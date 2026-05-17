@@ -37,7 +37,7 @@ anyhow = "1.0.102"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 async-trait = "0.1.89"
-nix = { version = "0.31", features = ["signal", "fs", "process", "term", "ioctl"] }
+nix = { version = "0.31", features = ["signal", "fs", "process", "term", "ioctl", "user"] }
 portable-pty = "0.9"
 directories = "6.0"
 clap = { version = "4.6", features = ["derive"] }
