@@ -2,10 +2,12 @@
 
 pub mod args;
 pub mod error;
+pub mod listener;
 pub mod paths;
 
 pub use args::DaemonArgs;
 pub use error::DaemonError;
+pub use listener::Listener;
 pub use paths::RuntimePaths;
 
 pub async fn run(_args: DaemonArgs) -> Result<(), DaemonError> {
