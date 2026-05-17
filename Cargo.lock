@@ -533,6 +533,7 @@ dependencies = [
  "nix 0.31.3",
  "plexy-glass-protocol",
  "portable-pty",
+ "postcard",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
