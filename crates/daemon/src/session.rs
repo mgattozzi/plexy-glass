@@ -52,6 +52,10 @@ impl Session {
                 cmd.env(k, v);
             }
         }
+        // Marker so shell rc files (and other tooling) can detect they're
+        // running inside plexy-glass, analogous to $TMUX / $ZELLIJ. Set
+        // last so a caller can't accidentally override it via spec.env.
+        cmd.env("PLEXY_GLASS", "1");
 
         let mut child = pair
             .slave
