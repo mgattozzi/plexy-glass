@@ -41,6 +41,11 @@ impl RuntimePaths {
     }
 
     fn resolve_runtime_dir(uid: u32) -> std::io::Result<PathBuf> {
+        // Per the spec: only honor XDG_RUNTIME_DIR on Linux. On macOS the
+        // canonical path is $TMPDIR/plexy-glass-$UID; a stray XDG_RUNTIME_DIR
+        // (some users set one for cross-platform consistency) would otherwise
+        // point at /run/user/$UID which doesn't exist on macOS.
+        #[cfg(target_os = "linux")]
         if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
             return Ok(PathBuf::from(dir).join("plexy-glass"));
         }
