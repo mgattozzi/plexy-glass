@@ -28,6 +28,7 @@ struct Inner {
     output_tx: broadcast::Sender<Bytes>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     exit_rx: watch::Receiver<Option<ExitStatus>>,
+    emulator: Arc<Mutex<plexy_glass_emulator::Emulator>>,
 }
 
 impl Session {
@@ -81,8 +82,16 @@ impl Session {
             .map_err(|e| DaemonError::Io(std::io::Error::other(format!("take writer: {e}"))))?;
         let master = pair.master;
 
+        // Terminal emulator: every PTY byte is fed through it before being
+        // broadcast, so the daemon can answer screen queries without having to
+        // replay the byte stream.
+        let emulator = Arc::new(Mutex::new(plexy_glass_emulator::Emulator::new(
+            size.rows, size.cols,
+        )));
+
         // PTY -> output broadcast (blocking thread, sends into tokio).
         let output_tx_clone = output_tx.clone();
+        let emulator_for_reader = Arc::clone(&emulator);
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
@@ -92,6 +101,13 @@ impl Session {
                         return;
                     }
                     Ok(n) => {
+                        // Feed the emulator first so any reader that wakes on
+                        // the broadcast and then queries the screen sees a
+                        // model that already reflects this chunk. Skip on a
+                        // poisoned mutex, the broadcast still goes out.
+                        if let Ok(mut e) = emulator_for_reader.lock() {
+                            e.advance(&buf[..n]);
+                        }
                         let chunk = Bytes::copy_from_slice(&buf[..n]);
                         // Best-effort send: if there are no subscribers yet, we drop.
                         let _ = output_tx_clone.send(chunk);
@@ -132,6 +148,7 @@ impl Session {
                 output_tx,
                 master: Mutex::new(master),
                 exit_rx,
+                emulator,
             }),
         })
     }
@@ -151,15 +168,45 @@ impl Session {
     }
 
     /// Resize the PTY and notify the child via TIOCSWINSZ + SIGWINCH (handled
-    /// by the kernel).
+    /// by the kernel). Also resize the emulator so its grid matches the PTY.
     pub fn resize(&self, size: PtySize) -> Result<(), DaemonError> {
-        // invariant: the Mutex is only contended by `resize` calls, which never
-        // hold the guard across an await; a panic here would imply a poisoned
-        // mutex, which we cannot recover from.
-        let master = self.inner.master.lock().expect("session master mutex poisoned");
-        master
-            .resize(to_portable(size))
-            .map_err(|e| DaemonError::Io(std::io::Error::other(format!("resize: {e}"))))
+        {
+            // invariant: the Mutex is only contended by `resize` calls, which never
+            // hold the guard across an await; a panic here would imply a poisoned
+            // mutex, which we cannot recover from.
+            let master = self.inner.master.lock().expect("session master mutex poisoned");
+            master
+                .resize(to_portable(size))
+                .map_err(|e| DaemonError::Io(std::io::Error::other(format!("resize: {e}"))))?;
+        }
+        {
+            // invariant: the emulator mutex is only ever held briefly by the
+            // PTY reader thread and resize; poisoning would mean a panic in
+            // the parser, which we cannot recover from.
+            let mut emu = self
+                .inner
+                .emulator
+                .lock()
+                .expect("emulator mutex poisoned");
+            emu.resize(size.rows, size.cols);
+        }
+        Ok(())
+    }
+
+    /// Run `f` with a shared reference to the emulator's screen. Used by the
+    /// daemon's screen-query paths; the lock is held only for the duration of
+    /// `f`, so callers must not block inside it.
+    pub fn with_screen<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&plexy_glass_emulator::Screen) -> R,
+    {
+        // invariant: see `resize`; poisoning is not recoverable.
+        let emu = self
+            .inner
+            .emulator
+            .lock()
+            .expect("emulator mutex poisoned");
+        f(emu.screen())
     }
 
     /// Resolves once the child has exited.

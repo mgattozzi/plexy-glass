@@ -579,6 +579,7 @@ dependencies = [
  "clap",
  "directories",
  "nix 0.31.3",
+ "plexy-glass-emulator",
  "plexy-glass-protocol",
  "portable-pty",
  "postcard",
