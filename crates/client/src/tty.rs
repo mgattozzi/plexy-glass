@@ -71,6 +71,12 @@ impl HostTty {
         self.restored = true;
         Ok(())
     }
+
+    /// Borrow the saved original termios snapshot. Used by
+    /// `install_emergency_restore` to seed the global restore state.
+    pub fn original_termios(&self) -> &Termios {
+        &self.original
+    }
 }
 
 impl Drop for HostTty {
@@ -100,6 +106,87 @@ pub fn current_size(fd: BorrowedFd<'_>) -> Result<plexy_glass_protocol::PtySize,
         pixel_width: ws.ws_xpixel,
         pixel_height: ws.ws_ypixel,
     })
+}
+
+use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static EMERGENCY_INSTALLED: OnceLock<()> = OnceLock::new();
+static EMERGENCY_FD: OnceLock<RawFd> = OnceLock::new();
+// Termios contains a `RefCell<libc::termios>` (nix 0.31) so it is not `Sync`.
+// Wrap it in a `Mutex` so the `OnceLock` is safe to share between threads.
+static EMERGENCY_TERMIOS: OnceLock<Mutex<Termios>> = OnceLock::new();
+static ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Install a panic hook and SIGINT/SIGTERM/SIGHUP handlers that restore the
+/// host TTY before the process dies. Call this once, ideally right after
+/// constructing the `HostTty` guard.
+///
+/// The signal handlers re-raise the signal with the default disposition so
+/// the parent shell observes the canonical exit status.
+pub fn install_emergency_restore(fd: BorrowedFd<'_>, snapshot: &Termios) {
+    if EMERGENCY_INSTALLED.set(()).is_err() {
+        return;
+    }
+    let _ = EMERGENCY_FD.set(fd.as_raw_fd());
+    let _ = EMERGENCY_TERMIOS.set(Mutex::new(snapshot.clone()));
+    ARMED.store(true, Ordering::SeqCst);
+
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_from_static();
+        default_hook(info);
+    }));
+
+    tokio::spawn(async {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT");
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM");
+        let mut sighup = signal(SignalKind::hangup()).expect("install SIGHUP");
+        let (sig, num) = tokio::select! {
+            _ = sigint.recv() => ("SIGINT", nix::sys::signal::Signal::SIGINT),
+            _ = sigterm.recv() => ("SIGTERM", nix::sys::signal::Signal::SIGTERM),
+            _ = sighup.recv() => ("SIGHUP", nix::sys::signal::Signal::SIGHUP),
+        };
+        tracing::warn!(signal = sig, "received signal, restoring tty and re-raising");
+        restore_from_static();
+        // Reset disposition and re-raise so the parent shell sees the
+        // canonical exit signal.
+        // SAFETY: sigaction is unsafe; we install SIG_DFL with an empty mask
+        // and empty flags for a known signal. raise is safe in nix 0.31.
+        unsafe {
+            let _ = nix::sys::signal::sigaction(
+                num,
+                &nix::sys::signal::SigAction::new(
+                    nix::sys::signal::SigHandler::SigDfl,
+                    nix::sys::signal::SaFlags::empty(),
+                    nix::sys::signal::SigSet::empty(),
+                ),
+            );
+        }
+        let _ = nix::sys::signal::raise(num);
+    });
+}
+
+fn restore_from_static() {
+    if !ARMED.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let Some(fd) = EMERGENCY_FD.get().copied() else {
+        return;
+    };
+    let Some(snap_lock) = EMERGENCY_TERMIOS.get() else {
+        return;
+    };
+    let Ok(snap) = snap_lock.lock() else {
+        return;
+    };
+    // SAFETY: fd remains valid as long as the process holds stdin/stdout.
+    let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+    let _ = termios::tcsetattr(fd, SetArg::TCSANOW, &snap);
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\x1b[?25h\x1b[?1049l");
+    let _ = out.flush();
 }
 
 #[cfg(test)]

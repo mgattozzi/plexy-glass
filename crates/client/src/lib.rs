@@ -28,6 +28,7 @@ pub async fn run(_args: ClientArgs) -> Result<(), ClientError> {
     let stdin = tokio::io::stdin();
     let stdin_fd = stdin.as_fd();
     let _tty_guard = HostTty::enter_raw(stdin_fd)?;
+    tty::install_emergency_restore(stdin_fd, _tty_guard.original_termios());
     let initial_size = current_size(stdin_fd)?;
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
