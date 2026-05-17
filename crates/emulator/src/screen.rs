@@ -283,9 +283,90 @@ impl Screen {
             'm' => {
                 self.handle_sgr(params);
             }
+            'h' => self.set_mode(params, intermediates, true),
+            'l' => self.set_mode(params, intermediates, false),
             _ => {
                 tracing::trace!(?intermediates, ?final_byte, "unhandled CSI");
             }
+        }
+    }
+
+    fn set_mode(&mut self, params: &vte::Params, intermediates: &[u8], on: bool) {
+        let private = intermediates.first() == Some(&b'?');
+        for p in params.iter() {
+            let Some(&code) = p.first() else { continue };
+            if private {
+                self.set_dec_private_mode(code, on);
+            } else {
+                self.set_ansi_mode(code, on);
+            }
+        }
+    }
+
+    fn set_dec_private_mode(&mut self, code: u16, on: bool) {
+        use crate::modes::Modes;
+        let flag = match code {
+            1 => Modes::APP_CURSOR_KEYS,
+            7 => Modes::AUTOWRAP,
+            25 => Modes::CURSOR_VISIBLE,
+            1049 => {
+                if on {
+                    self.enter_alt_screen();
+                } else {
+                    self.leave_alt_screen();
+                }
+                return;
+            }
+            2004 => Modes::BRACKETED_PASTE,
+            9 => Modes::MOUSE_X10,
+            1000 => Modes::MOUSE_BTN,
+            1003 => Modes::MOUSE_ANY,
+            1006 => Modes::MOUSE_SGR,
+            _ => {
+                tracing::trace!(code, on, "unhandled DEC private mode");
+                return;
+            }
+        };
+        if on {
+            self.modes.insert(flag);
+        } else {
+            self.modes.remove(flag);
+        }
+    }
+
+    fn set_ansi_mode(&mut self, code: u16, on: bool) {
+        use crate::modes::Modes;
+        match code {
+            4 => {
+                if on {
+                    self.modes.insert(Modes::INSERT);
+                } else {
+                    self.modes.remove(Modes::INSERT);
+                }
+            }
+            _ => tracing::trace!(code, on, "unhandled ANSI mode"),
+        }
+    }
+
+    fn enter_alt_screen(&mut self) {
+        if self.alt.is_some() {
+            return;
+        }
+        let (rows, cols) = (self.rows(), self.cols());
+        let alt = std::mem::replace(&mut self.active, Grid::new(rows, cols));
+        self.alt = Some(alt);
+        self.saved_cursor = Some(self.cursor.clone());
+        self.cursor = Cursor::default();
+        self.modes.insert(crate::modes::Modes::ALT_SCREEN);
+    }
+
+    fn leave_alt_screen(&mut self) {
+        if let Some(alt) = self.alt.take() {
+            self.active = alt;
+            if let Some(c) = self.saved_cursor.take() {
+                self.cursor = c;
+            }
+            self.modes.remove(crate::modes::Modes::ALT_SCREEN);
         }
     }
 
@@ -582,5 +663,31 @@ mod tests {
         let s = parse(b"\x1b[101mZ");
         let c0 = s.active.get_cell(0, 0).unwrap();
         assert_eq!(c0.bg, Color::Indexed(9));
+    }
+
+    #[test]
+    fn decset_alt_screen_save_and_restore() {
+        let s = parse(b"main\x1b[?1049h");
+        assert!(s.modes.contains(crate::modes::Modes::ALT_SCREEN));
+        assert!(s.alt.is_some());
+        assert!(s.active.get_cell(0, 0).unwrap().is_blank());
+
+        let mut p = crate::parser::Parser::new();
+        let mut s2 = Screen::new(8, 24);
+        p.advance(&mut s2, b"main\x1b[?1049halt\x1b[?1049l");
+        p.flush(&mut s2);
+        assert!(!s2.modes.contains(crate::modes::Modes::ALT_SCREEN));
+        assert!(s2.alt.is_none());
+        assert_eq!(s2.active.get_cell(0, 0).unwrap().grapheme.as_str(), "m");
+    }
+
+    #[test]
+    fn decset_25_toggles_cursor_visibility() {
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(8, 24);
+        p.advance(&mut s, b"\x1b[?25l");
+        assert!(!s.modes.contains(crate::modes::Modes::CURSOR_VISIBLE));
+        p.advance(&mut s, b"\x1b[?25h");
+        assert!(s.modes.contains(crate::modes::Modes::CURSOR_VISIBLE));
     }
 }
