@@ -185,7 +185,7 @@ impl Screen {
                 self.cursor.col = next.min(self.cols().saturating_sub(1));
                 self.cursor.pending_wrap = false;
             }
-            0x0A | 0x0B | 0x0C => {
+            0x0A..=0x0C => {
                 // LF / VT / FF: newline (no carriage return)
                 self.advance_to_next_row(false);
                 self.cursor.pending_wrap = false;
@@ -503,8 +503,43 @@ impl Screen {
         }
     }
 
-    /// Stub handlers used by the parser. These get filled in by later tasks.
-    pub fn handle_osc_stub(&mut self, _params: &[&[u8]]) {}
+    pub fn handle_osc(&mut self, params: &[&[u8]]) {
+        let Some(&cmd) = params.first() else {
+            return;
+        };
+        let cmd_str = std::str::from_utf8(cmd).unwrap_or("");
+        match cmd_str {
+            "0" | "2" => {
+                if let Some(arg) = params.get(1) {
+                    self.title = String::from_utf8_lossy(arg).into_owned();
+                }
+            }
+            "1" => {
+                if let Some(arg) = params.get(1) {
+                    self.icon_title = String::from_utf8_lossy(arg).into_owned();
+                }
+            }
+            "7" => {
+                if let Some(arg) = params.get(1) {
+                    self.cwd = Some(String::from_utf8_lossy(arg).into_owned());
+                }
+            }
+            "8" => {
+                let url = params
+                    .get(2)
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .unwrap_or_default();
+                if url.is_empty() {
+                    self.cursor.hyperlink_id = None;
+                } else {
+                    self.cursor.hyperlink_id = self.hyperlinks.intern(&url);
+                }
+            }
+            other => {
+                tracing::trace!(cmd = other, "unhandled OSC");
+            }
+        }
+    }
 }
 
 fn parse_extended_color(rest: &[u16]) -> (Option<crate::color::Color>, usize) {
@@ -536,7 +571,7 @@ impl ScreenOps for Screen {
         Screen::handle_csi(self, params, intermediates, action);
     }
     fn handle_osc(&mut self, params: &[&[u8]]) {
-        self.handle_osc_stub(params);
+        Screen::handle_osc(self, params);
     }
     fn handle_esc(&mut self, intermediates: &[u8], byte: u8) {
         Screen::handle_esc(self, intermediates, byte);
@@ -641,7 +676,7 @@ mod tests {
         let mut s = Screen::new(2, 4);
         p.advance(&mut s, b"AAAA\nBBBB\nCCCC");
         // "AAAA" should have scrolled into scrollback.
-        assert!(s.scrollback.len() >= 1);
+        assert!(!s.scrollback.is_empty());
     }
 
     fn parse(input: &[u8]) -> Screen {
@@ -810,5 +845,33 @@ mod tests {
         let mut s = Screen::new(8, 24);
         p.advance(&mut s, b"\x1b[1;4H\x1bH\x1b[1;1H\t");
         assert_eq!(s.cursor.col, 3);
+    }
+
+    #[test]
+    fn osc_0_sets_title() {
+        let s = parse(b"\x1b]0;my title\x07");
+        assert_eq!(s.title, "my title");
+    }
+
+    #[test]
+    fn osc_7_sets_cwd() {
+        let s = parse(b"\x1b]7;file:///tmp\x07");
+        assert_eq!(s.cwd.as_deref(), Some("file:///tmp"));
+    }
+
+    #[test]
+    fn osc_8_assigns_then_clears_hyperlink_id() {
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(4, 8);
+        p.advance(
+            &mut s,
+            b"\x1b]8;;https://example.com\x07link\x1b]8;;\x07after",
+        );
+        p.flush(&mut s);
+        let id = s.hyperlinks.intern("https://example.com");
+        let l = s.active.get_cell(0, 0).unwrap();
+        assert_eq!(l.hyperlink_id, id);
+        let a = s.active.get_cell(0, 4).unwrap();
+        assert_eq!(a.hyperlink_id, None);
     }
 }
