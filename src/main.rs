@@ -13,6 +13,8 @@ enum Command {
     Attach,
     /// Run the daemon (used internally by auto-spawn; `--foreground` for dev).
     Daemon(plexy_glass_daemon::DaemonArgs),
+    /// Stop the running daemon (`SIGTERM`, then `SIGKILL` after a grace period).
+    Kill,
 }
 
 #[tokio::main]
@@ -32,6 +34,13 @@ async fn main() -> anyhow::Result<()> {
         Command::Daemon(args) => {
             plexy_glass_daemon::run(args).await?;
         }
+        Command::Kill => match plexy_glass_client::kill().await? {
+            plexy_glass_client::KillOutcome::NoDaemon => println!("no daemon running"),
+            plexy_glass_client::KillOutcome::Stopped => println!("daemon stopped"),
+            plexy_glass_client::KillOutcome::ForceKilled => {
+                println!("daemon did not respond to SIGTERM; sent SIGKILL")
+            }
+        },
     }
     Ok(())
 }

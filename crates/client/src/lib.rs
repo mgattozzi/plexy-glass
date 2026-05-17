@@ -2,12 +2,14 @@
 
 pub mod args;
 pub mod error;
+pub mod kill;
 pub mod pump;
 pub mod transport;
 pub mod tty;
 
 pub use args::ClientArgs;
 pub use error::ClientError;
+pub use kill::{KillOutcome, kill};
 pub use pump::{handshake_spawn, pump};
 pub use transport::{connect_or_spawn, default_socket_path};
 pub use tty::{HostTty, current_size};
