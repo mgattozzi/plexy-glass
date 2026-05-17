@@ -280,15 +280,95 @@ impl Screen {
                 }
                 self.cursor.pending_wrap = false;
             }
+            'm' => {
+                self.handle_sgr(params);
+            }
             _ => {
                 tracing::trace!(?intermediates, ?final_byte, "unhandled CSI");
             }
         }
     }
 
+    fn handle_sgr(&mut self, params: &vte::Params) {
+        let codes: Vec<u16> = params.iter().flat_map(|p| p.iter().copied()).collect();
+        let mut i = 0;
+        while i < codes.len() {
+            let n = codes[i];
+            match n {
+                0 => {
+                    self.cursor.attrs = crate::attrs::Attrs::empty();
+                    self.cursor.fg = crate::color::Color::Default;
+                    self.cursor.bg = crate::color::Color::Default;
+                }
+                1 => self.cursor.attrs.insert(crate::attrs::Attrs::BOLD),
+                2 => self.cursor.attrs.insert(crate::attrs::Attrs::DIM),
+                3 => self.cursor.attrs.insert(crate::attrs::Attrs::ITALIC),
+                4 => self.cursor.attrs.insert(crate::attrs::Attrs::UNDERLINE),
+                5 => self.cursor.attrs.insert(crate::attrs::Attrs::BLINK),
+                7 => self.cursor.attrs.insert(crate::attrs::Attrs::REVERSE),
+                8 => self.cursor.attrs.insert(crate::attrs::Attrs::HIDDEN),
+                9 => self.cursor.attrs.insert(crate::attrs::Attrs::STRIKETHROUGH),
+                22 => {
+                    self.cursor.attrs.remove(crate::attrs::Attrs::BOLD);
+                    self.cursor.attrs.remove(crate::attrs::Attrs::DIM);
+                }
+                23 => self.cursor.attrs.remove(crate::attrs::Attrs::ITALIC),
+                24 => self.cursor.attrs.remove(crate::attrs::Attrs::UNDERLINE),
+                25 => self.cursor.attrs.remove(crate::attrs::Attrs::BLINK),
+                27 => self.cursor.attrs.remove(crate::attrs::Attrs::REVERSE),
+                28 => self.cursor.attrs.remove(crate::attrs::Attrs::HIDDEN),
+                29 => self.cursor.attrs.remove(crate::attrs::Attrs::STRIKETHROUGH),
+                30..=37 => self.cursor.fg = crate::color::Color::from_ansi_basic((n - 30) as u8),
+                38 => {
+                    let (color, consumed) = parse_extended_color(&codes[i + 1..]);
+                    if let Some(c) = color {
+                        self.cursor.fg = c;
+                    }
+                    i += consumed;
+                }
+                39 => self.cursor.fg = crate::color::Color::Default,
+                40..=47 => self.cursor.bg = crate::color::Color::from_ansi_basic((n - 40) as u8),
+                48 => {
+                    let (color, consumed) = parse_extended_color(&codes[i + 1..]);
+                    if let Some(c) = color {
+                        self.cursor.bg = c;
+                    }
+                    i += consumed;
+                }
+                49 => self.cursor.bg = crate::color::Color::Default,
+                90..=97 => self.cursor.fg = crate::color::Color::from_ansi_bright((n - 90) as u8),
+                100..=107 => {
+                    self.cursor.bg = crate::color::Color::from_ansi_bright((n - 100) as u8)
+                }
+                _ => {
+                    tracing::trace!(code = n, "unhandled SGR");
+                }
+            }
+            i += 1;
+        }
+    }
+
     /// Stub handlers used by the parser. These get filled in by later tasks.
     pub fn handle_osc_stub(&mut self, _params: &[&[u8]]) {}
     pub fn handle_esc_stub(&mut self, _intermediates: &[u8], _byte: u8) {}
+}
+
+fn parse_extended_color(rest: &[u16]) -> (Option<crate::color::Color>, usize) {
+    if rest.is_empty() {
+        return (None, 0);
+    }
+    match rest[0] {
+        5 if rest.len() >= 2 => (Some(crate::color::Color::Indexed(rest[1] as u8)), 2),
+        2 if rest.len() >= 4 => (
+            Some(crate::color::Color::Rgb(
+                rest[1] as u8,
+                rest[2] as u8,
+                rest[3] as u8,
+            )),
+            4,
+        ),
+        _ => (None, 0),
+    }
 }
 
 impl ScreenOps for Screen {
@@ -466,5 +546,41 @@ mod tests {
         assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "c");
         assert!(s.active.get_cell(0, 3).unwrap().is_blank());
         assert!(s.active.get_cell(0, 5).unwrap().is_blank());
+    }
+
+    #[test]
+    fn sgr_bold_red_then_reset() {
+        use crate::{attrs::Attrs, color::Color};
+        let s = parse(b"\x1b[1;31mhi\x1b[0mlo");
+        let c0 = s.active.get_cell(0, 0).unwrap();
+        assert!(c0.attrs.contains(Attrs::BOLD));
+        assert_eq!(c0.fg, Color::Indexed(1));
+        let c2 = s.active.get_cell(0, 2).unwrap();
+        assert!(!c2.attrs.contains(Attrs::BOLD));
+        assert_eq!(c2.fg, Color::Default);
+    }
+
+    #[test]
+    fn sgr_rgb_truecolor() {
+        use crate::color::Color;
+        let s = parse(b"\x1b[38;2;10;20;30mX");
+        let c0 = s.active.get_cell(0, 0).unwrap();
+        assert_eq!(c0.fg, Color::Rgb(10, 20, 30));
+    }
+
+    #[test]
+    fn sgr_indexed_256() {
+        use crate::color::Color;
+        let s = parse(b"\x1b[38;5;200mY");
+        let c0 = s.active.get_cell(0, 0).unwrap();
+        assert_eq!(c0.fg, Color::Indexed(200));
+    }
+
+    #[test]
+    fn sgr_bright_bg() {
+        use crate::color::Color;
+        let s = parse(b"\x1b[101mZ");
+        let c0 = s.active.get_cell(0, 0).unwrap();
+        assert_eq!(c0.bg, Color::Indexed(9));
     }
 }
