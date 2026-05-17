@@ -201,8 +201,56 @@ impl Screen {
         }
     }
 
+    pub fn handle_csi(&mut self, params: &vte::Params, intermediates: &[u8], final_byte: char) {
+        let mut iter = params.iter();
+        let first = iter.next().and_then(|p| p.first().copied());
+        let nth = |params: &vte::Params, idx: usize| -> Option<u16> {
+            params.iter().nth(idx).and_then(|p| p.first().copied())
+        };
+
+        match final_byte {
+            'A' => {
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                self.cursor.up(n);
+            }
+            'B' => {
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                let max = self.rows();
+                self.cursor.down(n, max);
+            }
+            'C' => {
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                let max = self.cols();
+                self.cursor.right(n, max);
+            }
+            'D' => {
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                self.cursor.left(n);
+            }
+            'G' => {
+                let col = first.unwrap_or(1).saturating_sub(1);
+                self.cursor.col = col.min(self.cols().saturating_sub(1));
+                self.cursor.pending_wrap = false;
+            }
+            'H' | 'f' => {
+                let row = first.unwrap_or(1).saturating_sub(1);
+                let col = nth(params, 1).unwrap_or(1).saturating_sub(1);
+                let max_rows = self.rows();
+                let max_cols = self.cols();
+                self.cursor.move_to(row, col, max_rows, max_cols);
+            }
+            'd' => {
+                let row = first.unwrap_or(1).saturating_sub(1);
+                self.cursor.row = row.min(self.rows().saturating_sub(1));
+                self.cursor.pending_wrap = false;
+            }
+            _ => {
+                tracing::trace!(?intermediates, ?final_byte, "unhandled CSI");
+            }
+        }
+    }
+
     /// Stub handlers used by the parser. These get filled in by later tasks.
-    pub fn handle_csi_stub(&mut self, _params: &vte::Params, _intermediates: &[u8], _action: char) {}
     pub fn handle_osc_stub(&mut self, _params: &[&[u8]]) {}
     pub fn handle_esc_stub(&mut self, _intermediates: &[u8], _byte: u8) {}
 }
@@ -215,7 +263,7 @@ impl ScreenOps for Screen {
         Screen::execute_c0(self, byte);
     }
     fn handle_csi(&mut self, params: &vte::Params, intermediates: &[u8], action: char) {
-        self.handle_csi_stub(params, intermediates, action);
+        Screen::handle_csi(self, params, intermediates, action);
     }
     fn handle_osc(&mut self, params: &[&[u8]]) {
         self.handle_osc_stub(params);
@@ -324,5 +372,44 @@ mod tests {
         p.advance(&mut s, b"AAAA\nBBBB\nCCCC");
         // "AAAA" should have scrolled into scrollback.
         assert!(s.scrollback.len() >= 1);
+    }
+
+    fn parse(input: &[u8]) -> Screen {
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(8, 24);
+        p.advance(&mut s, input);
+        p.flush(&mut s);
+        s
+    }
+
+    #[test]
+    fn cup_homes_cursor() {
+        let s = parse(b"abc\x1b[H");
+        assert_eq!((s.cursor.row, s.cursor.col), (0, 0));
+    }
+
+    #[test]
+    fn cup_with_params() {
+        let s = parse(b"\x1b[3;5H");
+        assert_eq!((s.cursor.row, s.cursor.col), (2, 4));
+    }
+
+    #[test]
+    fn cuf_advances_columns() {
+        let s = parse(b"\x1b[5C");
+        assert_eq!(s.cursor.col, 5);
+    }
+
+    #[test]
+    fn cuu_clamps_at_top() {
+        let s = parse(b"\x1b[3;1H\x1b[10A");
+        assert_eq!(s.cursor.row, 0);
+    }
+
+    #[test]
+    fn cup_clamps_outside_grid() {
+        let s = parse(b"\x1b[100;100H");
+        assert_eq!(s.cursor.row, 7);
+        assert_eq!(s.cursor.col, 23);
     }
 }
