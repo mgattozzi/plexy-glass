@@ -285,6 +285,37 @@ impl Screen {
             }
             'h' => self.set_mode(params, intermediates, true),
             'l' => self.set_mode(params, intermediates, false),
+            'r' => {
+                let top = first.unwrap_or(1).saturating_sub(1);
+                let bottom = nth(params, 1).unwrap_or(self.rows()).saturating_sub(1);
+                let bottom = bottom.min(self.rows().saturating_sub(1));
+                if top < bottom {
+                    self.scroll_region = (top, bottom);
+                } else {
+                    self.scroll_region = (0, self.rows().saturating_sub(1));
+                }
+                let max_rows = self.rows();
+                let max_cols = self.cols();
+                self.cursor.move_to(0, 0, max_rows, max_cols);
+            }
+            'S' => {
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                let (top, bottom) = self.scroll_region;
+                let alt_active = self.alt.is_some();
+                let mut popped = Vec::new();
+                let target = if alt_active { None } else { Some(&mut popped) };
+                self.active.scroll_up(top, bottom, n, target);
+                if !alt_active {
+                    for r in popped {
+                        self.scrollback.push(r);
+                    }
+                }
+            }
+            'T' => {
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                let (top, bottom) = self.scroll_region;
+                self.active.scroll_down(top, bottom, n);
+            }
             _ => {
                 tracing::trace!(?intermediates, ?final_byte, "unhandled CSI");
             }
@@ -689,5 +720,22 @@ mod tests {
         assert!(!s.modes.contains(crate::modes::Modes::CURSOR_VISIBLE));
         p.advance(&mut s, b"\x1b[?25h");
         assert!(s.modes.contains(crate::modes::Modes::CURSOR_VISIBLE));
+    }
+
+    #[test]
+    fn decstbm_sets_scroll_region_and_homes_cursor() {
+        let s = parse(b"\x1b[2;6r");
+        assert_eq!(s.scroll_region, (1, 5));
+        assert_eq!((s.cursor.row, s.cursor.col), (0, 0));
+    }
+
+    #[test]
+    fn su_scrolls_within_region() {
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(4, 4);
+        p.advance(&mut s, b"AAAA\nBBBB\nCCCC\nDDDD");
+        p.flush(&mut s);
+        p.advance(&mut s, b"\x1b[H\x1b[S");
+        assert!(s.active.get_cell(3, 0).unwrap().is_blank());
     }
 }
