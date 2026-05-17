@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/daemon", "crates/client"]
+members = ["crates/protocol", "crates/daemon", "crates/client", "crates/emulator"]
 
 [package]
 name = "plexy-glass"
@@ -43,3 +43,8 @@ directories = "6.0"
 clap = { version = "4.6", features = ["derive"] }
 tempfile = "3.27"
 tokio-test = "0.4.5"
+vte = "0.15.0"
+smol_str = "0.3.6"
+unicode-width = "0.2.2"
+unicode-segmentation = "1.13.2"
+bitflags = "2.11.1"

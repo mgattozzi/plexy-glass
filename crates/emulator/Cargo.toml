@@ -1,0 +1,13 @@
+[package]
+name = "plexy-glass-emulator"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+vte = { workspace = true }
+smol_str = { workspace = true }
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
+bitflags = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
