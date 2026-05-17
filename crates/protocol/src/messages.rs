@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 /// Window dimensions, in cells and pixels.
@@ -33,10 +34,41 @@ pub enum ExitStatus {
     Unknown,
 }
 
+/// Bumped any time `ClientMsg` or `ServerMsg` changes meaning.
+pub const PROTOCOL_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientHello {
+    pub version: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerHello {
+    pub version: u16,
+    pub daemon_pid: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum ClientMsg {
+    Spawn { cmd: SpawnSpec, size: PtySize },
+    Input(Bytes),
+    Resize(PtySize),
+    Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum ServerMsg {
+    Spawned,
+    Output(Bytes),
+    Exited { status: ExitStatus },
+    Error(crate::errors::ProtocolError),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
 
     #[test]
     fn pty_size_round_trips_through_postcard() {
@@ -74,5 +106,66 @@ mod tests {
         let bytes = postcard::to_allocvec(&payload).expect("serialize");
         let decoded: Bytes = postcard::from_bytes(&bytes).expect("deserialize");
         assert_eq!(payload, decoded);
+    }
+
+    #[test]
+    fn client_msgs_round_trip() {
+        let cases = vec![
+            ClientMsg::Spawn {
+                cmd: SpawnSpec {
+                    program: "bash".into(),
+                    args: vec![],
+                    env: vec![],
+                    cwd: None,
+                },
+                size: PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            },
+            ClientMsg::Input(Bytes::from_static(b"ls\n")),
+            ClientMsg::Resize(PtySize { rows: 50, cols: 200, pixel_width: 0, pixel_height: 0 }),
+            ClientMsg::Shutdown,
+        ];
+        for msg in cases {
+            let bytes = postcard::to_allocvec(&msg).expect("serialize");
+            let decoded: ClientMsg = postcard::from_bytes(&bytes).expect("deserialize");
+            assert_eq!(msg, decoded);
+        }
+    }
+
+    #[test]
+    fn server_msgs_round_trip_without_error_variant() {
+        // Error variant is covered once `ProtocolError` lands.
+        let cases = vec![
+            ServerMsg::Spawned,
+            ServerMsg::Output(Bytes::from_static(b"hello")),
+            ServerMsg::Exited { status: ExitStatus::Code(0) },
+        ];
+        for msg in cases {
+            let bytes = postcard::to_allocvec(&msg).expect("serialize");
+            let decoded: ServerMsg = postcard::from_bytes(&bytes).expect("deserialize");
+            assert_eq!(msg, decoded);
+        }
+    }
+
+    #[test]
+    fn hello_round_trips() {
+        let client = ClientHello { version: PROTOCOL_VERSION };
+        let server = ServerHello { version: PROTOCOL_VERSION, daemon_pid: 12345 };
+
+        let cb = postcard::to_allocvec(&client).expect("serialize");
+        let sb = postcard::to_allocvec(&server).expect("serialize");
+
+        assert_eq!(postcard::from_bytes::<ClientHello>(&cb).unwrap(), client);
+        assert_eq!(postcard::from_bytes::<ServerHello>(&sb).unwrap(), server);
+    }
+
+    #[test]
+    fn server_msg_error_round_trips() {
+        let err = ServerMsg::Error(crate::errors::ProtocolError::VersionMismatch {
+            client: 1,
+            server: 2,
+        });
+        let bytes = postcard::to_allocvec(&err).expect("serialize");
+        let decoded: ServerMsg = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(err, decoded);
     }
 }
