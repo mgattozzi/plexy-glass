@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 plexy-glass-protocol = { path = "../protocol" }
+postcard = { workspace = true }
 tokio = { workspace = true }
 nix = { workspace = true }
 serde = { workspace = true }
