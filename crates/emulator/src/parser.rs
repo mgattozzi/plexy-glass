@@ -36,6 +36,19 @@ impl Parser {
         // partials stay in the buffer until the next call.
         perf.flush_complete_clusters();
     }
+
+    /// Force-flush any pending grapheme cluster to the screen. Use this at
+    /// end-of-stream or end-of-test; not needed during streaming because each
+    /// non-print event flushes implicitly.
+    pub fn flush<S: ScreenOps>(&mut self, screen: &mut S) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let buf = std::mem::take(&mut self.pending);
+        for cluster in buf.graphemes(true) {
+            screen.put_grapheme(cluster);
+        }
+    }
 }
 
 impl Default for Parser {

@@ -200,9 +200,7 @@ mod tests {
         let mut p = crate::parser::Parser::new();
         let mut s = Screen::new(4, 8);
         p.advance(&mut s, input);
-        // Force-flush any cluster the parser retained as "possibly still
-        // growing" by feeding a no-op C0 byte (NUL). Stub execute ignores it.
-        p.advance(&mut s, b"\0");
+        p.flush(&mut s);
         s
     }
 
