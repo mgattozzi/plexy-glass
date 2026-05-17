@@ -175,3 +175,59 @@ fn exit_status_propagates_when_child_exits_nonzero() {
     let _ = child.wait();
     panic!("child did not exit within deadline");
 }
+
+#[test]
+fn sigwinch_propagates_to_child() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("openpty");
+
+    let bin = std::process::Command::cargo_bin("plexy-glass").expect("binary built");
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn child");
+    drop(pair.slave);
+
+    let mut master = pair.master;
+    let mut writer = master.take_writer().expect("take writer");
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Resize the master pty; the client should receive SIGWINCH and propagate.
+    master
+        .resize(PtySize {
+            rows: 50,
+            cols: 200,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("resize");
+
+    // Give the resize event time to propagate.
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Ask the inner shell to print its idea of the size.
+    writer.write_all(b"stty size; exit\n").expect("write stty");
+
+    let buf = read_until(&mut master, b"50 200", Instant::now() + Duration::from_secs(10));
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        buf.windows(6).any(|w| w == b"50 200"),
+        "expected stty to report 50 200 after resize. raw: {:?}",
+        String::from_utf8_lossy(&buf)
+    );
+}
