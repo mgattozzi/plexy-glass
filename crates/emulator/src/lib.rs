@@ -22,12 +22,13 @@ pub mod tabs;
 pub mod parser;
 pub mod screen;
 // pub mod events;
-// pub mod emulator;
+pub mod emulator;
 
 pub use attrs::Attrs;
 pub use cell::Cell;
 pub use color::Color;
 pub use cursor::{Cursor, CursorShape};
+pub use emulator::Emulator;
 pub use grid::{Grid, Row, WrapOrigin};
 pub use hyperlinks::HyperlinkTable;
 pub use modes::Modes;
