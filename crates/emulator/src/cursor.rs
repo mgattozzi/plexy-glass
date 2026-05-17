@@ -96,24 +96,30 @@ mod tests {
 
     #[test]
     fn up_saturates_at_zero() {
-        let mut c = Cursor::default();
-        c.row = 2;
+        let mut c = Cursor {
+            row: 2,
+            ..Cursor::default()
+        };
         c.up(5);
         assert_eq!(c.row, 0);
     }
 
     #[test]
     fn down_clamps_to_max() {
-        let mut c = Cursor::default();
-        c.row = 20;
+        let mut c = Cursor {
+            row: 20,
+            ..Cursor::default()
+        };
         c.down(10, 24);
         assert_eq!(c.row, 23);
     }
 
     #[test]
     fn motion_clears_pending_wrap() {
-        let mut c = Cursor::default();
-        c.pending_wrap = true;
+        let mut c = Cursor {
+            pending_wrap: true,
+            ..Cursor::default()
+        };
         c.right(1, 80);
         assert!(!c.pending_wrap);
     }

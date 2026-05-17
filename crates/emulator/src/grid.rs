@@ -51,10 +51,10 @@ impl Grid {
     }
 
     pub fn put_cell(&mut self, row: u16, col: u16, cell: Cell) {
-        if let Some(r) = self.rows.get_mut(row as usize) {
-            if let Some(c) = r.cells.get_mut(col as usize) {
-                *c = cell;
-            }
+        if let Some(r) = self.rows.get_mut(row as usize)
+            && let Some(c) = r.cells.get_mut(col as usize)
+        {
+            *c = cell;
         }
     }
 
@@ -135,9 +135,10 @@ mod tests {
     use smol_str::SmolStr;
 
     fn x_cell() -> Cell {
-        let mut c = Cell::default();
-        c.grapheme = SmolStr::new("X");
-        c
+        Cell {
+            grapheme: SmolStr::new("X"),
+            ..Cell::default()
+        }
     }
 
     #[test]
