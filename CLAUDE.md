@@ -55,6 +55,31 @@ scope. If a step is wrong, fix the plan first, then proceed.
   fail (each documented with a one-line `// invariant:` comment).
 - No `#[allow]` annotations without a one-line justification comment.
 
+## Dependencies — always pin to the current latest
+
+Before adding or modifying any `[dependencies]`, `[dev-dependencies]`, or
+`[workspace.dependencies]` entry, check the **current latest stable**
+version on crates.io and pin to it. Do not rely on training-data versions
+or on what an implementation plan said months ago — both drift.
+
+Quick checks:
+
+```bash
+# latest stable version
+cargo info <crate> | head -5
+curl -s https://crates.io/api/v1/crates/<crate> \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['crate']['max_stable_version'])"
+
+# available features for a specific version
+curl -s https://crates.io/api/v1/crates/<crate>/<version> \
+  | python3 -c "import json,sys; print(sorted(json.load(sys.stdin)['version']['features'].keys()))"
+```
+
+If the plan pins to an older version (or names a feature the latest no
+longer has), **fix the plan first**, then the manifest. Don't paper over
+plan/reality drift in the Cargo.toml only — the next task gets it wrong
+the same way.
+
 ## Phase 1 scope reminders
 
 Phase 1 is the daemon + client + one PTY-backed session foundation. It
