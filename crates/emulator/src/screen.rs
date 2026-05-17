@@ -167,11 +167,44 @@ impl Screen {
         }
     }
 
+    /// Handle C0 control characters: BEL, BS, HT, LF, VT, FF, CR.
+    pub fn execute_c0(&mut self, byte: u8) {
+        match byte {
+            0x07 => { /* BEL: no audible bell in Phase 2 */ }
+            0x08 => {
+                // Backspace
+                self.cursor.col = self.cursor.col.saturating_sub(1);
+                self.cursor.pending_wrap = false;
+            }
+            0x09 => {
+                // HT: horizontal tab to the next stop
+                let next = self
+                    .tabs
+                    .next(self.cursor.col)
+                    .unwrap_or(self.cols().saturating_sub(1));
+                self.cursor.col = next.min(self.cols().saturating_sub(1));
+                self.cursor.pending_wrap = false;
+            }
+            0x0A | 0x0B | 0x0C => {
+                // LF / VT / FF: newline (no carriage return)
+                self.advance_to_next_row(false);
+                self.cursor.pending_wrap = false;
+            }
+            0x0D => {
+                // CR
+                self.cursor.col = 0;
+                self.cursor.pending_wrap = false;
+            }
+            _ => {
+                tracing::trace!(byte, "unhandled C0 control");
+            }
+        }
+    }
+
     /// Stub handlers used by the parser. These get filled in by later tasks.
     pub fn handle_csi_stub(&mut self, _params: &vte::Params, _intermediates: &[u8], _action: char) {}
     pub fn handle_osc_stub(&mut self, _params: &[&[u8]]) {}
     pub fn handle_esc_stub(&mut self, _intermediates: &[u8], _byte: u8) {}
-    pub fn execute_c0_stub(&mut self, _byte: u8) {}
 }
 
 impl ScreenOps for Screen {
@@ -179,7 +212,7 @@ impl ScreenOps for Screen {
         Screen::put_grapheme(self, cluster);
     }
     fn execute_c0(&mut self, byte: u8) {
-        self.execute_c0_stub(byte);
+        Screen::execute_c0(self, byte);
     }
     fn handle_csi(&mut self, params: &vte::Params, intermediates: &[u8], action: char) {
         self.handle_csi_stub(params, intermediates, action);
@@ -245,5 +278,51 @@ mod tests {
         let s = drive(b"abcdefgh"); // exactly 8 chars
         assert_eq!(s.cursor.col, 7);
         assert!(s.cursor.pending_wrap);
+    }
+
+    #[test]
+    fn cr_returns_to_column_zero() {
+        let mut s = Screen::new(4, 8);
+        s.cursor.col = 5;
+        s.execute_c0(0x0D);
+        assert_eq!(s.cursor.col, 0);
+    }
+
+    #[test]
+    fn lf_moves_down_keeps_column() {
+        let mut s = Screen::new(4, 8);
+        s.cursor.row = 0;
+        s.cursor.col = 3;
+        s.execute_c0(0x0A);
+        assert_eq!((s.cursor.row, s.cursor.col), (1, 3));
+    }
+
+    #[test]
+    fn bs_moves_left_and_saturates() {
+        let mut s = Screen::new(4, 8);
+        s.cursor.col = 1;
+        s.execute_c0(0x08);
+        assert_eq!(s.cursor.col, 0);
+        s.execute_c0(0x08);
+        assert_eq!(s.cursor.col, 0);
+    }
+
+    #[test]
+    fn ht_jumps_to_next_tab_stop() {
+        let mut s = Screen::new(4, 24);
+        s.cursor.col = 1;
+        s.execute_c0(0x09);
+        assert_eq!(s.cursor.col, 8);
+        s.execute_c0(0x09);
+        assert_eq!(s.cursor.col, 16);
+    }
+
+    #[test]
+    fn lf_at_bottom_scrolls_into_scrollback() {
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(2, 4);
+        p.advance(&mut s, b"AAAA\nBBBB\nCCCC");
+        // "AAAA" should have scrolled into scrollback.
+        assert!(s.scrollback.len() >= 1);
     }
 }
