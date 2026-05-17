@@ -244,6 +244,42 @@ impl Screen {
                 self.cursor.row = row.min(self.rows().saturating_sub(1));
                 self.cursor.pending_wrap = false;
             }
+            'J' => {
+                let mode = first.unwrap_or(0);
+                let (r, c) = (self.cursor.row, self.cursor.col);
+                let (last_r, last_c) = (self.rows() - 1, self.cols() - 1);
+                match mode {
+                    0 => {
+                        self.active.clear_rect(r, c, r, last_c);
+                        if r < last_r {
+                            self.active.clear_rect(r + 1, 0, last_r, last_c);
+                        }
+                    }
+                    1 => {
+                        if r > 0 {
+                            self.active.clear_rect(0, 0, r - 1, last_c);
+                        }
+                        self.active.clear_rect(r, 0, r, c);
+                    }
+                    2 | 3 => {
+                        self.active.clear();
+                    }
+                    _ => {}
+                }
+                self.cursor.pending_wrap = false;
+            }
+            'K' => {
+                let mode = first.unwrap_or(0);
+                let (r, c) = (self.cursor.row, self.cursor.col);
+                let last_c = self.cols() - 1;
+                match mode {
+                    0 => self.active.clear_rect(r, c, r, last_c),
+                    1 => self.active.clear_rect(r, 0, r, c),
+                    2 => self.active.clear_rect(r, 0, r, last_c),
+                    _ => {}
+                }
+                self.cursor.pending_wrap = false;
+            }
             _ => {
                 tracing::trace!(?intermediates, ?final_byte, "unhandled CSI");
             }
@@ -411,5 +447,24 @@ mod tests {
         let s = parse(b"\x1b[100;100H");
         assert_eq!(s.cursor.row, 7);
         assert_eq!(s.cursor.col, 23);
+    }
+
+    #[test]
+    fn ed2_clears_screen() {
+        let s = parse(b"hello\x1b[2J");
+        for r in 0..8 {
+            for c in 0..24 {
+                assert!(s.active.get_cell(r, c).unwrap().is_blank());
+            }
+        }
+    }
+
+    #[test]
+    fn el_clears_to_end_of_line() {
+        let s = parse(b"abcdef\x1b[H\x1b[3C\x1b[K");
+        assert_eq!(s.active.get_cell(0, 0).unwrap().grapheme.as_str(), "a");
+        assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "c");
+        assert!(s.active.get_cell(0, 3).unwrap().is_blank());
+        assert!(s.active.get_cell(0, 5).unwrap().is_blank());
     }
 }
