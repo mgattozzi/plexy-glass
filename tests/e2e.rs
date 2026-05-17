@@ -121,3 +121,57 @@ fn smoke_echo_hello_round_trips() {
         String::from_utf8_lossy(&buf)
     );
 }
+
+#[test]
+fn exit_status_propagates_when_child_exits_nonzero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("openpty");
+
+    let bin = std::process::Command::cargo_bin("plexy-glass").expect("binary built");
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn child");
+    drop(pair.slave);
+
+    let master = pair.master;
+    let mut writer = master.take_writer().expect("take writer");
+    std::thread::sleep(Duration::from_millis(300));
+    writer.write_all(b"exit 7\n").expect("write");
+
+    // Drain output until the child terminates.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut reader = master.try_clone_reader().expect("clone reader");
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let code = status.exit_code() as i32;
+                assert_eq!(code, 7, "expected client to exit with code 7");
+                return;
+            }
+            Ok(None) => {
+                // Keep draining the master so the child isn't backpressured.
+                use std::io::Read;
+                let mut buf = [0u8; 256];
+                let _ = reader.read(&mut buf);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("child did not exit within deadline");
+}
