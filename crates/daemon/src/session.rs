@@ -339,4 +339,74 @@ mod tests {
             .unwrap();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
     }
+
+    #[tokio::test]
+    async fn emulator_captures_echo_output() {
+        let spec = SpawnSpec {
+            program: "/bin/echo".into(),
+            args: vec!["hello".into()],
+            env: vec![],
+            cwd: None,
+        };
+        let session = Session::spawn(spec, size()).expect("spawn");
+        // Wait for the child to exit so the PTY has flushed.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
+        // Give the reader thread a beat to drain.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let saw_hello = session.with_screen(|screen| {
+            (0..screen.rows()).any(|r| {
+                let row_text: String = screen.active.rows[r as usize]
+                    .cells
+                    .iter()
+                    .filter(|c| !c.is_wide_spacer())
+                    .map(|c| c.grapheme.as_str())
+                    .collect();
+                row_text.contains("hello")
+            })
+        });
+        assert!(saw_hello, "emulator did not capture 'hello'");
+    }
+
+    #[tokio::test]
+    async fn emulator_resizes_with_session() {
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let session = Session::spawn(spec, size()).expect("spawn");
+
+        session.resize(PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 }).expect("resize");
+        let (r, c) = session.with_screen(|s| (s.rows(), s.cols()));
+        assert_eq!((r, c), (30, 100));
+
+        // Send EOF so `cat` exits.
+        session.send_input(Bytes::from_static(&[0x04])).await.unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
+    }
+
+    #[tokio::test]
+    async fn emulator_records_sgr_attributes_from_child() {
+        let spec = SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "printf '\\x1b[1mhi\\x1b[0m'".into()],
+            env: vec![],
+            cwd: None,
+        };
+        let session = Session::spawn(spec, size()).expect("spawn");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let bold = session.with_screen(|screen| {
+            use plexy_glass_emulator::Attrs;
+            screen.active.rows[0]
+                .cells
+                .iter()
+                .take(2)
+                .all(|c| c.attrs.contains(Attrs::BOLD))
+        });
+        assert!(bold, "expected first two cells to be BOLD");
+    }
 }
