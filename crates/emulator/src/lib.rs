@@ -20,8 +20,8 @@ pub mod tabs;
 // These land in later tasks; declared here as placeholders so downstream
 // modules can `use` them the moment they exist.
 pub mod parser;
+pub mod screen;
 // pub mod events;
-// pub mod screen;
 // pub mod emulator;
 
 pub use attrs::Attrs;
@@ -31,5 +31,6 @@ pub use cursor::{Cursor, CursorShape};
 pub use grid::{Grid, Row, WrapOrigin};
 pub use hyperlinks::HyperlinkTable;
 pub use modes::Modes;
+pub use screen::Screen;
 pub use scrollback::{Scrollback, DEFAULT_SCROLLBACK_LINES};
 pub use tabs::TabStops;
