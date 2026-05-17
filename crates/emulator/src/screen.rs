@@ -316,6 +316,14 @@ impl Screen {
                 let (top, bottom) = self.scroll_region;
                 self.active.scroll_down(top, bottom, n);
             }
+            'g' => {
+                let mode = first.unwrap_or(0);
+                match mode {
+                    0 => self.tabs.clear(self.cursor.col),
+                    3 => self.tabs.clear_all(),
+                    _ => {}
+                }
+            }
             _ => {
                 tracing::trace!(?intermediates, ?final_byte, "unhandled CSI");
             }
@@ -460,9 +468,43 @@ impl Screen {
         }
     }
 
+    pub fn handle_esc(&mut self, intermediates: &[u8], byte: u8) {
+        if !intermediates.is_empty() {
+            tracing::trace!(?intermediates, byte, "unhandled ESC intermediates");
+            return;
+        }
+        match byte {
+            b'7' => {
+                self.saved_cursor = Some(self.cursor.clone());
+            }
+            b'8' => {
+                if let Some(c) = self.saved_cursor.clone() {
+                    self.cursor = c;
+                    self.cursor.pending_wrap = false;
+                }
+            }
+            b'H' => {
+                self.tabs.set(self.cursor.col);
+            }
+            b'c' => {
+                let (rows, cols) = (self.rows(), self.cols());
+                *self = Screen::new(rows, cols);
+            }
+            b'M' => {
+                let (top, _) = self.scroll_region;
+                if self.cursor.row == top {
+                    let (t, b) = self.scroll_region;
+                    self.active.scroll_down(t, b, 1);
+                } else {
+                    self.cursor.up(1);
+                }
+            }
+            _ => tracing::trace!(byte, "unhandled ESC"),
+        }
+    }
+
     /// Stub handlers used by the parser. These get filled in by later tasks.
     pub fn handle_osc_stub(&mut self, _params: &[&[u8]]) {}
-    pub fn handle_esc_stub(&mut self, _intermediates: &[u8], _byte: u8) {}
 }
 
 fn parse_extended_color(rest: &[u16]) -> (Option<crate::color::Color>, usize) {
@@ -497,7 +539,7 @@ impl ScreenOps for Screen {
         self.handle_osc_stub(params);
     }
     fn handle_esc(&mut self, intermediates: &[u8], byte: u8) {
-        self.handle_esc_stub(intermediates, byte);
+        Screen::handle_esc(self, intermediates, byte);
     }
 }
 
@@ -737,5 +779,36 @@ mod tests {
         p.flush(&mut s);
         p.advance(&mut s, b"\x1b[H\x1b[S");
         assert!(s.active.get_cell(3, 0).unwrap().is_blank());
+    }
+
+    #[test]
+    fn decsc_decrc_round_trip() {
+        let s = parse(b"\x1b[3;5H\x1b7\x1b[1;1H\x1b8");
+        assert_eq!((s.cursor.row, s.cursor.col), (2, 4));
+    }
+
+    #[test]
+    fn ris_resets_screen() {
+        let s = parse(b"hello\x1bc");
+        assert!(s.active.get_cell(0, 0).unwrap().is_blank());
+        assert_eq!((s.cursor.row, s.cursor.col), (0, 0));
+    }
+
+    #[test]
+    fn ri_at_top_of_region_scrolls_down() {
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(4, 4);
+        p.advance(&mut s, b"AAAA\nBBBB\nCCCC\nDDDD\x1b[H");
+        p.flush(&mut s);
+        p.advance(&mut s, b"\x1bM");
+        assert!(s.active.get_cell(0, 0).unwrap().is_blank());
+    }
+
+    #[test]
+    fn hts_sets_tab_at_cursor() {
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(8, 24);
+        p.advance(&mut s, b"\x1b[1;4H\x1bH\x1b[1;1H\t");
+        assert_eq!(s.cursor.col, 3);
     }
 }
