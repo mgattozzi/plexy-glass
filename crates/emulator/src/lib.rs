@@ -19,8 +19,8 @@ pub mod tabs;
 
 // These land in later tasks; declared here as placeholders so downstream
 // modules can `use` them the moment they exist.
+pub mod parser;
 // pub mod events;
-// pub mod parser;
 // pub mod screen;
 // pub mod emulator;
 
