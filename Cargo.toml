@@ -1,6 +1,45 @@
+[workspace]
+members = ["crates/protocol", "crates/daemon", "crates/client"]
+
 [package]
 name = "plexy-glass"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "plexy-glass"
+path = "src/main.rs"
+
 [dependencies]
+plexy-glass-protocol = { path = "crates/protocol" }
+plexy-glass-daemon = { path = "crates/daemon" }
+plexy-glass-client = { path = "crates/client" }
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"
+portable-pty = "0.8"
+
+[workspace.dependencies]
+tokio = { version = "1", features = [
+    "rt-multi-thread", "net", "io-util", "signal", "process",
+    "sync", "macros", "time", "fs",
+] }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+bytes = { version = "1", features = ["serde"] }
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+nix = { version = "0.29", features = ["signal", "fs", "process", "term", "ioctl"] }
+portable-pty = "0.8"
+directories = "5"
+clap = { version = "4.5", features = ["derive"] }
+tempfile = "3"
+tokio-test = "0.4"
