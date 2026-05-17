@@ -15,6 +15,7 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 directories = { workspace = true }
+plexy-glass-daemon = { path = "../daemon" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -510,6 +510,7 @@ dependencies = [
  "clap",
  "directories",
  "nix 0.31.3",
+ "plexy-glass-daemon",
  "plexy-glass-protocol",
  "portable-pty",
  "serde",
