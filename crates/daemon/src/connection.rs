@@ -13,7 +13,7 @@ use plexy_glass_protocol::{
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, mpsc};
 
 pub struct Connection;
 
@@ -43,7 +43,8 @@ impl Connection {
         };
 
         let notify = Arc::new(Notify::new());
-        let manager = match WindowManager::new(spec, size, Arc::clone(&notify)) {
+        let (death_tx, mut death_rx) = mpsc::channel::<plexy_glass_mux::PaneId>(16);
+        let manager = match WindowManager::new(spec, size, Arc::clone(&notify), Some(death_tx)) {
             Ok(m) => m,
             Err(e) => {
                 send_msg(
@@ -71,50 +72,63 @@ impl Connection {
 
         let mut keymap = Keymap::default_tmux();
         'outer: loop {
-            let frame = match Codec::read_frame(&mut reader).await {
-                Ok(Some(f)) => f,
-                Ok(None) => break,
-                Err(_) => break,
-            };
-            let msg: ClientMsg = match postcard::from_bytes(&frame) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            match msg {
-                ClientMsg::Input(bytes) => {
-                    for &b in bytes.as_ref() {
-                        let action = keymap.consume(b);
-                        prefix_active.store(keymap.prefix_active(), Ordering::SeqCst);
-                        match action {
-                            KeymapAction::PassThrough(byte) => {
-                                let manager = manager.lock().await;
-                                if let Some(pane) = manager.active_window().active_pane() {
-                                    let _ =
-                                        pane.send_input(Bytes::copy_from_slice(&[byte])).await;
-                                }
-                            }
-                            KeymapAction::Command(cmd) => {
-                                if matches!(cmd, plexy_glass_mux::Command::Detach) {
-                                    break 'outer;
-                                }
-                                let mut manager = manager.lock().await;
-                                if let Err(e) = manager.handle_command(cmd) {
-                                    tracing::warn!(?cmd, error = %e, "command failed");
-                                }
-                                notify.notify_one();
-                            }
-                            KeymapAction::Consumed => {
-                                notify.notify_one();
-                            }
-                        }
+            tokio::select! {
+                biased;
+                Some(pane_id) = death_rx.recv() => {
+                    let mut mgr = manager.lock().await;
+                    let _ = mgr.handle_pane_death(pane_id);
+                    if mgr.is_empty() {
+                        break 'outer;
                     }
                 }
-                ClientMsg::Resize(size) => {
-                    let mut manager = manager.lock().await;
-                    let _ = manager.on_host_resize(size);
+                frame = Codec::read_frame(&mut reader) => {
+                    let frame = match frame {
+                        Ok(Some(f)) => f,
+                        Ok(None) => break,
+                        Err(_) => break,
+                    };
+                    let msg: ClientMsg = match postcard::from_bytes(&frame) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    match msg {
+                        ClientMsg::Input(bytes) => {
+                            for &b in bytes.as_ref() {
+                                let action = keymap.consume(b);
+                                prefix_active.store(keymap.prefix_active(), Ordering::SeqCst);
+                                match action {
+                                    KeymapAction::PassThrough(byte) => {
+                                        let manager = manager.lock().await;
+                                        if let Some(pane) = manager.active_window().active_pane() {
+                                            let _ = pane
+                                                .send_input(Bytes::copy_from_slice(&[byte]))
+                                                .await;
+                                        }
+                                    }
+                                    KeymapAction::Command(cmd) => {
+                                        if matches!(cmd, plexy_glass_mux::Command::Detach) {
+                                            break 'outer;
+                                        }
+                                        let mut manager = manager.lock().await;
+                                        if let Err(e) = manager.handle_command(cmd) {
+                                            tracing::warn!(?cmd, error = %e, "command failed");
+                                        }
+                                        notify.notify_one();
+                                    }
+                                    KeymapAction::Consumed => {
+                                        notify.notify_one();
+                                    }
+                                }
+                            }
+                        }
+                        ClientMsg::Resize(size) => {
+                            let mut manager = manager.lock().await;
+                            let _ = manager.on_host_resize(size);
+                        }
+                        ClientMsg::Shutdown => break,
+                        _ => {}
+                    }
                 }
-                ClientMsg::Shutdown => break,
-                _ => {}
             }
         }
 

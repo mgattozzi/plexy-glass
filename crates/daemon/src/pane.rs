@@ -34,6 +34,7 @@ impl Pane {
         spec: SpawnSpec,
         size: PtySize,
         output_notify: Arc<Notify>,
+        death_tx: Option<mpsc::Sender<PaneId>>,
     ) -> Result<Self, DaemonError> {
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system
@@ -133,6 +134,9 @@ impl Pane {
         std::thread::spawn(move || {
             let status = wait_child(&mut child);
             let _ = exit_tx.send(Some(status));
+            if let Some(tx) = death_tx {
+                let _ = tx.blocking_send(id);
+            }
         });
 
         Ok(Self {
@@ -257,7 +261,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new())).expect("spawn");
+        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).expect("spawn");
         let mut rx = session.subscribe_output();
 
         let mut got = Vec::new();
@@ -292,7 +296,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new())).expect("spawn");
+        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).expect("spawn");
         let mut rx = session.subscribe_output();
 
         session
@@ -334,7 +338,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new())).expect("spawn");
+        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).expect("spawn");
         // Wait for the child to exit so the PTY has flushed.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
         // Give the reader thread a beat to drain.
@@ -362,7 +366,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new())).expect("spawn");
+        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).expect("spawn");
 
         session
             .resize(PtySize {
@@ -391,7 +395,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new())).expect("spawn");
+        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).expect("spawn");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 

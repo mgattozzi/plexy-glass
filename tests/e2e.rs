@@ -106,7 +106,9 @@ fn smoke_echo_hello_round_trips() {
     // Give the shell a moment to be ready.
     std::thread::sleep(Duration::from_millis(300));
     writer
-        .write_all(b"echo HEL-LO; exit\n")
+        // No trailing `exit` because Phase 3's auto-close-on-pane-death
+        // would race the host PTY drain.
+        .write_all(b"echo HEL-LO\n")
         .expect("write command");
 
     let buf = read_until(&mut master, b"HEL-LO", Instant::now() + Duration::from_secs(10));
@@ -163,8 +165,11 @@ fn sigwinch_propagates_to_child() {
     // Give the resize event time to propagate.
     std::thread::sleep(Duration::from_millis(200));
 
-    // Ask the inner shell to print its idea of the size.
-    writer.write_all(b"stty size; exit\n").expect("write stty");
+    // Ask the inner shell to print its idea of the size. We don't issue
+    // `exit` here because Phase 3 now auto-closes the only pane when its
+    // child dies, which tears down the connection before read_until can
+    // observe the bytes.
+    writer.write_all(b"stty size\n").expect("write stty");
 
     let buf = read_until(&mut master, b"49 200", Instant::now() + Duration::from_secs(10));
 

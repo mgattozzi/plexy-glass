@@ -4,7 +4,7 @@ use crate::{error::DaemonError, window::Window};
 use plexy_glass_mux::{Command, PaneId, Rect, SplitDir, WindowId};
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 
 pub struct WindowManager {
     windows: Vec<Window>,
@@ -16,6 +16,9 @@ pub struct WindowManager {
     /// `SpawnSpec` used to create new panes/windows (cloned from the client's
     /// initial `Spawn`).
     default_spec: SpawnSpec,
+    /// Each pane sends its `PaneId` here when its child exits. `None` in tests
+    /// where pane lifecycle is driven manually.
+    death_tx: Option<mpsc::Sender<PaneId>>,
 }
 
 impl WindowManager {
@@ -23,6 +26,7 @@ impl WindowManager {
         first_spec: SpawnSpec,
         host_size: PtySize,
         notify: Arc<Notify>,
+        death_tx: Option<mpsc::Sender<PaneId>>,
     ) -> Result<Self, DaemonError> {
         let viewport = host_viewport(host_size);
         let first = Window::spawn_first(
@@ -32,6 +36,7 @@ impl WindowManager {
             first_spec.clone(),
             viewport,
             Arc::clone(&notify),
+            death_tx.clone(),
         )?;
         Ok(Self {
             windows: vec![first],
@@ -41,7 +46,37 @@ impl WindowManager {
             host_size,
             notify,
             default_spec: first_spec,
+            death_tx,
         })
+    }
+
+    /// Close a pane whose child exited. Called by Connection when it
+    /// receives a `PaneId` on the death channel.
+    pub fn handle_pane_death(&mut self, pane_id: PaneId) -> Result<(), DaemonError> {
+        let viewport = self.viewport();
+        let mut closed_idx: Option<usize> = None;
+        for (idx, w) in self.windows.iter_mut().enumerate() {
+            if w.pane(pane_id).is_some() {
+                let outcome = w.close_pane(pane_id)?;
+                if matches!(outcome, plexy_glass_mux::CloseOutcome::TreeEmpty) {
+                    closed_idx = Some(idx);
+                } else {
+                    w.resize(viewport)?;
+                }
+                break;
+            }
+        }
+        if let Some(idx) = closed_idx {
+            self.windows.remove(idx);
+            if idx <= self.active && self.active > 0 {
+                self.active -= 1;
+            }
+            if self.active >= self.windows.len() && !self.windows.is_empty() {
+                self.active = self.windows.len() - 1;
+            }
+        }
+        self.notify.notify_one();
+        Ok(())
     }
 
     pub fn host_size(&self) -> PtySize {
@@ -75,15 +110,17 @@ impl WindowManager {
                 let new_id = self.alloc_pane_id();
                 let spec = self.default_spec.clone();
                 let notify = Arc::clone(&self.notify);
+                let death = self.death_tx.clone();
                 self.active_window_mut()
-                    .split(SplitDir::Vertical, new_id, spec, viewport, notify)?;
+                    .split(SplitDir::Vertical, new_id, spec, viewport, notify, death)?;
             }
             Command::SplitH => {
                 let new_id = self.alloc_pane_id();
                 let spec = self.default_spec.clone();
                 let notify = Arc::clone(&self.notify);
+                let death = self.death_tx.clone();
                 self.active_window_mut()
-                    .split(SplitDir::Horizontal, new_id, spec, viewport, notify)?;
+                    .split(SplitDir::Horizontal, new_id, spec, viewport, notify, death)?;
             }
             Command::SelectNextPane => self.active_window_mut().select_next(),
             Command::SelectPrevPane => self.active_window_mut().select_prev(),
@@ -113,6 +150,7 @@ impl WindowManager {
                     spec,
                     viewport,
                     Arc::clone(&self.notify),
+                    self.death_tx.clone(),
                 )?;
                 self.windows.push(window);
                 self.active = self.windows.len() - 1;
@@ -211,6 +249,7 @@ mod tests {
                 pixel_height: 0,
             },
             notify,
+            None,
         )
         .unwrap();
         assert_eq!(m.windows().len(), 1);
@@ -229,6 +268,7 @@ mod tests {
                 pixel_height: 0,
             },
             notify,
+            None,
         )
         .unwrap();
         m.handle_command(Command::SplitV).unwrap();
@@ -248,6 +288,7 @@ mod tests {
                 pixel_height: 0,
             },
             notify,
+            None,
         )
         .unwrap();
         m.handle_command(Command::NewWindow).unwrap();
@@ -267,6 +308,7 @@ mod tests {
                 pixel_height: 0,
             },
             notify,
+            None,
         )
         .unwrap();
         m.handle_command(Command::NewWindow).unwrap();

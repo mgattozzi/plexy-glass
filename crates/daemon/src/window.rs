@@ -24,6 +24,7 @@ impl Window {
         spec: SpawnSpec,
         rect: Rect,
         output_notify: std::sync::Arc<tokio::sync::Notify>,
+        death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
     ) -> Result<Self, DaemonError> {
         let size = PtySize {
             rows: rect.rows,
@@ -31,7 +32,7 @@ impl Window {
             pixel_width: 0,
             pixel_height: 0,
         };
-        let pane = Pane::spawn(first_pane_id, spec, size, output_notify)?;
+        let pane = Pane::spawn(first_pane_id, spec, size, output_notify, death_tx)?;
         let mut panes = HashMap::new();
         panes.insert(first_pane_id, pane);
         Ok(Self {
@@ -73,6 +74,7 @@ impl Window {
         spec: SpawnSpec,
         viewport: Rect,
         output_notify: std::sync::Arc<tokio::sync::Notify>,
+        death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
     ) -> Result<(), DaemonError> {
         self.layout
             .split(self.active, dir, new_pane_id, SplitPosition::After)
@@ -87,7 +89,7 @@ impl Window {
             pixel_width: 0,
             pixel_height: 0,
         };
-        let pane = Pane::spawn(new_pane_id, spec, size, output_notify)?;
+        let pane = Pane::spawn(new_pane_id, spec, size, output_notify, death_tx)?;
         self.panes.insert(new_pane_id, pane);
         self.focus_history.push_back(self.active);
         self.active = new_pane_id;
@@ -199,6 +201,7 @@ mod tests {
             shell_spec(),
             viewport,
             notify(),
+            None,
         )
         .expect("spawn");
         assert_eq!(w.active(), PaneId(0));
@@ -215,9 +218,10 @@ mod tests {
             shell_spec(),
             viewport,
             notify(),
+            None,
         )
         .unwrap();
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify())
+        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None)
             .expect("split");
         assert_eq!(w.active(), PaneId(1));
         assert!(w.layout().panes().contains(&PaneId(0)));
@@ -234,9 +238,10 @@ mod tests {
             shell_spec(),
             viewport,
             notify(),
+            None,
         )
         .unwrap();
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify())
+        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None)
             .unwrap();
         let outcome = w.close_active().unwrap();
         assert_eq!(outcome, CloseOutcome::SiblingPromoted);
