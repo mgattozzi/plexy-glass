@@ -8,6 +8,7 @@ pub mod pane;
 pub mod paths;
 pub mod session;
 pub mod window;
+pub mod window_manager;
 
 pub use args::DaemonArgs;
 pub use connection::Connection;
@@ -17,6 +18,7 @@ pub use pane::Pane;
 pub use paths::RuntimePaths;
 pub use session::Session;
 pub use window::Window;
+pub use window_manager::WindowManager;
 
 use tracing::{error, info};
 
