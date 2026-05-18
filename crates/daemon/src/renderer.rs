@@ -60,6 +60,13 @@ impl Renderer {
                 tracing::warn!(error = %e, "render failed; closing renderer");
                 return Err(e);
             }
+            // Exit cleanly when the session has ended (last pane closed).
+            // The final render above already flushed the closing-frame bytes
+            // through the wire, so the host TTY is in a coherent state before
+            // we drop the writer.
+            if manager.lock().await.is_empty() {
+                return Ok(());
+            }
         }
     }
 

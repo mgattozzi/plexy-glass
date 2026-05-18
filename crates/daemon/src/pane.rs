@@ -83,12 +83,16 @@ impl Pane {
         // DA, …) back through the input mpsc so the writer thread forwards
         // them to the child. Without this, TUI line editors block on `ESC[6n`.
         let reply_tx = input_tx.clone();
-        std::thread::spawn(move || {
+        let reader_notify_for_self = Arc::clone(&output_notify);
+        let reader_handle = std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
                         debug!("pane reader EOF");
+                        // Final notify so the renderer can pick up any
+                        // unprocessed bytes before the connection tears down.
+                        reader_notify_for_self.notify_one();
                         return;
                     }
                     Ok(n) => {
@@ -134,6 +138,13 @@ impl Pane {
         std::thread::spawn(move || {
             let status = wait_child(&mut child);
             let _ = exit_tx.send(Some(status));
+            // Wait for the reader thread to drain any remaining PTY bytes
+            // (line-editor cleanup, final prompt erase, etc.) into the
+            // emulator before signaling death. Otherwise the connection
+            // might tear down the renderer while the host TTY is still in a
+            // mid-render state, leaving the user's host shell to need a
+            // keystroke before redrawing.
+            let _ = reader_handle.join();
             if let Some(tx) = death_tx {
                 let _ = tx.blocking_send(id);
             }

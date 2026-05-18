@@ -132,13 +132,14 @@ impl Connection {
             }
         }
 
-        // The renderer holds an Arc<manager> and loops on notify; it won't
-        // wind down on its own when Connection drops its Arc. Abort it
-        // explicitly so the writer half of the socket drops, the client sees
-        // EOF, and pump returns. Awaiting after abort lets the task actually
-        // tear down before we return.
+        // Wake the renderer one last time so it can flush its closing frame
+        // (the host-TTY-restoring sequences the line editor wrote on exit)
+        // before noticing `manager.is_empty()` and returning gracefully. The
+        // wait_child thread joins the reader thread before signaling death,
+        // so by the time we get here the emulator has already absorbed every
+        // byte the child produced on its way out.
+        notify.notify_one();
         drop(manager);
-        renderer_task.abort();
         let _ = renderer_task.await;
         Ok(())
     }
