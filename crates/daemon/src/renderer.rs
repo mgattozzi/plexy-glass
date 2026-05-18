@@ -62,9 +62,20 @@ impl Renderer {
             }
             // Exit cleanly when the session has ended (last pane closed).
             // The final render above already flushed the closing-frame bytes
-            // through the wire, so the host TTY is in a coherent state before
-            // we drop the writer.
+            // through the wire; emit one short tail sequence so the host
+            // shell takes over from a known cursor position with no leaked
+            // SGR or hidden-cursor state, then drop the writer.
             if manager.lock().await.is_empty() {
+                // SGR reset, then cursor to bottom-left of the host TTY,
+                // then a newline so the cursor advances onto a fresh row
+                // (the host scrolls if needed). Finally re-show the cursor
+                // in case the diff renderer's last frame hid it.
+                let host = manager.lock().await.host_size();
+                let tail = format!("\x1b[0m\x1b[{};1H\r\n\x1b[?25h", host.rows);
+                let msg = ServerMsg::Output(Bytes::from(tail.into_bytes()));
+                if let Ok(payload) = postcard::to_allocvec(&msg) {
+                    let _ = Codec::write_frame(&mut writer, &payload).await;
+                }
                 return Ok(());
             }
         }
