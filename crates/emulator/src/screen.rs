@@ -13,6 +13,7 @@ use crate::{
 };
 use unicode_width::UnicodeWidthStr;
 
+#[derive(Clone)]
 pub struct Screen {
     pub active: Grid,
     pub alt: Option<Grid>,
