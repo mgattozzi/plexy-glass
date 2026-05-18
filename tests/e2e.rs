@@ -228,3 +228,59 @@ fn mux_split_renders_two_panes() {
     assert!(txt.contains("LEFT"), "expected LEFT in output. raw: {txt}");
     assert!(txt.contains("RIGHT"), "expected RIGHT in output. raw: {txt}");
 }
+
+#[test]
+fn mux_resize_propagates_to_all_panes() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("openpty");
+
+    let bin = std::process::Command::cargo_bin("plexy-glass").expect("binary built");
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn child");
+    drop(pair.slave);
+
+    let mut master = pair.master;
+    let mut writer = master.take_writer().expect("take writer");
+    std::thread::sleep(Duration::from_millis(400));
+
+    writer.write_all(&[0x02, b'%']).expect("split");
+    std::thread::sleep(Duration::from_millis(400));
+
+    master
+        .resize(PtySize {
+            rows: 30,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("resize");
+    std::thread::sleep(Duration::from_millis(400));
+
+    writer.write_all(b"stty size\n").expect("stty right");
+
+    let buf = read_until(&mut master, b"29", Instant::now() + Duration::from_secs(8));
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let txt = String::from_utf8_lossy(&buf);
+    assert!(
+        txt.contains("29 "),
+        "expected stty to report 29 rows after resize (host 30 - 1 status row). raw: {txt}"
+    );
+}
