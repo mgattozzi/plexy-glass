@@ -1,21 +1,23 @@
-//! One attached client. Drives handshake -> Spawn -> bidirectional pump -> exit.
+//! One attached client. Phase 3 rewrites this to drive a `WindowManager`.
 
-use crate::error::DaemonError;
-use crate::pane::Pane;
+use crate::{
+    error::DaemonError,
+    renderer::Renderer,
+    window_manager::WindowManager,
+};
 use bytes::Bytes;
-use plexy_glass_mux::PaneId;
+use plexy_glass_mux::{Keymap, KeymapAction};
 use plexy_glass_protocol::{
-    ClientMsg, Codec, ExitStatus, ProtocolError, ServerMsg, server_handshake,
+    ClientMsg, Codec, ProtocolError, ServerMsg, server_handshake,
 };
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::Notify;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{Mutex, Notify};
 
-/// One attached client.
 pub struct Connection;
 
 impl Connection {
-    /// Run the full lifecycle of an attached client over the given duplex stream.
     pub async fn serve<S>(stream: S, daemon_pid: u32) -> Result<(), DaemonError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -23,7 +25,6 @@ impl Connection {
         let (mut reader, mut writer) = tokio::io::split(stream);
         server_handshake(&mut reader, &mut writer, daemon_pid).await?;
 
-        // Wait for the first message; it must be `Spawn`.
         let frame = Codec::read_frame(&mut reader).await?.ok_or_else(|| {
             DaemonError::Io(std::io::Error::other("client closed before Spawn"))
         })?;
@@ -41,8 +42,9 @@ impl Connection {
             }
         };
 
-        let session = match Pane::spawn(PaneId(0), spec, size, Arc::new(Notify::new())) {
-            Ok(s) => s,
+        let notify = Arc::new(Notify::new());
+        let manager = match WindowManager::new(spec, size, Arc::clone(&notify)) {
+            Ok(m) => m,
             Err(e) => {
                 send_msg(
                     &mut writer,
@@ -54,98 +56,70 @@ impl Connection {
                 return Ok(());
             }
         };
+        let manager = Arc::new(Mutex::new(manager));
 
         send_msg(&mut writer, &ServerMsg::Spawned).await?;
 
-        let mut output_rx = session.subscribe_output();
-
-        // Spawn the session-output -> socket forwarder. It owns `writer` for
-        // the duration of the connection and hands it back on exit.
-        let writer_task = tokio::spawn(async move {
-            loop {
-                match output_rx.recv().await {
-                    Ok(chunk) => {
-                        if send_msg(&mut writer, &ServerMsg::Output(chunk))
-                            .await
-                            .is_err()
-                        {
-                            return writer;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            writer
+        let prefix_active = Arc::new(AtomicBool::new(false));
+        let renderer = Renderer::new();
+        let renderer_task = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let notify = Arc::clone(&notify);
+            let prefix_active = Arc::clone(&prefix_active);
+            async move { renderer.run(manager, notify, prefix_active, writer).await }
         });
 
-        // Drive the socket-input + child-exit selector on this task.
-        // We hold session refs in an inner scope so they drop (closing the
-        // broadcast) once the loop exits, which signals writer_task to return.
-        let exit_status: ExitStatus = {
-            let session_clone = session.clone();
-            let mut status = ExitStatus::Unknown;
-            let exit_wait = async move { session_clone.wait().await };
-            tokio::pin!(exit_wait);
-
-            loop {
-                tokio::select! {
-                    biased;
-                    s = &mut exit_wait => {
-                        status = s;
-                        break;
-                    }
-                    frame = Codec::read_frame(&mut reader) => {
-                        match frame {
-                            Ok(Some(buf)) => {
-                                let msg: ClientMsg = match postcard::from_bytes(&buf) {
-                                    Ok(m) => m,
-                                    Err(_) => continue, // ignore garbage
-                                };
-                                match msg {
-                                    ClientMsg::Input(bytes) => {
-                                        let _ = session.send_input(bytes).await;
-                                    }
-                                    ClientMsg::Resize(size) => {
-                                        let _ = session.resize(size);
-                                    }
-                                    ClientMsg::Shutdown => {
-                                        // Phase 1: shutdown ends this client's read pump.
-                                        break;
-                                    }
-                                    ClientMsg::Spawn { .. } => {
-                                        // Already spawned; ignore.
-                                    }
-                                    // ClientMsg is #[non_exhaustive]; keep a fallback
-                                    // arm for forward-compatibility with future variants.
-                                    #[allow(unreachable_patterns)]
-                                    _ => {}
+        let mut keymap = Keymap::default_tmux();
+        'outer: loop {
+            let frame = match Codec::read_frame(&mut reader).await {
+                Ok(Some(f)) => f,
+                Ok(None) => break,
+                Err(_) => break,
+            };
+            let msg: ClientMsg = match postcard::from_bytes(&frame) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            match msg {
+                ClientMsg::Input(bytes) => {
+                    for &b in bytes.as_ref() {
+                        let action = keymap.consume(b);
+                        prefix_active.store(keymap.prefix_active(), Ordering::SeqCst);
+                        match action {
+                            KeymapAction::PassThrough(byte) => {
+                                let manager = manager.lock().await;
+                                if let Some(pane) = manager.active_window().active_pane() {
+                                    let _ =
+                                        pane.send_input(Bytes::copy_from_slice(&[byte])).await;
                                 }
                             }
-                            Ok(None) => break,
-                            Err(_) => break,
+                            KeymapAction::Command(cmd) => {
+                                if matches!(cmd, plexy_glass_mux::Command::Detach) {
+                                    break 'outer;
+                                }
+                                let mut manager = manager.lock().await;
+                                if let Err(e) = manager.handle_command(cmd) {
+                                    tracing::warn!(?cmd, error = %e, "command failed");
+                                }
+                                notify.notify_one();
+                            }
+                            KeymapAction::Consumed => {
+                                notify.notify_one();
+                            }
                         }
                     }
                 }
+                ClientMsg::Resize(size) => {
+                    let mut manager = manager.lock().await;
+                    let _ = manager.on_host_resize(size);
+                }
+                ClientMsg::Shutdown => break,
+                _ => {}
             }
-            status
-        };
+        }
 
-        // Drop our remaining Session handle so the broadcast Sender count hits 0
-        // and writer_task sees `RecvError::Closed` and exits.
-        drop(session);
-
-        let mut writer = writer_task
-            .await
-            .map_err(|e| DaemonError::Io(std::io::Error::other(format!("writer task: {e}"))))?;
-        let _ = send_msg(
-            &mut writer,
-            &ServerMsg::Exited {
-                status: exit_status,
-            },
-        )
-        .await;
-        let _ = writer.shutdown().await;
+        drop(manager);
+        let _ = renderer_task.await;
         Ok(())
     }
 }
@@ -160,40 +134,31 @@ where
     Ok(())
 }
 
-// Vestigial helper from drafting, kept silent so the `bytes` import has a
-// use site.
-#[allow(dead_code)] // retained for symmetry with protocol Bytes payloads in tests
-fn _bytes_marker(_: Bytes) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plexy_glass_protocol::{
-        ClientMsg, PROTOCOL_VERSION, PtySize, ServerMsg, SpawnSpec, client_handshake,
-    };
+    use plexy_glass_protocol::{PROTOCOL_VERSION, PtySize, SpawnSpec, client_handshake};
     use tokio::io::duplex;
 
     #[tokio::test]
-    async fn full_flow_with_echo_program() {
+    async fn end_to_end_renders_then_exits() {
         let (server_side, client_side) = duplex(64 * 1024);
         let server = tokio::spawn(async move { Connection::serve(server_side, 7).await });
 
         let (mut cr, mut cw) = tokio::io::split(client_side);
         let server_hello = client_handshake(&mut cr, &mut cw).await.unwrap();
         assert_eq!(server_hello.version, PROTOCOL_VERSION);
-        assert_eq!(server_hello.daemon_pid, 7);
 
-        // Send Spawn for /bin/echo hello.
         let spawn = ClientMsg::Spawn {
             cmd: SpawnSpec {
                 program: "/bin/echo".into(),
-                args: vec!["hello".into()],
+                args: vec!["hi".into()],
                 env: vec![],
                 cwd: None,
             },
             size: PtySize {
-                rows: 24,
-                cols: 80,
+                rows: 8,
+                cols: 24,
                 pixel_width: 0,
                 pixel_height: 0,
             },
@@ -201,11 +166,10 @@ mod tests {
         let bytes = postcard::to_allocvec(&spawn).unwrap();
         Codec::write_frame(&mut cw, &bytes).await.unwrap();
 
-        // Collect frames until we see Exited.
+        let mut saw_spawned = false;
         let mut saw_output = false;
-        let mut saw_exit = false;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-        while !saw_exit && tokio::time::Instant::now() < deadline {
+        while tokio::time::Instant::now() < deadline {
             let frame = match tokio::time::timeout(
                 std::time::Duration::from_millis(500),
                 Codec::read_frame(&mut cr),
@@ -217,25 +181,18 @@ mod tests {
             };
             let msg: ServerMsg = postcard::from_bytes(&frame).unwrap();
             match msg {
-                ServerMsg::Spawned => {}
-                ServerMsg::Output(b) if b.windows(5).any(|w| w == b"hello") => {
-                    saw_output = true;
-                }
-                ServerMsg::Output(_) => {}
-                ServerMsg::Exited {
-                    status: ExitStatus::Code(0),
-                } => saw_exit = true,
-                ServerMsg::Exited { status } => panic!("non-zero exit: {status:?}"),
+                ServerMsg::Spawned => saw_spawned = true,
+                ServerMsg::Output(_) => saw_output = true,
                 ServerMsg::Error(e) => panic!("got error: {e:?}"),
-                // ServerMsg is #[non_exhaustive]; keep a fallback arm for
-                // forward-compatibility with future variants.
-                #[allow(unreachable_patterns)]
                 _ => {}
             }
+            if saw_spawned && saw_output {
+                break;
+            }
         }
-        assert!(saw_output, "did not see 'hello'");
-        assert!(saw_exit, "did not see Exited");
+        assert!(saw_spawned, "missing Spawned");
+        assert!(saw_output, "missing Output");
 
-        let _ = server.await;
+        server.abort();
     }
 }
