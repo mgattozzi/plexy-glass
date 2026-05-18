@@ -297,6 +297,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn select_pane_right_after_split() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            notify,
+            None,
+        )
+        .unwrap();
+        m.handle_command(Command::SplitV).unwrap();
+        // After SplitV, the new pane (`PaneId(1)`) is active.
+        assert_eq!(m.active_window().active(), PaneId(1));
+        // Going left should reach PaneId(0).
+        m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Left))
+            .unwrap();
+        assert_eq!(m.active_window().active(), PaneId(0));
+        // Going right should return to PaneId(1).
+        m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Right))
+            .unwrap();
+        assert_eq!(m.active_window().active(), PaneId(1));
+    }
+
+    #[tokio::test]
+    async fn select_pane_up_down_after_horizontal_split() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            notify,
+            None,
+        )
+        .unwrap();
+        m.handle_command(Command::SplitH).unwrap();
+        // After SplitH, the new pane (`PaneId(1)`) is active.
+        assert_eq!(m.active_window().active(), PaneId(1));
+        // Going up should reach PaneId(0).
+        m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Up))
+            .unwrap();
+        assert_eq!(m.active_window().active(), PaneId(0));
+        // Going down should return to PaneId(1).
+        m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Down))
+            .unwrap();
+        assert_eq!(m.active_window().active(), PaneId(1));
+    }
+
+    #[tokio::test]
     async fn next_window_cycles() {
         let notify = Arc::new(Notify::new());
         let mut m = WindowManager::new(
