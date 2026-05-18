@@ -580,6 +580,7 @@ dependencies = [
  "directories",
  "nix 0.31.3",
  "plexy-glass-emulator",
+ "plexy-glass-mux",
  "plexy-glass-protocol",
  "portable-pty",
  "postcard",

@@ -4,6 +4,7 @@ pub mod args;
 pub mod connection;
 pub mod error;
 pub mod listener;
+pub mod pane;
 pub mod paths;
 pub mod session;
 
@@ -11,6 +12,7 @@ pub use args::DaemonArgs;
 pub use connection::Connection;
 pub use error::DaemonError;
 pub use listener::Listener;
+pub use pane::Pane;
 pub use paths::RuntimePaths;
 pub use session::Session;
 

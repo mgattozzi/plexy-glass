@@ -1,12 +1,15 @@
 //! One attached client. Drives handshake -> Spawn -> bidirectional pump -> exit.
 
 use crate::error::DaemonError;
-use crate::session::Session;
+use crate::pane::Pane;
 use bytes::Bytes;
+use plexy_glass_mux::PaneId;
 use plexy_glass_protocol::{
     ClientMsg, Codec, ExitStatus, ProtocolError, ServerMsg, server_handshake,
 };
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::sync::Notify;
 
 /// One attached client.
 pub struct Connection;
@@ -38,7 +41,7 @@ impl Connection {
             }
         };
 
-        let session = match Session::spawn(spec, size) {
+        let session = match Pane::spawn(PaneId(0), spec, size, Arc::new(Notify::new())) {
             Ok(s) => s,
             Err(e) => {
                 send_msg(

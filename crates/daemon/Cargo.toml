@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 plexy-glass-protocol = { path = "../protocol" }
 plexy-glass-emulator = { path = "../emulator" }
+plexy-glass-mux = { path = "../mux" }
 postcard = { workspace = true }
 tokio = { workspace = true }
 portable-pty = { workspace = true }
