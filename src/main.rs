@@ -36,9 +36,15 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Kill => match plexy_glass_client::kill().await? {
             plexy_glass_client::KillOutcome::NoDaemon => println!("no daemon running"),
-            plexy_glass_client::KillOutcome::Stopped => println!("daemon stopped"),
-            plexy_glass_client::KillOutcome::ForceKilled => {
-                println!("daemon did not respond to SIGTERM; sent SIGKILL")
+            plexy_glass_client::KillOutcome::Stopped { count } => {
+                let plural = if count == 1 { "" } else { "s" };
+                println!("stopped {count} daemon{plural}");
+            }
+            plexy_glass_client::KillOutcome::ForceKilled { count } => {
+                let plural = if count == 1 { "" } else { "s" };
+                println!(
+                    "force-killed {count} daemon{plural} (SIGTERM ignored, sent SIGKILL)"
+                );
             }
         },
     }
