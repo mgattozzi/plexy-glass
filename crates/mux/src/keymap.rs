@@ -44,34 +44,34 @@ pub struct Keymap {
 }
 
 impl Keymap {
-    /// Default keymap, derived from the user's tmux.conf:
-    /// - Prefix: Ctrl-a (`0x01`) instead of tmux's stock Ctrl-b.
+    /// Default keymap:
+    /// - Prefix: Ctrl-a (`0x01`).
     /// - `v` / `s` split panes (matching `bind v split-window -h` and
-    ///   `bind s split-window -v` in tmux; `-h` is plexy-glass's vertical
-    ///   split, `-v` is horizontal).
-    /// - `h` / `i` / `n` / `e` select the pane left / right / down / up
-    ///   (Colemak-friendly homerow). `n` therefore is NOT next-window in
-    ///   this config; use the digit bindings to switch windows.
+    ///   `bind s split-window -v` in the user's tmux.conf; `-h` is
+    ///   plexy-glass's vertical split, `-v` is horizontal).
+    /// - `h` / `j` / `k` / `l` select pane left / down / up / right
+    ///   (vi-style; works on both QWERTY and Colemak keyboards because
+    ///   the bytes are layout-independent).
+    /// - `n` is next-window (its tmux default).
     pub fn default_tmux() -> Self {
         let mut bindings: HashMap<u8, Command> = HashMap::new();
-        // Splits, matching tmux conventions: `bind v split-window -h`,
-        // `bind s split-window -v`.
+        // Splits, matching the user's tmux.conf.
         bindings.insert(b'v', Command::SplitV);
         bindings.insert(b's', Command::SplitH);
         // Cycling panes.
         bindings.insert(b'o', Command::SelectNextPane);
         bindings.insert(b';', Command::SelectPrevPane);
-        // Directional pane selection (Colemak homerow positions).
+        // Directional pane selection (vi-style hjkl).
         bindings.insert(b'h', Command::SelectPane(Direction::Left));
-        bindings.insert(b'i', Command::SelectPane(Direction::Right));
-        bindings.insert(b'n', Command::SelectPane(Direction::Down));
-        bindings.insert(b'e', Command::SelectPane(Direction::Up));
+        bindings.insert(b'j', Command::SelectPane(Direction::Down));
+        bindings.insert(b'k', Command::SelectPane(Direction::Up));
+        bindings.insert(b'l', Command::SelectPane(Direction::Right));
         // Pane lifecycle.
         bindings.insert(b'x', Command::KillPane);
         bindings.insert(b'z', Command::ZoomToggle);
-        // Window management. `n` is taken for pane-down above, so window
-        // navigation is digits + `p` for previous + `&` for kill.
+        // Window management.
         bindings.insert(b'c', Command::NewWindow);
+        bindings.insert(b'n', Command::NextWindow);
         bindings.insert(b'p', Command::PrevWindow);
         bindings.insert(b'&', Command::KillWindow);
         bindings.insert(b'd', Command::Detach);
@@ -158,18 +158,18 @@ mod tests {
         );
         assert_eq!(k.consume(0x01), KeymapAction::Consumed);
         assert_eq!(
-            k.consume(b'i'),
-            KeymapAction::Command(Command::SelectPane(Direction::Right))
-        );
-        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
-        assert_eq!(
-            k.consume(b'n'),
+            k.consume(b'j'),
             KeymapAction::Command(Command::SelectPane(Direction::Down))
         );
         assert_eq!(k.consume(0x01), KeymapAction::Consumed);
         assert_eq!(
-            k.consume(b'e'),
+            k.consume(b'k'),
             KeymapAction::Command(Command::SelectPane(Direction::Up))
+        );
+        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
+        assert_eq!(
+            k.consume(b'l'),
+            KeymapAction::Command(Command::SelectPane(Direction::Right))
         );
     }
 
