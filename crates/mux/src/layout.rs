@@ -114,6 +114,124 @@ impl LayoutTree {
     }
 }
 
+impl LayoutTree {
+    /// Find the pane nearest to `pane` in `dir`. Uses rect adjacency:
+    /// computes the cell just past `pane`'s edge in `dir` and asks which pane
+    /// is there.
+    pub fn next_in_direction(
+        &self,
+        pane: PaneId,
+        viewport: Rect,
+        dir: crate::direction::Direction,
+    ) -> Option<PaneId> {
+        let rect = self.rect_of(pane, viewport)?;
+        let (probe_r, probe_c) = match dir {
+            crate::direction::Direction::Up => {
+                if rect.row == 0 { return None; }
+                (rect.row.saturating_sub(2), rect.col + rect.cols / 2)
+            }
+            crate::direction::Direction::Down => {
+                let r = rect.bottom_edge_row().saturating_add(2);
+                (r, rect.col + rect.cols / 2)
+            }
+            crate::direction::Direction::Left => {
+                if rect.col == 0 { return None; }
+                (rect.row + rect.rows / 2, rect.col.saturating_sub(2))
+            }
+            crate::direction::Direction::Right => {
+                let c = rect.right_edge_col().saturating_add(2);
+                (rect.row + rect.rows / 2, c)
+            }
+        };
+        self.pane_at_coord(viewport, probe_r, probe_c)
+    }
+
+    /// Find which pane (if any) is under the given viewport coordinate.
+    pub fn pane_at_coord(&self, viewport: Rect, row: u16, col: u16) -> Option<PaneId> {
+        let root = self.root.as_ref()?;
+        pane_at_in(root, viewport, row, col)
+    }
+
+    /// Adjust the nearest enclosing split (in `axis`) so that the side
+    /// containing `toward` grows by `delta_cells`. Clamps to [0.1, 0.9].
+    pub fn resize_split(
+        &mut self,
+        toward: PaneId,
+        axis: SplitDir,
+        delta_cells: i32,
+        viewport: Rect,
+    ) {
+        let Some(root) = self.root.take() else { return };
+        let (new_root, _) = resize_in(root, toward, axis, delta_cells, viewport);
+        self.root = Some(new_root);
+    }
+}
+
+fn pane_at_in(node: &LayoutNode, viewport: Rect, row: u16, col: u16) -> Option<PaneId> {
+    match node {
+        LayoutNode::Leaf(p) => {
+            if viewport.contains(row, col) {
+                Some(*p)
+            } else {
+                None
+            }
+        }
+        LayoutNode::Split { dir, ratio, first, second } => {
+            let (a, b) = viewport.subdivide(*dir, *ratio);
+            if a.contains(row, col) {
+                pane_at_in(first, a, row, col)
+            } else if b.contains(row, col) {
+                pane_at_in(second, b, row, col)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Returns `(new_node, contains_target)`.
+fn resize_in(
+    node: LayoutNode,
+    target: PaneId,
+    axis: SplitDir,
+    delta_cells: i32,
+    viewport: Rect,
+) -> (LayoutNode, bool) {
+    match node {
+        LayoutNode::Leaf(p) => (LayoutNode::Leaf(p), p == target),
+        LayoutNode::Split { dir, ratio, first, second } => {
+            let (a_rect, b_rect) = viewport.subdivide(dir, ratio);
+            let (new_first, in_first) = resize_in(*first, target, axis, delta_cells, a_rect);
+            let (new_second, in_second) =
+                resize_in(*second, target, axis, delta_cells, b_rect);
+
+            let mut new_ratio = ratio;
+            if dir == axis && (in_first || in_second) {
+                let size = match axis {
+                    SplitDir::Horizontal => viewport.rows.saturating_sub(1).max(1) as i32,
+                    SplitDir::Vertical => viewport.cols.saturating_sub(1).max(1) as i32,
+                };
+                let dr = (delta_cells as f32) / (size as f32);
+                if in_first {
+                    new_ratio = (ratio + dr).clamp(0.1, 0.9);
+                } else {
+                    new_ratio = (ratio - dr).clamp(0.1, 0.9);
+                }
+            }
+
+            (
+                LayoutNode::Split {
+                    dir,
+                    ratio: new_ratio,
+                    first: Box::new(new_first),
+                    second: Box::new(new_second),
+                },
+                in_first || in_second,
+            )
+        }
+    }
+}
+
 fn collect_panes(node: &LayoutNode, out: &mut Vec<PaneId>) {
     match node {
         LayoutNode::Leaf(p) => out.push(*p),
@@ -289,5 +407,47 @@ mod tests {
         let mut t = LayoutTree::single(PaneId(0));
         assert_eq!(t.close(PaneId(99)), CloseOutcome::NotPresent);
         assert_eq!(t.panes(), vec![PaneId(0)]);
+    }
+
+    use crate::direction::Direction;
+
+    fn build_two_pane_vertical() -> LayoutTree {
+        let mut t = LayoutTree::single(PaneId(0));
+        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After).unwrap();
+        t
+    }
+
+    #[test]
+    fn pane_at_coord_finds_left_and_right() {
+        let t = build_two_pane_vertical();
+        let vp = Rect::new(0, 0, 24, 21);
+        assert_eq!(t.pane_at_coord(vp, 5, 2), Some(PaneId(0)));
+        assert_eq!(t.pane_at_coord(vp, 5, 18), Some(PaneId(1)));
+    }
+
+    #[test]
+    fn next_in_direction_finds_right_neighbor() {
+        let t = build_two_pane_vertical();
+        let vp = Rect::new(0, 0, 24, 21);
+        assert_eq!(t.next_in_direction(PaneId(0), vp, Direction::Right), Some(PaneId(1)));
+        assert_eq!(t.next_in_direction(PaneId(1), vp, Direction::Left), Some(PaneId(0)));
+    }
+
+    #[test]
+    fn next_in_direction_returns_none_off_edge() {
+        let t = build_two_pane_vertical();
+        let vp = Rect::new(0, 0, 24, 21);
+        assert_eq!(t.next_in_direction(PaneId(0), vp, Direction::Up), None);
+        assert_eq!(t.next_in_direction(PaneId(1), vp, Direction::Right), None);
+    }
+
+    #[test]
+    fn resize_split_changes_ratio() {
+        let mut t = build_two_pane_vertical();
+        let vp = Rect::new(0, 0, 24, 21);
+        let before = t.rect_of(PaneId(0), vp).unwrap().cols;
+        t.resize_split(PaneId(0), SplitDir::Vertical, 3, vp);
+        let after = t.rect_of(PaneId(0), vp).unwrap().cols;
+        assert!(after > before, "pane 0 should have grown");
     }
 }
