@@ -7,6 +7,7 @@ pub mod listener;
 pub mod pane;
 pub mod paths;
 pub mod session;
+pub mod window;
 
 pub use args::DaemonArgs;
 pub use connection::Connection;
@@ -15,6 +16,7 @@ pub use listener::Listener;
 pub use pane::Pane;
 pub use paths::RuntimePaths;
 pub use session::Session;
+pub use window::Window;
 
 use tracing::{error, info};
 
