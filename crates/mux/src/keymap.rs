@@ -44,21 +44,34 @@ pub struct Keymap {
 }
 
 impl Keymap {
-    /// Default keymap: Ctrl-b prefix + tmux-style bindings.
+    /// Default keymap, derived from the user's tmux.conf:
+    /// - Prefix: Ctrl-a (`0x01`) instead of tmux's stock Ctrl-b.
+    /// - `v` / `s` split panes (matching `bind v split-window -h` and
+    ///   `bind s split-window -v` in tmux; `-h` is plexy-glass's vertical
+    ///   split, `-v` is horizontal).
+    /// - `h` / `i` / `n` / `e` select the pane left / right / down / up
+    ///   (Colemak-friendly homerow). `n` therefore is NOT next-window in
+    ///   this config; use the digit bindings to switch windows.
     pub fn default_tmux() -> Self {
         let mut bindings: HashMap<u8, Command> = HashMap::new();
-        bindings.insert(b'%', Command::SplitV);
-        bindings.insert(b'"', Command::SplitH);
+        // Splits, matching tmux conventions: `bind v split-window -h`,
+        // `bind s split-window -v`.
+        bindings.insert(b'v', Command::SplitV);
+        bindings.insert(b's', Command::SplitH);
+        // Cycling panes.
         bindings.insert(b'o', Command::SelectNextPane);
         bindings.insert(b';', Command::SelectPrevPane);
+        // Directional pane selection (Colemak homerow positions).
         bindings.insert(b'h', Command::SelectPane(Direction::Left));
-        bindings.insert(b'j', Command::SelectPane(Direction::Down));
-        bindings.insert(b'k', Command::SelectPane(Direction::Up));
-        bindings.insert(b'l', Command::SelectPane(Direction::Right));
+        bindings.insert(b'i', Command::SelectPane(Direction::Right));
+        bindings.insert(b'n', Command::SelectPane(Direction::Down));
+        bindings.insert(b'e', Command::SelectPane(Direction::Up));
+        // Pane lifecycle.
         bindings.insert(b'x', Command::KillPane);
         bindings.insert(b'z', Command::ZoomToggle);
+        // Window management. `n` is taken for pane-down above, so window
+        // navigation is digits + `p` for previous + `&` for kill.
         bindings.insert(b'c', Command::NewWindow);
-        bindings.insert(b'n', Command::NextWindow);
         bindings.insert(b'p', Command::PrevWindow);
         bindings.insert(b'&', Command::KillWindow);
         bindings.insert(b'd', Command::Detach);
@@ -66,7 +79,7 @@ impl Keymap {
             bindings.insert(b'0' + digit, Command::SelectWindow(digit));
         }
         Self {
-            prefix: 0x02, // Ctrl-b
+            prefix: 0x01, // Ctrl-a (from user's tmux.conf)
             state: KeymapState::PassThrough,
             bindings,
         }
@@ -124,21 +137,53 @@ mod tests {
     #[test]
     fn prefix_then_command_emits_command() {
         let mut k = Keymap::default_tmux();
-        assert_eq!(k.consume(0x02), KeymapAction::Consumed);
-        assert_eq!(k.consume(b'%'), KeymapAction::Command(Command::SplitV));
+        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
+        assert_eq!(k.consume(b'v'), KeymapAction::Command(Command::SplitV));
+    }
+
+    #[test]
+    fn split_h_binding() {
+        let mut k = Keymap::default_tmux();
+        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
+        assert_eq!(k.consume(b's'), KeymapAction::Command(Command::SplitH));
+    }
+
+    #[test]
+    fn directional_pane_select_bindings() {
+        let mut k = Keymap::default_tmux();
+        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
+        assert_eq!(
+            k.consume(b'h'),
+            KeymapAction::Command(Command::SelectPane(Direction::Left))
+        );
+        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
+        assert_eq!(
+            k.consume(b'i'),
+            KeymapAction::Command(Command::SelectPane(Direction::Right))
+        );
+        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
+        assert_eq!(
+            k.consume(b'n'),
+            KeymapAction::Command(Command::SelectPane(Direction::Down))
+        );
+        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
+        assert_eq!(
+            k.consume(b'e'),
+            KeymapAction::Command(Command::SelectPane(Direction::Up))
+        );
     }
 
     #[test]
     fn double_prefix_passes_through_literal() {
         let mut k = Keymap::default_tmux();
-        assert_eq!(k.consume(0x02), KeymapAction::Consumed);
-        assert_eq!(k.consume(0x02), KeymapAction::PassThrough(0x02));
+        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
+        assert_eq!(k.consume(0x01), KeymapAction::PassThrough(0x01));
     }
 
     #[test]
     fn unknown_command_aborts_to_pass_through() {
         let mut k = Keymap::default_tmux();
-        assert_eq!(k.consume(0x02), KeymapAction::Consumed);
+        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
         assert_eq!(k.consume(b'~'), KeymapAction::Consumed);
         assert_eq!(k.consume(b'a'), KeymapAction::PassThrough(b'a'));
     }
@@ -146,14 +191,14 @@ mod tests {
     #[test]
     fn escape_after_prefix_cancels() {
         let mut k = Keymap::default_tmux();
-        assert_eq!(k.consume(0x02), KeymapAction::Consumed);
+        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
         assert_eq!(k.consume(0x1b), KeymapAction::Command(Command::Cancel));
     }
 
     #[test]
     fn digits_map_to_select_window() {
         let mut k = Keymap::default_tmux();
-        assert_eq!(k.consume(0x02), KeymapAction::Consumed);
+        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
         assert_eq!(k.consume(b'3'), KeymapAction::Command(Command::SelectWindow(3)));
     }
 
@@ -161,9 +206,9 @@ mod tests {
     fn prefix_active_flag_tracks_state() {
         let mut k = Keymap::default_tmux();
         assert!(!k.prefix_active());
-        k.consume(0x02);
+        k.consume(0x01);
         assert!(k.prefix_active());
-        k.consume(b'%');
+        k.consume(b'v');
         assert!(!k.prefix_active());
     }
 }

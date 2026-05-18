@@ -211,7 +211,7 @@ fn mux_split_renders_two_panes() {
 
     writer.write_all(b"echo LEFT\n").expect("write");
     std::thread::sleep(Duration::from_millis(300));
-    writer.write_all(&[0x02, b'%']).expect("split");
+    writer.write_all(&[0x01, b'v']).expect("split");
     std::thread::sleep(Duration::from_millis(400));
     writer.write_all(b"echo RIGHT\n").expect("write right");
 
@@ -258,7 +258,7 @@ fn mux_resize_propagates_to_all_panes() {
     let mut writer = master.take_writer().expect("take writer");
     std::thread::sleep(Duration::from_millis(400));
 
-    writer.write_all(&[0x02, b'%']).expect("split");
+    writer.write_all(&[0x01, b'v']).expect("split");
     std::thread::sleep(Duration::from_millis(400));
 
     master
@@ -314,9 +314,9 @@ fn mux_kill_pane_collapses_layout() {
     let mut writer = master.take_writer().expect("take writer");
     std::thread::sleep(Duration::from_millis(400));
 
-    writer.write_all(&[0x02, b'%']).expect("split");
+    writer.write_all(&[0x01, b'v']).expect("split");
     std::thread::sleep(Duration::from_millis(400));
-    writer.write_all(&[0x02, b'x']).expect("kill pane");
+    writer.write_all(&[0x01, b'x']).expect("kill pane");
     std::thread::sleep(Duration::from_millis(400));
 
     writer.write_all(b"stty size\n").expect("stty");
