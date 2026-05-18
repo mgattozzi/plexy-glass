@@ -94,6 +94,10 @@ impl WindowManager {
                 let outcome = self.active_window_mut().close_active()?;
                 if matches!(outcome, plexy_glass_mux::CloseOutcome::TreeEmpty) {
                     self.close_active_window();
+                } else {
+                    // Surviving panes may now occupy a larger rect after the
+                    // layout collapses; resize their PTYs to match.
+                    self.active_window_mut().resize(viewport)?;
                 }
             }
             Command::NewWindow => {
