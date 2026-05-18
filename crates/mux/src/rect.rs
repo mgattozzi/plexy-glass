@@ -1,0 +1,120 @@
+//! Rectangle in (row, col) coordinates with (rows, cols) dimensions.
+//!
+//! Origin at top-left. All ops clamp; nothing panics.
+
+use crate::direction::SplitDir;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rect {
+    pub row: u16,
+    pub col: u16,
+    pub rows: u16,
+    pub cols: u16,
+}
+
+impl Rect {
+    pub const fn new(row: u16, col: u16, rows: u16, cols: u16) -> Self {
+        Self { row, col, rows, cols }
+    }
+
+    pub fn contains(self, r: u16, c: u16) -> bool {
+        r >= self.row
+            && r < self.row.saturating_add(self.rows)
+            && c >= self.col
+            && c < self.col.saturating_add(self.cols)
+    }
+
+    pub fn bottom_edge_row(self) -> u16 {
+        self.row.saturating_add(self.rows).saturating_sub(1)
+    }
+
+    pub fn right_edge_col(self) -> u16 {
+        self.col.saturating_add(self.cols).saturating_sub(1)
+    }
+
+    /// Subdivide along `dir` at `ratio` (fraction of size that the first child gets).
+    /// `ratio` is clamped to `[0.1, 0.9]`. Children are sized so they sum to the
+    /// original (minus a 1-cell separator between them) so callers can paint a
+    /// border on the separator row/col.
+    pub fn subdivide(self, dir: SplitDir, ratio: f32) -> (Rect, Rect) {
+        let ratio = ratio.clamp(0.1, 0.9);
+        match dir {
+            SplitDir::Horizontal => {
+                // Children stack top/bottom; one row reserved for the separator.
+                let usable = self.rows.saturating_sub(1).max(1);
+                let first_rows = ((usable as f32) * ratio).round() as u16;
+                let first_rows = first_rows.clamp(1, usable.saturating_sub(1).max(1));
+                let second_rows = usable.saturating_sub(first_rows);
+                let first = Rect::new(self.row, self.col, first_rows, self.cols);
+                let second = Rect::new(
+                    self.row.saturating_add(first_rows).saturating_add(1),
+                    self.col,
+                    second_rows,
+                    self.cols,
+                );
+                (first, second)
+            }
+            SplitDir::Vertical => {
+                // Children sit side by side; one col reserved for the separator.
+                let usable = self.cols.saturating_sub(1).max(1);
+                let first_cols = ((usable as f32) * ratio).round() as u16;
+                let first_cols = first_cols.clamp(1, usable.saturating_sub(1).max(1));
+                let second_cols = usable.saturating_sub(first_cols);
+                let first = Rect::new(self.row, self.col, self.rows, first_cols);
+                let second = Rect::new(
+                    self.row,
+                    self.col.saturating_add(first_cols).saturating_add(1),
+                    self.rows,
+                    second_cols,
+                );
+                (first, second)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contains_inside_and_outside() {
+        let r = Rect::new(2, 3, 4, 5);
+        assert!(r.contains(2, 3));
+        assert!(r.contains(5, 7));
+        assert!(!r.contains(1, 3));
+        assert!(!r.contains(2, 8));
+    }
+
+    #[test]
+    fn edges() {
+        let r = Rect::new(0, 0, 10, 20);
+        assert_eq!(r.bottom_edge_row(), 9);
+        assert_eq!(r.right_edge_col(), 19);
+    }
+
+    #[test]
+    fn subdivide_vertical_splits_columns() {
+        let r = Rect::new(0, 0, 10, 21);
+        let (a, b) = r.subdivide(SplitDir::Vertical, 0.5);
+        assert_eq!(a, Rect::new(0, 0, 10, 10));
+        assert_eq!(b, Rect::new(0, 11, 10, 10));
+    }
+
+    #[test]
+    fn subdivide_horizontal_splits_rows() {
+        let r = Rect::new(0, 0, 11, 20);
+        let (a, b) = r.subdivide(SplitDir::Horizontal, 0.5);
+        assert_eq!(a, Rect::new(0, 0, 5, 20));
+        assert_eq!(b, Rect::new(6, 0, 5, 20));
+    }
+
+    #[test]
+    fn subdivide_clamps_ratio() {
+        let r = Rect::new(0, 0, 11, 21);
+        let (a, _) = r.subdivide(SplitDir::Vertical, 0.001);
+        assert!(a.cols >= 1);
+        let (_, b) = r.subdivide(SplitDir::Vertical, 0.999);
+        assert!(b.cols >= 1);
+    }
+}
