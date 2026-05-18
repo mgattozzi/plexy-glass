@@ -1,0 +1,10 @@
+[package]
+name = "plexy-glass-mux"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+plexy-glass-emulator = { path = "../emulator" }
+unicode-width = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

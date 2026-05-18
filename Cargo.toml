@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/daemon", "crates/client", "crates/emulator"]
+members = ["crates/protocol", "crates/daemon", "crates/client", "crates/emulator", "crates/mux"]
 
 [package]
 name = "plexy-glass"
