@@ -132,7 +132,13 @@ impl Connection {
             }
         }
 
+        // The renderer holds an Arc<manager> and loops on notify; it won't
+        // wind down on its own when Connection drops its Arc. Abort it
+        // explicitly so the writer half of the socket drops, the client sees
+        // EOF, and pump returns. Awaiting after abort lets the task actually
+        // tear down before we return.
         drop(manager);
+        renderer_task.abort();
         let _ = renderer_task.await;
         Ok(())
     }
