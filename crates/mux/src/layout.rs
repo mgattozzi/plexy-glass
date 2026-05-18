@@ -115,35 +115,54 @@ impl LayoutTree {
 }
 
 impl LayoutTree {
-    /// Find the pane nearest to `pane` in `dir`. Uses rect adjacency:
-    /// computes the cell just past `pane`'s edge in `dir` and asks which pane
-    /// is there.
+    /// Find the pane nearest to `pane` in `dir`. Enumerates every other pane,
+    /// keeps the ones whose rect is adjacent in the requested direction (one
+    /// separator cell away with overlapping perpendicular range), and picks
+    /// the candidate with the largest perpendicular overlap. Ties broken by
+    /// the candidate closest to the source pane's perpendicular center.
     pub fn next_in_direction(
         &self,
         pane: PaneId,
         viewport: Rect,
         dir: crate::direction::Direction,
     ) -> Option<PaneId> {
-        let rect = self.rect_of(pane, viewport)?;
-        let (probe_r, probe_c) = match dir {
-            crate::direction::Direction::Up => {
-                if rect.row == 0 { return None; }
-                (rect.row.saturating_sub(2), rect.col + rect.cols / 2)
+        use crate::direction::Direction;
+        let src = self.rect_of(pane, viewport)?;
+        let panes: Vec<(PaneId, Rect)> = self
+            .panes()
+            .into_iter()
+            .filter(|p| *p != pane)
+            .filter_map(|p| self.rect_of(p, viewport).map(|r| (p, r)))
+            .collect();
+
+        match dir {
+            Direction::Right => {
+                let target_col = src.right_edge_col().checked_add(2)?;
+                pick_neighbor(&panes, |r| r.col == target_col, src, /*horizontal=*/ true)
             }
-            crate::direction::Direction::Down => {
-                let r = rect.bottom_edge_row().saturating_add(2);
-                (r, rect.col + rect.cols / 2)
+            Direction::Left => {
+                let target_right = src.col.checked_sub(2)?;
+                pick_neighbor(
+                    &panes,
+                    |r| r.right_edge_col() == target_right,
+                    src,
+                    /*horizontal=*/ true,
+                )
             }
-            crate::direction::Direction::Left => {
-                if rect.col == 0 { return None; }
-                (rect.row + rect.rows / 2, rect.col.saturating_sub(2))
+            Direction::Down => {
+                let target_row = src.bottom_edge_row().checked_add(2)?;
+                pick_neighbor(&panes, |r| r.row == target_row, src, /*horizontal=*/ false)
             }
-            crate::direction::Direction::Right => {
-                let c = rect.right_edge_col().saturating_add(2);
-                (rect.row + rect.rows / 2, c)
+            Direction::Up => {
+                let target_bottom = src.row.checked_sub(2)?;
+                pick_neighbor(
+                    &panes,
+                    |r| r.bottom_edge_row() == target_bottom,
+                    src,
+                    /*horizontal=*/ false,
+                )
             }
-        };
-        self.pane_at_coord(viewport, probe_r, probe_c)
+        }
     }
 
     /// Find which pane (if any) is under the given viewport coordinate.
@@ -187,6 +206,54 @@ fn pane_at_in(node: &LayoutNode, viewport: Rect, row: u16, col: u16) -> Option<P
             }
         }
     }
+}
+
+/// Pick the best neighbor from `panes` matching `edge_pred`. `horizontal`
+/// determines whether the perpendicular axis is rows (true: horizontal
+/// motion → compare vertical extents) or columns. Candidate selection: most
+/// overlap with `src`'s perpendicular range; tie-broken by smallest
+/// distance between the candidate's perpendicular center and `src`'s.
+fn pick_neighbor(
+    panes: &[(PaneId, Rect)],
+    edge_pred: impl Fn(&Rect) -> bool,
+    src: Rect,
+    horizontal: bool,
+) -> Option<PaneId> {
+    let (src_lo, src_hi) = if horizontal {
+        (src.row, src.bottom_edge_row())
+    } else {
+        (src.col, src.right_edge_col())
+    };
+    let src_center = src_lo as i32 + (src_hi as i32 - src_lo as i32) / 2;
+
+    panes
+        .iter()
+        .filter(|(_, r)| edge_pred(r))
+        .filter_map(|(p, r)| {
+            let (lo, hi) = if horizontal {
+                (r.row, r.bottom_edge_row())
+            } else {
+                (r.col, r.right_edge_col())
+            };
+            let overlap = overlap_len(lo, hi, src_lo, src_hi);
+            if overlap == 0 {
+                None
+            } else {
+                let center = lo as i32 + (hi as i32 - lo as i32) / 2;
+                let center_dist = (center - src_center).unsigned_abs();
+                Some((*p, overlap, center_dist))
+            }
+        })
+        // Largest overlap wins; ties broken by smallest center distance
+        // (so we prefer the candidate aligned with the source).
+        .max_by_key(|(_, overlap, dist)| (*overlap, u32::MAX - dist))
+        .map(|(p, _, _)| p)
+}
+
+fn overlap_len(a_lo: u16, a_hi: u16, b_lo: u16, b_hi: u16) -> u16 {
+    let lo = a_lo.max(b_lo);
+    let hi = a_hi.min(b_hi);
+    if hi >= lo { hi - lo + 1 } else { 0 }
 }
 
 /// Returns `(new_node, contains_target)`.
@@ -449,5 +516,46 @@ mod tests {
         t.resize_split(PaneId(0), SplitDir::Vertical, 3, vp);
         let after = t.rect_of(PaneId(0), vp).unwrap().cols;
         assert!(after > before, "pane 0 should have grown");
+    }
+
+    /// L | TR / BR: vertical split, then horizontal split on the right side.
+    /// From L moving Right must reach a pane on the right (TR by default,
+    /// picked by tie-break on center proximity).
+    #[test]
+    fn next_in_direction_handles_nested_split() {
+        let mut t = LayoutTree::single(PaneId(0));
+        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After)
+            .unwrap();
+        t.split(PaneId(1), SplitDir::Horizontal, PaneId(2), SplitPosition::After)
+            .unwrap();
+        let vp = Rect::new(0, 0, 24, 80);
+
+        // From L, Right should reach one of the two right-side panes.
+        let neighbor = t.next_in_direction(PaneId(0), vp, Direction::Right);
+        assert!(
+            neighbor == Some(PaneId(1)) || neighbor == Some(PaneId(2)),
+            "expected TR or BR from L going Right, got {neighbor:?}"
+        );
+
+        // From TR, Left should reach L.
+        assert_eq!(
+            t.next_in_direction(PaneId(1), vp, Direction::Left),
+            Some(PaneId(0))
+        );
+        // From BR, Left should reach L.
+        assert_eq!(
+            t.next_in_direction(PaneId(2), vp, Direction::Left),
+            Some(PaneId(0))
+        );
+        // From TR, Down should reach BR.
+        assert_eq!(
+            t.next_in_direction(PaneId(1), vp, Direction::Down),
+            Some(PaneId(2))
+        );
+        // From BR, Up should reach TR.
+        assert_eq!(
+            t.next_in_direction(PaneId(2), vp, Direction::Up),
+            Some(PaneId(1))
+        );
     }
 }
