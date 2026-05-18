@@ -8,6 +8,4 @@ plexy-glass-emulator = { path = "../emulator" }
 unicode-width = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
 smol_str = { workspace = true }
