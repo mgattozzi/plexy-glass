@@ -59,6 +59,14 @@ impl Emulator {
     pub fn screen_mut(&mut self) -> &mut Screen {
         &mut self.screen
     }
+
+    /// Drain any replies the child is waiting on (DSR cursor reports, DA, …).
+    /// Call after `advance` and write the returned bytes back through the
+    /// child's stdin. Empty most of the time; non-empty only when the child
+    /// has issued a query.
+    pub fn take_replies(&mut self) -> Vec<Vec<u8>> {
+        self.screen.take_replies()
+    }
 }
 
 #[cfg(test)]
@@ -84,5 +92,42 @@ mod tests {
         e.resize(4, 16);
         assert_eq!(e.screen().active.num_cols(), 16);
         assert_eq!(e.screen().active.get_cell(0, 0).unwrap().grapheme.as_str(), "h");
+    }
+
+    #[test]
+    fn dsr_cursor_position_report_queued() {
+        let mut e = Emulator::new(8, 24);
+        // Move cursor to (3, 5) (0-indexed) then ask for cursor position.
+        e.advance(b"\x1b[4;6H\x1b[6n");
+        let replies = e.take_replies();
+        assert_eq!(replies.len(), 1);
+        // CPR is 1-indexed: row 4, col 6.
+        assert_eq!(replies[0], b"\x1b[4;6R");
+        // Subsequent take drains.
+        assert!(e.take_replies().is_empty());
+    }
+
+    #[test]
+    fn dsr_status_report_queued() {
+        let mut e = Emulator::new(4, 8);
+        e.advance(b"\x1b[5n");
+        let replies = e.take_replies();
+        assert_eq!(replies, vec![b"\x1b[0n".to_vec()]);
+    }
+
+    #[test]
+    fn primary_da_queued() {
+        let mut e = Emulator::new(4, 8);
+        e.advance(b"\x1b[c");
+        let replies = e.take_replies();
+        assert_eq!(replies, vec![b"\x1b[?1;2c".to_vec()]);
+    }
+
+    #[test]
+    fn secondary_da_queued() {
+        let mut e = Emulator::new(4, 8);
+        e.advance(b"\x1b[>c");
+        let replies = e.take_replies();
+        assert_eq!(replies, vec![b"\x1b[>0;1;0c".to_vec()]);
     }
 }

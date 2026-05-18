@@ -78,6 +78,10 @@ impl Pane {
         let output_tx_clone = output_tx.clone();
         let emulator_for_reader = Arc::clone(&emulator);
         let notify_for_reader = Arc::clone(&output_notify);
+        // Reader also writes emulator-generated replies (DSR cursor reports,
+        // DA, …) back through the input mpsc so the writer thread forwards
+        // them to the child. Without this, TUI line editors block on `ESC[6n`.
+        let reply_tx = input_tx.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
@@ -87,12 +91,23 @@ impl Pane {
                         return;
                     }
                     Ok(n) => {
-                        if let Ok(mut e) = emulator_for_reader.lock() {
+                        let replies = {
+                            // invariant: emulator mutex held briefly to advance + drain.
+                            let mut e = emulator_for_reader
+                                .lock()
+                                .expect("pane emulator mutex poisoned");
                             e.advance(&buf[..n]);
-                        }
+                            e.take_replies()
+                        };
                         let chunk = Bytes::copy_from_slice(&buf[..n]);
                         let _ = output_tx_clone.send(chunk);
                         notify_for_reader.notify_one();
+                        for reply in replies {
+                            if let Err(err) = reply_tx.blocking_send(Bytes::from(reply)) {
+                                debug!(error = %err, "could not forward emulator reply");
+                                break;
+                            }
+                        }
                     }
                     Err(e) => {
                         debug!(error = %e, "pane reader closed");

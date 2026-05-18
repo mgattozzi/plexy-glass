@@ -28,6 +28,11 @@ pub struct Screen {
     pub hyperlinks: HyperlinkTable,
     /// Scroll region (top, bottom), inclusive, in active-grid row coords.
     pub scroll_region: (u16, u16),
+    /// Outbound replies the emulator owes the child (DSR, DA, …). Drained by
+    /// the daemon's PTY reader thread after each `advance` and written back
+    /// through the child's stdin so TUI line editors (reedline, fish, etc.)
+    /// don't block on `ESC[6n`.
+    pub replies: Vec<Vec<u8>>,
 }
 
 impl Screen {
@@ -45,7 +50,14 @@ impl Screen {
             cwd: None,
             hyperlinks: HyperlinkTable::default(),
             scroll_region: (0, rows.saturating_sub(1)),
+            replies: Vec::new(),
         }
+    }
+
+    /// Drain queued replies. The daemon calls this after `Emulator::advance`
+    /// and pipes the bytes back into the child's stdin.
+    pub fn take_replies(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.replies)
     }
 
     pub fn rows(&self) -> u16 {
@@ -323,6 +335,36 @@ impl Screen {
                     0 => self.tabs.clear(self.cursor.col),
                     3 => self.tabs.clear_all(),
                     _ => {}
+                }
+            }
+            'n' => {
+                // DSR (Device Status Report). The child blocks waiting for
+                // our reply, so this MUST be queued to be written back.
+                let mode = first.unwrap_or(0);
+                match mode {
+                    5 => {
+                        // Status report: "ready, no malfunction".
+                        self.replies.push(b"\x1b[0n".to_vec());
+                    }
+                    6 => {
+                        // Cursor Position Report: `ESC [ row ; col R`, 1-indexed.
+                        let r = self.cursor.row.saturating_add(1);
+                        let c = self.cursor.col.saturating_add(1);
+                        self.replies.push(format!("\x1b[{r};{c}R").into_bytes());
+                    }
+                    _ => {}
+                }
+            }
+            'c' => {
+                // DA (Device Attributes): identify ourselves as a VT100 with
+                // advanced video (the xterm-compatible answer most consumers expect).
+                let is_secondary = intermediates.first() == Some(&b'>');
+                if is_secondary {
+                    // DA2: terminal id, firmware version, hardware. xterm answers
+                    // `ESC [ > 0 ; 95 ; 0 c`; we mirror with a recognisable id.
+                    self.replies.push(b"\x1b[>0;1;0c".to_vec());
+                } else {
+                    self.replies.push(b"\x1b[?1;2c".to_vec());
                 }
             }
             _ => {
