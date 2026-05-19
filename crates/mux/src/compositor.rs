@@ -24,6 +24,7 @@ impl Compositor {
         panes: &[PaneView<'_>],
         host_size: (u16, u16),
         status: Option<&StatusLine>,
+        selection: Option<&crate::selection::Selection>,
     ) -> VirtualScreen {
         let (host_rows, host_cols) = host_size;
         let host_rows = host_rows.max(1);
@@ -55,6 +56,23 @@ impl Compositor {
                             cell.clone(),
                         );
                     }
+                }
+            }
+        }
+
+        // Selection overlay: OR REVERSE onto selected cells.
+        if let Some(sel) = selection
+            && let Some(view) = panes.iter().find(|v| v.id == sel.source_pane)
+        {
+            let cols = view.screen.active.num_cols();
+            for (row, col) in sel.cells(cols) {
+                let host_r = view.rect.row.saturating_add(row);
+                let host_c = view.rect.col.saturating_add(col);
+                if host_r >= pane_area_rows || host_c >= host_cols {
+                    continue;
+                }
+                if let Some(cell) = screen.cell_mut(host_r, host_c) {
+                    cell.attrs |= plexy_glass_emulator::Attrs::REVERSE;
                 }
             }
         }
@@ -114,9 +132,36 @@ mod tests {
             screen: e.screen(),
             is_active: true,
         };
-        let vs = Compositor::compose(&[view], (4, 6), None);
+        let vs = Compositor::compose(&[view], (4, 6), None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
         assert_eq!(vs.cursor, Some((0, 2)));
+    }
+
+    #[test]
+    fn selection_overlay_sets_reverse_attr() {
+        use crate::selection::{Selection, SelectionKind};
+        use plexy_glass_emulator::Attrs;
+        let mut e = Emulator::new(4, 6);
+        pane(&mut e, b"hello ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 4, 6),
+            screen: e.screen(),
+            is_active: true,
+        };
+        let mut sel = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
+        sel.extend(0, 4, Rect::new(0, 0, 4, 6));
+        let vs = Compositor::compose(&[view], (4, 6), None, Some(&sel));
+        for c in 0..=4 {
+            let cell = vs.cell(0, c).unwrap();
+            assert!(
+                cell.attrs.contains(Attrs::REVERSE),
+                "expected REVERSE on col {c}, got {:?}",
+                cell.attrs
+            );
+        }
+        let unsel = vs.cell(0, 5).unwrap();
+        assert!(!unsel.attrs.contains(Attrs::REVERSE));
     }
 
     #[test]
@@ -138,7 +183,7 @@ mod tests {
             screen: right.screen(),
             is_active: true,
         };
-        let vs = Compositor::compose(&[lv, rv], (4, 7), None);
+        let vs = Compositor::compose(&[lv, rv], (4, 7), None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "L");
         assert_eq!(vs.cell(0, 4).unwrap().grapheme.as_str(), "R");
         // Border column.

@@ -143,7 +143,7 @@ impl Renderer {
                 prefix_active: prefix_active.load(std::sync::atomic::Ordering::SeqCst),
             };
 
-            let virt = Compositor::compose(&views, (host.rows, host.cols), Some(&status));
+            let virt = Compositor::compose(&views, (host.rows, host.cols), Some(&status), None);
             self.diff.render(&virt)
         };
         let msg = ServerMsg::Output(Bytes::from(bytes));
