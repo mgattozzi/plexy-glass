@@ -158,7 +158,30 @@ impl Session {
         let coord_handle = tokio::spawn(render_coordinator(Arc::clone(&session)));
         // invariant: no other thread holds coordinator_handle at construction time
         *session.coordinator_handle.lock().expect("coordinator lock poisoned") = Some(coord_handle);
-        // Death channel handling is wired in Task 13.
+
+        // Take the receiver out of `pending_death_rx` and spawn the consumer.
+        // invariant: pending_death_rx is Some immediately after Session construction
+        let death_rx = session
+            .pending_death_rx
+            .try_lock()
+            .expect("pending_death_rx lock: no contention at construction time")
+            .take()
+            .expect("invariant: pending_death_rx is Some after Session::new");
+        let session_for_death = Arc::clone(&session);
+        tokio::spawn(async move {
+            let mut death_rx = death_rx;
+            while let Some(pane_id) = death_rx.recv().await {
+                let mut m = session_for_death.window_manager.lock().await;
+                let _ = m.handle_pane_death(pane_id);
+                let now_empty = m.is_empty();
+                drop(m);
+                session_for_death.notify.notify_one();
+                if now_empty {
+                    break;
+                }
+            }
+        });
+
         Ok(session)
     }
 
@@ -407,5 +430,26 @@ mod tests {
         )
         .await;
         assert!(result.is_ok(), "expected a frame within 1s");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn coordinator_emits_tail_frame_when_last_pane_dies() {
+        let spec = SpawnSpec {
+            program: "/bin/echo".into(),
+            args: vec!["hi".into()],
+            env: vec![],
+            cwd: None,
+        };
+        let s = Session::new("test".into(), spec, size()).unwrap();
+        // Wait up to 5s for the session to close (echo exits, then the death consumer
+        // reports it, then the coordinator observes is_empty and sets closing=true).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if s.closing.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(s.closing.load(Ordering::SeqCst), "session did not converge to closing");
     }
 }

@@ -16,7 +16,9 @@ impl SessionRegistry {
     }
 
     pub async fn list(&self) -> Vec<SessionEntry> {
-        let map = self.inner.lock().await;
+        let mut map = self.inner.lock().await;
+        // Lazily prune sessions that have already closed.
+        map.retain(|_, s| !s.closing.load(std::sync::atomic::Ordering::SeqCst));
         // `list_entry` takes blocking locks, so defer to spawn_blocking-style.
         let mut out: Vec<SessionEntry> = map
             .values()
@@ -30,8 +32,15 @@ impl SessionRegistry {
     }
 
     pub async fn get(&self, name: &str) -> Option<Arc<Session>> {
-        let map = self.inner.lock().await;
-        map.get(name).cloned()
+        let mut map = self.inner.lock().await;
+        if let Some(s) = map.get(name) {
+            if s.closing.load(std::sync::atomic::Ordering::SeqCst) {
+                map.remove(name);
+                return None;
+            }
+            return Some(Arc::clone(s));
+        }
+        None
     }
 
     pub async fn create(
@@ -146,5 +155,27 @@ mod tests {
         let r = SessionRegistry::new();
         let err = r.create("has space".into(), spec(), size()).await.map(|_| ()).unwrap_err();
         assert!(matches!(err, DaemonError::Protocol(ProtocolError::InvalidName { .. })));
+    }
+
+    #[tokio::test]
+    async fn closing_sessions_are_pruned_on_get() {
+        let r = SessionRegistry::new();
+        let s = r.create("dead".into(), spec(), size()).await.unwrap();
+        s.closing.store(true, std::sync::atomic::Ordering::SeqCst);
+        let got = r.get("dead").await;
+        assert!(got.is_none(), "closing session should be pruned on get");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn closing_sessions_are_pruned_on_list() {
+        let r = SessionRegistry::new();
+        let alive = r.create("alive".into(), spec(), size()).await.unwrap();
+        let dead = r.create("dead".into(), spec(), size()).await.unwrap();
+        dead.closing.store(true, std::sync::atomic::Ordering::SeqCst);
+        let entries = r.list().await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "alive");
+        // touch `alive` so the borrow checker doesn't complain about unused
+        let _ = alive.name.clone();
     }
 }
