@@ -22,7 +22,7 @@ pub use diff::DiffRenderer;
 pub use direction::{Direction, SplitDir};
 pub use keymap::{Command, Keymap, KeymapAction};
 pub use layout::{CloseOutcome, LayoutError, LayoutTree, SplitPosition};
-pub use mouse::{MouseButton, MouseEncoding, MouseEvent, MouseKind, MouseModifiers, MouseParseAction};
+pub use mouse::{MouseButton, MouseEncoding, MouseEvent, MouseKind, MouseModifiers, MouseParseAction, MouseParser};
 pub use pane_id::{PaneId, WindowId};
 pub use rect::Rect;
 pub use status::{StatusLine, WindowEntry};
