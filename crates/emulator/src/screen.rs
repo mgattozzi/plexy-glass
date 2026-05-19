@@ -612,6 +612,7 @@ impl Screen {
                 }
             }
             "133" => self.handle_osc_133(params),
+            "52" => self.handle_osc_52(params),
             other => {
                 tracing::trace!(cmd = other, "unhandled OSC");
             }
@@ -645,6 +646,34 @@ impl Screen {
             row: self.cursor.row,
             col: self.cursor.col,
         });
+    }
+
+    const OSC52_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+    fn handle_osc_52(&mut self, params: &[&[u8]]) {
+        use base64::Engine as _;
+        // params[0] = "52", params[1] = selection chars ("c", "s", "p", ...),
+        // params[2] = base64 payload OR "?".
+        let Some(payload) = params.get(2) else { return };
+        if *payload == b"?" {
+            return; // Phase 4 is set-only.
+        }
+        let selection = params.get(1).and_then(|p| p.first().copied()).unwrap_or(b'c');
+        if !matches!(selection, b'c' | b's') {
+            return;
+        }
+        let decoded = match base64::engine::general_purpose::STANDARD.decode(payload) {
+            Ok(d) => d,
+            Err(_) => {
+                tracing::trace!("OSC 52 base64 decode failed; ignoring");
+                return;
+            }
+        };
+        if decoded.len() > Self::OSC52_MAX_BYTES {
+            tracing::warn!(bytes = decoded.len(), "OSC 52 payload exceeds cap; dropping");
+            return;
+        }
+        self.clipboard_writes.push(decoded);
     }
 }
 
@@ -687,6 +716,7 @@ impl ScreenOps for Screen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     fn drive(input: &[u8]) -> Screen {
         let mut p = crate::parser::Parser::new();
@@ -1028,5 +1058,37 @@ mod tests {
             Some(m) => assert_eq!(m.kind, PromptMarkKind::CommandEnd(None)),
             None => panic!("expected CommandEnd mark"),
         }
+    }
+
+    #[test]
+    fn osc_52_clipboard_set_decodes_base64() {
+        let s = parse(b"\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(s.clipboard_writes.len(), 1);
+        assert_eq!(s.clipboard_writes[0], b"hello");
+    }
+
+    #[test]
+    fn osc_52_clipboard_set_with_s_selection() {
+        let s = parse(b"\x1b]52;s;d29ybGQ=\x07");
+        assert_eq!(s.clipboard_writes.len(), 1);
+        assert_eq!(s.clipboard_writes[0], b"world");
+    }
+
+    #[test]
+    fn osc_52_oversized_payload_dropped() {
+        // 5 MiB of 'a' base64-encoded.
+        let big = "a".repeat(5 * 1024 * 1024);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(big.as_bytes());
+        let sequence = format!("\x1b]52;c;{encoded}\x07");
+        let s = parse(sequence.as_bytes());
+        assert!(s.clipboard_writes.is_empty(), "expected oversized payload to be dropped");
+    }
+
+    #[test]
+    fn osc_52_read_request_ignored() {
+        // The selection char is followed by `?`, which is a READ request.
+        // Phase 4 set-only: drop these silently.
+        let s = parse(b"\x1b]52;c;?\x07");
+        assert!(s.clipboard_writes.is_empty());
     }
 }
