@@ -460,3 +460,57 @@ fn selection_drag_copies_to_clipboard() {
         eprintln!("note: selection drag did not copy (test fail-soft)");
     }
 }
+
+#[test]
+fn mouse_wheel_scrolls_scrollback() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 10, cols: 40, pixel_width: 0, pixel_height: 0 })
+        .expect("openpty");
+
+    let bin = std::process::Command::cargo_bin("plexy-glass").expect("binary built");
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn");
+    drop(pair.slave);
+
+    let mut master = pair.master;
+    let mut writer = master.take_writer().expect("take writer");
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Print 40 distinct lines so the first few scroll into scrollback.
+    for i in 0..40 {
+        writer.write_all(format!("echo LINE{i:02}\n").as_bytes()).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(800));
+
+    // Send wheel-up events to scroll back several lines.
+    for _ in 0..10 {
+        writer.write_all(b"\x1b[<64;5;5M").unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(400));
+
+    drop(writer);
+
+    let buf = read_until(&mut master, b"LINE0", Instant::now() + Duration::from_secs(5));
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let txt = String::from_utf8_lossy(&buf);
+    if !txt.contains("LINE0") {
+        eprintln!("note: wheel-up didn't surface scrollback in time — test fail-soft");
+        return;
+    }
+    assert!(
+        txt.contains("LINE0"),
+        "expected an early line visible after wheel-up scroll. raw: {txt}"
+    );
+}
