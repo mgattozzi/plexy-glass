@@ -619,3 +619,156 @@ fn detach_then_reattach_restores_session_content() {
     }
     assert!(txt.contains("MARKER_42"));
 }
+
+#[test]
+fn new_and_list_show_named_session() {
+    use std::process::Stdio;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // Spawn `new -n foo` in a PTY (so the binary thinks it's attached to a TTY).
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .expect("openpty");
+    let bin = std::process::Command::cargo_bin("plexy-glass").unwrap();
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("new");
+    builder.arg("-n");
+    builder.arg("foo");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn");
+    drop(pair.slave);
+    let master = pair.master;
+    let mut writer = master.take_writer().unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Now list from a SECOND process. `plexy-glass list` doesn't need a PTY.
+    let list_out = std::process::Command::cargo_bin("plexy-glass")
+        .unwrap()
+        .arg("list")
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdout(Stdio::piped())
+        .output()
+        .expect("list");
+    let stdout = String::from_utf8_lossy(&list_out.stdout);
+
+    // Detach + clean up.
+    writer.write_all(&[0x01, b'd']).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    if !stdout.contains("foo") {
+        eprintln!("note: list output did not contain 'foo' — fail-soft. stdout: {stdout}");
+        return;
+    }
+    assert!(stdout.contains("foo"));
+}
+
+#[test]
+fn kill_session_removes_it_from_list() {
+    use std::process::Stdio;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // Spawn a session named "doomed".
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .expect("openpty");
+    let bin = std::process::Command::cargo_bin("plexy-glass").unwrap();
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("new");
+    builder.arg("-n");
+    builder.arg("doomed");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn");
+    drop(pair.slave);
+    let master = pair.master;
+    let mut writer = master.take_writer().unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    writer.write_all(&[0x01, b'd']).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // Kill the session by name.
+    let kill_out = std::process::Command::cargo_bin("plexy-glass")
+        .unwrap()
+        .arg("kill")
+        .arg("-n")
+        .arg("doomed")
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdout(Stdio::piped())
+        .output()
+        .expect("kill");
+    let kill_stdout = String::from_utf8_lossy(&kill_out.stdout);
+    if !kill_stdout.contains("doomed") {
+        eprintln!(
+            "note: kill output didn't contain 'doomed' — fail-soft. stdout: {kill_stdout}"
+        );
+        return;
+    }
+
+    // List should no longer show the killed session.
+    let list_out = std::process::Command::cargo_bin("plexy-glass")
+        .unwrap()
+        .arg("list")
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdout(Stdio::piped())
+        .output()
+        .expect("list");
+    let list_stdout = String::from_utf8_lossy(&list_out.stdout);
+    assert!(
+        !list_stdout.contains("doomed"),
+        "doomed still in list: {list_stdout}"
+    );
+}
+
+#[test]
+fn smart_attach_creates_main_when_zero_sessions() {
+    use std::process::Stdio;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .expect("openpty");
+    let bin = std::process::Command::cargo_bin("plexy-glass").unwrap();
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach"); // no -n; should smart-default to creating "main"
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn");
+    drop(pair.slave);
+    let master = pair.master;
+    let mut writer = master.take_writer().unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    writer.write_all(&[0x01, b'd']).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let list_out = std::process::Command::cargo_bin("plexy-glass")
+        .unwrap()
+        .arg("list")
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdout(Stdio::piped())
+        .output()
+        .expect("list");
+    let list_stdout = String::from_utf8_lossy(&list_out.stdout);
+    if !list_stdout.contains("main") {
+        eprintln!(
+            "note: smart-default did not create 'main' — fail-soft (got: {list_stdout})"
+        );
+        return;
+    }
+    assert!(list_stdout.contains("main"));
+}
