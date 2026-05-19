@@ -13,6 +13,25 @@ use crate::{
 };
 use unicode_width::UnicodeWidthStr;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptMarkKind {
+    /// OSC 133 ; A (prompt start).
+    PromptStart,
+    /// OSC 133 ; B (prompt end / input start).
+    PromptEnd,
+    /// OSC 133 ; C (command submitted).
+    CommandStart,
+    /// OSC 133 ; D[;exit_code] (command finished).
+    CommandEnd(Option<i32>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptMark {
+    pub kind: PromptMarkKind,
+    pub row: u16,
+    pub col: u16,
+}
+
 #[derive(Clone)]
 pub struct Screen {
     pub active: Grid,
@@ -33,6 +52,12 @@ pub struct Screen {
     /// through the child's stdin so TUI line editors (reedline, fish, etc.)
     /// don't block on `ESC[6n`.
     pub replies: Vec<Vec<u8>>,
+    /// OSC 133 prompt marks. Pruned as scrollback evicts the row they
+    /// reference. Reflow recomputes positions on the active grid.
+    pub prompt_marks: Vec<PromptMark>,
+    /// OSC 52 clipboard payloads queued for the daemon to flush via
+    /// `pbcopy` / `xclip`. Drained by `take_clipboard_writes`.
+    pub clipboard_writes: Vec<Vec<u8>>,
 }
 
 impl Screen {
@@ -51,6 +76,8 @@ impl Screen {
             hyperlinks: HyperlinkTable::default(),
             scroll_region: (0, rows.saturating_sub(1)),
             replies: Vec::new(),
+            prompt_marks: Vec::new(),
+            clipboard_writes: Vec::new(),
         }
     }
 
@@ -58,6 +85,12 @@ impl Screen {
     /// and pipes the bytes back into the child's stdin.
     pub fn take_replies(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.replies)
+    }
+
+    /// Drain queued clipboard writes. The daemon calls this after
+    /// `Emulator::advance` and flushes the payloads via `pbcopy` / `xclip`.
+    pub fn take_clipboard_writes(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.clipboard_writes)
     }
 
     pub fn rows(&self) -> u16 {
@@ -916,5 +949,22 @@ mod tests {
         assert_eq!(l.hyperlink_id, id);
         let a = s.active.get_cell(0, 4).unwrap();
         assert_eq!(a.hyperlink_id, None);
+    }
+
+    #[test]
+    fn new_screen_has_no_marks_or_clipboard() {
+        let s = Screen::new(8, 24);
+        assert!(s.prompt_marks.is_empty());
+        assert!(s.clipboard_writes.is_empty());
+    }
+
+    #[test]
+    fn take_clipboard_writes_drains() {
+        let mut s = Screen::new(8, 24);
+        s.clipboard_writes.push(b"hello".to_vec());
+        s.clipboard_writes.push(b"world".to_vec());
+        let drained = s.take_clipboard_writes();
+        assert_eq!(drained, vec![b"hello".to_vec(), b"world".to_vec()]);
+        assert!(s.clipboard_writes.is_empty());
     }
 }
