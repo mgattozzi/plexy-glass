@@ -21,7 +21,7 @@ pub use listener::Listener;
 pub use pane::Pane;
 pub use paths::RuntimePaths;
 pub use renderer::Renderer;
-pub use session::Session;
+pub use session::{ClientHandle, Session};
 pub use window::Window;
 pub use window_manager::WindowManager;
 
