@@ -51,16 +51,16 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // Default to `attach` with no name when no subcommand is given.
     match cli.command.unwrap_or(Cmd::Attach { name: None }) {
-        Cmd::New { name: _, cmd: _, args: _ } => {
-            // Task 16 implements this properly.
-            eprintln!("error: 'new' subcommand not yet implemented");
-            std::process::exit(1);
+        Cmd::New { name, cmd, args } => {
+            plexy_glass_client::client_new(name, cmd, args).await?;
         }
-        Cmd::Attach { name: _ } => {
-            // Existing attach behavior: connect to (or auto-spawn) the daemon
-            // and open a session. Task 16/17 will thread the `name` argument
-            // through once multi-session support is wired up.
-            plexy_glass_client::run(plexy_glass_client::ClientArgs {}).await?;
+        Cmd::Attach { name } => {
+            // When no name is given, `create_if_missing=true` preserves the
+            // existing default-session behaviour that the e2e tests rely on.
+            // When a specific name is given, require the session to exist
+            // (`create_if_missing=false`); Task 17 will add the smart default.
+            let create = name.is_none();
+            plexy_glass_client::run(name, create, None).await?;
         }
         Cmd::List => {
             // Task 17 implements this properly.
@@ -68,13 +68,11 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
         Cmd::Kill { name } => match name {
-            Some(_session_name) => {
-                // Task 16 implements per-session kill.
-                eprintln!("error: 'kill -n NAME' not yet implemented (Task 16)");
-                std::process::exit(1);
+            Some(session_name) => {
+                plexy_glass_client::client_kill_session(session_name).await?;
             }
             None => {
-                // Existing behavior: kill the daemon.
+                // Existing behaviour: kill the daemon.
                 match plexy_glass_client::kill().await? {
                     plexy_glass_client::KillOutcome::NoDaemon => println!("no daemon running"),
                     plexy_glass_client::KillOutcome::Stopped { count } => {

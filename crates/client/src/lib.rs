@@ -14,12 +14,23 @@ pub use pump::{handshake_spawn, pump};
 pub use transport::{connect_or_spawn, default_socket_path};
 pub use tty::{HostTty, current_size};
 
-use plexy_glass_protocol::{SpawnSpec, client_handshake};
+use plexy_glass_protocol::{ClientMsg, Codec, ServerMsg, SpawnSpec, client_handshake};
 use std::os::fd::AsFd;
 use tokio::sync::mpsc;
 use tracing::info;
 
-pub async fn run(_args: ClientArgs) -> Result<(), ClientError> {
+/// Attach to (or create) a session and drive the terminal interactively.
+///
+/// - `name`: which session to target; `None` lets the daemon pick.
+/// - `create_if_missing`: when `true` the daemon creates the session if it
+///   does not yet exist; when `false` it returns `SessionNotFound`.
+/// - `spawn_cmd`: override the program spawned in new sessions; `None` uses
+///   the current `$SHELL`.
+pub async fn run(
+    name: Option<String>,
+    create_if_missing: bool,
+    spawn_cmd: Option<SpawnSpec>,
+) -> Result<(), ClientError> {
     let socket = default_socket_path()?;
     let stream = connect_or_spawn(&socket).await?;
     let (mut reader, mut writer) = tokio::io::split(stream);
@@ -38,14 +49,9 @@ pub async fn run(_args: ClientArgs) -> Result<(), ClientError> {
     let _ = stdout.flush();
     let initial_size = current_size(stdin_fd)?;
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let spec = SpawnSpec {
-        program: shell,
-        args: vec![],
-        env: vec![], // inherit from daemon for Phase 1
-        cwd: None,
-    };
-    handshake_spawn(&mut reader, &mut writer, spec, initial_size).await?;
+    let spec = spawn_cmd.unwrap_or_else(default_spawn_spec);
+    handshake_spawn(&mut reader, &mut writer, name, create_if_missing, Some(spec), initial_size)
+        .await?;
 
     // SIGWINCH plumbing.
     let (resize_tx, resize_rx) = mpsc::channel(4);
@@ -62,6 +68,58 @@ pub async fn run(_args: ClientArgs) -> Result<(), ClientError> {
         std::process::exit(c);
     }
     Ok(())
+}
+
+/// Create a new named session (fails if it already exists) and attach to it.
+pub async fn client_new(
+    name: String,
+    cmd: Option<String>,
+    args: Vec<String>,
+) -> Result<(), ClientError> {
+    let spec = match cmd {
+        Some(program) => SpawnSpec { program, args, env: vec![], cwd: None },
+        None => {
+            let mut s = default_spawn_spec();
+            s.args = args;
+            s
+        }
+    };
+    run(Some(name), true, Some(spec)).await
+}
+
+/// Send `KillSession { name }` to the daemon and print the result.
+pub async fn client_kill_session(name: String) -> Result<(), ClientError> {
+    let socket = default_socket_path()?;
+    let stream = connect_or_spawn(&socket).await?;
+    let (mut reader, mut writer) = tokio::io::split(stream);
+
+    client_handshake(&mut reader, &mut writer).await?;
+
+    let msg = ClientMsg::KillSession { name };
+    let payload = postcard::to_allocvec(&msg)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
+    Codec::write_frame(&mut writer, &payload).await?;
+
+    let frame = Codec::read_frame(&mut reader)
+        .await?
+        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
+    let reply: ServerMsg = postcard::from_bytes(&frame)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    match reply {
+        ServerMsg::SessionKilled { name: n } => {
+            println!("killed session: {n}");
+            Ok(())
+        }
+        ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
+        other => Err(ClientError::Io(std::io::Error::other(format!(
+            "unexpected reply from daemon: {other:?}"
+        )))),
+    }
+}
+
+fn default_spawn_spec() -> SpawnSpec {
+    let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    SpawnSpec { program, args: vec![], env: vec![], cwd: None }
 }
 
 fn spawn_sigwinch_task(tx: mpsc::Sender<plexy_glass_protocol::PtySize>, fd: std::os::fd::OwnedFd) {

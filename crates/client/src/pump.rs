@@ -94,7 +94,9 @@ where
 pub async fn handshake_spawn<R, W>(
     reader: &mut R,
     writer: &mut W,
-    spec: plexy_glass_protocol::SpawnSpec,
+    name: Option<String>,
+    create_if_missing: bool,
+    spec: Option<plexy_glass_protocol::SpawnSpec>,
     size: PtySize,
 ) -> Result<(), ClientError>
 where
@@ -104,9 +106,9 @@ where
     send_client_msg(
         writer,
         &ClientMsg::AttachOrCreate {
-            name: None,
-            create_if_missing: true,
-            cmd: Some(spec),
+            name,
+            create_if_missing,
+            cmd: spec,
             size,
         },
     )
