@@ -26,12 +26,19 @@ impl Connection {
         server_handshake(&mut reader, &mut writer, daemon_pid).await?;
 
         let frame = Codec::read_frame(&mut reader).await?.ok_or_else(|| {
-            DaemonError::Io(std::io::Error::other("client closed before Spawn"))
+            DaemonError::Io(std::io::Error::other("client closed before AttachOrCreate"))
         })?;
         let msg: ClientMsg = postcard::from_bytes(&frame)
             .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
         let (spec, size) = match msg {
-            ClientMsg::Spawn { cmd, size } => (cmd, size),
+            ClientMsg::AttachOrCreate { cmd, size, .. } => {
+                (cmd.unwrap_or_else(|| plexy_glass_protocol::SpawnSpec {
+                    program: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+                    args: vec![],
+                    env: vec![],
+                    cwd: None,
+                }), size)
+            }
             other => {
                 send_msg(
                     &mut writer,
@@ -187,13 +194,15 @@ mod tests {
         let server_hello = client_handshake(&mut cr, &mut cw).await.unwrap();
         assert_eq!(server_hello.version, PROTOCOL_VERSION);
 
-        let spawn = ClientMsg::Spawn {
-            cmd: SpawnSpec {
+        let spawn = ClientMsg::AttachOrCreate {
+            name: None,
+            create_if_missing: true,
+            cmd: Some(SpawnSpec {
                 program: "/bin/echo".into(),
                 args: vec!["hi".into()],
                 env: vec![],
                 cwd: None,
-            },
+            }),
             size: PtySize {
                 rows: 8,
                 cols: 24,

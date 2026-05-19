@@ -90,7 +90,7 @@ where
     Ok(())
 }
 
-/// Send the initial `Spawn` request and wait for `Spawned`.
+/// Send the initial `AttachOrCreate` request and wait for `Spawned`.
 pub async fn handshake_spawn<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -101,7 +101,16 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    send_client_msg(writer, &ClientMsg::Spawn { cmd: spec, size }).await?;
+    send_client_msg(
+        writer,
+        &ClientMsg::AttachOrCreate {
+            name: None,
+            create_if_missing: true,
+            cmd: Some(spec),
+            size,
+        },
+    )
+    .await?;
     let frame = Codec::read_frame(reader)
         .await?
         .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before Spawned")))?;

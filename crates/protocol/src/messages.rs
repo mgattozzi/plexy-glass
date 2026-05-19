@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::time::SystemTime;
 
 /// Window dimensions, in cells and pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -8,6 +9,16 @@ pub struct PtySize {
     pub cols: u16,
     pub pixel_width: u16,
     pub pixel_height: u16,
+}
+
+/// A live session visible to `ListSessions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEntry {
+    pub name: String,
+    pub windows: u8,
+    pub panes: u8,
+    pub clients: u8,
+    pub created: SystemTime,
 }
 
 /// What the daemon should spawn.
@@ -51,9 +62,17 @@ pub struct ServerHello {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ClientMsg {
-    Spawn { cmd: SpawnSpec, size: PtySize },
+    AttachOrCreate {
+        name: Option<String>,
+        create_if_missing: bool,
+        cmd: Option<SpawnSpec>,
+        size: PtySize,
+    },
+    ListSessions,
+    KillSession { name: String },
     Input(Bytes),
     Resize(PtySize),
+    Detach,
     Shutdown,
 }
 
@@ -111,17 +130,22 @@ mod tests {
     #[test]
     fn client_msgs_round_trip() {
         let cases = vec![
-            ClientMsg::Spawn {
-                cmd: SpawnSpec {
+            ClientMsg::AttachOrCreate {
+                name: Some("main".into()),
+                create_if_missing: true,
+                cmd: Some(SpawnSpec {
                     program: "bash".into(),
                     args: vec![],
                     env: vec![],
                     cwd: None,
-                },
+                }),
                 size: PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
             },
+            ClientMsg::ListSessions,
+            ClientMsg::KillSession { name: "old".into() },
             ClientMsg::Input(Bytes::from_static(b"ls\n")),
             ClientMsg::Resize(PtySize { rows: 50, cols: 200, pixel_width: 0, pixel_height: 0 }),
+            ClientMsg::Detach,
             ClientMsg::Shutdown,
         ];
         for msg in cases {
