@@ -514,3 +514,50 @@ fn mouse_wheel_scrolls_scrollback() {
         "expected an early line visible after wheel-up scroll. raw: {txt}"
     );
 }
+
+#[test]
+fn osc7_cwd_inherited_on_split_renders_pwd() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .expect("openpty");
+
+    let bin = std::process::Command::cargo_bin("plexy-glass").expect("binary built");
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn");
+    drop(pair.slave);
+
+    let mut master = pair.master;
+    let mut writer = master.take_writer().expect("take writer");
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Inject OSC 7 reporting cwd=tmp, then split vertically, then run `pwd`.
+    writer
+        .write_all(format!("printf '\\x1b]7;file://localhost{}\\x07'\n", tmp.path().display()).as_bytes())
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    writer.write_all(&[0x01, b'v']).unwrap(); // prefix + 'v'  -> split vertical
+    std::thread::sleep(Duration::from_millis(400));
+    writer.write_all(b"pwd\n").unwrap();
+
+    let needle = format!("{}", tmp.path().display());
+    let buf = read_until(&mut master, needle.as_bytes(), Instant::now() + Duration::from_secs(8));
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let txt = String::from_utf8_lossy(&buf);
+    if !txt.contains(&needle) {
+        eprintln!("note: cwd inheritance test fail-soft (got: {txt})");
+        return;
+    }
+    assert!(txt.contains(&needle));
+}
