@@ -46,7 +46,7 @@ pub enum ExitStatus {
 }
 
 /// Bumped any time `ClientMsg` or `ServerMsg` changes meaning.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientHello {
@@ -79,7 +79,9 @@ pub enum ClientMsg {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ServerMsg {
-    Spawned,
+    Attached { session_name: String, client_id: u64 },
+    SessionList { entries: Vec<SessionEntry> },
+    SessionKilled { name: String },
     Output(Bytes),
     Exited { status: ExitStatus },
     Error(crate::errors::ProtocolError),
@@ -159,7 +161,9 @@ mod tests {
     fn server_msgs_round_trip_without_error_variant() {
         // Error variant is covered once `ProtocolError` lands.
         let cases = vec![
-            ServerMsg::Spawned,
+            ServerMsg::Attached { session_name: "main".into(), client_id: 0 },
+            ServerMsg::SessionList { entries: vec![] },
+            ServerMsg::SessionKilled { name: "old".into() },
             ServerMsg::Output(Bytes::from_static(b"hello")),
             ServerMsg::Exited { status: ExitStatus::Code(0) },
         ];

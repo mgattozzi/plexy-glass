@@ -54,7 +54,7 @@ where
                     ServerMsg::Error(e) => {
                         return Err(ClientError::DaemonError(e));
                     }
-                    ServerMsg::Spawned => {} // already saw it in the caller
+                    ServerMsg::Attached { .. } => {} // already saw it in the caller
                     // `ServerMsg` is `#[non_exhaustive]`; future variants are ignored here.
                     #[allow(unreachable_patterns)]
                     _ => {}
@@ -90,7 +90,7 @@ where
     Ok(())
 }
 
-/// Send the initial `AttachOrCreate` request and wait for `Spawned`.
+/// Send the initial `AttachOrCreate` request and wait for `Attached`.
 pub async fn handshake_spawn<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -113,14 +113,14 @@ where
     .await?;
     let frame = Codec::read_frame(reader)
         .await?
-        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before Spawned")))?;
+        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before Attached")))?;
     let msg: ServerMsg = postcard::from_bytes(&frame)
         .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
     match msg {
-        ServerMsg::Spawned => Ok(()),
+        ServerMsg::Attached { .. } => Ok(()),
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
         other => Err(ClientError::Io(std::io::Error::other(format!(
-            "expected Spawned, got {other:?}"
+            "expected Attached, got {other:?}"
         )))),
     }
 }

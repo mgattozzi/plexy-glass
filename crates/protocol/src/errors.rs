@@ -16,6 +16,16 @@ pub enum ProtocolError {
     UnexpectedMessage(String),
     #[error("internal daemon error: {0}")]
     Internal(String),
+    #[error("session not found: {name}")]
+    SessionNotFound { name: String },
+    #[error("session already exists: {name}")]
+    SessionAlreadyExists { name: String },
+    #[error("ambiguous attach: {count} sessions exist; specify -n NAME")]
+    AmbiguousSession { count: u8 },
+    #[error("session name is empty or too long")]
+    EmptyName,
+    #[error("session name has invalid characters: {name}")]
+    InvalidName { name: String },
 }
 
 /// Errors that surface from the framing codec itself (not part of the wire).

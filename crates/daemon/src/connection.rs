@@ -66,7 +66,7 @@ impl Connection {
         };
         let manager = Arc::new(Mutex::new(manager));
 
-        send_msg(&mut writer, &ServerMsg::Spawned).await?;
+        send_msg(&mut writer, &ServerMsg::Attached { session_name: "main".to_string(), client_id: 0 }).await?;
 
         let prefix_active = Arc::new(AtomicBool::new(false));
         let renderer = Renderer::new();
@@ -228,7 +228,7 @@ mod tests {
             };
             let msg: ServerMsg = postcard::from_bytes(&frame).unwrap();
             match msg {
-                ServerMsg::Spawned => saw_spawned = true,
+                ServerMsg::Attached { .. } => saw_spawned = true,
                 ServerMsg::Output(_) => saw_output = true,
                 ServerMsg::Error(e) => panic!("got error: {e:?}"),
                 _ => {}
@@ -237,7 +237,7 @@ mod tests {
                 break;
             }
         }
-        assert!(saw_spawned, "missing Spawned");
+        assert!(saw_spawned, "missing Attached");
         assert!(saw_output, "missing Output");
 
         server.abort();
