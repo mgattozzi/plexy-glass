@@ -67,6 +67,12 @@ impl Emulator {
     pub fn take_replies(&mut self) -> Vec<Vec<u8>> {
         self.screen.take_replies()
     }
+
+    /// Drain queued OSC 52 clipboard payloads. The daemon calls this from
+    /// the PTY reader thread (same place it drains `take_replies`).
+    pub fn take_clipboard_writes(&mut self) -> Vec<Vec<u8>> {
+        self.screen.take_clipboard_writes()
+    }
 }
 
 #[cfg(test)]
@@ -129,5 +135,14 @@ mod tests {
         e.advance(b"\x1b[>c");
         let replies = e.take_replies();
         assert_eq!(replies, vec![b"\x1b[>0;1;0c".to_vec()]);
+    }
+
+    #[test]
+    fn take_clipboard_writes_drains_after_osc52() {
+        let mut e = Emulator::new(4, 8);
+        e.advance(b"\x1b]52;c;aGVsbG8=\x07");
+        let drained = e.take_clipboard_writes();
+        assert_eq!(drained, vec![b"hello".to_vec()]);
+        assert!(e.take_clipboard_writes().is_empty());
     }
 }
