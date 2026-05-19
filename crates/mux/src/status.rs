@@ -8,6 +8,8 @@ use smol_str::SmolStr;
 pub struct StatusLine {
     pub windows: Vec<WindowEntry>,
     pub prefix_active: bool,
+    pub session_name: String,
+    pub attached_clients: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -31,15 +33,43 @@ pub fn build(line: &StatusLine, cols: u16) -> Vec<Cell> {
     }
     let prefix_indicator = if line.prefix_active { "[prefix]" } else { "" };
 
+    // Right-side: session name + optional client count, then prefix indicator.
+    let session_chunk = if line.attached_clients >= 2 {
+        format!("session: {} *{}", line.session_name, line.attached_clients)
+    } else {
+        format!("session: {}", line.session_name)
+    };
+    // Right side = "| {session_chunk}" then prefix indicator to the far right.
+    // Layout (right-to-left): [prefix_indicator][session_sep_chunk]
+    // We place prefix_indicator at the very right edge, then session_chunk
+    // immediately to its left separated by " | ".
+    let session_sep = format!(" | {session_chunk}");
+
     let mut row: Vec<Cell> = Vec::with_capacity(cols as usize);
     let text_chars: Vec<char> = text.chars().collect();
     let prefix_chars: Vec<char> = prefix_indicator.chars().collect();
+    let session_sep_chars: Vec<char> = session_sep.chars().collect();
 
-    let usable_text = (cols as usize).saturating_sub(prefix_chars.len());
+    // Total right-side width = session separator + prefix indicator.
+    let right_width = session_sep_chars.len() + prefix_chars.len();
+    let usable_text = (cols as usize).saturating_sub(right_width);
+
     for i in 0..(cols as usize) {
         let ch = if i < text_chars.len().min(usable_text) {
             text_chars[i]
-        } else if i >= (cols as usize) - prefix_chars.len() && !prefix_chars.is_empty() {
+        } else if i >= (cols as usize).saturating_sub(right_width)
+            && i < (cols as usize).saturating_sub(prefix_chars.len())
+        {
+            // Session separator + chunk region.
+            let sidx = i - (cols as usize).saturating_sub(right_width);
+            if sidx < session_sep_chars.len() {
+                session_sep_chars[sidx]
+            } else {
+                ' '
+            }
+        } else if i >= (cols as usize).saturating_sub(prefix_chars.len())
+            && !prefix_chars.is_empty()
+        {
             let pidx = i - ((cols as usize) - prefix_chars.len());
             prefix_chars[pidx]
         } else {
@@ -71,8 +101,10 @@ mod tests {
         let s = StatusLine {
             windows: vec![WindowEntry { id: WindowId(0), name: "zsh".into(), active: true }],
             prefix_active: false,
+            session_name: "main".into(),
+            attached_clients: 1,
         };
-        let row = build(&s, 20);
+        let row = build(&s, 40);
         let txt = row_text(&row);
         assert!(txt.starts_with("0:zsh*"));
     }
@@ -82,8 +114,10 @@ mod tests {
         let s = StatusLine {
             windows: vec![WindowEntry { id: WindowId(0), name: "a".into(), active: true }],
             prefix_active: true,
+            session_name: "main".into(),
+            attached_clients: 1,
         };
-        let row = build(&s, 20);
+        let row = build(&s, 60);
         let txt = row_text(&row);
         assert!(txt.ends_with("[prefix]"));
     }
@@ -93,8 +127,36 @@ mod tests {
         let s = StatusLine {
             windows: vec![WindowEntry { id: WindowId(0), name: "a".into(), active: true }],
             prefix_active: false,
+            session_name: "main".into(),
+            attached_clients: 1,
         };
-        let row = build(&s, 10);
+        let row = build(&s, 30);
         assert!(row.iter().all(|c| c.attrs.contains(Attrs::REVERSE)));
+    }
+
+    #[test]
+    fn session_name_appears_in_status() {
+        let s = StatusLine {
+            windows: vec![WindowEntry { id: WindowId(0), name: "zsh".into(), active: true }],
+            prefix_active: false,
+            session_name: "main".into(),
+            attached_clients: 1,
+        };
+        let row = build(&s, 40);
+        let txt = row_text(&row);
+        assert!(txt.contains("main"), "expected session name in status bar: {txt}");
+    }
+
+    #[test]
+    fn client_count_shown_when_multiple() {
+        let s = StatusLine {
+            windows: vec![WindowEntry { id: WindowId(0), name: "zsh".into(), active: true }],
+            prefix_active: false,
+            session_name: "main".into(),
+            attached_clients: 3,
+        };
+        let row = build(&s, 40);
+        let txt = row_text(&row);
+        assert!(txt.contains("*3"), "expected *3 in status bar: {txt}");
     }
 }

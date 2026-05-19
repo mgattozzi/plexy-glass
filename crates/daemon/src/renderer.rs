@@ -144,6 +144,8 @@ impl Renderer {
             let status = StatusLine {
                 windows,
                 prefix_active: prefix_active.load(std::sync::atomic::Ordering::SeqCst),
+                session_name: "main".into(),
+                attached_clients: 1,
             };
 
             let selection = m.selection().cloned();

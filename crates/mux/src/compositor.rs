@@ -230,6 +230,62 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_renders_session_name() {
+        let e = Emulator::new(4, 40);
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 3, 40),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+        };
+        let status = StatusLine {
+            windows: vec![crate::status::WindowEntry {
+                id: crate::pane_id::WindowId(0),
+                name: "shell0".into(),
+                active: true,
+            }],
+            prefix_active: false,
+            session_name: "main".into(),
+            attached_clients: 1,
+        };
+        let vs = Compositor::compose(&[view], (4, 40), Some(&status), None);
+        let row3: String = (0..40)
+            .filter_map(|c| vs.cell(3, c).map(|cell| cell.grapheme.as_str().to_string()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(row3.contains("main"), "expected session name in status bar: {row3}");
+    }
+
+    #[test]
+    fn status_bar_shows_client_count_when_multiple() {
+        let e = Emulator::new(4, 40);
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 3, 40),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+        };
+        let status = StatusLine {
+            windows: vec![crate::status::WindowEntry {
+                id: crate::pane_id::WindowId(0),
+                name: "shell0".into(),
+                active: true,
+            }],
+            prefix_active: false,
+            session_name: "main".into(),
+            attached_clients: 3,
+        };
+        let vs = Compositor::compose(&[view], (4, 40), Some(&status), None);
+        let row3: String = (0..40)
+            .filter_map(|c| vs.cell(3, c).map(|cell| cell.grapheme.as_str().to_string()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(row3.contains("*3"), "expected client count indicator: {row3}");
+    }
+
+    #[test]
     fn scroll_offset_pulls_rows_from_scrollback() {
         // Use \r\n so the cursor returns to column 0 on each line, producing
         // clean full-width rows in scrollback rather than partial overwrites.
