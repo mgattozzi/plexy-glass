@@ -49,11 +49,8 @@ pub enum MouseEncoding {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseParseAction {
-    /// Byte was consumed as part of an in-progress sequence.
     Pending,
-    /// Sequence complete; here's the event.
     Event(MouseEvent),
-    /// Byte was NOT part of a mouse sequence; caller should route it elsewhere.
     Other(u8),
 }
 
@@ -71,8 +68,12 @@ mod tests {
 
     #[test]
     fn wheel_kind_sign_indicates_direction() {
-        let up = MouseKind::Wheel { delta: 3 };
-        let down = MouseKind::Wheel { delta: -3 };
-        assert_ne!(up, down);
+        match (MouseKind::Wheel { delta: 3 }, MouseKind::Wheel { delta: -3 }) {
+            (MouseKind::Wheel { delta: up }, MouseKind::Wheel { delta: down }) => {
+                assert!(up > 0, "expected positive delta for wheel up");
+                assert!(down < 0, "expected negative delta for wheel down");
+            }
+            _ => unreachable!(),
+        }
     }
 }
