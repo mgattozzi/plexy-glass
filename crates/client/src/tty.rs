@@ -64,9 +64,9 @@ impl HostTty {
         let fd = unsafe { BorrowedFd::borrow_raw(self.fd) };
         termios::tcsetattr(fd, SetArg::TCSANOW, &self.original)
             .map_err(|e| ClientError::Tty(e.to_string()))?;
-        // Belt-and-suspenders: re-enable cursor, exit alternate screen.
+        // Disable mouse tracking first, then re-enable cursor and exit alternate screen.
         let mut out = std::io::stdout();
-        let _ = out.write_all(b"\x1b[?25h\x1b[?1049l");
+        let _ = out.write_all(b"\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?1049l");
         let _ = out.flush();
         self.restored = true;
         Ok(())
@@ -185,7 +185,7 @@ fn restore_from_static() {
     let fd = unsafe { BorrowedFd::borrow_raw(fd) };
     let _ = termios::tcsetattr(fd, SetArg::TCSANOW, &snap);
     let mut out = std::io::stdout();
-    let _ = out.write_all(b"\x1b[?25h\x1b[?1049l");
+    let _ = out.write_all(b"\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?1049l");
     let _ = out.flush();
 }
 

@@ -31,6 +31,11 @@ pub async fn run(_args: ClientArgs) -> Result<(), ClientError> {
     let stdin_fd = stdin.as_fd();
     let _tty_guard = HostTty::enter_raw(stdin_fd)?;
     tty::install_emergency_restore(stdin_fd, _tty_guard.original_termios());
+    // Enable SGR-encoded mouse coords (?1006h) and any-event tracking (?1003h).
+    use std::io::Write as _;
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(b"\x1b[?1006h\x1b[?1003h");
+    let _ = stdout.flush();
     let initial_size = current_size(stdin_fd)?;
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
