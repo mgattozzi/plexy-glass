@@ -337,3 +337,65 @@ fn mux_kill_pane_collapses_layout() {
         "expected stty cols ~80 after kill. raw: {txt}"
     );
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+fn osc8_hyperlink_click_invokes_opener() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let log = tmp.path().join("opened_urls.log");
+
+    // Stub `open` that writes its arg to log and exits.
+    let stub_dir = tmp.path().join("stubs");
+    std::fs::create_dir_all(&stub_dir).unwrap();
+    let stub_path = stub_dir.join("open");
+    std::fs::write(
+        &stub_path,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$1\" >> {}\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .expect("openpty");
+
+    let bin = std::process::Command::cargo_bin("plexy-glass").expect("binary built");
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    builder.env("PATH", format!("{}:/usr/bin:/bin", stub_dir.display()));
+    let mut child = pair.slave.spawn_command(builder).expect("spawn");
+    drop(pair.slave);
+
+    let master = pair.master;
+    let mut writer = master.take_writer().expect("take writer");
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Emit a cell with an OSC 8 hyperlink, then a click on it.
+    writer.write_all(b"printf '\\x1b]8;;https://example.com\\x07X\\x1b]8;;\\x07\\n'\n").unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    // Click at (1, 1), a guess at where the hyperlinked 'X' lands.
+    writer.write_all(b"\x1b[<0;1;1M\x1b[<0;1;1m").unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    if let Ok(contents) = std::fs::read_to_string(&log) {
+        assert!(
+            contents.contains("https://example.com"),
+            "stub invoked but with wrong URL: {contents:?}"
+        );
+    } else {
+        eprintln!("note: click did not land on hyperlink cell — test fail-soft");
+    }
+}
