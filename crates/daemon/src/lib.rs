@@ -3,6 +3,7 @@
 pub mod args;
 pub mod connection;
 pub mod error;
+pub mod input_router;
 pub mod listener;
 pub mod osc_actions;
 pub mod pane;
@@ -15,6 +16,7 @@ pub mod window_manager;
 pub use args::DaemonArgs;
 pub use connection::Connection;
 pub use error::DaemonError;
+pub use input_router::{InputEvent, InputRouter};
 pub use listener::Listener;
 pub use pane::Pane;
 pub use paths::RuntimePaths;
