@@ -71,6 +71,7 @@ impl Connection {
         });
 
         let mut keymap = Keymap::default_tmux();
+        let mut router = crate::InputRouter::new();
         'outer: loop {
             tokio::select! {
                 biased;
@@ -93,30 +94,46 @@ impl Connection {
                     };
                     match msg {
                         ClientMsg::Input(bytes) => {
-                            for &b in bytes.as_ref() {
-                                let action = keymap.consume(b);
-                                prefix_active.store(keymap.prefix_active(), Ordering::SeqCst);
-                                match action {
-                                    KeymapAction::PassThrough(byte) => {
-                                        let manager = manager.lock().await;
-                                        if let Some(pane) = manager.active_window().active_pane() {
-                                            let _ = pane
-                                                .send_input(Bytes::copy_from_slice(&[byte]))
-                                                .await;
-                                        }
+                            let events = router.classify(bytes.as_ref());
+                            for event in events {
+                                match event {
+                                    crate::InputEvent::Mouse(me) => {
+                                        let mut mgr = manager.lock().await;
+                                        let _ = mgr.handle_mouse(me).await;
                                     }
-                                    KeymapAction::Command(cmd) => {
-                                        if matches!(cmd, plexy_glass_mux::Command::Detach) {
-                                            break 'outer;
+                                    crate::InputEvent::Key(b) => {
+                                        // Snap scroll-back to live on any keystroke.
+                                        {
+                                            let mgr = manager.lock().await;
+                                            if let Some(p) = mgr.active_window().active_pane() {
+                                                p.reset_scroll();
+                                            }
                                         }
-                                        let mut manager = manager.lock().await;
-                                        if let Err(e) = manager.handle_command(cmd) {
-                                            tracing::warn!(?cmd, error = %e, "command failed");
+                                        let action = keymap.consume(b);
+                                        prefix_active.store(keymap.prefix_active(), Ordering::SeqCst);
+                                        match action {
+                                            KeymapAction::PassThrough(byte) => {
+                                                let manager = manager.lock().await;
+                                                if let Some(pane) = manager.active_window().active_pane() {
+                                                    let _ = pane
+                                                        .send_input(Bytes::copy_from_slice(&[byte]))
+                                                        .await;
+                                                }
+                                            }
+                                            KeymapAction::Command(cmd) => {
+                                                if matches!(cmd, plexy_glass_mux::Command::Detach) {
+                                                    break 'outer;
+                                                }
+                                                let mut manager = manager.lock().await;
+                                                if let Err(e) = manager.handle_command(cmd) {
+                                                    tracing::warn!(?cmd, error = %e, "command failed");
+                                                }
+                                                notify.notify_one();
+                                            }
+                                            KeymapAction::Consumed => {
+                                                notify.notify_one();
+                                            }
                                         }
-                                        notify.notify_one();
-                                    }
-                                    KeymapAction::Consumed => {
-                                        notify.notify_one();
                                     }
                                 }
                             }
