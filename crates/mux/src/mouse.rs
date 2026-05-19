@@ -115,6 +115,8 @@ impl MouseParser {
                 self.consume(byte)
             }
             ParseState::AccumParam(idx) => {
+                // invariant: FSM only ever sets idx to 0, 1, or 2
+                debug_assert!(idx <= 2, "AccumParam idx out of range");
                 if byte.is_ascii_digit() {
                     self.params[idx as usize] =
                         self.params[idx as usize].saturating_mul(10) + u32::from(byte - b'0');
@@ -200,17 +202,6 @@ mod tests {
     fn modifiers_default_all_false() {
         let m = MouseModifiers::default();
         assert!(!m.shift && !m.alt && !m.ctrl);
-    }
-
-    #[test]
-    fn wheel_kind_sign_indicates_direction() {
-        match (MouseKind::Wheel { delta: 3 }, MouseKind::Wheel { delta: -3 }) {
-            (MouseKind::Wheel { delta: up }, MouseKind::Wheel { delta: down }) => {
-                assert!(up > 0, "expected positive delta for wheel up");
-                assert!(down < 0, "expected negative delta for wheel down");
-            }
-            _ => unreachable!(),
-        }
     }
 
     fn drive(bytes: &[u8]) -> Vec<MouseParseAction> {
