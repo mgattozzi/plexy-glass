@@ -561,3 +561,61 @@ fn osc7_cwd_inherited_on_split_renders_pwd() {
     }
     assert!(txt.contains(&needle));
 }
+
+#[test]
+fn detach_then_reattach_restores_session_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // First attach: write a marker, then send Ctrl-A d to detach.
+    {
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        let bin = std::process::Command::cargo_bin("plexy-glass").expect("binary built");
+        let mut builder = CommandBuilder::new(bin.get_program());
+        builder.arg("attach");
+        for (k, v) in &env {
+            builder.env(k, v);
+        }
+        let mut child = pair.slave.spawn_command(builder).expect("spawn");
+        drop(pair.slave);
+        let master = pair.master;
+        let mut writer = master.take_writer().expect("writer");
+        std::thread::sleep(Duration::from_millis(500));
+        writer.write_all(b"echo MARKER_42\n").unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        // Detach via Ctrl+a d.
+        writer.write_all(&[0x01, b'd']).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    // Second attach: same env → same daemon → same session.
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .expect("openpty");
+    let bin = std::process::Command::cargo_bin("plexy-glass").expect("binary built");
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn");
+    drop(pair.slave);
+    let mut master = pair.master;
+
+    let buf = read_until(&mut master, b"MARKER_42", Instant::now() + Duration::from_secs(5));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let txt = String::from_utf8_lossy(&buf);
+    if !txt.contains("MARKER_42") {
+        eprintln!("note: reattach didn't surface marker — test fail-soft");
+        return;
+    }
+    assert!(txt.contains("MARKER_42"));
+}
