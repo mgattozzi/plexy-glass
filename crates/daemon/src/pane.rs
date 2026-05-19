@@ -11,6 +11,7 @@ use plexy_glass_protocol::{ExitStatus, PtySize, SpawnSpec};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize as PortablePtySize};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 use tracing::{debug, error};
 
@@ -26,6 +27,7 @@ struct Inner {
     master: Mutex<Box<dyn MasterPty + Send>>,
     exit_rx: watch::Receiver<Option<ExitStatus>>,
     emulator: Arc<Mutex<Emulator>>,
+    scroll_offset: AtomicU32,
 }
 
 impl Pane {
@@ -158,6 +160,7 @@ impl Pane {
                 master: Mutex::new(master),
                 exit_rx,
                 emulator,
+                scroll_offset: AtomicU32::new(0),
             }),
         })
     }
@@ -229,6 +232,45 @@ impl Pane {
             .lock()
             .expect("pane emulator mutex poisoned");
         f(emu.screen())
+    }
+
+    pub fn with_screen_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut plexy_glass_emulator::Screen) -> R,
+    {
+        let mut emu = self.inner.emulator.lock().expect("pane emulator mutex poisoned");
+        f(emu.screen_mut())
+    }
+
+    pub fn scroll_offset(&self) -> u32 {
+        self.inner.scroll_offset.load(Ordering::SeqCst)
+    }
+
+    /// Adjust the scroll offset by `delta` rows (positive = up into
+    /// scrollback, negative = down toward live). Clamps to `[0, max]`.
+    pub fn scroll_by(&self, delta: i32, max_offset: u32) {
+        loop {
+            let current = self.inner.scroll_offset.load(Ordering::SeqCst);
+            let new = (current as i64 + delta as i64).clamp(0, max_offset as i64) as u32;
+            if self
+                .inner
+                .scroll_offset
+                .compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+
+    pub fn reset_scroll(&self) {
+        self.inner.scroll_offset.store(0, Ordering::SeqCst);
+    }
+
+    pub fn scrollback_len(&self) -> u32 {
+        // invariant: emulator mutex briefly held to read len.
+        let emu = self.inner.emulator.lock().expect("pane emulator mutex poisoned");
+        emu.screen().scrollback.len() as u32
     }
 }
 
@@ -396,6 +438,40 @@ mod tests {
             .await
             .unwrap();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
+    }
+
+    #[tokio::test]
+    async fn scroll_offset_starts_at_zero() {
+        let spec = SpawnSpec {
+            program: "/bin/echo".into(),
+            args: vec!["hi".into()],
+            env: vec![],
+            cwd: None,
+        };
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).expect("spawn");
+        assert_eq!(p.scroll_offset(), 0);
+    }
+
+    #[tokio::test]
+    async fn scroll_by_clamps_at_zero_and_max() {
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).expect("spawn");
+        p.scroll_by(-5, 100);
+        assert_eq!(p.scroll_offset(), 0);
+        p.scroll_by(3, 10);
+        assert_eq!(p.scroll_offset(), 3);
+        p.scroll_by(-1, 10);
+        assert_eq!(p.scroll_offset(), 2);
+        p.scroll_by(100, 10);
+        assert_eq!(p.scroll_offset(), 10);
+        p.reset_scroll();
+        assert_eq!(p.scroll_offset(), 0);
+        let _ = p.send_input(bytes::Bytes::from_static(&[0x04])).await;
     }
 
     #[tokio::test]
