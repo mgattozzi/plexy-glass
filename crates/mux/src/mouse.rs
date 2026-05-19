@@ -194,6 +194,48 @@ impl Default for MouseParser {
     }
 }
 
+/// Encode a typed `MouseEvent` as bytes to forward to a child that has
+/// requested mouse reporting. Only SGR encoding (`?1006`) is supported in
+/// Phase 4; other modes fall back to SGR (the apps we care about all
+/// support SGR).
+pub fn encode_for_child(event: MouseEvent, _mode: MouseEncoding) -> Vec<u8> {
+    let mut button_code: u32 = match event.button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+        MouseButton::None => 0,
+    };
+    if event.modifiers.shift {
+        button_code |= 4;
+    }
+    if event.modifiers.alt {
+        button_code |= 8;
+    }
+    if event.modifiers.ctrl {
+        button_code |= 16;
+    }
+    let mut is_press = true;
+    match event.kind {
+        MouseKind::Press => {}
+        MouseKind::Release => {
+            is_press = false;
+        }
+        MouseKind::Move => {
+            button_code |= 32;
+        }
+        MouseKind::Wheel { delta } => {
+            button_code = 64;
+            if delta < 0 {
+                button_code |= 1;
+            }
+        }
+    }
+    let final_byte = if is_press { 'M' } else { 'm' };
+    let row = event.row.saturating_add(1);
+    let col = event.col.saturating_add(1);
+    format!("\x1b[<{button_code};{col};{row}{final_byte}").into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +325,57 @@ mod tests {
         for a in &actions[..actions.len() - 1] {
             assert!(matches!(a, MouseParseAction::Pending), "expected Pending, got {a:?}");
         }
+    }
+
+    fn ev(kind: MouseKind, button: MouseButton, row: u16, col: u16) -> MouseEvent {
+        MouseEvent { kind, button, modifiers: MouseModifiers::default(), row, col }
+    }
+
+    #[test]
+    fn encode_sgr_press_release() {
+        let press = ev(MouseKind::Press, MouseButton::Left, 4, 9);
+        assert_eq!(encode_for_child(press, MouseEncoding::Sgr), b"\x1b[<0;10;5M");
+        let rel = ev(MouseKind::Release, MouseButton::Left, 4, 9);
+        assert_eq!(encode_for_child(rel, MouseEncoding::Sgr), b"\x1b[<0;10;5m");
+    }
+
+    #[test]
+    fn encode_sgr_wheel_up() {
+        let wheel = ev(MouseKind::Wheel { delta: 3 }, MouseButton::None, 0, 0);
+        // wheel up = button code 64; coords 1-indexed.
+        assert_eq!(encode_for_child(wheel, MouseEncoding::Sgr), b"\x1b[<64;1;1M");
+    }
+
+    #[test]
+    fn encode_sgr_wheel_down() {
+        let wheel = ev(MouseKind::Wheel { delta: -3 }, MouseButton::None, 0, 0);
+        // wheel down = 65.
+        assert_eq!(encode_for_child(wheel, MouseEncoding::Sgr), b"\x1b[<65;1;1M");
+    }
+
+    #[test]
+    fn encode_sgr_move_with_held_button() {
+        let mv = MouseEvent {
+            kind: MouseKind::Move,
+            button: MouseButton::Left,
+            modifiers: MouseModifiers::default(),
+            row: 4,
+            col: 9,
+        };
+        // motion = 32; left held = 0. Total = 32.
+        assert_eq!(encode_for_child(mv, MouseEncoding::Sgr), b"\x1b[<32;10;5M");
+    }
+
+    #[test]
+    fn encode_sgr_modifiers() {
+        let with_mods = MouseEvent {
+            kind: MouseKind::Press,
+            button: MouseButton::Left,
+            modifiers: MouseModifiers { shift: true, alt: true, ctrl: true },
+            row: 0,
+            col: 0,
+        };
+        // shift (4) + alt (8) + ctrl (16) = 28.
+        assert_eq!(encode_for_child(with_mods, MouseEncoding::Sgr), b"\x1b[<28;1;1M");
     }
 }
