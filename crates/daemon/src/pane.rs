@@ -86,6 +86,14 @@ impl Pane {
         // them to the child. Without this, TUI line editors block on `ESC[6n`.
         let reply_tx = input_tx.clone();
         let reader_notify_for_self = Arc::clone(&output_notify);
+
+        let (clip_tx, mut clip_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        tokio::spawn(async move {
+            while let Some(payload) = clip_rx.recv().await {
+                let _ = crate::osc_actions::write_clipboard(&payload).await;
+            }
+        });
+
         let reader_handle = std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
@@ -98,13 +106,13 @@ impl Pane {
                         return;
                     }
                     Ok(n) => {
-                        let replies = {
+                        let (replies, clip_writes) = {
                             // invariant: emulator mutex held briefly to advance + drain.
                             let mut e = emulator_for_reader
                                 .lock()
                                 .expect("pane emulator mutex poisoned");
                             e.advance(&buf[..n]);
-                            e.take_replies()
+                            (e.take_replies(), e.take_clipboard_writes())
                         };
                         let chunk = Bytes::copy_from_slice(&buf[..n]);
                         let _ = output_tx_clone.send(chunk);
@@ -114,6 +122,9 @@ impl Pane {
                                 debug!(error = %err, "could not forward emulator reply");
                                 break;
                             }
+                        }
+                        for payload in clip_writes {
+                            clip_tx.blocking_send(payload).ok();
                         }
                     }
                     Err(e) => {
