@@ -107,6 +107,7 @@ impl Renderer {
                 plexy_glass_mux::Rect,
                 Screen,
                 bool,
+                u32,
             )> = Vec::with_capacity(pane_ids.len());
             for id in pane_ids {
                 if let Some(pane) = win.pane(id) {
@@ -115,17 +116,18 @@ impl Renderer {
                         None => continue,
                     };
                     let screen = pane.with_screen(|s| s.clone());
-                    owned_screens.push((id, rect, screen, id == active_id));
+                    let scroll = pane.scroll_offset();
+                    owned_screens.push((id, rect, screen, id == active_id, scroll));
                 }
             }
             let views: Vec<PaneView> = owned_screens
                 .iter()
-                .map(|(id, rect, screen, active)| PaneView {
+                .map(|(id, rect, screen, active, scroll)| PaneView {
                     id: *id,
                     rect: *rect,
                     screen,
                     is_active: *active,
-                    scroll_offset: 0,
+                    scroll_offset: *scroll,
                 })
                 .collect();
 
@@ -144,7 +146,13 @@ impl Renderer {
                 prefix_active: prefix_active.load(std::sync::atomic::Ordering::SeqCst),
             };
 
-            let virt = Compositor::compose(&views, (host.rows, host.cols), Some(&status), None);
+            let selection = m.selection().cloned();
+            let virt = Compositor::compose(
+                &views,
+                (host.rows, host.cols),
+                Some(&status),
+                selection.as_ref(),
+            );
             self.diff.render(&virt)
         };
         let msg = ServerMsg::Output(Bytes::from(bytes));
