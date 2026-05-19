@@ -146,6 +146,17 @@ impl Window {
         }
     }
 
+    /// Make `target` the active pane (no-op if it is already active or not in
+    /// this window). Mirrors the focus-history update used by `select_next` /
+    /// `select_prev` so `close_pane` can fall back to the previously focused
+    /// pane.
+    pub fn focus(&mut self, target: PaneId) {
+        if self.panes.contains_key(&target) && target != self.active {
+            self.focus_history.push_back(self.active);
+            self.active = target;
+        }
+    }
+
     pub fn select_direction(
         &mut self,
         dir: plexy_glass_mux::Direction,

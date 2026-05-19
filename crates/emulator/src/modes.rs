@@ -27,6 +27,21 @@ impl Default for Modes {
     }
 }
 
+impl Modes {
+    /// Mask of every mouse-related `Modes` bit (?9, ?1000, ?1003, ?1006).
+    pub const MOUSE_REPORTING_BITS: Self = Self::empty()
+        .union(Self::MOUSE_X10)
+        .union(Self::MOUSE_BTN)
+        .union(Self::MOUSE_ANY)
+        .union(Self::MOUSE_SGR);
+
+    /// True if any of the DEC mouse-reporting modes (?9 / ?1000 / ?1003 / ?1006)
+    /// is currently enabled, meaning the child wants raw mouse events.
+    pub fn any_mouse_mode_active(self) -> bool {
+        self.intersects(Self::MOUSE_REPORTING_BITS)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -46,5 +61,20 @@ mod tests {
         assert!(m.contains(Modes::ALT_SCREEN));
         m.remove(Modes::ALT_SCREEN);
         assert!(!m.contains(Modes::ALT_SCREEN));
+    }
+
+    #[test]
+    fn any_mouse_mode_active_reflects_a_mouse_bit() {
+        // Default: no mouse reporting requested.
+        let m = Modes::default();
+        assert!(!m.any_mouse_mode_active());
+        // Each mouse bit individually flips the helper to true.
+        for bit in [Modes::MOUSE_X10, Modes::MOUSE_BTN, Modes::MOUSE_ANY, Modes::MOUSE_SGR] {
+            let m = bit;
+            assert!(m.any_mouse_mode_active(), "{bit:?} should mark mouse reporting active");
+        }
+        // Non-mouse bits do not.
+        let m = Modes::ALT_SCREEN | Modes::AUTOWRAP;
+        assert!(!m.any_mouse_mode_active());
     }
 }

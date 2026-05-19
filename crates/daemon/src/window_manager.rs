@@ -1,7 +1,10 @@
 //! Owns all windows for one attached client.
 
 use crate::{error::DaemonError, window::Window};
-use plexy_glass_mux::{Command, PaneId, Rect, SplitDir, WindowId};
+use plexy_glass_mux::{
+    Command, MouseButton, MouseEncoding, MouseEvent, MouseKind, PaneId, Rect, Selection,
+    SelectionKind, SplitDir, WindowId, encode_for_child, extract_text,
+};
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
 use tokio::sync::{Notify, mpsc};
@@ -19,6 +22,9 @@ pub struct WindowManager {
     /// Each pane sends its `PaneId` here when its child exits. `None` in tests
     /// where pane lifecycle is driven manually.
     death_tx: Option<mpsc::Sender<PaneId>>,
+    /// In-flight mouse selection (left-press → drag → release). `None` between
+    /// drags.
+    selection: Option<Selection>,
 }
 
 impl WindowManager {
@@ -47,7 +53,14 @@ impl WindowManager {
             notify,
             default_spec: first_spec,
             death_tx,
+            selection: None,
         })
+    }
+
+    /// Read-only access to the in-flight selection, if any. Used by the
+    /// compositor to draw highlight cells.
+    pub fn selection(&self) -> Option<&Selection> {
+        self.selection.as_ref()
     }
 
     /// Close a pane whose child exited. Called by Connection when it
@@ -193,6 +206,150 @@ impl WindowManager {
         }
         self.notify.notify_one();
         Ok(())
+    }
+
+    /// Dispatch one decoded mouse event. See the Phase 4 plan for the
+    /// algorithm: locate the pane under (row, col), optionally forward the raw
+    /// SGR-encoded event to the child if it opted into mouse reporting, and
+    /// otherwise drive focus/hyperlink/click-to-position/selection/wheel.
+    pub async fn handle_mouse(&mut self, event: MouseEvent) -> Result<(), DaemonError> {
+        let viewport = self.viewport();
+        let Some(pane_id) = self
+            .active_window()
+            .layout()
+            .pane_at_coord(viewport, event.row, event.col)
+        else {
+            return Ok(());
+        };
+
+        // App-mouse-mode passthrough: if the resolved pane's emulator wants
+        // mouse events, forward and return.
+        let wants_mouse = self
+            .active_window()
+            .pane(pane_id)
+            .map(|p| p.with_screen(|s| s.modes.any_mouse_mode_active()))
+            .unwrap_or(false);
+        if wants_mouse {
+            let bytes = encode_for_child(event, MouseEncoding::Sgr);
+            if let Some(pane) = self.active_window().pane(pane_id).cloned() {
+                let _ = pane.send_input(bytes::Bytes::from(bytes)).await;
+            }
+            return Ok(());
+        }
+
+        match event.kind {
+            MouseKind::Press if event.button == MouseButton::Left => {
+                self.handle_left_press(pane_id, event, viewport).await?;
+            }
+            MouseKind::Release if event.button == MouseButton::Left => {
+                self.handle_left_release().await?;
+            }
+            MouseKind::Move if event.button == MouseButton::Left => {
+                self.handle_left_drag(event, viewport);
+            }
+            MouseKind::Wheel { delta } => {
+                self.handle_wheel(pane_id, delta);
+            }
+            _ => {}
+        }
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    async fn handle_left_press(
+        &mut self,
+        pane_id: PaneId,
+        event: MouseEvent,
+        viewport: Rect,
+    ) -> Result<(), DaemonError> {
+        // Click in a non-active pane → focus only.
+        if pane_id != self.active_window().active() {
+            self.active_window_mut().focus(pane_id);
+            return Ok(());
+        }
+
+        let pane_rect = self
+            .active_window()
+            .layout()
+            .rect_of(pane_id, viewport)
+            .unwrap_or(viewport);
+        let local_row = event.row.saturating_sub(pane_rect.row);
+        let local_col = event.col.saturating_sub(pane_rect.col);
+
+        // OSC 8 hyperlink under the cell? Open in the OS browser; suppress
+        // selection start.
+        let url = self.active_window().pane(pane_id).and_then(|p| {
+            p.with_screen(|s| {
+                s.active
+                    .get_cell(local_row, local_col)
+                    .and_then(|cell| cell.hyperlink_id)
+                    .and_then(|id| s.hyperlinks.get(id).map(str::to_owned))
+            })
+        });
+        if let Some(url) = url {
+            tokio::spawn(async move {
+                let _ = crate::osc_actions::open_url(&url).await;
+            });
+            return Ok(());
+        }
+
+        // OSC 133 click-to-position. If a prompt mark on the current row is
+        // before the click column, walk the shell cursor with arrow keys.
+        if let Some(pane) = self.active_window().pane(pane_id).cloned()
+            && crate::osc_actions::click_to_position(&pane, local_col).await?
+        {
+            return Ok(());
+        }
+
+        // Otherwise: start a selection anchored at this cell.
+        self.selection = Some(Selection::start(
+            pane_id,
+            local_row,
+            local_col,
+            SelectionKind::Char,
+        ));
+        Ok(())
+    }
+
+    fn handle_left_drag(&mut self, event: MouseEvent, viewport: Rect) {
+        let Some(source_pane) = self.selection.as_ref().map(|s| s.source_pane) else {
+            return;
+        };
+        let Some(pane_rect) = self.active_window().layout().rect_of(source_pane, viewport) else {
+            return;
+        };
+        let local_row = event.row.saturating_sub(pane_rect.row);
+        let local_col = event.col.saturating_sub(pane_rect.col);
+        if let Some(sel) = self.selection.as_mut() {
+            sel.extend(local_row, local_col, pane_rect);
+        }
+    }
+
+    async fn handle_left_release(&mut self) -> Result<(), DaemonError> {
+        let Some(sel) = self.selection.take() else {
+            return Ok(());
+        };
+        if sel.is_empty() {
+            return Ok(());
+        }
+        if let Some(pane) = self.active_window().pane(sel.source_pane) {
+            let text = pane.with_screen(|s| extract_text(&sel, s));
+            if !text.is_empty() {
+                tokio::spawn(async move {
+                    let _ = crate::osc_actions::write_clipboard(text.as_bytes()).await;
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_wheel(&mut self, pane_id: PaneId, delta: i16) {
+        let Some(pane) = self.active_window().pane(pane_id) else {
+            return;
+        };
+        let max_offset = pane.scrollback_len();
+        // Wheel-up = positive delta = scroll INTO older history.
+        pane.scroll_by(delta.into(), max_offset);
     }
 
     fn alloc_pane_id(&mut self) -> PaneId {
@@ -350,6 +507,39 @@ mod tests {
         m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Down))
             .unwrap();
         assert_eq!(m.active_window().active(), PaneId(1));
+    }
+
+    #[tokio::test]
+    async fn click_in_other_pane_changes_focus() {
+        use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
+
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            notify,
+            None,
+        )
+        .unwrap();
+        m.handle_command(Command::SplitV).unwrap();
+        // After SplitV, the new pane (`PaneId(1)`) is active on the right.
+        assert_eq!(m.active_window().active(), PaneId(1));
+
+        // Click in the LEFT half (`PaneId(0)`), which should change focus there.
+        let event = MouseEvent {
+            kind: MouseKind::Press,
+            button: MouseButton::Left,
+            modifiers: MouseModifiers::default(),
+            row: 5,
+            col: 2,
+        };
+        m.handle_mouse(event).await.unwrap();
+        assert_eq!(m.active_window().active(), PaneId(0));
     }
 
     #[tokio::test]
