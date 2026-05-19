@@ -70,23 +70,6 @@ pub async fn run(
     Ok(())
 }
 
-/// Create a new named session (fails if it already exists) and attach to it.
-pub async fn client_new(
-    name: String,
-    cmd: Option<String>,
-    args: Vec<String>,
-) -> Result<(), ClientError> {
-    let spec = match cmd {
-        Some(program) => SpawnSpec { program, args, env: vec![], cwd: None },
-        None => {
-            let mut s = default_spawn_spec();
-            s.args = args;
-            s
-        }
-    };
-    run(Some(name), true, Some(spec)).await
-}
-
 /// Send `KillSession { name }` to the daemon and print the result.
 pub async fn client_kill_session(name: String) -> Result<(), ClientError> {
     let socket = default_socket_path()?;
@@ -162,15 +145,15 @@ async fn list_sessions_inline() -> Result<Vec<plexy_glass_protocol::SessionEntry
     }
 }
 
-/// Attach to a session using smart-default logic when no name is given.
+/// Attach to a session, creating it if it doesn't exist.
 ///
-/// - explicit name supplied → attach (no create)
+/// - explicit name supplied → attach-or-create that name
 /// - 0 sessions → create and attach to "main"
 /// - 1 session  → attach to that session
 /// - 2+ sessions → print list, exit 1
 pub async fn client_attach_smart(explicit_name: Option<String>) -> Result<(), ClientError> {
     match explicit_name {
-        Some(n) => run(Some(n), false, None).await,
+        Some(n) => run(Some(n), true, Some(default_spawn_spec())).await,
         None => {
             let entries = list_sessions_inline().await?;
             match entries.len() {

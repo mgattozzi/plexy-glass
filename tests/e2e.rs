@@ -633,7 +633,7 @@ fn new_and_list_show_named_session() {
         .expect("openpty");
     let bin = std::process::Command::cargo_bin("plexy-glass").unwrap();
     let mut builder = CommandBuilder::new(bin.get_program());
-    builder.arg("new");
+    builder.arg("attach");
     builder.arg("-n");
     builder.arg("foo");
     for (k, v) in &env {
@@ -681,7 +681,7 @@ fn kill_session_removes_it_from_list() {
         .expect("openpty");
     let bin = std::process::Command::cargo_bin("plexy-glass").unwrap();
     let mut builder = CommandBuilder::new(bin.get_program());
-    builder.arg("new");
+    builder.arg("attach");
     builder.arg("-n");
     builder.arg("doomed");
     for (k, v) in &env {

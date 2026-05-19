@@ -9,21 +9,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// Create a new session and attach to it.
-    New {
-        /// Session name.
-        #[arg(short = 'n', long = "name")]
-        name: String,
-        /// Command to run in the new session.
-        #[arg(short = 'c', long = "cmd")]
-        cmd: Option<String>,
-        /// Arguments to pass to the command.
-        #[arg(long = "args", num_args = 0..)]
-        args: Vec<String>,
-    },
-    /// Attach to an existing session (or start the daemon and open a session).
+    /// Attach to a session (creates it if it doesn't exist).
     Attach {
-        /// Session name to attach to.
+        /// Session name. If omitted: attach to the only existing session, or create "main" if none.
         #[arg(short = 'n', long = "name")]
         name: Option<String>,
     },
@@ -51,9 +39,6 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // Default to `attach` with no name when no subcommand is given.
     match cli.command.unwrap_or(Cmd::Attach { name: None }) {
-        Cmd::New { name, cmd, args } => {
-            plexy_glass_client::client_new(name, cmd, args).await?;
-        }
         Cmd::Attach { name } => {
             plexy_glass_client::client_attach_smart(name).await?;
         }
