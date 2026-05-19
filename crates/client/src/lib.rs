@@ -117,6 +117,75 @@ pub async fn client_kill_session(name: String) -> Result<(), ClientError> {
     }
 }
 
+/// List all sessions and print a table to stdout.
+pub async fn client_list() -> Result<(), ClientError> {
+    let entries = list_sessions_inline().await?;
+    print_sessions_table(&entries);
+    Ok(())
+}
+
+/// Print a formatted table of session entries to stdout.
+pub fn print_sessions_table(entries: &[plexy_glass_protocol::SessionEntry]) {
+    if entries.is_empty() {
+        println!("(no sessions)");
+        return;
+    }
+    println!("{:<20}  {:>7}  {:>5}  {:>7}", "NAME", "WINDOWS", "PANES", "CLIENTS");
+    for e in entries {
+        println!("{:<20}  {:>7}  {:>5}  {:>7}", e.name, e.windows, e.panes, e.clients);
+    }
+}
+
+/// Shared helper: open a connection, handshake, send `ListSessions`, return entries.
+async fn list_sessions_inline() -> Result<Vec<plexy_glass_protocol::SessionEntry>, ClientError> {
+    let socket = default_socket_path()?;
+    let stream = connect_or_spawn(&socket).await?;
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    client_handshake(&mut reader, &mut writer).await?;
+
+    let msg = ClientMsg::ListSessions;
+    let payload = postcard::to_allocvec(&msg)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
+    Codec::write_frame(&mut writer, &payload).await?;
+
+    let frame = Codec::read_frame(&mut reader)
+        .await?
+        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
+    let reply: ServerMsg = postcard::from_bytes(&frame)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    match reply {
+        ServerMsg::SessionList { entries } => Ok(entries),
+        ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
+        other => Err(ClientError::Io(std::io::Error::other(format!(
+            "unexpected reply from daemon: {other:?}"
+        )))),
+    }
+}
+
+/// Attach to a session using smart-default logic when no name is given.
+///
+/// - explicit name supplied → attach (no create)
+/// - 0 sessions → create and attach to "main"
+/// - 1 session  → attach to that session
+/// - 2+ sessions → print list, exit 1
+pub async fn client_attach_smart(explicit_name: Option<String>) -> Result<(), ClientError> {
+    match explicit_name {
+        Some(n) => run(Some(n), false, None).await,
+        None => {
+            let entries = list_sessions_inline().await?;
+            match entries.len() {
+                0 => run(Some("main".to_string()), true, Some(default_spawn_spec())).await,
+                1 => run(Some(entries[0].name.clone()), false, None).await,
+                n => {
+                    eprintln!("error: {n} sessions exist; specify with -n NAME");
+                    print_sessions_table(&entries);
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
 fn default_spawn_spec() -> SpawnSpec {
     let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     SpawnSpec { program, args: vec![], env: vec![], cwd: None }

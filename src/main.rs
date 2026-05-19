@@ -55,17 +55,10 @@ async fn main() -> anyhow::Result<()> {
             plexy_glass_client::client_new(name, cmd, args).await?;
         }
         Cmd::Attach { name } => {
-            // When no name is given, `create_if_missing=true` preserves the
-            // existing default-session behaviour that the e2e tests rely on.
-            // When a specific name is given, require the session to exist
-            // (`create_if_missing=false`); Task 17 will add the smart default.
-            let create = name.is_none();
-            plexy_glass_client::run(name, create, None).await?;
+            plexy_glass_client::client_attach_smart(name).await?;
         }
         Cmd::List => {
-            // Task 17 implements this properly.
-            eprintln!("error: 'list' subcommand not yet implemented");
-            std::process::exit(1);
+            plexy_glass_client::client_list().await?;
         }
         Cmd::Kill { name } => match name {
             Some(session_name) => {
