@@ -1,0 +1,150 @@
+//! Daemon-wide registry of named sessions.
+
+use crate::{error::DaemonError, session::Session};
+use plexy_glass_protocol::{ProtocolError, PtySize, SessionEntry, SpawnSpec};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+pub struct SessionRegistry {
+    inner: Mutex<HashMap<String, Arc<Session>>>,
+}
+
+impl SessionRegistry {
+    pub fn new() -> Self {
+        Self { inner: Mutex::new(HashMap::new()) }
+    }
+
+    pub async fn list(&self) -> Vec<SessionEntry> {
+        let map = self.inner.lock().await;
+        // `list_entry` takes blocking locks, so defer to spawn_blocking-style.
+        let mut out: Vec<SessionEntry> = map
+            .values()
+            .map(|s| {
+                let s = Arc::clone(s);
+                tokio::task::block_in_place(|| s.list_entry())
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    pub async fn get(&self, name: &str) -> Option<Arc<Session>> {
+        let map = self.inner.lock().await;
+        map.get(name).cloned()
+    }
+
+    pub async fn create(
+        &self,
+        name: String,
+        cmd: SpawnSpec,
+        size: PtySize,
+    ) -> Result<Arc<Session>, DaemonError> {
+        validate_name(&name)?;
+        let mut map = self.inner.lock().await;
+        if map.contains_key(&name) {
+            return Err(DaemonError::Protocol(ProtocolError::SessionAlreadyExists { name }));
+        }
+        let session = Session::new(name.clone(), cmd, size)?;
+        map.insert(name, Arc::clone(&session));
+        Ok(session)
+    }
+
+    pub async fn kill(&self, name: &str) -> Result<(), DaemonError> {
+        let mut map = self.inner.lock().await;
+        let session = map.remove(name).ok_or_else(|| {
+            DaemonError::Protocol(ProtocolError::SessionNotFound { name: name.to_string() })
+        })?;
+        session.closing.store(true, std::sync::atomic::Ordering::SeqCst);
+        session.notify.notify_one();
+        Ok(())
+    }
+
+    pub async fn prune_empty(&self) {
+        let mut map = self.inner.lock().await;
+        map.retain(|_, s| !s.closing.load(std::sync::atomic::Ordering::SeqCst));
+    }
+}
+
+impl Default for SessionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn validate_name(name: &str) -> Result<(), DaemonError> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(DaemonError::Protocol(ProtocolError::EmptyName));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Err(DaemonError::Protocol(ProtocolError::InvalidName { name: name.to_string() }));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec() -> SpawnSpec {
+        SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        }
+    }
+
+    fn size() -> PtySize {
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }
+    }
+
+    #[tokio::test]
+    async fn create_then_get() {
+        let r = SessionRegistry::new();
+        let s = r.create("main".into(), spec(), size()).await.unwrap();
+        assert_eq!(s.name, "main");
+        let got = r.get("main").await.unwrap();
+        assert_eq!(got.name, "main");
+    }
+
+    #[tokio::test]
+    async fn duplicate_create_fails() {
+        let r = SessionRegistry::new();
+        r.create("main".into(), spec(), size()).await.unwrap();
+        let err = r.create("main".into(), spec(), size()).await.map(|_| ()).unwrap_err();
+        assert!(matches!(err, DaemonError::Protocol(ProtocolError::SessionAlreadyExists { .. })));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_returns_sorted_entries() {
+        let r = SessionRegistry::new();
+        r.create("zeta".into(), spec(), size()).await.unwrap();
+        r.create("alpha".into(), spec(), size()).await.unwrap();
+        let entries = r.list().await;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "alpha");
+        assert_eq!(entries[1].name, "zeta");
+    }
+
+    #[tokio::test]
+    async fn kill_unknown_returns_session_not_found() {
+        let r = SessionRegistry::new();
+        let err = r.kill("ghost").await.unwrap_err();
+        assert!(matches!(err, DaemonError::Protocol(ProtocolError::SessionNotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn name_validation_rejects_empty() {
+        let r = SessionRegistry::new();
+        let err = r.create("".into(), spec(), size()).await.map(|_| ()).unwrap_err();
+        assert!(matches!(err, DaemonError::Protocol(ProtocolError::EmptyName)));
+    }
+
+    #[tokio::test]
+    async fn name_validation_rejects_invalid_chars() {
+        let r = SessionRegistry::new();
+        let err = r.create("has space".into(), spec(), size()).await.map(|_| ()).unwrap_err();
+        assert!(matches!(err, DaemonError::Protocol(ProtocolError::InvalidName { .. })));
+    }
+}
