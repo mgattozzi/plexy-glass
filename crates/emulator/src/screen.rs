@@ -611,10 +611,40 @@ impl Screen {
                     self.cursor.hyperlink_id = self.hyperlinks.intern(&url);
                 }
             }
+            "133" => self.handle_osc_133(params),
             other => {
                 tracing::trace!(cmd = other, "unhandled OSC");
             }
         }
+    }
+
+    fn handle_osc_133(&mut self, params: &[&[u8]]) {
+        // params[0] is "133", params[1] is the subcommand letter, optional
+        // params[2..] carry sub-arguments (e.g. exit code for D).
+        let Some(subcmd) = params.get(1).and_then(|p| p.first().copied()) else {
+            return;
+        };
+        let kind = match subcmd {
+            b'A' => PromptMarkKind::PromptStart,
+            b'B' => PromptMarkKind::PromptEnd,
+            b'C' => PromptMarkKind::CommandStart,
+            b'D' => {
+                let exit_code = params
+                    .get(2)
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .and_then(|s| s.parse::<i32>().ok());
+                PromptMarkKind::CommandEnd(exit_code)
+            }
+            other => {
+                tracing::trace!(subcmd = other, "unhandled OSC 133 subcommand");
+                return;
+            }
+        };
+        self.prompt_marks.push(PromptMark {
+            kind,
+            row: self.cursor.row,
+            col: self.cursor.col,
+        });
     }
 }
 
@@ -966,5 +996,37 @@ mod tests {
         let drained = s.take_clipboard_writes();
         assert_eq!(drained, vec![b"hello".to_vec(), b"world".to_vec()]);
         assert!(s.clipboard_writes.is_empty());
+    }
+
+    #[test]
+    fn osc_133_prompt_start_recorded() {
+        let s = parse(b"\x1b]133;A\x07");
+        assert_eq!(s.prompt_marks.len(), 1);
+        assert_eq!(s.prompt_marks[0].kind, PromptMarkKind::PromptStart);
+    }
+
+    #[test]
+    fn osc_133_prompt_end_records_position() {
+        let s = parse(b"abc\x1b]133;B\x07");
+        let mark = s.prompt_marks.iter().find(|m| m.kind == PromptMarkKind::PromptEnd);
+        assert!(mark.is_some(), "expected a PromptEnd mark: {:?}", s.prompt_marks);
+    }
+
+    #[test]
+    fn osc_133_command_end_carries_exit_code() {
+        let s = parse(b"\x1b]133;D;0\x07");
+        match s.prompt_marks.iter().find(|m| matches!(m.kind, PromptMarkKind::CommandEnd(_))) {
+            Some(m) => assert_eq!(m.kind, PromptMarkKind::CommandEnd(Some(0))),
+            None => panic!("expected CommandEnd mark; got {:?}", s.prompt_marks),
+        }
+    }
+
+    #[test]
+    fn osc_133_command_end_without_exit_code() {
+        let s = parse(b"\x1b]133;D\x07");
+        match s.prompt_marks.iter().find(|m| matches!(m.kind, PromptMarkKind::CommandEnd(_))) {
+            Some(m) => assert_eq!(m.kind, PromptMarkKind::CommandEnd(None)),
+            None => panic!("expected CommandEnd mark"),
+        }
     }
 }
