@@ -26,6 +26,6 @@ pub use layout::{CloseOutcome, LayoutError, LayoutTree, SplitPosition};
 pub use mouse::{encode_for_child, MouseButton, MouseEncoding, MouseEvent, MouseKind, MouseModifiers, MouseParseAction, MouseParser};
 pub use pane_id::{PaneId, WindowId};
 pub use rect::Rect;
-pub use selection::{Selection, SelectionKind};
+pub use selection::{Selection, SelectionKind, extract_text};
 pub use status::{StatusLine, WindowEntry};
 pub use virtual_screen::VirtualScreen;

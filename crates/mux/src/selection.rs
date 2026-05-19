@@ -94,6 +94,44 @@ impl Iterator for SelectionCells {
     }
 }
 
+/// Pull the selected text out of `screen`. Walks the cells in selection
+/// order; inserts `\n` at row boundaries. Trailing default-blank cells on
+/// each row are trimmed so empty space at the right edge of the pane
+/// doesn't bloat the copied string. Wide-spacer cells are skipped.
+pub fn extract_text(selection: &Selection, screen: &plexy_glass_emulator::Screen) -> String {
+    let (start, end) = selection.normalized();
+    let cols = screen.active.num_cols();
+    let mut out = String::new();
+    for r in start.0..=end.0 {
+        let row_start = if r == start.0 { start.1 } else { 0 };
+        let row_end = if r == end.0 {
+            end.1
+        } else {
+            cols.saturating_sub(1)
+        };
+        let mut last_significant = row_start;
+        for c in row_start..=row_end {
+            if let Some(cell) = screen.active.get_cell(r, c)
+                && !cell.is_blank()
+            {
+                last_significant = c;
+            }
+        }
+        for c in row_start..=last_significant {
+            if let Some(cell) = screen.active.get_cell(r, c) {
+                if cell.is_wide_spacer() {
+                    continue;
+                }
+                out.push_str(cell.grapheme.as_str());
+            }
+        }
+        if r < end.0 {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +183,40 @@ mod tests {
     fn empty_selection_when_anchor_equals_head() {
         let s = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
         assert!(s.is_empty());
+    }
+
+    use plexy_glass_emulator::Emulator;
+
+    fn screen_from(rows: u16, cols: u16, lines: &[&str]) -> plexy_glass_emulator::Screen {
+        let mut e = Emulator::new(rows, cols);
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                e.advance(b"\r\n");
+            }
+            e.advance(line.as_bytes());
+        }
+        // A no-op SGR flushes the parser's pending grapheme buffer so the
+        // final grapheme is committed to the screen before we clone it.
+        e.advance(b"\x1b[m");
+        e.screen().clone()
+    }
+
+    #[test]
+    fn extract_simple_word() {
+        let screen = screen_from(2, 10, &["hello", ""]);
+        let mut s = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
+        s.extend(0, 4, Rect::new(0, 0, 2, 10));
+        assert_eq!(extract_text(&s, &screen), "hello");
+    }
+
+    #[test]
+    fn extract_across_rows_joins_with_newline() {
+        let screen = screen_from(2, 10, &["abc", "def"]);
+        let mut s = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
+        s.extend(1, 2, Rect::new(0, 0, 2, 10));
+        let txt = extract_text(&s, &screen);
+        assert!(txt.starts_with("abc"));
+        assert!(txt.contains('\n'));
+        assert!(txt.ends_with("def"));
     }
 }
