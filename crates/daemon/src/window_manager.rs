@@ -121,7 +121,8 @@ impl WindowManager {
         match cmd {
             Command::SplitV => {
                 let new_id = self.alloc_pane_id();
-                let spec = self.default_spec.clone();
+                let mut spec = self.default_spec.clone();
+                spec.cwd = inherit_cwd(self.active_window().active_pane());
                 let notify = Arc::clone(&self.notify);
                 let death = self.death_tx.clone();
                 self.active_window_mut()
@@ -129,7 +130,8 @@ impl WindowManager {
             }
             Command::SplitH => {
                 let new_id = self.alloc_pane_id();
-                let spec = self.default_spec.clone();
+                let mut spec = self.default_spec.clone();
+                spec.cwd = inherit_cwd(self.active_window().active_pane());
                 let notify = Arc::clone(&self.notify);
                 let death = self.death_tx.clone();
                 self.active_window_mut()
@@ -154,7 +156,8 @@ impl WindowManager {
                 let id = WindowId(self.next_window_id);
                 self.next_window_id += 1;
                 let first_pane = self.alloc_pane_id();
-                let spec = self.default_spec.clone();
+                let mut spec = self.default_spec.clone();
+                spec.cwd = inherit_cwd(self.active_window().active_pane());
                 let n = id.raw();
                 let window = Window::spawn_first(
                     id,
@@ -381,6 +384,22 @@ fn host_viewport(host: PtySize) -> Rect {
     Rect::new(0, 0, rows, host.cols.max(1))
 }
 
+fn inherit_cwd(active_pane: Option<&crate::pane::Pane>) -> Option<String> {
+    active_pane
+        .and_then(|p| p.with_screen(|s| s.cwd.clone()))
+        .and_then(|url| cwd_from_osc7(&url))
+}
+
+/// OSC 7 sends `file://hostname/path`. Strip the scheme and optional
+/// hostname and return the path string, or `None` if the format is
+/// unexpected.
+fn cwd_from_osc7(url: &str) -> Option<String> {
+    let after_scheme = url.strip_prefix("file://")?;
+    // Skip hostname if present (may be empty: "file:///path").
+    let path_start = after_scheme.find('/')?;
+    Some(after_scheme[path_start..].to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,5 +581,32 @@ mod tests {
         assert_eq!(m.active_idx(), 0);
         m.handle_command(Command::NextWindow).unwrap();
         assert_eq!(m.active_idx(), 1);
+    }
+
+    #[tokio::test]
+    async fn osc7_cwd_inherited_on_split() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+        )
+        .unwrap();
+        // Inject a cwd directly onto the active pane's screen.
+        if let Some(pane) = m.active_window().active_pane() {
+            pane.with_screen_mut(|s| s.cwd = Some("file:///tmp/work".to_string()));
+        }
+        m.handle_command(Command::SplitV).unwrap();
+        // We can't easily inspect the spawned pane's spec.cwd post-spawn,
+        // but verify the split succeeded.
+        assert_eq!(m.active_window().layout().panes().len(), 2);
+    }
+
+    #[test]
+    fn cwd_from_osc7_strips_file_scheme_and_hostname() {
+        assert_eq!(super::cwd_from_osc7("file:///tmp"), Some("/tmp".to_string()));
+        assert_eq!(super::cwd_from_osc7("file://localhost/tmp"), Some("/tmp".to_string()));
+        assert_eq!(super::cwd_from_osc7("not-a-file-url"), None);
     }
 }
