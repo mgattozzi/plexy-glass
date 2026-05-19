@@ -4,10 +4,106 @@ use crate::{error::DaemonError, window_manager::WindowManager};
 use plexy_glass_mux::{PaneId, VirtualScreen};
 use plexy_glass_protocol::{ProtocolError, PtySize, SessionEntry, SpawnSpec};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::SystemTime;
 use tokio::sync::{mpsc, watch, Mutex, Notify};
 use tokio::task::JoinHandle;
+
+async fn render_coordinator(session: Arc<Session>) {
+    use plexy_glass_emulator::Screen;
+    use plexy_glass_mux::{Compositor, PaneView, StatusLine, WindowEntry};
+    use std::time::Duration;
+    const DEBOUNCE: Duration = Duration::from_millis(16);
+
+    loop {
+        session.notify.notified().await;
+        // Debounce a few notifications.
+        let n = Arc::clone(&session.notify);
+        let _ = tokio::time::timeout(DEBOUNCE, async move {
+            loop {
+                n.notified().await;
+            }
+        })
+        .await;
+
+        let attached = session.clients.lock().await.len() as u8;
+        let frame = {
+            let m = session.window_manager.lock().await;
+            if m.is_empty() {
+                let host = m.host_size();
+                let virt = build_session_end_frame(host);
+                let _ = session.frame_tx.send(Arc::new(virt));
+                break;
+            }
+            let host = m.host_size();
+            let viewport = m.viewport();
+            let win = m.active_window();
+            let layout = win.layout();
+            let active_id = win.active();
+
+            let pane_ids = layout.panes();
+            let mut owned: Vec<(
+                plexy_glass_mux::PaneId,
+                plexy_glass_mux::Rect,
+                Screen,
+                bool,
+                u32,
+            )> = Vec::with_capacity(pane_ids.len());
+            for id in pane_ids {
+                if let Some(pane) = win.pane(id) {
+                    let rect = match layout.rect_of(id, viewport) {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    let screen = pane.with_screen(|s| s.clone());
+                    let scroll = pane.scroll_offset();
+                    owned.push((id, rect, screen, id == active_id, scroll));
+                }
+            }
+            let views: Vec<PaneView> = owned
+                .iter()
+                .map(|(id, rect, screen, active, scroll)| PaneView {
+                    id: *id,
+                    rect: *rect,
+                    screen,
+                    is_active: *active,
+                    scroll_offset: *scroll,
+                })
+                .collect();
+
+            let windows: Vec<WindowEntry> = m
+                .windows()
+                .iter()
+                .enumerate()
+                .map(|(i, w)| WindowEntry {
+                    id: w.id,
+                    name: w.name.clone(),
+                    active: i == m.active_idx(),
+                })
+                .collect();
+            let status = StatusLine {
+                windows,
+                prefix_active: false, // per-client; the session can't know, a Phase 5 papercut
+                session_name: session.name.clone(),
+                attached_clients: attached,
+            };
+            let selection = m.selection().cloned();
+
+            Compositor::compose(
+                &views,
+                (host.rows, host.cols),
+                Some(&status),
+                selection.as_ref(),
+            )
+        };
+        let _ = session.frame_tx.send(Arc::new(frame));
+    }
+    session.closing.store(true, Ordering::SeqCst);
+}
+
+fn build_session_end_frame(host: PtySize) -> plexy_glass_mux::VirtualScreen {
+    plexy_glass_mux::VirtualScreen::blank(host.rows, host.cols)
+}
 
 pub struct ClientHandle {
     pub client_id: u64,
@@ -25,9 +121,7 @@ pub struct Session {
     pub death_tx: mpsc::Sender<PaneId>,
     pub closing: AtomicBool,
     next_client_id: AtomicU64,
-    // Task 7 will take the coordinator handle; unused skeleton until then.
-    #[allow(dead_code)]
-    coordinator_handle: Mutex<Option<JoinHandle<()>>>,
+    coordinator_handle: StdMutex<Option<JoinHandle<()>>>,
     /// Holds the death channel receiver until Task 13 wires up the consumer.
     pub pending_death_rx: Mutex<Option<mpsc::Receiver<PaneId>>>,
 }
@@ -58,10 +152,12 @@ impl Session {
             death_tx,
             closing: AtomicBool::new(false),
             next_client_id: AtomicU64::new(0),
-            coordinator_handle: Mutex::new(None),
+            coordinator_handle: StdMutex::new(None),
             pending_death_rx: Mutex::new(Some(death_rx)),
         });
-        // Coordinator task is spawned in Task 7. For now, no-op.
+        let coord_handle = tokio::spawn(render_coordinator(Arc::clone(&session)));
+        // invariant: no other thread holds coordinator_handle at construction time
+        *session.coordinator_handle.lock().expect("coordinator lock poisoned") = Some(coord_handle);
         // Death channel handling is wired in Task 13.
         Ok(session)
     }
@@ -298,5 +394,18 @@ mod tests {
         let result =
             tokio::task::spawn_blocking(move || s2.register_client(size())).await.unwrap();
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn coordinator_publishes_initial_frame() {
+        let s = Session::new("test".into(), spec(), size()).unwrap();
+        let mut rx = s.frame_tx.subscribe();
+        s.notify.notify_one();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            rx.changed(),
+        )
+        .await;
+        assert!(result.is_ok(), "expected a frame within 1s");
     }
 }
