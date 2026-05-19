@@ -4,6 +4,7 @@ pub mod args;
 pub mod connection;
 pub mod error;
 pub mod listener;
+pub mod osc_actions;
 pub mod pane;
 pub mod paths;
 pub mod renderer;
