@@ -130,6 +130,45 @@ impl Session {
         PtySize { rows, cols, pixel_width: pw, pixel_height: ph }
     }
 
+    pub async fn handle_input_bytes(&self, bytes: &[u8]) -> Result<(), DaemonError> {
+        let manager = self.window_manager.lock().await;
+        if let Some(pane) = manager.active_window().active_pane() {
+            pane.send_input(bytes::Bytes::copy_from_slice(bytes)).await.ok();
+        }
+        drop(manager);
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    pub async fn handle_command(&self, cmd: plexy_glass_mux::Command) -> Result<(), DaemonError> {
+        let mut manager = self.window_manager.lock().await;
+        manager.handle_command(cmd)?;
+        drop(manager);
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    pub async fn handle_mouse(
+        &self,
+        event: plexy_glass_mux::MouseEvent,
+    ) -> Result<(), DaemonError> {
+        let mut manager = self.window_manager.lock().await;
+        manager.handle_mouse(event).await?;
+        drop(manager);
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    pub fn handle_resize(&self, client_id: u64, new_size: PtySize) {
+        {
+            let mut clients = self.clients.blocking_lock();
+            if let Some(c) = clients.iter_mut().find(|c| c.client_id == client_id) {
+                c.size = new_size;
+            }
+        }
+        self.recompute_size_and_notify();
+    }
+
     fn recompute_size_and_notify(&self) {
         let new_size = self.effective_size();
         let mut m = self.window_manager.blocking_lock();
@@ -224,6 +263,31 @@ mod tests {
         let s2 = Arc::clone(&s);
         let cid_a = a.client_id;
         tokio::task::spawn_blocking(move || s2.deregister_client(cid_a)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_input_bytes_sends_to_active_pane() {
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let s = Session::new("test".into(), spec, size()).unwrap();
+        s.handle_input_bytes(b"hello\n").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let m = s.window_manager.lock().await;
+        let pane = m.active_window().active_pane().unwrap();
+        let saw = pane.with_screen(|screen| {
+            (0..screen.active.num_cols())
+                .filter_map(|c| {
+                    screen.active.get_cell(0, c).map(|cell| cell.grapheme.as_str().to_string())
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        });
+        assert!(saw.contains("hello"), "expected 'hello' in active grid; got {saw:?}");
+        let _ = pane.send_input(bytes::Bytes::from_static(&[0x04])).await;
     }
 
     #[tokio::test]
