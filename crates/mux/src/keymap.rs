@@ -211,4 +211,13 @@ mod tests {
         k.consume(b'v');
         assert!(!k.prefix_active());
     }
+
+    #[test]
+    fn ctrl_a_d_emits_detach() {
+        let mut k = Keymap::default_tmux();
+        let a = k.consume(0x01);
+        assert!(matches!(a, KeymapAction::Consumed));
+        let b = k.consume(b'd');
+        assert!(matches!(b, KeymapAction::Command(Command::Detach)), "got {b:?}");
+    }
 }
