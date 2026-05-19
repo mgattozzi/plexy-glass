@@ -13,8 +13,10 @@ pub enum DaemonError {
     },
     #[error("socket path {path} is owned by a different user; refusing to clobber")]
     SocketOwnedByOtherUser { path: std::path::PathBuf },
+    #[error("codec: {0}")]
+    Codec(#[from] plexy_glass_protocol::errors::CodecError),
     #[error("protocol: {0}")]
-    Protocol(#[from] plexy_glass_protocol::errors::CodecError),
+    Protocol(#[from] plexy_glass_protocol::ProtocolError),
     #[error("handshake: {0}")]
     Handshake(#[from] plexy_glass_protocol::HandshakeError),
     #[error("not yet implemented")]

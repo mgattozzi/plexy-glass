@@ -2,8 +2,8 @@
 
 use crate::{error::DaemonError, window_manager::WindowManager};
 use plexy_glass_mux::{PaneId, VirtualScreen};
-use plexy_glass_protocol::{PtySize, SessionEntry, SpawnSpec};
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use plexy_glass_protocol::{ProtocolError, PtySize, SessionEntry, SpawnSpec};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{mpsc, watch, Mutex, Notify};
@@ -24,8 +24,6 @@ pub struct Session {
     pub frame_tx: watch::Sender<Arc<VirtualScreen>>,
     pub death_tx: mpsc::Sender<PaneId>,
     pub closing: AtomicBool,
-    // Task 7 will read `next_client_id` when issuing client IDs.
-    #[allow(dead_code)]
     next_client_id: AtomicU64,
     // Task 7 will take the coordinator handle; unused skeleton until then.
     #[allow(dead_code)]
@@ -85,6 +83,62 @@ impl Session {
             created: self.created,
         }
     }
+
+    pub fn register_client(self: &Arc<Self>, size: PtySize) -> Result<ClientHandle, DaemonError> {
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(DaemonError::Protocol(ProtocolError::SessionNotFound {
+                name: self.name.clone(),
+            }));
+        }
+        let client_id = self.next_client_id.fetch_add(1, Ordering::SeqCst);
+        let frame_rx_for_caller = self.frame_tx.subscribe();
+        let frame_rx_for_session = self.frame_tx.subscribe();
+        {
+            let mut clients = self.clients.blocking_lock();
+            clients.push(ClientHandle {
+                client_id,
+                size,
+                frame_rx: frame_rx_for_session,
+            });
+        }
+        self.recompute_size_and_notify();
+        Ok(ClientHandle {
+            client_id,
+            size,
+            frame_rx: frame_rx_for_caller,
+        })
+    }
+
+    pub fn deregister_client(&self, client_id: u64) {
+        {
+            let mut clients = self.clients.blocking_lock();
+            clients.retain(|c| c.client_id != client_id);
+        }
+        self.recompute_size_and_notify();
+    }
+
+    pub fn effective_size(&self) -> PtySize {
+        let clients = self.clients.blocking_lock();
+        if clients.is_empty() {
+            let m = self.window_manager.blocking_lock();
+            return m.host_size();
+        }
+        let rows = clients.iter().map(|c| c.size.rows).min().unwrap_or(1);
+        let cols = clients.iter().map(|c| c.size.cols).min().unwrap_or(1);
+        let pw = clients.iter().map(|c| c.size.pixel_width).min().unwrap_or(0);
+        let ph = clients.iter().map(|c| c.size.pixel_height).min().unwrap_or(0);
+        PtySize { rows, cols, pixel_width: pw, pixel_height: ph }
+    }
+
+    fn recompute_size_and_notify(&self) {
+        let new_size = self.effective_size();
+        let mut m = self.window_manager.blocking_lock();
+        if m.host_size() != new_size {
+            let _ = m.on_host_resize(new_size);
+        }
+        drop(m);
+        self.notify.notify_one();
+    }
 }
 
 #[cfg(test)]
@@ -121,5 +175,64 @@ mod tests {
         assert_eq!(entry.windows, 1);
         assert_eq!(entry.panes, 1);
         assert_eq!(entry.clients, 0);
+    }
+
+    #[tokio::test]
+    async fn register_then_effective_size_matches_single_client() {
+        let s = Session::new("main".into(), spec(), size()).unwrap();
+        let s2 = Arc::clone(&s);
+        let h = tokio::task::spawn_blocking(move || {
+            s2.register_client(PtySize { rows: 10, cols: 30, pixel_width: 0, pixel_height: 0 })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let s2 = Arc::clone(&s);
+        let eff = tokio::task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+        assert_eq!((eff.rows, eff.cols), (10, 30));
+        let s2 = Arc::clone(&s);
+        let cid = h.client_id;
+        tokio::task::spawn_blocking(move || s2.deregister_client(cid)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn smallest_client_wins() {
+        let s = Session::new("main".into(), spec(), size()).unwrap();
+        let s2 = Arc::clone(&s);
+        let a = tokio::task::spawn_blocking(move || {
+            s2.register_client(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let s2 = Arc::clone(&s);
+        let b = tokio::task::spawn_blocking(move || {
+            s2.register_client(PtySize { rows: 10, cols: 30, pixel_width: 0, pixel_height: 0 })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let s2 = Arc::clone(&s);
+        let eff = tokio::task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+        assert_eq!((eff.rows, eff.cols), (10, 30));
+        let s2 = Arc::clone(&s);
+        let cid_b = b.client_id;
+        tokio::task::spawn_blocking(move || s2.deregister_client(cid_b)).await.unwrap();
+        let s2 = Arc::clone(&s);
+        let eff2 = tokio::task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+        assert_eq!((eff2.rows, eff2.cols), (24, 80));
+        let s2 = Arc::clone(&s);
+        let cid_a = a.client_id;
+        tokio::task::spawn_blocking(move || s2.deregister_client(cid_a)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn closing_session_refuses_register() {
+        let s = Session::new("main".into(), spec(), size()).unwrap();
+        s.closing.store(true, Ordering::SeqCst);
+        let s2 = Arc::clone(&s);
+        let result =
+            tokio::task::spawn_blocking(move || s2.register_client(size())).await.unwrap();
+        assert!(result.is_err());
     }
 }
