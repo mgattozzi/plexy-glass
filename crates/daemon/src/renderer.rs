@@ -125,6 +125,7 @@ impl Renderer {
                     rect: *rect,
                     screen,
                     is_active: *active,
+                    scroll_offset: 0,
                 })
                 .collect();
 

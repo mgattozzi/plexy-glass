@@ -15,6 +15,9 @@ pub struct PaneView<'a> {
     pub rect: Rect,
     pub screen: &'a Screen,
     pub is_active: bool,
+    /// 0 = follow the live screen. N > 0 = show N rows of scrollback above
+    /// the active grid; the bottom rows of the active grid are clipped.
+    pub scroll_offset: u32,
 }
 
 pub struct Compositor;
@@ -37,19 +40,51 @@ impl Compositor {
             host_rows
         };
 
-        // Copy each pane's emulator cells into its rect.
+        // Copy each pane's emulator cells into its rect, mixing in scrollback
+        // when scroll_offset > 0.
         for view in panes {
-            let max_r = view.rect.rows.min(view.screen.active.num_rows());
+            let max_r = view.rect.rows;
             let max_c = view.rect.cols.min(view.screen.active.num_cols());
             for r in 0..max_r {
+                if view.rect.row.saturating_add(r) >= pane_area_rows {
+                    continue;
+                }
+                let cells_src: Option<&[plexy_glass_emulator::Cell]> =
+                    if view.scroll_offset > 0 {
+                        let scroll_len = view.screen.scrollback.len() as u32;
+                        let want_from_scrollback = view.scroll_offset.min(scroll_len);
+                        if (r as u32) < want_from_scrollback {
+                            // This row comes from scrollback.
+                            let sb_idx =
+                                (scroll_len - want_from_scrollback + r as u32) as usize;
+                            view.screen
+                                .scrollback
+                                .iter()
+                                .nth(sb_idx)
+                                .map(|row| row.cells.as_slice())
+                        } else {
+                            // This row comes from the active grid (offset by the
+                            // number of scrollback rows shown above).
+                            let active_r = r - want_from_scrollback as u16;
+                            view.screen
+                                .active
+                                .rows
+                                .get(active_r as usize)
+                                .map(|row| row.cells.as_slice())
+                        }
+                    } else {
+                        view.screen
+                            .active
+                            .rows
+                            .get(r as usize)
+                            .map(|row| row.cells.as_slice())
+                    };
+                let Some(cells) = cells_src else { continue };
                 for c in 0..max_c {
-                    if view.rect.row.saturating_add(r) >= pane_area_rows {
-                        continue;
-                    }
                     if view.rect.col.saturating_add(c) >= host_cols {
                         continue;
                     }
-                    if let Some(cell) = view.screen.active.get_cell(r, c) {
+                    if let Some(cell) = cells.get(c as usize) {
                         screen.put(
                             view.rect.row.saturating_add(r),
                             view.rect.col.saturating_add(c),
@@ -131,6 +166,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 6),
             screen: e.screen(),
             is_active: true,
+            scroll_offset: 0,
         };
         let vs = Compositor::compose(&[view], (4, 6), None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
@@ -148,6 +184,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 6),
             screen: e.screen(),
             is_active: true,
+            scroll_offset: 0,
         };
         let mut sel = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
         sel.extend(0, 4, Rect::new(0, 0, 4, 6));
@@ -176,17 +213,48 @@ mod tests {
             rect: Rect::new(0, 0, 4, 3),
             screen: left.screen(),
             is_active: false,
+            scroll_offset: 0,
         };
         let rv = PaneView {
             id: PaneId(1),
             rect: Rect::new(0, 4, 4, 3),
             screen: right.screen(),
             is_active: true,
+            scroll_offset: 0,
         };
         let vs = Compositor::compose(&[lv, rv], (4, 7), None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "L");
         assert_eq!(vs.cell(0, 4).unwrap().grapheme.as_str(), "R");
         // Border column.
         assert_eq!(vs.cell(0, 3).unwrap().grapheme.as_str(), "│");
+    }
+
+    #[test]
+    fn scroll_offset_pulls_rows_from_scrollback() {
+        // Use \r\n so the cursor returns to column 0 on each line, producing
+        // clean full-width rows in scrollback rather than partial overwrites.
+        let mut e = Emulator::new(2, 4);
+        e.advance(b"AAAA\r\nBBBB\r\nCCCC\r\nDDDD");
+        // Flush any pending grapheme.
+        e.advance(b"\x1b[m");
+        // After "AAAA\r\nBBBB\r\nCCCC\r\nDDDD" on a 2-row screen:
+        //   scrollback = [AAAA, BBBB], active = [CCCC, DDDD]
+        // scroll_offset=1 shows the last scrollback row (BBBB) at row 0
+        // and the first active row (CCCC) at row 1.
+        let s = e.screen().clone();
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 2, 4),
+            screen: &s,
+            is_active: true,
+            scroll_offset: 1,
+        };
+        let vs = Compositor::compose(&[view], (2, 4), None, None);
+        // Row 0 should be the last scrollback row (BBBB), not CCCC.
+        let r0: String = (0..4)
+            .map(|c| vs.cell(0, c).unwrap().grapheme.as_str().to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(r0, "BBBB", "expected BBBB at top; got {r0}");
     }
 }
