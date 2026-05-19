@@ -61,6 +61,7 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
 
     let listener = Listener::bind(paths)?;
     let daemon_pid = std::process::id();
+    let registry = std::sync::Arc::new(SessionRegistry::new());
 
     info!(foreground = args.foreground, "daemon ready, entering accept loop");
     loop {
@@ -71,8 +72,9 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
                 continue;
             }
         };
+        let registry = std::sync::Arc::clone(&registry);
         tokio::spawn(async move {
-            if let Err(e) = Connection::serve(stream, daemon_pid).await {
+            if let Err(e) = Connection::serve(stream, daemon_pid, registry).await {
                 error!(error = %e, "connection ended with error");
             }
         });

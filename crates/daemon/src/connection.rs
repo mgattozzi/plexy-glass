@@ -18,7 +18,11 @@ use tokio::sync::{Mutex, Notify, mpsc};
 pub struct Connection;
 
 impl Connection {
-    pub async fn serve<S>(stream: S, daemon_pid: u32) -> Result<(), DaemonError>
+    pub async fn serve<S>(
+        stream: S,
+        daemon_pid: u32,
+        _registry: Arc<crate::SessionRegistry>,
+    ) -> Result<(), DaemonError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -188,7 +192,9 @@ mod tests {
     #[tokio::test]
     async fn end_to_end_renders_then_exits() {
         let (server_side, client_side) = duplex(64 * 1024);
-        let server = tokio::spawn(async move { Connection::serve(server_side, 7).await });
+        let server = tokio::spawn(async move {
+            Connection::serve(server_side, 7, Arc::new(crate::SessionRegistry::new())).await
+        });
 
         let (mut cr, mut cw) = tokio::io::split(client_side);
         let server_hello = client_handshake(&mut cr, &mut cw).await.unwrap();
