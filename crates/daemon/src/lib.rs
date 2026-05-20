@@ -59,6 +59,12 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
         Some(guard)
     };
 
+    let (config, cfg_err) = plexy_glass_config::load_or_default();
+    if let Some(e) = cfg_err {
+        tracing::warn!(error = %e, "config load error; using built-in default");
+    }
+    let config = std::sync::Arc::new(config);
+
     let listener = Listener::bind(paths)?;
     let daemon_pid = std::process::id();
     let registry = std::sync::Arc::new(SessionRegistry::new());
@@ -73,8 +79,9 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
             }
         };
         let registry = std::sync::Arc::clone(&registry);
+        let config = std::sync::Arc::clone(&config);
         tokio::spawn(async move {
-            if let Err(e) = Connection::serve(stream, daemon_pid, registry).await {
+            if let Err(e) = Connection::serve(stream, daemon_pid, registry, config).await {
                 error!(error = %e, "connection ended with error");
             }
         });

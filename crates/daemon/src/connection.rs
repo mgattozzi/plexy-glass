@@ -19,6 +19,7 @@ impl Connection {
         stream: S,
         daemon_pid: u32,
         registry: Arc<SessionRegistry>,
+        config: Arc<plexy_glass_config::Config>,
     ) -> Result<(), DaemonError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -46,7 +47,8 @@ impl Connection {
                 Err(e) => Err(e),
             },
             ClientMsg::AttachOrCreate { name, create_if_missing, cmd, size } => {
-                serve_attach(reader, writer, registry, name, create_if_missing, cmd, size).await
+                serve_attach(reader, writer, registry, name, create_if_missing, cmd, size, config)
+                    .await
             }
             other => {
                 send_msg(
@@ -79,6 +81,7 @@ async fn serve_attach<R, W>(
     create_if_missing: bool,
     cmd: Option<SpawnSpec>,
     size: PtySize,
+    config: Arc<plexy_glass_config::Config>,
 ) -> Result<(), DaemonError>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -90,7 +93,7 @@ where
             Some(s) => s,
             None if create_if_missing => {
                 let spec = cmd.unwrap_or_else(default_spawn_spec);
-                let cfg = Arc::new(plexy_glass_config::built_in_default());
+                let cfg = Arc::clone(&config);
                 match registry.create(n.clone(), spec, size, cfg).await {
                     Ok(s) => s,
                     Err(DaemonError::Protocol(perr)) => {
@@ -113,7 +116,7 @@ where
             match entries.len() {
                 0 => {
                     let spec = cmd.unwrap_or_else(default_spawn_spec);
-                    let cfg = Arc::new(plexy_glass_config::built_in_default());
+                    let cfg = Arc::clone(&config);
                     match registry.create("main".into(), spec, size, cfg).await {
                         Ok(s) => s,
                         Err(DaemonError::Protocol(perr)) => {
@@ -293,7 +296,13 @@ mod tests {
     async fn end_to_end_attach_renders_then_exits() {
         let (server_side, client_side) = duplex(64 * 1024);
         let server = tokio::spawn(async move {
-            Connection::serve(server_side, 7, Arc::new(crate::SessionRegistry::new())).await
+            Connection::serve(
+                server_side,
+                7,
+                Arc::new(crate::SessionRegistry::new()),
+                Arc::new(plexy_glass_config::built_in_default()),
+            )
+            .await
         });
 
         let (mut cr, mut cw) = tokio::io::split(client_side);
