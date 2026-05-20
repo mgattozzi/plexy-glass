@@ -5,7 +5,7 @@ mod load;
 mod types;
 
 pub use default::{built_in_default, kanagawa_dragon_palette};
-pub use load::{load_or_default, ConfigError};
+pub use load::{load_or_default, load_from_path, ConfigError};
 pub use types::{
     Config, PaletteConfig, Padding, Position, StatusConfig, StyleConfig, WidgetSpec,
 };
