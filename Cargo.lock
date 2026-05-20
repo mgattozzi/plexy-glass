@@ -865,6 +865,7 @@ dependencies = [
 name = "plexy-glass-mux"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.11.1",
  "plexy-glass-emulator",
  "plexy-glass-status",
  "smol_str",

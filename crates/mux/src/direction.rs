@@ -1,7 +1,7 @@
 //! Direction (Up/Down/Left/Right) for neighbor traversal and SplitDir for
 //! arranging children in a Split.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
     Up,
     Down,
