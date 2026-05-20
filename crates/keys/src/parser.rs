@@ -167,6 +167,20 @@ impl KeyParser {
             (b'F', []) => Some(KeyEvent::plain(Key::End)),
             (b'~', [n]) => key_from_tilde(*n).map(KeyEvent::plain),
             (b'Z', []) => Some(KeyEvent::new(Key::Tab, Modifiers::SHIFT)),
+            // Modified arrows / Home / End: CSI 1 ; <mods> <final>
+            (b'A', [1, m]) => Some(KeyEvent::new(Key::Arrow(Direction::Up),    decode_xterm_mods(*m))),
+            (b'B', [1, m]) => Some(KeyEvent::new(Key::Arrow(Direction::Down),  decode_xterm_mods(*m))),
+            (b'C', [1, m]) => Some(KeyEvent::new(Key::Arrow(Direction::Right), decode_xterm_mods(*m))),
+            (b'D', [1, m]) => Some(KeyEvent::new(Key::Arrow(Direction::Left),  decode_xterm_mods(*m))),
+            (b'H', [1, m]) => Some(KeyEvent::new(Key::Home, decode_xterm_mods(*m))),
+            (b'F', [1, m]) => Some(KeyEvent::new(Key::End,  decode_xterm_mods(*m))),
+            // F1-F4 with modifiers: CSI 1 ; <mods> P/Q/R/S
+            (b'P', [1, m]) => Some(KeyEvent::new(Key::Function(1), decode_xterm_mods(*m))),
+            (b'Q', [1, m]) => Some(KeyEvent::new(Key::Function(2), decode_xterm_mods(*m))),
+            (b'R', [1, m]) => Some(KeyEvent::new(Key::Function(3), decode_xterm_mods(*m))),
+            (b'S', [1, m]) => Some(KeyEvent::new(Key::Function(4), decode_xterm_mods(*m))),
+            // Modified tilde keys: CSI <n> ; <mods> ~
+            (b'~', [n, m]) => key_from_tilde(*n).map(|k| KeyEvent::new(k, decode_xterm_mods(*m))),
             _ => None,
         };
         match event_opt {
@@ -199,6 +213,26 @@ impl KeyParser {
         self.params.clear();
         self.current_param = None;
     }
+}
+
+fn decode_xterm_mods(raw: u32) -> Modifiers {
+    // xterm modifier param = 1 + bitmap, where the bitmap is:
+    //   bit 0 = Shift, bit 1 = Alt, bit 2 = Ctrl, bit 3 = Super
+    let bits = raw.saturating_sub(1);
+    let mut mods = Modifiers::empty();
+    if bits & 0b0001 != 0 {
+        mods |= Modifiers::SHIFT;
+    }
+    if bits & 0b0010 != 0 {
+        mods |= Modifiers::ALT;
+    }
+    if bits & 0b0100 != 0 {
+        mods |= Modifiers::CTRL;
+    }
+    if bits & 0b1000 != 0 {
+        mods |= Modifiers::SUPER;
+    }
+    mods
 }
 
 fn key_from_tilde(n: u32) -> Option<Key> {
@@ -361,5 +395,47 @@ mod tests {
             KeyParseOutput::Bytes(bs) => assert_eq!(bs.as_slice(), b"\x1b[Q"),
             _ => panic!("expected Bytes, got {last:?}"),
         }
+    }
+
+    #[test]
+    fn csi_ctrl_left() {
+        let e = last_event(b"\x1b[1;5D");
+        assert_eq!(e.key, Key::Arrow(Direction::Left));
+        assert_eq!(e.mods, Modifiers::CTRL);
+    }
+
+    #[test]
+    fn csi_shift_alt_up() {
+        let e = last_event(b"\x1b[1;4A");
+        assert_eq!(e.key, Key::Arrow(Direction::Up));
+        assert_eq!(e.mods, Modifiers::SHIFT | Modifiers::ALT);
+    }
+
+    #[test]
+    fn csi_ctrl_alt_shift_right() {
+        let e = last_event(b"\x1b[1;8C");
+        assert_eq!(e.key, Key::Arrow(Direction::Right));
+        assert_eq!(e.mods, Modifiers::CTRL | Modifiers::ALT | Modifiers::SHIFT);
+    }
+
+    #[test]
+    fn csi_modified_f1() {
+        let e = last_event(b"\x1b[1;5P");
+        assert_eq!(e.key, Key::Function(1));
+        assert_eq!(e.mods, Modifiers::CTRL);
+    }
+
+    #[test]
+    fn csi_modified_pageup() {
+        let e = last_event(b"\x1b[5;5~");
+        assert_eq!(e.key, Key::PageUp);
+        assert_eq!(e.mods, Modifiers::CTRL);
+    }
+
+    #[test]
+    fn csi_modified_delete() {
+        let e = last_event(b"\x1b[3;3~");
+        assert_eq!(e.key, Key::Delete);
+        assert_eq!(e.mods, Modifiers::ALT);
     }
 }
