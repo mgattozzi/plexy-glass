@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/daemon", "crates/client", "crates/emulator", "crates/mux"]
+members = ["crates/protocol", "crates/daemon", "crates/client", "crates/config", "crates/emulator", "crates/mux"]
 
 [package]
 name = "plexy-glass"
@@ -33,6 +33,8 @@ serde = { version = "1.0.228", features = ["derive"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 bytes = { version = "1.11", features = ["serde"] }
 thiserror = "2.0"
+toml = "1.1.2"
+humantime-serde = "1.1.1"
 anyhow = "1.0.102"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
