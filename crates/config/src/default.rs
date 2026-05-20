@@ -2,15 +2,30 @@ use crate::{Config, PaletteConfig, Padding, Position, StatusConfig, StyleConfig,
 use std::time::Duration;
 
 pub fn kanagawa_dragon_palette() -> PaletteConfig {
+    // Mirrors the upstream tmux-kanagawa "dragon" mapping
+    // (themes/kanagawa/dragon.sh + palette.sh):
+    //   text       -> old_white       (#c8c093)
+    //   bg_pane    -> dragon_black_2  (#1D1C19)  -- used as our `bg`
+    //   bg_bar     -> dragon_black_4  (#282727)
+    //   accent     -> dragon_ash      (#737c73)
+    //   highlight  -> dragon_orange   (#b6927b)
+    //   selection  -> dragon_black_5  (#393836)
+    //   info       -> dragon_teal     (#949fb5)
+    //   notice     -> dragon_yellow   (#c4b28a)  -- our `warn`
+    //   error      -> dragon_red      (#c4746e)  -- our `alert`
+    //   muted      -> dragon_orange   (#b6927b)
     let entries = [
-        ("bg", "#181616"),
-        ("bg_bar", "#0d0c0c"),
-        ("fg", "#c5c9c5"),
-        ("accent", "#8ba4b0"),
+        ("bg", "#1D1C19"),
+        ("bg_bar", "#282727"),
+        ("fg", "#c8c093"),
+        ("accent", "#737c73"),
+        ("highlight", "#b6927b"),
+        ("selection", "#393836"),
+        ("info", "#949fb5"),
         ("alert", "#c4746e"),
-        ("muted", "#625e5a"),
-        ("ok", "#8a9a7b"),
         ("warn", "#c4b28a"),
+        ("muted", "#b6927b"),
+        ("ok", "#87a987"),
     ]
     .iter()
     .map(|(k, v)| ((*k).to_string(), (*v).to_string()))

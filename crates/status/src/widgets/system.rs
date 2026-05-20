@@ -83,16 +83,15 @@ impl Widget for BatteryWidget {
         let pct = b
             .state_of_charge()
             .get::<battery::units::ratio::percent>();
-        let icon = match b.state() {
-            battery::State::Charging => "⚡",
-            battery::State::Discharging
-            | battery::State::Empty
-            | battery::State::Full
-            | battery::State::Unknown => "🔋",
-            // invariant: __Nonexhaustive is a hidden doc variant that can never be constructed
-            _ => "🔋",
+        // Plain ASCII prefix. The compositor's status painter walks chars
+        // 1:1 against terminal cells and doesn't reserve a spacer for
+        // wide characters, so a "🔋" or "⚡" here would garble subsequent
+        // cells in the right zone.
+        let prefix = match b.state() {
+            battery::State::Charging => "+",
+            _ => "",
         };
-        let text = format!("{icon}{pct:.0}%");
+        let text = format!("{prefix}BAT {pct:.0}%");
         StyledText::single(SmolStr::new(text), self.style)
     }
 }

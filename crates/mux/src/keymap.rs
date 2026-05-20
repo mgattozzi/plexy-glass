@@ -75,8 +75,9 @@ impl Keymap {
         bindings.insert(b'p', Command::PrevWindow);
         bindings.insert(b'&', Command::KillWindow);
         bindings.insert(b'd', Command::Detach);
-        for digit in 0..10u8 {
-            bindings.insert(b'0' + digit, Command::SelectWindow(digit));
+        // tmux convention: prefix + 1..9 selects window 0..8 (1-indexed display).
+        for digit in 1..10u8 {
+            bindings.insert(b'0' + digit, Command::SelectWindow(digit - 1));
         }
         Self {
             prefix: 0x01, // Ctrl-a (from user's tmux.conf)
@@ -196,10 +197,26 @@ mod tests {
     }
 
     #[test]
-    fn digits_map_to_select_window() {
+    fn digits_map_to_select_window_one_indexed() {
+        let mut k = Keymap::default_tmux();
+        // prefix + 1 -> window 0 (first window).
+        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
+        assert_eq!(k.consume(b'1'), KeymapAction::Command(Command::SelectWindow(0)));
+        // prefix + 3 -> window 2.
+        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
+        assert_eq!(k.consume(b'3'), KeymapAction::Command(Command::SelectWindow(2)));
+    }
+
+    #[test]
+    fn zero_is_not_bound_to_select_window() {
         let mut k = Keymap::default_tmux();
         assert_eq!(k.consume(0x01), KeymapAction::Consumed);
-        assert_eq!(k.consume(b'3'), KeymapAction::Command(Command::SelectWindow(3)));
+        // '0' has no binding under prefix; it leaves prefix mode without firing a command.
+        let action = k.consume(b'0');
+        assert!(
+            !matches!(action, KeymapAction::Command(Command::SelectWindow(_))),
+            "prefix + 0 should not select a window; got {action:?}"
+        );
     }
 
     #[test]
