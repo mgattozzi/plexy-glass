@@ -9,7 +9,10 @@ use std::time::SystemTime;
 use tokio::sync::{mpsc, watch, Mutex, Notify};
 use tokio::task::JoinHandle;
 
-async fn render_coordinator(session: Arc<Session>) {
+async fn render_coordinator(
+    session: Arc<Session>,
+    frame_tx: watch::Sender<Arc<VirtualScreen>>,
+) {
     use plexy_glass_emulator::Screen;
     use plexy_glass_mux::{Compositor, PaneView, StatusLine, WindowEntry};
     use std::time::Duration;
@@ -32,7 +35,7 @@ async fn render_coordinator(session: Arc<Session>) {
             if m.is_empty() {
                 let host = m.host_size();
                 let virt = build_session_end_frame(host);
-                let _ = session.frame_tx.send(Arc::new(virt));
+                let _ = frame_tx.send(Arc::new(virt));
                 break;
             }
             let host = m.host_size();
@@ -96,9 +99,11 @@ async fn render_coordinator(session: Arc<Session>) {
                 selection.as_ref(),
             )
         };
-        let _ = session.frame_tx.send(Arc::new(frame));
+        let _ = frame_tx.send(Arc::new(frame));
     }
     session.closing.store(true, Ordering::SeqCst);
+    // frame_tx drops here; subscribers will see frame_rx.changed() return Err
+    // and exit their loops, which closes their sockets and lets clients restore.
 }
 
 fn build_session_end_frame(host: PtySize) -> plexy_glass_mux::VirtualScreen {
@@ -117,7 +122,10 @@ pub struct Session {
     pub window_manager: Mutex<WindowManager>,
     pub clients: Mutex<Vec<ClientHandle>>,
     pub notify: Arc<Notify>,
-    pub frame_tx: watch::Sender<Arc<VirtualScreen>>,
+    /// Receiver template: clone into a new `ClientHandle`'s `frame_rx`.
+    /// The matching `Sender` lives inside the coordinator task; it drops
+    /// when the coordinator exits, signalling end-of-session to all clients.
+    pub frame_rx_template: watch::Receiver<Arc<VirtualScreen>>,
     pub death_tx: mpsc::Sender<PaneId>,
     pub closing: AtomicBool,
     next_client_id: AtomicU64,
@@ -141,21 +149,21 @@ impl Session {
             Some(death_tx.clone()),
         )?;
         let initial_frame = Arc::new(VirtualScreen::blank(first_size.rows, first_size.cols));
-        let (frame_tx, _) = watch::channel(initial_frame);
+        let (frame_tx, frame_rx_template) = watch::channel(initial_frame);
         let session = Arc::new(Self {
             name,
             created: SystemTime::now(),
             window_manager: Mutex::new(window_manager),
             clients: Mutex::new(Vec::new()),
             notify,
-            frame_tx,
+            frame_rx_template,
             death_tx,
             closing: AtomicBool::new(false),
             next_client_id: AtomicU64::new(0),
             coordinator_handle: StdMutex::new(None),
             pending_death_rx: Mutex::new(Some(death_rx)),
         });
-        let coord_handle = tokio::spawn(render_coordinator(Arc::clone(&session)));
+        let coord_handle = tokio::spawn(render_coordinator(Arc::clone(&session), frame_tx));
         // invariant: no other thread holds coordinator_handle at construction time
         *session.coordinator_handle.lock().expect("coordinator lock poisoned") = Some(coord_handle);
 
@@ -210,8 +218,8 @@ impl Session {
             }));
         }
         let client_id = self.next_client_id.fetch_add(1, Ordering::SeqCst);
-        let frame_rx_for_caller = self.frame_tx.subscribe();
-        let frame_rx_for_session = self.frame_tx.subscribe();
+        let frame_rx_for_caller = self.frame_rx_template.clone();
+        let frame_rx_for_session = self.frame_rx_template.clone();
         {
             let mut clients = self.clients.blocking_lock();
             clients.push(ClientHandle {
@@ -422,7 +430,7 @@ mod tests {
     #[tokio::test]
     async fn coordinator_publishes_initial_frame() {
         let s = Session::new("test".into(), spec(), size()).unwrap();
-        let mut rx = s.frame_tx.subscribe();
+        let mut rx = s.frame_rx_template.clone();
         s.notify.notify_one();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),

@@ -174,7 +174,7 @@ where
     // here on out.
     let frame_rx = handle.frame_rx.clone();
     let renderer = Renderer::new();
-    let renderer_task = tokio::spawn(async move {
+    let mut renderer_task = tokio::spawn(async move {
         let _ = renderer.run(frame_rx, writer).await;
     });
 
@@ -184,10 +184,18 @@ where
     let prefix_active = Arc::new(AtomicBool::new(false));
 
     loop {
-        let frame = match Codec::read_frame(&mut reader).await {
-            Ok(Some(f)) => f,
-            Ok(None) => break,
-            Err(_) => break,
+        let frame = tokio::select! {
+            biased;
+            // Renderer exits when its `frame_rx` is closed, i.e. the session's
+            // coordinator dropped its `frame_tx`. That means the session ended
+            // (last pane exited, or the session was killed). Tear down so the
+            // client process exits and `HostTty::restore` runs.
+            _ = &mut renderer_task => break,
+            result = Codec::read_frame(&mut reader) => match result {
+                Ok(Some(f)) => f,
+                Ok(None) => break,
+                Err(_) => break,
+            },
         };
         let msg: ClientMsg = match postcard::from_bytes(&frame) {
             Ok(m) => m,
