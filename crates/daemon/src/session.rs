@@ -213,14 +213,27 @@ impl Session {
             }
         });
 
-        // Spawn the status tick task. The closure runs synchronously inside the
-        // tick loop and produces an owned `SnapshotCtx` from session state via
-        // `blocking_lock`, which is safe because the tick task runs on the
-        // multi-thread runtime and only briefly holds the locks.
-        let session_for_status = Arc::clone(&session);
+        // Spawn the status tick task. Capture a `Weak<Session>` so the task
+        // doesn't keep the session alive on its own; when the registry
+        // drops the session's last strong `Arc` (`kill -n NAME`), the upgrade
+        // below returns `None` and the closure produces an empty snapshot.
+        // The surrounding tick task will be aborted by `Drop::drop` on
+        // `Session`, but until then a missing session still yields a valid
+        // (if empty) ctx.
+        let session_weak = Arc::downgrade(&session);
         let tick_handle = engine.spawn_tick_task(
             Arc::clone(&session.notify),
-            move || build_snapshot_ctx(&session_for_status),
+            move || match session_weak.upgrade() {
+                Some(s) => build_snapshot_ctx(&s),
+                None => plexy_glass_status::SnapshotCtx {
+                    session_name: String::new(),
+                    windows: Vec::new(),
+                    active_window: 0,
+                    attached_clients: 0,
+                    prefix_active: false,
+                    active_pane_cwd: None,
+                },
+            },
         );
         // invariant: no other thread holds status_tick_handle at construction time
         *session.status_tick_handle.lock().expect("status tick handle lock poisoned") =
@@ -340,6 +353,30 @@ impl Session {
         }
         drop(m);
         self.notify.notify_one();
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Abort the background tasks so they don't outlive the Session.
+        // The status tick task captures Weak<Session>, so by the time we
+        // reach Drop the only place that can revive the session is gone.
+        if let Some(handle) = self
+            .status_tick_handle
+            .lock()
+            .expect("status tick handle lock poisoned")
+            .take()
+        {
+            handle.abort();
+        }
+        if let Some(handle) = self
+            .coordinator_handle
+            .lock()
+            .expect("coordinator handle lock poisoned")
+            .take()
+        {
+            handle.abort();
+        }
     }
 }
 
