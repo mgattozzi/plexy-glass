@@ -14,7 +14,7 @@ async fn render_coordinator(
     frame_tx: watch::Sender<Arc<VirtualScreen>>,
 ) {
     use plexy_glass_emulator::Screen;
-    use plexy_glass_mux::{Compositor, PaneView, StatusLine, WindowEntry};
+    use plexy_glass_mux::{Compositor, PaneView, StatusLine};
     use std::time::Duration;
     const DEBOUNCE: Duration = Duration::from_millis(16);
 
@@ -29,7 +29,7 @@ async fn render_coordinator(
         })
         .await;
 
-        let attached = session.clients.lock().await.len() as u8;
+        let _attached = session.clients.lock().await.len() as u8;
         let frame = {
             let m = session.window_manager.lock().await;
             if m.is_empty() {
@@ -74,22 +74,8 @@ async fn render_coordinator(
                 })
                 .collect();
 
-            let windows: Vec<WindowEntry> = m
-                .windows()
-                .iter()
-                .enumerate()
-                .map(|(i, w)| WindowEntry {
-                    id: w.id,
-                    name: w.name.clone(),
-                    active: i == m.active_idx(),
-                })
-                .collect();
-            let status = StatusLine {
-                windows,
-                prefix_active: false, // per-client; the session can't know, a Phase 5 papercut
-                session_name: session.name.clone(),
-                attached_clients: attached,
-            };
+            // Stubbed until Task 11 wires the per-session `StatusEngine`.
+            let status = StatusLine::default();
             let selection = m.selection().cloned();
 
             Compositor::compose(

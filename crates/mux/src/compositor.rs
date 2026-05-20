@@ -118,13 +118,7 @@ impl Compositor {
 
         // Status bar.
         if let Some(s) = status {
-            let row_cells = crate::status::build(s, host_cols);
-            for (c, cell) in row_cells.into_iter().enumerate() {
-                if (c as u16) >= host_cols {
-                    break;
-                }
-                screen.put(host_rows.saturating_sub(1), c as u16, cell);
-            }
+            paint_status_row(&mut screen, s, host_cols, host_rows.saturating_sub(1));
         }
 
         // Cursor from the active pane.
@@ -143,6 +137,97 @@ impl Compositor {
 
         screen
     }
+}
+
+fn paint_status_row(
+    screen: &mut VirtualScreen,
+    status: &StatusLine,
+    cols: u16,
+    row: u16,
+) {
+    let cols_us = cols as usize;
+
+    let mut left_cells = collect_cells(&status.left);
+    let middle_cells = collect_cells(&status.middle);
+    let right_cells = collect_cells(&status.right);
+
+    // Truncate left if it overflows.
+    if left_cells.len() > cols_us {
+        left_cells.truncate(cols_us);
+    }
+    let left_w = left_cells.len();
+
+    // Reserve the right side, and truncate if it would overflow.
+    let mut right_w = right_cells.len();
+    if left_w + right_w > cols_us {
+        right_w = cols_us.saturating_sub(left_w);
+    }
+    let right_cells: Vec<_> = right_cells.into_iter().take(right_w).collect();
+
+    // Middle fills the gap; ellipsize if needed.
+    let middle_budget = cols_us.saturating_sub(left_w + right_w);
+    let middle_cells = if middle_cells.len() <= middle_budget {
+        middle_cells
+    } else if middle_budget == 0 {
+        Vec::new()
+    } else {
+        let mut truncated: Vec<_> = middle_cells.into_iter().take(middle_budget - 1).collect();
+        truncated.push((smol_str::SmolStr::new("…"), plexy_glass_status::ResolvedStyle::default()));
+        truncated
+    };
+
+    // Paint left starting at col 0.
+    for (i, (g, style)) in left_cells.iter().enumerate() {
+        screen.put(row, i as u16, cell_for(g, style));
+    }
+    // Paint middle starting after left.
+    for (i, (g, style)) in middle_cells.iter().enumerate() {
+        screen.put(row, (left_w + i) as u16, cell_for(g, style));
+    }
+    // Paint right pinned to the right edge.
+    let right_start = cols_us.saturating_sub(right_w);
+    for (i, (g, style)) in right_cells.iter().enumerate() {
+        screen.put(row, (right_start + i) as u16, cell_for(g, style));
+    }
+}
+
+fn collect_cells(
+    segments: &[plexy_glass_status::Segment],
+) -> Vec<(smol_str::SmolStr, plexy_glass_status::ResolvedStyle)> {
+    let mut out = Vec::new();
+    for seg in segments {
+        for ch in seg.text.chars() {
+            let mut buf = [0u8; 4];
+            let s = ch.encode_utf8(&mut buf);
+            out.push((smol_str::SmolStr::new(s), seg.style));
+        }
+    }
+    out
+}
+
+fn cell_for(
+    g: &smol_str::SmolStr,
+    style: &plexy_glass_status::ResolvedStyle,
+) -> plexy_glass_emulator::Cell {
+    // Build with struct-update syntax so any extra fields on `Cell` pick up
+    // their defaults, and so we dodge `clippy::field_reassign_with_default`.
+    let mut cell = plexy_glass_emulator::Cell {
+        grapheme: g.clone(),
+        attrs: style.attrs,
+        ..plexy_glass_emulator::Cell::default()
+    };
+    if let Some(fg) = style.fg {
+        cell.fg = rgb_to_color(fg);
+    }
+    if let Some(bg) = style.bg {
+        cell.bg = rgb_to_color(bg);
+    }
+    cell
+}
+
+fn rgb_to_color(rgb: plexy_glass_status::Rgb) -> plexy_glass_emulator::Color {
+    // `Color::Rgb(u8, u8, u8)`, confirmed in `crates/emulator/src/color.rs`.
+    plexy_glass_emulator::Color::Rgb(rgb.r, rgb.g, rgb.b)
 }
 
 #[cfg(test)]
@@ -227,62 +312,6 @@ mod tests {
         assert_eq!(vs.cell(0, 4).unwrap().grapheme.as_str(), "R");
         // Border column.
         assert_eq!(vs.cell(0, 3).unwrap().grapheme.as_str(), "│");
-    }
-
-    #[test]
-    fn status_bar_renders_session_name() {
-        let e = Emulator::new(4, 40);
-        let view = PaneView {
-            id: PaneId(0),
-            rect: Rect::new(0, 0, 3, 40),
-            screen: e.screen(),
-            is_active: true,
-            scroll_offset: 0,
-        };
-        let status = StatusLine {
-            windows: vec![crate::status::WindowEntry {
-                id: crate::pane_id::WindowId(0),
-                name: "shell0".into(),
-                active: true,
-            }],
-            prefix_active: false,
-            session_name: "main".into(),
-            attached_clients: 1,
-        };
-        let vs = Compositor::compose(&[view], (4, 40), Some(&status), None);
-        let row3: String = (0..40)
-            .filter_map(|c| vs.cell(3, c).map(|cell| cell.grapheme.as_str().to_string()))
-            .collect::<Vec<_>>()
-            .join("");
-        assert!(row3.contains("main"), "expected session name in status bar: {row3}");
-    }
-
-    #[test]
-    fn status_bar_shows_client_count_when_multiple() {
-        let e = Emulator::new(4, 40);
-        let view = PaneView {
-            id: PaneId(0),
-            rect: Rect::new(0, 0, 3, 40),
-            screen: e.screen(),
-            is_active: true,
-            scroll_offset: 0,
-        };
-        let status = StatusLine {
-            windows: vec![crate::status::WindowEntry {
-                id: crate::pane_id::WindowId(0),
-                name: "shell0".into(),
-                active: true,
-            }],
-            prefix_active: false,
-            session_name: "main".into(),
-            attached_clients: 3,
-        };
-        let vs = Compositor::compose(&[view], (4, 40), Some(&status), None);
-        let row3: String = (0..40)
-            .filter_map(|c| vs.cell(3, c).map(|cell| cell.grapheme.as_str().to_string()))
-            .collect::<Vec<_>>()
-            .join("");
-        assert!(row3.contains("*3"), "expected client count indicator: {row3}");
     }
 
     #[test]

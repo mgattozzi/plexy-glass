@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 plexy-glass-emulator = { path = "../emulator" }
+plexy-glass-status = { path = "../status" }
 unicode-width = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
