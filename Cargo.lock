@@ -862,6 +862,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "plexy-glass-keys"
+version = "0.1.0"
+dependencies = [
+ "plexy-glass-mux",
+ "smol_str",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "plexy-glass-mux"
 version = "0.1.0"
 dependencies = [
