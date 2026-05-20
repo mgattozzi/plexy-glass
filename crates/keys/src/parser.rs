@@ -181,6 +181,12 @@ impl KeyParser {
             (b'S', [1, m]) => Some(KeyEvent::new(Key::Function(4), decode_xterm_mods(*m))),
             // Modified tilde keys: CSI <n> ; <mods> ~
             (b'~', [n, m]) => key_from_tilde(*n).map(|k| KeyEvent::new(k, decode_xterm_mods(*m))),
+            // Kitty CSI u: <codepoint> ; <mods> u  (mods optional)
+            (b'u', [code]) => kitty_key(*code, Modifiers::empty()),
+            (b'u', [code, m]) => kitty_key(*code, decode_xterm_mods(*m)),
+            // Future kitty extensions may add a third param (text-as-codepoint).
+            // We ignore params beyond the second for now.
+            (b'u', [code, m, ..]) => kitty_key(*code, decode_xterm_mods(*m)),
             _ => None,
         };
         match event_opt {
@@ -233,6 +239,34 @@ fn decode_xterm_mods(raw: u32) -> Modifiers {
         mods |= Modifiers::SUPER;
     }
     mods
+}
+
+fn kitty_key(code: u32, mods: Modifiers) -> Option<KeyEvent> {
+    // Special control codepoints first.
+    match code {
+        9 => return Some(KeyEvent::new(Key::Tab, mods)),
+        13 => return Some(KeyEvent::new(Key::Enter, mods)),
+        27 => return Some(KeyEvent::new(Key::Escape, mods)),
+        127 => return Some(KeyEvent::new(Key::Backspace, mods)),
+        // Kitty-extended named-key codepoints.
+        57361 => return Some(KeyEvent::new(Key::Insert, mods)),
+        57352 => return Some(KeyEvent::new(Key::Home, mods)),
+        57359 => return Some(KeyEvent::new(Key::End, mods)),
+        57353 => return Some(KeyEvent::new(Key::PageUp, mods)),
+        57354 => return Some(KeyEvent::new(Key::PageDown, mods)),
+        // F1..F12 in kitty's extended range:
+        57364..=57375 => {
+            let n = (code - 57364 + 1) as u8;
+            return Some(KeyEvent::new(Key::Function(n), mods));
+        }
+        // Arrows in kitty's extended range:
+        57355 => return Some(KeyEvent::new(Key::Arrow(Direction::Up), mods)),
+        57356 => return Some(KeyEvent::new(Key::Arrow(Direction::Down), mods)),
+        57358 => return Some(KeyEvent::new(Key::Arrow(Direction::Right), mods)),
+        57357 => return Some(KeyEvent::new(Key::Arrow(Direction::Left), mods)),
+        _ => {}
+    }
+    char::from_u32(code).map(|c| KeyEvent::new(Key::Char(c), mods))
 }
 
 fn key_from_tilde(n: u32) -> Option<Key> {
@@ -437,5 +471,51 @@ mod tests {
         let e = last_event(b"\x1b[3;3~");
         assert_eq!(e.key, Key::Delete);
         assert_eq!(e.mods, Modifiers::ALT);
+    }
+
+    #[test]
+    fn kitty_ctrl_a() {
+        let e = last_event(b"\x1b[97;5u");
+        assert_eq!(e.key, Key::Char('a'));
+        assert_eq!(e.mods, Modifiers::CTRL);
+    }
+
+    #[test]
+    fn kitty_ctrl_i_distinct_from_tab() {
+        let e = last_event(b"\x1b[105;5u");
+        assert_eq!(e.key, Key::Char('i'));
+        assert_eq!(e.mods, Modifiers::CTRL);
+    }
+
+    #[test]
+    fn kitty_bare_tab() {
+        let e = last_event(b"\x1b[9;1u");
+        assert_eq!(e.key, Key::Tab);
+        assert!(e.mods.is_empty());
+    }
+
+    #[test]
+    fn kitty_bare_enter() {
+        let e = last_event(b"\x1b[13;1u");
+        assert_eq!(e.key, Key::Enter);
+    }
+
+    #[test]
+    fn kitty_escape() {
+        let e = last_event(b"\x1b[27;1u");
+        assert_eq!(e.key, Key::Escape);
+    }
+
+    #[test]
+    fn kitty_function_key() {
+        let e = last_event(b"\x1b[57364;1u");
+        assert_eq!(e.key, Key::Function(1));
+    }
+
+    #[test]
+    fn kitty_no_modifier_param_implies_none() {
+        let e = last_event(b"\x1b[97u");
+        assert_eq!(e.key, Key::Char('a'));
+        assert!(e.mods.is_empty());
     }
 }
