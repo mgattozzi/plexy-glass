@@ -58,18 +58,34 @@ pub fn built_in_default() -> Config {
                     style: StyleConfig::new("fg", "bg_bar"),
                     min_count: 2,
                 },
+                WidgetSpec::Text {
+                    value: "  ".into(),
+                    style: StyleConfig::new("muted", "bg_bar"),
+                },
                 WidgetSpec::CpuLoad {
                     style: StyleConfig::new("fg", "bg_bar"),
                     interval: None,
+                },
+                WidgetSpec::Text {
+                    value: " | ".into(),
+                    style: StyleConfig::new("muted", "bg_bar"),
                 },
                 WidgetSpec::Battery {
                     style: StyleConfig::new("fg", "bg_bar"),
                     interval: None,
                 },
+                WidgetSpec::Text {
+                    value: " | ".into(),
+                    style: StyleConfig::new("muted", "bg_bar"),
+                },
                 WidgetSpec::Time {
                     style: StyleConfig::new("fg", "bg_bar"),
                     format: "%H:%M".into(),
                     interval: None,
+                },
+                WidgetSpec::Text {
+                    value: " ".into(),
+                    style: StyleConfig::new("muted", "bg_bar"),
                 },
             ],
         },

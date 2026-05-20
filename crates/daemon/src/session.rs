@@ -98,6 +98,12 @@ async fn render_coordinator(
                 active_pane_cwd: active_pane_cwd.as_deref(),
             };
             session.status_engine.refresh_event_driven(&ctx).await;
+            // Also flush any interval widgets whose deadline has passed. On
+            // the first render this populates widgets the tick task hasn't
+            // had a chance to evaluate yet (initial next_due is None, so
+            // they're all considered due); on subsequent renders it's a
+            // cheap no-op when the tick task is keeping up.
+            let _ = session.status_engine.refresh_due_intervals(&ctx).await;
             let snap = session.status_engine.snapshot().await;
             let status = StatusLine {
                 left: snap.left.into_iter().flatten().collect(),
