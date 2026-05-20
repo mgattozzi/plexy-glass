@@ -19,6 +19,7 @@ async fn two_clients_effective_size_is_min() {
         "test".into(),
         spec(),
         PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 },
+        Arc::new(plexy_glass_config::built_in_default()),
     )
     .unwrap();
 
@@ -61,6 +62,7 @@ async fn concurrent_register_is_safe() {
         "test".into(),
         spec(),
         PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        Arc::new(plexy_glass_config::built_in_default()),
     )
     .unwrap();
 

@@ -90,7 +90,8 @@ where
             Some(s) => s,
             None if create_if_missing => {
                 let spec = cmd.unwrap_or_else(default_spawn_spec);
-                match registry.create(n.clone(), spec, size).await {
+                let cfg = Arc::new(plexy_glass_config::built_in_default());
+                match registry.create(n.clone(), spec, size, cfg).await {
                     Ok(s) => s,
                     Err(DaemonError::Protocol(perr)) => {
                         return send_msg(&mut writer, &ServerMsg::Error(perr)).await;
@@ -112,7 +113,8 @@ where
             match entries.len() {
                 0 => {
                     let spec = cmd.unwrap_or_else(default_spawn_spec);
-                    match registry.create("main".into(), spec, size).await {
+                    let cfg = Arc::new(plexy_glass_config::built_in_default());
+                    match registry.create("main".into(), spec, size, cfg).await {
                         Ok(s) => s,
                         Err(DaemonError::Protocol(perr)) => {
                             return send_msg(&mut writer, &ServerMsg::Error(perr)).await;

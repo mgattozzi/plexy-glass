@@ -29,7 +29,6 @@ async fn render_coordinator(
         })
         .await;
 
-        let _attached = session.clients.lock().await.len() as u8;
         let frame = {
             let m = session.window_manager.lock().await;
             if m.is_empty() {
@@ -74,8 +73,37 @@ async fn render_coordinator(
                 })
                 .collect();
 
-            // Stubbed until Task 11 wires the per-session `StatusEngine`.
-            let status = StatusLine::default();
+            // Build event-driven widget context, refresh, snapshot.
+            let session_name = session.name.clone();
+            let attached_clients = session.clients.lock().await.len() as u8;
+            let windows_data: Vec<plexy_glass_status::WindowSummary> = m
+                .windows()
+                .iter()
+                .enumerate()
+                .map(|(i, w)| plexy_glass_status::WindowSummary {
+                    name: w.name.clone(),
+                    active: i == m.active_idx(),
+                })
+                .collect();
+            let active_pane_cwd = m
+                .active_window()
+                .active_pane()
+                .and_then(|p| p.with_screen(|s| s.cwd.clone()));
+            let ctx = plexy_glass_status::EvalContext {
+                session_name: &session_name,
+                windows: &windows_data,
+                active_window: m.active_idx(),
+                attached_clients,
+                prefix_active: false,
+                active_pane_cwd: active_pane_cwd.as_deref(),
+            };
+            session.status_engine.refresh_event_driven(&ctx).await;
+            let snap = session.status_engine.snapshot().await;
+            let status = StatusLine {
+                left: snap.left.into_iter().flatten().collect(),
+                middle: snap.middle.into_iter().flatten().collect(),
+                right: snap.right.into_iter().flatten().collect(),
+            };
             let selection = m.selection().cloned();
 
             Compositor::compose(
@@ -118,6 +146,9 @@ pub struct Session {
     coordinator_handle: StdMutex<Option<JoinHandle<()>>>,
     /// Holds the death channel receiver until Task 13 wires up the consumer.
     pub pending_death_rx: Mutex<Option<mpsc::Receiver<PaneId>>>,
+    pub status_engine: Arc<plexy_glass_status::EngineInner>,
+    status_tick_handle: StdMutex<Option<JoinHandle<()>>>,
+    pub config: Arc<plexy_glass_config::Config>,
 }
 
 impl Session {
@@ -125,6 +156,7 @@ impl Session {
         name: String,
         initial_cmd: SpawnSpec,
         first_size: PtySize,
+        config: Arc<plexy_glass_config::Config>,
     ) -> Result<Arc<Self>, DaemonError> {
         let notify = Arc::new(Notify::new());
         let (death_tx, death_rx) = mpsc::channel::<PaneId>(16);
@@ -136,6 +168,8 @@ impl Session {
         )?;
         let initial_frame = Arc::new(VirtualScreen::blank(first_size.rows, first_size.cols));
         let (frame_tx, frame_rx_template) = watch::channel(initial_frame);
+        let engine = plexy_glass_status::StatusEngine::new(&config.status, &config.palette);
+        let status_engine = engine.inner();
         let session = Arc::new(Self {
             name,
             created: SystemTime::now(),
@@ -148,6 +182,9 @@ impl Session {
             next_client_id: AtomicU64::new(0),
             coordinator_handle: StdMutex::new(None),
             pending_death_rx: Mutex::new(Some(death_rx)),
+            status_engine,
+            status_tick_handle: StdMutex::new(None),
+            config,
         });
         let coord_handle = tokio::spawn(render_coordinator(Arc::clone(&session), frame_tx));
         // invariant: no other thread holds coordinator_handle at construction time
@@ -175,6 +212,19 @@ impl Session {
                 }
             }
         });
+
+        // Spawn the status tick task. The closure runs synchronously inside the
+        // tick loop and produces an owned `SnapshotCtx` from session state via
+        // `blocking_lock`, which is safe because the tick task runs on the
+        // multi-thread runtime and only briefly holds the locks.
+        let session_for_status = Arc::clone(&session);
+        let tick_handle = engine.spawn_tick_task(
+            Arc::clone(&session.notify),
+            move || build_snapshot_ctx(&session_for_status),
+        );
+        // invariant: no other thread holds status_tick_handle at construction time
+        *session.status_tick_handle.lock().expect("status tick handle lock poisoned") =
+            Some(tick_handle);
 
         Ok(session)
     }
@@ -293,6 +343,37 @@ impl Session {
     }
 }
 
+/// Build an owned snapshot of session state for the status tick closure.
+/// Runs synchronously inside the tick task; uses `blocking_lock` for the
+/// async mutexes since the tick task lives on the multi-thread runtime.
+fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::SnapshotCtx {
+    let manager = session.window_manager.blocking_lock();
+    let session_name = session.name.clone();
+    let attached_clients = session.clients.blocking_lock().len() as u8;
+    let active_idx = manager.active_idx();
+    let windows: Vec<plexy_glass_status::WindowSummary> = manager
+        .windows()
+        .iter()
+        .enumerate()
+        .map(|(i, w)| plexy_glass_status::WindowSummary {
+            name: w.name.clone(),
+            active: i == active_idx,
+        })
+        .collect();
+    let active_pane_cwd = manager
+        .active_window()
+        .active_pane()
+        .and_then(|p| p.with_screen(|s| s.cwd.clone()));
+    plexy_glass_status::SnapshotCtx {
+        session_name,
+        windows,
+        active_window: active_idx,
+        attached_clients,
+        prefix_active: false,
+        active_pane_cwd,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,16 +393,20 @@ mod tests {
         PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }
     }
 
+    fn cfg() -> Arc<plexy_glass_config::Config> {
+        Arc::new(plexy_glass_config::built_in_default())
+    }
+
     #[tokio::test]
     async fn session_construct_succeeds() {
-        let s = Session::new("main".into(), spec(), size()).expect("construct session");
+        let s = Session::new("main".into(), spec(), size(), cfg()).expect("construct session");
         assert_eq!(s.name, "main");
         assert!(!s.closing.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
     async fn list_entry_reports_one_window_one_pane_zero_clients() {
-        let s = Session::new("main".into(), spec(), size()).unwrap();
+        let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         let entry = tokio::task::spawn_blocking(move || s.list_entry()).await.unwrap();
         assert_eq!(entry.name, "main");
         assert_eq!(entry.windows, 1);
@@ -331,7 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_then_effective_size_matches_single_client() {
-        let s = Session::new("main".into(), spec(), size()).unwrap();
+        let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         let s2 = Arc::clone(&s);
         let h = tokio::task::spawn_blocking(move || {
             s2.register_client(PtySize { rows: 10, cols: 30, pixel_width: 0, pixel_height: 0 })
@@ -349,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn smallest_client_wins() {
-        let s = Session::new("main".into(), spec(), size()).unwrap();
+        let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         let s2 = Arc::clone(&s);
         let a = tokio::task::spawn_blocking(move || {
             s2.register_client(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
@@ -386,7 +471,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let s = Session::new("test".into(), spec, size()).unwrap();
+        let s = Session::new("test".into(), spec, size(), cfg()).unwrap();
         s.handle_input_bytes(b"hello\n").await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let m = s.window_manager.lock().await;
@@ -405,7 +490,7 @@ mod tests {
 
     #[tokio::test]
     async fn closing_session_refuses_register() {
-        let s = Session::new("main".into(), spec(), size()).unwrap();
+        let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         s.closing.store(true, Ordering::SeqCst);
         let s2 = Arc::clone(&s);
         let result =
@@ -415,7 +500,7 @@ mod tests {
 
     #[tokio::test]
     async fn coordinator_publishes_initial_frame() {
-        let s = Session::new("test".into(), spec(), size()).unwrap();
+        let s = Session::new("test".into(), spec(), size(), cfg()).unwrap();
         let mut rx = s.frame_rx_template.clone();
         s.notify.notify_one();
         let result = tokio::time::timeout(
@@ -434,7 +519,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let s = Session::new("test".into(), spec, size()).unwrap();
+        let s = Session::new("test".into(), spec, size(), cfg()).unwrap();
         // Wait up to 5s for the session to close (echo exits, then the death consumer
         // reports it, then the coordinator observes is_empty and sets closing=true).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

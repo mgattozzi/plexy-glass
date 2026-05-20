@@ -48,13 +48,14 @@ impl SessionRegistry {
         name: String,
         cmd: SpawnSpec,
         size: PtySize,
+        config: Arc<plexy_glass_config::Config>,
     ) -> Result<Arc<Session>, DaemonError> {
         validate_name(&name)?;
         let mut map = self.inner.lock().await;
         if map.contains_key(&name) {
             return Err(DaemonError::Protocol(ProtocolError::SessionAlreadyExists { name }));
         }
-        let session = Session::new(name.clone(), cmd, size)?;
+        let session = Session::new(name.clone(), cmd, size, config)?;
         map.insert(name, Arc::clone(&session));
         Ok(session)
     }
@@ -108,10 +109,14 @@ mod tests {
         PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }
     }
 
+    fn cfg() -> Arc<plexy_glass_config::Config> {
+        Arc::new(plexy_glass_config::built_in_default())
+    }
+
     #[tokio::test]
     async fn create_then_get() {
         let r = SessionRegistry::new();
-        let s = r.create("main".into(), spec(), size()).await.unwrap();
+        let s = r.create("main".into(), spec(), size(), cfg()).await.unwrap();
         assert_eq!(s.name, "main");
         let got = r.get("main").await.unwrap();
         assert_eq!(got.name, "main");
@@ -120,16 +125,17 @@ mod tests {
     #[tokio::test]
     async fn duplicate_create_fails() {
         let r = SessionRegistry::new();
-        r.create("main".into(), spec(), size()).await.unwrap();
-        let err = r.create("main".into(), spec(), size()).await.map(|_| ()).unwrap_err();
+        r.create("main".into(), spec(), size(), cfg()).await.unwrap();
+        let err =
+            r.create("main".into(), spec(), size(), cfg()).await.map(|_| ()).unwrap_err();
         assert!(matches!(err, DaemonError::Protocol(ProtocolError::SessionAlreadyExists { .. })));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn list_returns_sorted_entries() {
         let r = SessionRegistry::new();
-        r.create("zeta".into(), spec(), size()).await.unwrap();
-        r.create("alpha".into(), spec(), size()).await.unwrap();
+        r.create("zeta".into(), spec(), size(), cfg()).await.unwrap();
+        r.create("alpha".into(), spec(), size(), cfg()).await.unwrap();
         let entries = r.list().await;
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "alpha");
@@ -146,21 +152,25 @@ mod tests {
     #[tokio::test]
     async fn name_validation_rejects_empty() {
         let r = SessionRegistry::new();
-        let err = r.create("".into(), spec(), size()).await.map(|_| ()).unwrap_err();
+        let err = r.create("".into(), spec(), size(), cfg()).await.map(|_| ()).unwrap_err();
         assert!(matches!(err, DaemonError::Protocol(ProtocolError::EmptyName)));
     }
 
     #[tokio::test]
     async fn name_validation_rejects_invalid_chars() {
         let r = SessionRegistry::new();
-        let err = r.create("has space".into(), spec(), size()).await.map(|_| ()).unwrap_err();
+        let err = r
+            .create("has space".into(), spec(), size(), cfg())
+            .await
+            .map(|_| ())
+            .unwrap_err();
         assert!(matches!(err, DaemonError::Protocol(ProtocolError::InvalidName { .. })));
     }
 
     #[tokio::test]
     async fn closing_sessions_are_pruned_on_get() {
         let r = SessionRegistry::new();
-        let s = r.create("dead".into(), spec(), size()).await.unwrap();
+        let s = r.create("dead".into(), spec(), size(), cfg()).await.unwrap();
         s.closing.store(true, std::sync::atomic::Ordering::SeqCst);
         let got = r.get("dead").await;
         assert!(got.is_none(), "closing session should be pruned on get");
@@ -169,8 +179,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn closing_sessions_are_pruned_on_list() {
         let r = SessionRegistry::new();
-        let alive = r.create("alive".into(), spec(), size()).await.unwrap();
-        let dead = r.create("dead".into(), spec(), size()).await.unwrap();
+        let alive = r.create("alive".into(), spec(), size(), cfg()).await.unwrap();
+        let dead = r.create("dead".into(), spec(), size(), cfg()).await.unwrap();
         dead.closing.store(true, std::sync::atomic::Ordering::SeqCst);
         let entries = r.list().await;
         assert_eq!(entries.len(), 1);
