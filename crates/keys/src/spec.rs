@@ -1,5 +1,7 @@
 //! Parsers for the `keys` and `command` strings in `[[keymap.bindings]]`.
 
+use plexy_glass_mux::{Command, Direction, Key, Modifiers};
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum KeyParseError {
     #[error("empty chord")]
@@ -14,22 +16,210 @@ pub enum KeyParseError {
     MissingArg { command: String },
 }
 
-pub type ChordSpec = (plexy_glass_mux::Modifiers, plexy_glass_mux::Key);
+pub type ChordSpec = (Modifiers, Key);
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct CommandSpec {
-    pub command: plexy_glass_mux::Command,
+    pub command: Command,
 }
 
-pub fn parse_chord(_s: &str) -> Result<ChordSpec, KeyParseError> {
-    // Placeholder: real impl in Task 7.
-    Err(KeyParseError::Empty)
+pub fn parse_chord(s: &str) -> Result<ChordSpec, KeyParseError> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(KeyParseError::Empty);
+    }
+    let mut mods = Modifiers::empty();
+    let parts: Vec<&str> = s.split('+').collect();
+    // invariant: split on a non-empty string always yields at least one element
+    let (key_part, mod_parts) = parts.split_last().expect("split always yields >= 1 element");
+    for m in mod_parts {
+        match Modifiers::alias_meta_as_alt(m.trim()) {
+            Some(flag) => mods |= flag,
+            None => return Err(KeyParseError::UnknownToken((*m).to_string())),
+        }
+    }
+    let key = parse_named_key(key_part.trim())?;
+    Ok((mods, key))
 }
 
-pub fn parse_chord_seq(_s: &str) -> Result<Vec<ChordSpec>, KeyParseError> {
-    Err(KeyParseError::Empty)
+pub fn parse_chord_seq(s: &str) -> Result<Vec<ChordSpec>, KeyParseError> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(KeyParseError::Empty);
+    }
+    s.split_whitespace().map(parse_chord).collect()
 }
 
-pub fn parse_command(_s: &str) -> Result<CommandSpec, KeyParseError> {
-    Err(KeyParseError::Empty)
+fn parse_named_key(s: &str) -> Result<Key, KeyParseError> {
+    // F1..F12 (case-insensitive prefix)
+    if let Some(rest) = s.strip_prefix(['F', 'f'])
+        && let Ok(n) = rest.parse::<u8>()
+    {
+        if (1..=12).contains(&n) {
+            return Ok(Key::Function(n));
+        }
+        // Out-of-range function key, so fall through to the error below.
+        return Err(KeyParseError::UnknownToken(s.to_string()));
+    }
+    let normalized = s.to_lowercase();
+    let key = match normalized.as_str() {
+        "right" => Key::Arrow(Direction::Right),
+        "left" => Key::Arrow(Direction::Left),
+        "up" => Key::Arrow(Direction::Up),
+        "down" => Key::Arrow(Direction::Down),
+        "home" => Key::Home,
+        "end" => Key::End,
+        "pageup" | "pgup" => Key::PageUp,
+        "pagedown" | "pgdn" | "pgdown" => Key::PageDown,
+        "insert" | "ins" => Key::Insert,
+        "delete" | "del" => Key::Delete,
+        "tab" => Key::Tab,
+        "enter" | "return" => Key::Enter,
+        "backspace" | "bs" => Key::Backspace,
+        "escape" | "esc" => Key::Escape,
+        "space" => Key::Char(' '),
+        _ => {
+            // Single Unicode scalar.
+            if s.chars().count() == 1 {
+                // invariant: count == 1 guarantees next() returns Some
+                let c = s.chars().next().expect("count is 1");
+                return Ok(Key::Char(c));
+            }
+            return Err(KeyParseError::UnknownToken(s.to_string()));
+        }
+    };
+    Ok(key)
+}
+
+pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
+    let s = s.trim();
+    let mut parts = s.splitn(2, ':');
+    // invariant: splitn(2, …) on any string always yields >= 1 element
+    let name = parts.next().expect("splitn always yields >= 1").trim();
+    let arg = parts.next().map(str::trim);
+    let command = match name {
+        "new_window" => Command::NewWindow,
+        "split_v" => Command::SplitV,
+        "split_h" => Command::SplitH,
+        "kill_pane" => Command::KillPane,
+        "kill_window" => Command::KillWindow,
+        "zoom_toggle" => Command::ZoomToggle,
+        "next_window" => Command::NextWindow,
+        "prev_window" => Command::PrevWindow,
+        "detach" => Command::Detach,
+        "cancel" => Command::Cancel,
+        "select_next_pane" => Command::SelectNextPane,
+        "select_prev_pane" => Command::SelectPrevPane,
+        "select_pane_left" => Command::SelectPane(Direction::Left),
+        "select_pane_right" => Command::SelectPane(Direction::Right),
+        "select_pane_up" => Command::SelectPane(Direction::Up),
+        "select_pane_down" => Command::SelectPane(Direction::Down),
+        "select_window" => {
+            let arg_str = arg.ok_or_else(|| KeyParseError::MissingArg {
+                command: name.to_string(),
+            })?;
+            let n: u8 = arg_str.parse().map_err(|_| KeyParseError::BadArg {
+                command: name.to_string(),
+                arg: arg_str.to_string(),
+            })?;
+            Command::SelectWindow(n)
+        }
+        other => return Err(KeyParseError::UnknownCommand(other.to_string())),
+    };
+    Ok(CommandSpec { command })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plexy_glass_mux::{Direction, Key, Modifiers};
+
+    #[test]
+    fn parses_bare_letter() {
+        assert_eq!(
+            parse_chord("a").unwrap(),
+            (Modifiers::empty(), Key::Char('a'))
+        );
+    }
+
+    #[test]
+    fn parses_ctrl_plus_letter() {
+        assert_eq!(
+            parse_chord("Ctrl+a").unwrap(),
+            (Modifiers::CTRL, Key::Char('a'))
+        );
+    }
+
+    #[test]
+    fn parses_multi_modifier() {
+        let (mods, key) = parse_chord("Ctrl+Shift+Right").unwrap();
+        assert_eq!(mods, Modifiers::CTRL | Modifiers::SHIFT);
+        assert_eq!(key, Key::Arrow(Direction::Right));
+    }
+
+    #[test]
+    fn parses_meta_as_alt() {
+        assert_eq!(
+            parse_chord("Meta+a").unwrap(),
+            (Modifiers::ALT, Key::Char('a'))
+        );
+    }
+
+    #[test]
+    fn function_keys() {
+        assert_eq!(
+            parse_chord("F1").unwrap(),
+            (Modifiers::empty(), Key::Function(1))
+        );
+        assert_eq!(
+            parse_chord("F12").unwrap(),
+            (Modifiers::empty(), Key::Function(12))
+        );
+        assert!(parse_chord("F13").is_err());
+    }
+
+    #[test]
+    fn unknown_modifier_errors() {
+        assert!(parse_chord("Hyper2+a").is_err());
+    }
+
+    #[test]
+    fn unknown_key_errors() {
+        assert!(parse_chord("Wat").is_err());
+    }
+
+    #[test]
+    fn chord_seq_parses_multiple() {
+        let v = parse_chord_seq("Ctrl+a c").unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0], (Modifiers::CTRL, Key::Char('a')));
+        assert_eq!(v[1], (Modifiers::empty(), Key::Char('c')));
+    }
+
+    #[test]
+    fn command_no_arg() {
+        let c = parse_command("new_window").unwrap();
+        assert_eq!(c.command, Command::NewWindow);
+    }
+
+    #[test]
+    fn command_with_arg() {
+        let c = parse_command("select_window:0").unwrap();
+        assert_eq!(c.command, Command::SelectWindow(0));
+    }
+
+    #[test]
+    fn command_missing_arg_errors() {
+        assert!(parse_command("select_window").is_err());
+    }
+
+    #[test]
+    fn command_bad_arg_errors() {
+        assert!(parse_command("select_window:abc").is_err());
+    }
+
+    #[test]
+    fn unknown_command_errors() {
+        assert!(parse_command("frobnicate").is_err());
+    }
 }
