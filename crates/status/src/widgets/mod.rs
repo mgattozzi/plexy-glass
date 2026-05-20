@@ -1,8 +1,12 @@
+mod git_branch;
+mod shell;
 mod simple;
 mod system;
 mod time;
 mod window_list;
 
+pub use git_branch::GitBranchWidget;
+pub use shell::ShellWidget;
 pub use simple::{
     AttachedClientsWidget, CwdWidget, HostnameWidget, PrefixIndicatorWidget, SeparatorWidget,
     SessionWidget, TextWidget,

@@ -9,6 +9,7 @@ pub use engine::{EvalContext, StatusEngine, WindowSummary};
 pub use style::{resolve_style, ResolvedStyle, Rgb};
 pub use widget::{Segment, StyledText, Widget};
 pub use widgets::{
-    AttachedClientsWidget, BatteryWidget, CpuLoadWidget, CwdWidget, HostnameWidget, MemoryWidget,
-    PrefixIndicatorWidget, SeparatorWidget, SessionWidget, TextWidget, TimeWidget, WindowListWidget,
+    AttachedClientsWidget, BatteryWidget, CpuLoadWidget, CwdWidget, GitBranchWidget, HostnameWidget,
+    MemoryWidget, PrefixIndicatorWidget, SeparatorWidget, SessionWidget, ShellWidget, TextWidget,
+    TimeWidget, WindowListWidget,
 };
