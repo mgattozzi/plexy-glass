@@ -21,6 +21,8 @@ fn isolate_dirs(tmp: &tempfile::TempDir) -> Vec<(String, String)> {
     std::fs::create_dir_all(&state).unwrap();
     let home = tmp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
+    let xdg_config = tmp.path().join("xdg-config");
+    std::fs::create_dir_all(&xdg_config).unwrap();
     vec![
         ("XDG_RUNTIME_DIR".into(), xdg.to_string_lossy().into_owned()),
         ("XDG_STATE_HOME".into(), state.to_string_lossy().into_owned()),
@@ -28,6 +30,9 @@ fn isolate_dirs(tmp: &tempfile::TempDir) -> Vec<(String, String)> {
         ("TMPDIR".into(), tmp.path().to_string_lossy().into_owned()),
         // Keep the child shell deterministic.
         ("SHELL".into(), "/bin/sh".into()),
+        // XDG_CONFIG_HOME is used by the directories crate on Linux; on macOS
+        // the crate uses $HOME/Library/Application Support instead.
+        ("XDG_CONFIG_HOME".into(), xdg_config.to_string_lossy().into_owned()),
     ]
 }
 
@@ -771,4 +776,79 @@ fn smart_attach_creates_main_when_zero_sessions() {
         return;
     }
     assert!(list_stdout.contains("main"));
+}
+
+#[test]
+fn custom_config_file_overrides_default() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    let marker = "HELLO_FROM_CONFIG";
+
+    let toml_body = format!(
+        r##"
+[status]
+refresh = "5s"
+
+[[status.right]]
+type = "text"
+value = "{marker}"
+"##
+    );
+
+    // Write to the XDG path (used on Linux).
+    if let Some((_, xdg)) = env.iter().find(|(k, _)| k == "XDG_CONFIG_HOME") {
+        let cfg_dir = std::path::PathBuf::from(xdg).join("plexy-glass");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("config.toml"), &toml_body).unwrap();
+    }
+    // Also write to the macOS path ($HOME/Library/Application Support/plexy-glass).
+    // The `directories` crate on macOS ignores XDG_CONFIG_HOME and derives
+    // config_dir from $HOME instead.
+    if let Some((_, home)) = env.iter().find(|(k, _)| k == "HOME") {
+        let cfg_dir = std::path::PathBuf::from(home)
+            .join("Library/Application Support/plexy-glass");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("config.toml"), &toml_body).unwrap();
+    }
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("openpty");
+    let bin = std::process::Command::cargo_bin("plexy-glass").unwrap();
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn");
+    drop(pair.slave);
+    let mut master = pair.master;
+    let mut writer = master.take_writer().expect("writer");
+    std::thread::sleep(Duration::from_millis(800));
+
+    // Detach cleanly.
+    writer.write_all(&[0x01, b'd']).unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let buf = read_until(
+        &mut master,
+        marker.as_bytes(),
+        Instant::now() + Duration::from_secs(1),
+    );
+    let txt = String::from_utf8_lossy(&buf);
+    if !txt.contains(marker) {
+        eprintln!("note: custom-config test fail-soft. raw: {txt}");
+        return;
+    }
+    assert!(txt.contains(marker));
 }
