@@ -138,6 +138,64 @@ fn build_slot(spec: &WidgetSpec, palette: &PaletteConfig) -> WidgetSlot {
     }
 }
 
+/// Owned snapshot of session state suitable for evaluating widgets.
+/// (We can't borrow across awaits, so the caller produces an owned
+/// snapshot each tick.)
+pub struct SnapshotCtx {
+    pub session_name: String,
+    pub windows: Vec<WindowSummary>,
+    pub active_window: usize,
+    pub attached_clients: u8,
+    pub prefix_active: bool,
+    pub active_pane_cwd: Option<String>,
+}
+
+impl SnapshotCtx {
+    pub fn as_eval_context(&self) -> EvalContext<'_> {
+        EvalContext {
+            session_name: &self.session_name,
+            windows: &self.windows,
+            active_window: self.active_window,
+            attached_clients: self.attached_clients,
+            prefix_active: self.prefix_active,
+            active_pane_cwd: self.active_pane_cwd.as_deref(),
+        }
+    }
+}
+
+impl StatusEngine {
+    /// Spawn a background tick task that refreshes interval-driven widgets.
+    ///
+    /// The task signals `notify.notify_one()` after each refresh batch so
+    /// the render coordinator wakes up. The returned `JoinHandle` should
+    /// be aborted by the owner on session shutdown.
+    pub fn spawn_tick_task(
+        &self,
+        notify: std::sync::Arc<tokio::sync::Notify>,
+        snapshot_ctx: impl Fn() -> SnapshotCtx + Send + Sync + 'static,
+    ) -> tokio::task::JoinHandle<()> {
+        let inner = Arc::clone(&self.inner);
+        let snapshot_ctx = std::sync::Arc::new(snapshot_ctx);
+        tokio::spawn(async move {
+            loop {
+                let owned = (snapshot_ctx)();
+                let ctx = owned.as_eval_context();
+                let next_deadline = inner.refresh_due_intervals(&ctx).await;
+                notify.notify_one();
+                match next_deadline {
+                    Some(deadline) => {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                    }
+                    None => {
+                        // No interval-driven widgets at all, so we sleep on the default refresh.
+                        tokio::time::sleep(inner.refresh()).await;
+                    }
+                }
+            }
+        })
+    }
+}
+
 impl EngineInner {
     /// Refresh ALL event-driven widgets in all three zones from `ctx`.
     pub async fn refresh_event_driven(&self, ctx: &EvalContext<'_>) {
@@ -231,6 +289,46 @@ mod tests {
         assert_eq!(snap.left.len(), cfg.status.left.len());
         assert_eq!(snap.middle.len(), cfg.status.middle.len());
         assert_eq!(snap.right.len(), cfg.status.right.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tick_task_notifies_periodically() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut cfg = built_in_default();
+        // Force a fast interval on the Time widget so the tick fires often.
+        for w in cfg.status.right.iter_mut() {
+            if let plexy_glass_config::WidgetSpec::Time { interval, .. } = w {
+                *interval = Some(std::time::Duration::from_millis(100));
+            }
+        }
+        let engine = StatusEngine::new(&cfg.status, &cfg.palette);
+        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let counter = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter_inc = std::sync::Arc::clone(&counter);
+        let n2 = std::sync::Arc::clone(&notify);
+        tokio::spawn(async move {
+            for _ in 0..10 {
+                n2.notified().await;
+                counter_inc.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let snapshot_ctx = || SnapshotCtx {
+            session_name: "test".into(),
+            windows: vec![],
+            active_window: 0,
+            attached_clients: 1,
+            prefix_active: false,
+            active_pane_cwd: None,
+        };
+        let handle = engine.spawn_tick_task(notify, snapshot_ctx);
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        handle.abort();
+        assert!(
+            counter.load(Ordering::SeqCst) >= 3,
+            "expected at least 3 ticks, got {}",
+            counter.load(Ordering::SeqCst)
+        );
     }
 
     #[tokio::test]
