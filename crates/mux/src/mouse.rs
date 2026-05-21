@@ -47,11 +47,15 @@ pub enum MouseEncoding {
     Sgr,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MouseParseAction {
     Pending,
     Event(MouseEvent),
+    /// Byte was not part of a mouse sequence; route elsewhere.
     Other(u8),
+    /// A partial sequence was abandoned; the held bytes are returned so
+    /// the caller can route them through a different parser (e.g. keys).
+    BailedBytes(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -66,6 +70,7 @@ enum ParseState {
 pub struct MouseParser {
     state: ParseState,
     params: [u32; 3],
+    held: Vec<u8>,
 }
 
 impl MouseParser {
@@ -73,6 +78,7 @@ impl MouseParser {
         Self {
             state: ParseState::Idle,
             params: [0; 3],
+            held: Vec::with_capacity(16),
         }
     }
 
@@ -81,68 +87,92 @@ impl MouseParser {
         match self.state {
             ParseState::Idle => {
                 if byte == 0x1b {
+                    self.held.push(byte);
                     self.state = ParseState::SawEsc;
                     MouseParseAction::Pending
                 } else {
+                    // held is empty here, so there are no buffered bytes to recover.
                     MouseParseAction::Other(byte)
                 }
             }
             ParseState::SawEsc => {
                 if byte == b'[' {
+                    self.held.push(byte);
                     self.state = ParseState::SawBracket;
                     MouseParseAction::Pending
                 } else {
-                    // Not a mouse sequence; emit current byte as Other. The
-                    // held ESC is dropped (rare in practice; ESC by itself
-                    // outside a sequence is unusual once the host TTY is in
-                    // raw mode with key-only input).
-                    self.reset();
-                    MouseParseAction::Other(byte)
+                    // Not a CSI sequence at all; return held ESC + current byte.
+                    self.bail_with_byte(byte)
                 }
             }
             ParseState::SawBracket => {
                 if byte == b'<' {
+                    self.held.push(byte);
                     self.state = ParseState::SawLt;
                     MouseParseAction::Pending
                 } else {
-                    // CSI without `<` isn't an SGR mouse sequence. Bail.
-                    self.reset();
-                    MouseParseAction::Other(byte)
+                    // CSI without `<` isn't an SGR mouse sequence. Bail and
+                    // return ESC + '[' + current byte so the key parser sees them.
+                    self.bail_with_byte(byte)
                 }
             }
             ParseState::SawLt => {
+                // The '<' is already in held. Push byte and enter AccumParam.
+                self.held.push(byte);
                 self.state = ParseState::AccumParam(0);
-                self.consume(byte)
+                self.accum_param(byte, 0)
             }
             ParseState::AccumParam(idx) => {
-                // invariant: FSM only ever sets idx to 0, 1, or 2
-                debug_assert!(idx <= 2, "AccumParam idx out of range");
-                if byte.is_ascii_digit() {
-                    self.params[idx as usize] =
-                        self.params[idx as usize].saturating_mul(10) + u32::from(byte - b'0');
-                    MouseParseAction::Pending
-                } else if byte == b';' {
-                    if idx >= 2 {
-                        // Too many params; bail.
-                        self.reset();
-                        MouseParseAction::Other(byte)
-                    } else {
-                        self.state = ParseState::AccumParam(idx + 1);
-                        MouseParseAction::Pending
-                    }
-                } else if byte == b'M' || byte == b'm' {
-                    let evt = self.build_event(byte == b'M');
-                    self.reset();
-                    MouseParseAction::Event(evt)
-                } else {
-                    self.reset();
-                    MouseParseAction::Other(byte)
-                }
+                self.held.push(byte);
+                self.accum_param(byte, idx)
             }
         }
     }
 
-    fn reset(&mut self) {
+    /// Process a byte while in `AccumParam(idx)`. Called only after the byte
+    /// has already been pushed to `held`.
+    fn accum_param(&mut self, byte: u8, idx: u8) -> MouseParseAction {
+        // invariant: FSM only ever sets idx to 0, 1, or 2
+        debug_assert!(idx <= 2, "AccumParam idx out of range");
+        if byte.is_ascii_digit() {
+            self.params[idx as usize] =
+                self.params[idx as usize].saturating_mul(10) + u32::from(byte - b'0');
+            MouseParseAction::Pending
+        } else if byte == b';' {
+            if idx >= 2 {
+                // Too many params; bail and return all buffered bytes including ';'.
+                self.bail_already_pushed()
+            } else {
+                self.state = ParseState::AccumParam(idx + 1);
+                MouseParseAction::Pending
+            }
+        } else if byte == b'M' || byte == b'm' {
+            let evt = self.build_event(byte == b'M');
+            self.reset_state();
+            // Discard held (successfully parsed, so nothing needs re-routing).
+            self.held.clear();
+            MouseParseAction::Event(evt)
+        } else {
+            // An unexpected byte mid-sequence means the wire is garbage, so bail.
+            self.bail_already_pushed()
+        }
+    }
+
+    /// Push `byte` to held, drain held into `BailedBytes`, and reset state.
+    fn bail_with_byte(&mut self, byte: u8) -> MouseParseAction {
+        self.held.push(byte);
+        self.bail_already_pushed()
+    }
+
+    /// Drain held into `BailedBytes` and reset state. Use when the current
+    /// byte is already in `held`.
+    fn bail_already_pushed(&mut self) -> MouseParseAction {
+        let bytes = std::mem::take(&mut self.held);
+        self.reset_state();
+        MouseParseAction::BailedBytes(bytes)
+    }
+
+    fn reset_state(&mut self) {
         self.state = ParseState::Idle;
         self.params = [0; 3];
     }
@@ -252,8 +282,8 @@ mod tests {
     }
 
     fn finalize(bytes: &[u8]) -> MouseEvent {
-        let actions = drive(bytes);
-        match actions.last().copied() {
+        let mut actions = drive(bytes);
+        match actions.pop() {
             Some(MouseParseAction::Event(e)) => e,
             other => panic!("expected Event, got {other:?}"),
         }
@@ -308,12 +338,14 @@ mod tests {
     }
 
     #[test]
-    fn bare_esc_followed_by_non_lbracket_emits_other() {
-        // ESC alone should be held; if next byte isn't '[', emit both as Other.
+    fn bare_esc_followed_by_non_lbracket_returns_bailed_bytes() {
+        // ESC alone should be held; if next byte isn't '[', return ESC + byte.
         let mut p = MouseParser::new();
         assert_eq!(p.consume(0x1b), MouseParseAction::Pending);
-        assert_eq!(p.consume(b'a'), MouseParseAction::Other(b'a'));
-        // The held ESC gets dropped here; not ideal, but acceptable in this design.
+        match p.consume(b'a') {
+            MouseParseAction::BailedBytes(bytes) => assert_eq!(bytes, vec![0x1b, b'a']),
+            other => panic!("expected BailedBytes, got {other:?}"),
+        }
     }
 
     #[test]
@@ -324,6 +356,18 @@ mod tests {
         assert!(matches!(actions.last(), Some(MouseParseAction::Event(_))));
         for a in &actions[..actions.len() - 1] {
             assert!(matches!(a, MouseParseAction::Pending), "expected Pending, got {a:?}");
+        }
+    }
+
+    #[test]
+    fn esc_bracket_then_non_lt_returns_bailed_bytes() {
+        // Arrow keys: ESC [ A, so the parser sees ESC [ and then 'A' (not '<').
+        let mut p = MouseParser::new();
+        assert_eq!(p.consume(0x1b), MouseParseAction::Pending);
+        assert_eq!(p.consume(b'['), MouseParseAction::Pending);
+        match p.consume(b'A') {
+            MouseParseAction::BailedBytes(bytes) => assert_eq!(bytes, vec![0x1b, b'[', b'A']),
+            other => panic!("expected BailedBytes, got {other:?}"),
         }
     }
 

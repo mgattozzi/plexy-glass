@@ -32,6 +32,11 @@ impl InputRouter {
                 MouseParseAction::Pending => {}
                 MouseParseAction::Event(e) => out.push(InputEvent::Mouse(e)),
                 MouseParseAction::Other(byte) => out.push(InputEvent::Key(byte)),
+                MouseParseAction::BailedBytes(bs) => {
+                    for byte in bs {
+                        out.push(InputEvent::Key(byte));
+                    }
+                }
             }
         }
         out
@@ -84,5 +89,16 @@ mod tests {
         assert!(matches!(events[0], InputEvent::Key(b'a')));
         assert!(matches!(events[1], InputEvent::Mouse(_)));
         assert!(matches!(events[2], InputEvent::Key(b'b')));
+    }
+
+    #[test]
+    fn esc_bracket_arrow_emits_all_three_bytes() {
+        // Arrow key ESC [ A must not be swallowed; all three bytes arrive as Key events.
+        let mut r = InputRouter::new();
+        let events = r.classify(b"\x1b[A");
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0], InputEvent::Key(0x1b)));
+        assert!(matches!(events[1], InputEvent::Key(b'[')));
+        assert!(matches!(events[2], InputEvent::Key(b'A')));
     }
 }
