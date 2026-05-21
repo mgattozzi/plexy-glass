@@ -244,9 +244,23 @@ where
                                 }
                             }
                         }
-                        InputEvent::Paste(bs) => {
-                            // Phase: bracketed paste, real wrap/strip logic in Task 3.
-                            let _ = session.handle_input_bytes(&bs).await;
+                        InputEvent::Paste(bytes) => {
+                            let want_bracketed = {
+                                let manager = session.window_manager.lock().await;
+                                manager
+                                    .active_window()
+                                    .active_pane()
+                                    .map(|p| p.with_screen(|s| {
+                                        s.modes.contains(plexy_glass_emulator::Modes::BRACKETED_PASTE)
+                                    }))
+                                    .unwrap_or(false)
+                            };
+                            let payload = if want_bracketed {
+                                wrap_paste(&bytes)
+                            } else {
+                                bytes
+                            };
+                            let _ = session.handle_input_bytes(&payload).await;
                         }
                         InputEvent::Bytes(bs) => {
                             let _ = session.handle_input_bytes(&bs).await;
@@ -286,6 +300,14 @@ async fn cleanup_and_exit(
     Ok(())
 }
 
+fn wrap_paste(inner: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(inner.len() + 12);
+    out.extend_from_slice(b"\x1b[200~");
+    out.extend_from_slice(inner);
+    out.extend_from_slice(b"\x1b[201~");
+    out
+}
+
 fn default_spawn_spec() -> SpawnSpec {
     let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     SpawnSpec {
@@ -301,6 +323,19 @@ mod tests {
     use super::*;
     use plexy_glass_protocol::{PROTOCOL_VERSION, PtySize, SpawnSpec, client_handshake};
     use tokio::io::duplex;
+
+    #[test]
+    fn wrap_paste_wraps_with_bracketed_paste_escapes() {
+        let inner = b"hello world";
+        let wrapped = wrap_paste(inner);
+        assert_eq!(wrapped.as_slice(), b"\x1b[200~hello world\x1b[201~");
+    }
+
+    #[test]
+    fn wrap_paste_empty_input() {
+        let wrapped = wrap_paste(b"");
+        assert_eq!(wrapped.as_slice(), b"\x1b[200~\x1b[201~");
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn end_to_end_attach_renders_then_exits() {
