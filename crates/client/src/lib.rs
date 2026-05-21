@@ -52,6 +52,12 @@ pub async fn run(
     // silently ignore. Disabled in HostTty::restore.
     let _ = stdout.write_all(b"\x1b[>1u");
     let _ = stdout.flush();
+    // Enable bracketed paste mode so the host TTY wraps pasted bytes in
+    // \x1b[200~...\x1b[201~. The daemon's PasteParser recognizes the
+    // wrapper and forwards pastes to the active pane wrapped or stripped
+    // depending on whether that pane has its own bracketed-paste mode on.
+    let _ = stdout.write_all(b"\x1b[?2004h");
+    let _ = stdout.flush();
     let initial_size = current_size(stdin_fd)?;
 
     let spec = spawn_cmd.unwrap_or_else(default_spawn_spec);
