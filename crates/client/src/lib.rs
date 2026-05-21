@@ -47,6 +47,11 @@ pub async fn run(
     let mut stdout = std::io::stdout();
     let _ = stdout.write_all(b"\x1b[?1006h\x1b[?1003h");
     let _ = stdout.flush();
+    // Enable the kitty keyboard protocol so the daemon receives
+    // unambiguous modifier info. Terminals that don't support it
+    // silently ignore. Disabled in HostTty::restore.
+    let _ = stdout.write_all(b"\x1b[>1u");
+    let _ = stdout.flush();
     let initial_size = current_size(stdin_fd)?;
 
     let spec = spawn_cmd.unwrap_or_else(default_spawn_spec);
