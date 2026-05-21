@@ -4,7 +4,7 @@ use crate::{
     InputEvent, InputRouter, error::DaemonError, registry::SessionRegistry, renderer::Renderer,
     session::Session,
 };
-use plexy_glass_mux::{Command, Keymap, KeymapAction};
+use plexy_glass_mux::{Command, KeymapAction};
 use plexy_glass_protocol::{
     ClientMsg, Codec, ProtocolError, PtySize, ServerMsg, SpawnSpec, server_handshake,
 };
@@ -185,7 +185,7 @@ where
 
     // Input loop.
     let mut router = InputRouter::new();
-    let mut keymap = Keymap::default_tmux();
+    let mut keymap = plexy_glass_keys::build_keymap(&config.keymap);
     let prefix_active = Arc::new(AtomicBool::new(false));
 
     loop {
@@ -215,7 +215,7 @@ where
                         InputEvent::Mouse(me) => {
                             let _ = session.handle_mouse(me).await;
                         }
-                        InputEvent::Key(b) => {
+                        InputEvent::Key(ke, raw_bytes) => {
                             // Snap scrollback to live on any keystroke.
                             {
                                 let manager = session.window_manager.lock().await;
@@ -223,11 +223,11 @@ where
                                     p.reset_scroll();
                                 }
                             }
-                            let action = keymap.consume(b);
+                            let action = keymap.consume(ke, raw_bytes);
                             prefix_active.store(keymap.prefix_active(), Ordering::SeqCst);
                             match action {
-                                KeymapAction::PassThrough(byte) => {
-                                    let _ = session.handle_input_bytes(&[byte]).await;
+                                KeymapAction::PassThrough(_, bytes_back) => {
+                                    let _ = session.handle_input_bytes(&bytes_back).await;
                                 }
                                 KeymapAction::Command(cmd) => {
                                     if matches!(cmd, Command::Detach) {
@@ -236,10 +236,16 @@ where
                                     }
                                     let _ = session.handle_command(cmd).await;
                                 }
-                                KeymapAction::Consumed => {
+                                KeymapAction::Pending => {
+                                    session.notify.notify_one();
+                                }
+                                KeymapAction::Cancel => {
                                     session.notify.notify_one();
                                 }
                             }
+                        }
+                        InputEvent::Bytes(bs) => {
+                            let _ = session.handle_input_bytes(&bs).await;
                         }
                     }
                 }

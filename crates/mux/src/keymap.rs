@@ -1,240 +1,233 @@
-//! Prefix-key state machine. Translates raw input bytes into either
-//! pass-through bytes (sent to the active pane) or `Command` events (which
-//! mutate the `WindowManager`).
+//! Keymap: a chord trie that consumes typed `KeyEvent`s and emits `Command`
+//! or `PassThrough`.
 
-use crate::direction::Direction;
+use crate::{Direction, Key, KeyEvent, Modifiers};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Command {
-    SplitH,
-    SplitV,
-    SelectNextPane,
-    SelectPrevPane,
-    SelectPane(Direction),
-    KillPane,
-    ZoomToggle,
     NewWindow,
     NextWindow,
     PrevWindow,
-    SelectWindow(u8),
     KillWindow,
+    SelectWindow(u8),
+    SplitV,
+    SplitH,
+    KillPane,
+    ZoomToggle,
+    SelectPane(Direction),
+    SelectNextPane,
+    SelectPrevPane,
     Detach,
     Cancel,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeymapAction {
-    PassThrough(u8),
-    Command(Command),
-    /// Byte consumed by the state machine (e.g., prefix); no side effects on the pane.
-    Consumed,
+pub type Chord = (Modifiers, Key);
+
+#[derive(Debug, Default, Clone)]
+struct TrieNode {
+    children: HashMap<Chord, TrieNode>,
+    terminal: Option<Command>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeymapState {
-    PassThrough,
-    AwaitingCommand,
-}
-
+#[derive(Debug, Clone)]
 pub struct Keymap {
-    prefix: u8,
-    state: KeymapState,
-    bindings: HashMap<u8, Command>,
+    root: TrieNode,
+    pending: Vec<Chord>,
+    pending_bytes: Vec<u8>,
+    pending_since: Option<Instant>,
+    timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub enum KeymapAction {
+    /// Key bubbled all the way through; deliver to the active pane.
+    PassThrough(KeyEvent, Vec<u8>),
+    /// A binding fired.
+    Command(Command),
+    /// We're inside a chord sequence; hold until next chord.
+    Pending,
+    /// Pending sequence cancelled (timeout / non-matching key).
+    Cancel,
 }
 
 impl Keymap {
-    /// Default keymap:
-    /// - Prefix: Ctrl-a (`0x01`).
-    /// - `v` / `s` split panes (matching `bind v split-window -h` and
-    ///   `bind s split-window -v` in the user's tmux.conf; `-h` is
-    ///   plexy-glass's vertical split, `-v` is horizontal).
-    /// - `h` / `j` / `k` / `l` select pane left / down / up / right
-    ///   (vi-style; works on both QWERTY and Colemak keyboards because
-    ///   the bytes are layout-independent).
-    /// - `n` is next-window (its tmux default).
-    pub fn default_tmux() -> Self {
-        let mut bindings: HashMap<u8, Command> = HashMap::new();
-        // Splits, matching the user's tmux.conf.
-        bindings.insert(b'v', Command::SplitV);
-        bindings.insert(b's', Command::SplitH);
-        // Cycling panes.
-        bindings.insert(b'o', Command::SelectNextPane);
-        bindings.insert(b';', Command::SelectPrevPane);
-        // Directional pane selection (vi-style hjkl).
-        bindings.insert(b'h', Command::SelectPane(Direction::Left));
-        bindings.insert(b'j', Command::SelectPane(Direction::Down));
-        bindings.insert(b'k', Command::SelectPane(Direction::Up));
-        bindings.insert(b'l', Command::SelectPane(Direction::Right));
-        // Pane lifecycle.
-        bindings.insert(b'x', Command::KillPane);
-        bindings.insert(b'z', Command::ZoomToggle);
-        // Window management.
-        bindings.insert(b'c', Command::NewWindow);
-        bindings.insert(b'n', Command::NextWindow);
-        bindings.insert(b'p', Command::PrevWindow);
-        bindings.insert(b'&', Command::KillWindow);
-        bindings.insert(b'd', Command::Detach);
-        // tmux convention: prefix + 1..9 selects window 0..8 (1-indexed display).
-        for digit in 1..10u8 {
-            bindings.insert(b'0' + digit, Command::SelectWindow(digit - 1));
-        }
+    pub fn new() -> Self {
         Self {
-            prefix: 0x01, // Ctrl-a (from user's tmux.conf)
-            state: KeymapState::PassThrough,
-            bindings,
+            root: TrieNode::default(),
+            pending: Vec::new(),
+            pending_bytes: Vec::new(),
+            pending_since: None,
+            timeout: Duration::from_secs(1),
         }
     }
 
-    pub fn consume(&mut self, byte: u8) -> KeymapAction {
-        match self.state {
-            KeymapState::PassThrough => {
-                if byte == self.prefix {
-                    self.state = KeymapState::AwaitingCommand;
-                    KeymapAction::Consumed
-                } else {
-                    KeymapAction::PassThrough(byte)
-                }
-            }
-            KeymapState::AwaitingCommand => {
-                self.state = KeymapState::PassThrough;
-                if byte == self.prefix {
-                    return KeymapAction::PassThrough(byte);
-                }
-                if byte == 0x1b {
-                    return KeymapAction::Command(Command::Cancel);
-                }
-                if let Some(cmd) = self.bindings.get(&byte).copied() {
-                    return KeymapAction::Command(cmd);
-                }
-                tracing::trace!(byte, "unknown command after prefix");
-                KeymapAction::Consumed
-            }
-        }
+    pub fn set_timeout(&mut self, t: Duration) {
+        self.timeout = t;
     }
 
-    /// True if we're currently between the prefix byte and the next byte.
+    /// Add a binding. Later bindings with the same chord-sequence override earlier ones.
+    pub fn bind(&mut self, chords: &[Chord], command: Command) {
+        let mut node = &mut self.root;
+        for chord in chords.iter() {
+            node = node.children.entry(*chord).or_default();
+        }
+        node.terminal = Some(command);
+    }
+
     pub fn prefix_active(&self) -> bool {
-        matches!(self.state, KeymapState::AwaitingCommand)
+        !self.pending.is_empty()
+    }
+
+    pub fn consume(&mut self, event: KeyEvent, bytes: Vec<u8>) -> KeymapAction {
+        // Check pending timeout.
+        if let Some(at) = self.pending_since
+            && at.elapsed() >= self.timeout
+        {
+            self.cancel();
+        }
+
+        let chord = (event.mods, event.key);
+        let node = self.descend();
+        if let Some(child) = node.children.get(&chord) {
+            if !child.children.is_empty() {
+                self.pending.push(chord);
+                self.pending_bytes.extend_from_slice(&bytes);
+                self.pending_since = Some(Instant::now());
+                return KeymapAction::Pending;
+            }
+            if let Some(cmd) = child.terminal {
+                self.cancel();
+                return KeymapAction::Command(cmd);
+            }
+            self.cancel();
+            return KeymapAction::Cancel;
+        }
+
+        if self.pending.is_empty() {
+            return KeymapAction::PassThrough(event, bytes);
+        }
+        self.cancel();
+        KeymapAction::Cancel
+    }
+
+    /// Call periodically to handle prefix timeout. Returns `Some(PassThrough)` when
+    /// the held sequence has timed out.
+    pub fn tick(&mut self) -> Option<KeymapAction> {
+        if let Some(at) = self.pending_since
+            && at.elapsed() >= self.timeout
+        {
+            let bytes = std::mem::take(&mut self.pending_bytes);
+            let last_event = self.pending.last().copied();
+            self.cancel();
+            if let Some((mods, key)) = last_event {
+                return Some(KeymapAction::PassThrough(
+                    KeyEvent::new(key, mods),
+                    bytes,
+                ));
+            }
+            return Some(KeymapAction::Cancel);
+        }
+        None
+    }
+
+    fn descend(&self) -> &TrieNode {
+        let mut node = &self.root;
+        for chord in &self.pending {
+            match node.children.get(chord) {
+                Some(child) => node = child,
+                None => return &self.root,
+            }
+        }
+        node
+    }
+
+    fn cancel(&mut self) {
+        self.pending.clear();
+        self.pending_bytes.clear();
+        self.pending_since = None;
     }
 }
 
 impl Default for Keymap {
     fn default() -> Self {
-        Self::default_tmux()
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread::sleep;
 
-    #[test]
-    fn plain_byte_passes_through() {
-        let mut k = Keymap::default_tmux();
-        assert_eq!(k.consume(b'a'), KeymapAction::PassThrough(b'a'));
+    fn chord(mods: Modifiers, key: Key) -> Chord {
+        (mods, key)
+    }
+
+    fn ev(mods: Modifiers, key: Key, bytes: &[u8]) -> (KeyEvent, Vec<u8>) {
+        (KeyEvent::new(key, mods), bytes.to_vec())
     }
 
     #[test]
-    fn prefix_then_command_emits_command() {
-        let mut k = Keymap::default_tmux();
-        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
-        assert_eq!(k.consume(b'v'), KeymapAction::Command(Command::SplitV));
+    fn unbound_key_passes_through() {
+        let mut k = Keymap::new();
+        let (e, b) = ev(Modifiers::empty(), Key::Char('z'), b"z");
+        let action = k.consume(e, b);
+        assert!(matches!(action, KeymapAction::PassThrough(_, ref bs) if bs == b"z"));
     }
 
     #[test]
-    fn split_h_binding() {
-        let mut k = Keymap::default_tmux();
-        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
-        assert_eq!(k.consume(b's'), KeymapAction::Command(Command::SplitH));
-    }
-
-    #[test]
-    fn directional_pane_select_bindings() {
-        let mut k = Keymap::default_tmux();
-        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
-        assert_eq!(
-            k.consume(b'h'),
-            KeymapAction::Command(Command::SelectPane(Direction::Left))
+    fn direct_binding_fires_command() {
+        let mut k = Keymap::new();
+        k.bind(
+            &[chord(Modifiers::ALT, Key::Arrow(Direction::Right))],
+            Command::SelectPane(Direction::Right),
         );
-        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
-        assert_eq!(
-            k.consume(b'j'),
-            KeymapAction::Command(Command::SelectPane(Direction::Down))
+        let (e, b) = ev(Modifiers::ALT, Key::Arrow(Direction::Right), b"\x1b[1;3C");
+        let action = k.consume(e, b);
+        assert!(matches!(action, KeymapAction::Command(Command::SelectPane(Direction::Right))));
+    }
+
+    #[test]
+    fn prefix_sequence_fires_on_second_chord() {
+        let mut k = Keymap::new();
+        k.bind(
+            &[chord(Modifiers::CTRL, Key::Char('a')), chord(Modifiers::empty(), Key::Char('c'))],
+            Command::NewWindow,
         );
-        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
-        assert_eq!(
-            k.consume(b'k'),
-            KeymapAction::Command(Command::SelectPane(Direction::Up))
+        let (e1, b1) = ev(Modifiers::CTRL, Key::Char('a'), &[0x01]);
+        assert!(matches!(k.consume(e1, b1), KeymapAction::Pending));
+        let (e2, b2) = ev(Modifiers::empty(), Key::Char('c'), b"c");
+        assert!(matches!(k.consume(e2, b2), KeymapAction::Command(Command::NewWindow)));
+    }
+
+    #[test]
+    fn prefix_non_matching_followup_cancels() {
+        let mut k = Keymap::new();
+        k.bind(
+            &[chord(Modifiers::CTRL, Key::Char('a')), chord(Modifiers::empty(), Key::Char('c'))],
+            Command::NewWindow,
         );
-        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
-        assert_eq!(
-            k.consume(b'l'),
-            KeymapAction::Command(Command::SelectPane(Direction::Right))
+        let (e1, b1) = ev(Modifiers::CTRL, Key::Char('a'), &[0x01]);
+        assert!(matches!(k.consume(e1, b1), KeymapAction::Pending));
+        let (e2, b2) = ev(Modifiers::empty(), Key::Char('z'), b"z");
+        assert!(matches!(k.consume(e2, b2), KeymapAction::Cancel));
+    }
+
+    #[test]
+    fn pending_timeout_triggers_cancel_on_tick() {
+        let mut k = Keymap::new();
+        k.set_timeout(Duration::from_millis(50));
+        k.bind(
+            &[chord(Modifiers::CTRL, Key::Char('a')), chord(Modifiers::empty(), Key::Char('c'))],
+            Command::NewWindow,
         );
-    }
-
-    #[test]
-    fn double_prefix_passes_through_literal() {
-        let mut k = Keymap::default_tmux();
-        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
-        assert_eq!(k.consume(0x01), KeymapAction::PassThrough(0x01));
-    }
-
-    #[test]
-    fn unknown_command_aborts_to_pass_through() {
-        let mut k = Keymap::default_tmux();
-        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
-        assert_eq!(k.consume(b'~'), KeymapAction::Consumed);
-        assert_eq!(k.consume(b'a'), KeymapAction::PassThrough(b'a'));
-    }
-
-    #[test]
-    fn escape_after_prefix_cancels() {
-        let mut k = Keymap::default_tmux();
-        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
-        assert_eq!(k.consume(0x1b), KeymapAction::Command(Command::Cancel));
-    }
-
-    #[test]
-    fn digits_map_to_select_window_one_indexed() {
-        let mut k = Keymap::default_tmux();
-        // prefix + 1 -> window 0 (first window).
-        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
-        assert_eq!(k.consume(b'1'), KeymapAction::Command(Command::SelectWindow(0)));
-        // prefix + 3 -> window 2.
-        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
-        assert_eq!(k.consume(b'3'), KeymapAction::Command(Command::SelectWindow(2)));
-    }
-
-    #[test]
-    fn zero_is_not_bound_to_select_window() {
-        let mut k = Keymap::default_tmux();
-        assert_eq!(k.consume(0x01), KeymapAction::Consumed);
-        // '0' has no binding under prefix; it leaves prefix mode without firing a command.
-        let action = k.consume(b'0');
-        assert!(
-            !matches!(action, KeymapAction::Command(Command::SelectWindow(_))),
-            "prefix + 0 should not select a window; got {action:?}"
-        );
-    }
-
-    #[test]
-    fn prefix_active_flag_tracks_state() {
-        let mut k = Keymap::default_tmux();
+        let (e1, b1) = ev(Modifiers::CTRL, Key::Char('a'), &[0x01]);
+        assert!(matches!(k.consume(e1, b1), KeymapAction::Pending));
+        sleep(Duration::from_millis(80));
+        let tick = k.tick().expect("expected timeout flush");
+        assert!(matches!(tick, KeymapAction::PassThrough(..)));
         assert!(!k.prefix_active());
-        k.consume(0x01);
-        assert!(k.prefix_active());
-        k.consume(b'v');
-        assert!(!k.prefix_active());
-    }
-
-    #[test]
-    fn ctrl_a_d_emits_detach() {
-        let mut k = Keymap::default_tmux();
-        let a = k.consume(0x01);
-        assert!(matches!(a, KeymapAction::Consumed));
-        let b = k.consume(b'd');
-        assert!(matches!(b, KeymapAction::Command(Command::Detach)), "got {b:?}");
     }
 }

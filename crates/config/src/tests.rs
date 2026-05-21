@@ -79,3 +79,20 @@ fn load_or_default_returns_a_config() {
     // Smoke test: must always succeed (never panic).
     let (_cfg, _err) = load_or_default();
 }
+
+#[test]
+fn built_in_keymap_has_prefix_bindings() {
+    let km = built_in_keymap();
+    assert_eq!(km.prefix, "Ctrl+a");
+    assert!(km.inherit_defaults);
+    assert!(
+        km.bindings
+            .iter()
+            .any(|b| b.keys == "Ctrl+a c" && b.command == "new_window")
+    );
+    assert!(
+        km.bindings
+            .iter()
+            .any(|b| b.keys == "Alt+Right" && b.command == "select_pane_right")
+    );
+}

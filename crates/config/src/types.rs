@@ -8,6 +8,41 @@ pub struct Config {
     pub palette: PaletteConfig,
     #[serde(default)]
     pub status: StatusConfig,
+    #[serde(default)]
+    pub keymap: KeymapConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeymapConfig {
+    #[serde(default = "default_prefix")]
+    pub prefix: String,
+    #[serde(default = "default_true")]
+    pub inherit_defaults: bool,
+    #[serde(default)]
+    pub bindings: Vec<KeymapBinding>,
+}
+
+impl Default for KeymapConfig {
+    fn default() -> Self {
+        Self {
+            prefix: default_prefix(),
+            inherit_defaults: true,
+            bindings: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeymapBinding {
+    pub keys: String,
+    pub command: String,
+}
+
+fn default_prefix() -> String {
+    "Ctrl+a".to_string()
+}
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -1,16 +1,20 @@
-//! Classifies raw client input bytes into typed keyboard or mouse events.
+//! Classifies raw client input bytes into typed key events, mouse events,
+//! or passthrough bytes.
 
-use plexy_glass_mux::{MouseEvent, MouseParseAction, MouseParser};
+use plexy_glass_keys::{KeyParseOutput, KeyParser};
+use plexy_glass_mux::{KeyEvent, MouseEvent, MouseParseAction, MouseParser};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum InputEvent {
-    /// Byte that wasn't part of a mouse sequence; route to keymap / pane.
-    Key(u8),
+    Key(KeyEvent, Vec<u8>),
     Mouse(MouseEvent),
+    /// Bytes that didn't parse as either mouse or key, so they pass through to the shell.
+    Bytes(Vec<u8>),
 }
 
 pub struct InputRouter {
     mouse: MouseParser,
+    keys: KeyParser,
 }
 
 impl Default for InputRouter {
@@ -21,84 +25,100 @@ impl Default for InputRouter {
 
 impl InputRouter {
     pub fn new() -> Self {
-        Self { mouse: MouseParser::new() }
+        Self {
+            mouse: MouseParser::new(),
+            keys: KeyParser::new(),
+        }
     }
 
-    /// Classify each byte. Returns events in the order they were produced.
     pub fn classify(&mut self, bytes: &[u8]) -> Vec<InputEvent> {
         let mut out = Vec::with_capacity(bytes.len());
         for &b in bytes {
             match self.mouse.consume(b) {
                 MouseParseAction::Pending => {}
                 MouseParseAction::Event(e) => out.push(InputEvent::Mouse(e)),
-                MouseParseAction::Other(byte) => out.push(InputEvent::Key(byte)),
+                MouseParseAction::Other(byte) => self.feed_key(byte, &mut out),
                 MouseParseAction::BailedBytes(bs) => {
                     for byte in bs {
-                        out.push(InputEvent::Key(byte));
+                        self.feed_key(byte, &mut out);
                     }
                 }
             }
         }
         out
     }
+
+    pub fn flush_keys(&mut self) -> Option<InputEvent> {
+        match self.keys.flush()? {
+            KeyParseOutput::Event { event, bytes } => Some(InputEvent::Key(event, bytes)),
+            KeyParseOutput::Bytes(bs) => Some(InputEvent::Bytes(bs)),
+            KeyParseOutput::Pending => None,
+        }
+    }
+
+    fn feed_key(&mut self, byte: u8, out: &mut Vec<InputEvent>) {
+        match self.keys.consume(byte) {
+            KeyParseOutput::Pending => {}
+            KeyParseOutput::Event { event, bytes } => out.push(InputEvent::Key(event, bytes)),
+            KeyParseOutput::Bytes(bs) => out.push(InputEvent::Bytes(bs)),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plexy_glass_mux::{MouseButton, MouseKind};
+    use plexy_glass_mux::{Direction, Key, Modifiers};
 
     #[test]
-    fn pure_keys_classify_as_key_events() {
+    fn arrow_up_parses_as_key_event() {
         let mut r = InputRouter::new();
-        let events = r.classify(b"ls\n");
-        assert_eq!(events.len(), 3);
-        for (i, byte) in b"ls\n".iter().enumerate() {
-            match events[i] {
-                InputEvent::Key(b) => assert_eq!(b, *byte),
-                _ => panic!("expected Key"),
+        let events = r.classify(b"\x1b[A");
+        let mut found = false;
+        for e in events {
+            if let InputEvent::Key(ke, bytes) = e {
+                assert_eq!(ke.key, Key::Arrow(Direction::Up));
+                assert!(ke.mods.is_empty());
+                assert_eq!(bytes, b"\x1b[A");
+                found = true;
             }
         }
+        assert!(found, "expected an arrow-up Key event");
     }
 
     #[test]
-    fn sgr_mouse_press_classifies_as_mouse_event() {
+    fn ctrl_left_parses_with_modifier() {
+        let mut r = InputRouter::new();
+        let events = r.classify(b"\x1b[1;5D");
+        let key = events
+            .iter()
+            .find_map(|e| match e {
+                InputEvent::Key(ke, _) => Some(ke),
+                _ => None,
+            })
+            .expect("key event");
+        assert_eq!(key.key, Key::Arrow(Direction::Left));
+        assert_eq!(key.mods, Modifiers::CTRL);
+    }
+
+    #[test]
+    fn mouse_event_routes_to_mouse() {
         let mut r = InputRouter::new();
         let events = r.classify(b"\x1b[<0;10;5M");
         assert_eq!(events.len(), 1);
-        match events[0] {
-            InputEvent::Mouse(e) => {
-                assert_eq!(e.button, MouseButton::Left);
-                assert_eq!(e.kind, MouseKind::Press);
-                assert_eq!((e.row, e.col), (4, 9));
+        assert!(matches!(events[0], InputEvent::Mouse(_)));
+    }
+
+    #[test]
+    fn plain_char_parses_as_key_event() {
+        let mut r = InputRouter::new();
+        let events = r.classify(b"a");
+        match events.first() {
+            Some(InputEvent::Key(ke, bytes)) => {
+                assert_eq!(ke.key, Key::Char('a'));
+                assert_eq!(bytes.as_slice(), b"a");
             }
-            _ => panic!("expected Mouse"),
+            other => panic!("expected Key event, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn interleaved_keys_and_mouse() {
-        let mut r = InputRouter::new();
-        let mut input = Vec::new();
-        input.extend_from_slice(b"a");
-        input.extend_from_slice(b"\x1b[<0;1;1M");
-        input.extend_from_slice(b"b");
-        let events = r.classify(&input);
-        // 'a', mouse press, 'b'.
-        assert_eq!(events.len(), 3);
-        assert!(matches!(events[0], InputEvent::Key(b'a')));
-        assert!(matches!(events[1], InputEvent::Mouse(_)));
-        assert!(matches!(events[2], InputEvent::Key(b'b')));
-    }
-
-    #[test]
-    fn esc_bracket_arrow_emits_all_three_bytes() {
-        // Arrow key ESC [ A must not be swallowed; all three bytes arrive as Key events.
-        let mut r = InputRouter::new();
-        let events = r.classify(b"\x1b[A");
-        assert_eq!(events.len(), 3);
-        assert!(matches!(events[0], InputEvent::Key(0x1b)));
-        assert!(matches!(events[1], InputEvent::Key(b'[')));
-        assert!(matches!(events[2], InputEvent::Key(b'A')));
     }
 }

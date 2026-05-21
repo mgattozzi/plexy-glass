@@ -832,6 +832,7 @@ dependencies = [
  "nix 0.31.3",
  "plexy-glass-config",
  "plexy-glass-emulator",
+ "plexy-glass-keys",
  "plexy-glass-mux",
  "plexy-glass-protocol",
  "plexy-glass-status",
@@ -865,6 +866,7 @@ dependencies = [
 name = "plexy-glass-keys"
 version = "0.1.0"
 dependencies = [
+ "plexy-glass-config",
  "plexy-glass-mux",
  "smol_str",
  "thiserror 2.0.18",

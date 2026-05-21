@@ -1,4 +1,7 @@
-use crate::{Config, PaletteConfig, Padding, Position, StatusConfig, StyleConfig, WidgetSpec};
+use crate::{
+    Config, KeymapBinding, KeymapConfig, PaletteConfig, Padding, Position, StatusConfig,
+    StyleConfig, WidgetSpec,
+};
 use std::time::Duration;
 
 pub fn kanagawa_dragon_palette() -> PaletteConfig {
@@ -36,6 +39,7 @@ pub fn kanagawa_dragon_palette() -> PaletteConfig {
 pub fn built_in_default() -> Config {
     Config {
         palette: kanagawa_dragon_palette(),
+        keymap: built_in_keymap(),
         status: StatusConfig {
             position: Position::Bottom,
             refresh: Duration::from_secs(5),
@@ -89,5 +93,47 @@ pub fn built_in_default() -> Config {
                 },
             ],
         },
+    }
+}
+
+pub fn built_in_keymap() -> KeymapConfig {
+    KeymapConfig {
+        prefix: "Ctrl+a".into(),
+        inherit_defaults: true,
+        bindings: vec![
+            binding("Ctrl+a c", "new_window"),
+            binding("Ctrl+a v", "split_v"),
+            binding("Ctrl+a s", "split_h"),
+            binding("Ctrl+a x", "kill_pane"),
+            binding("Ctrl+a z", "zoom_toggle"),
+            binding("Ctrl+a n", "next_window"),
+            binding("Ctrl+a p", "prev_window"),
+            binding("Ctrl+a &", "kill_window"),
+            binding("Ctrl+a d", "detach"),
+            binding("Ctrl+a 1", "select_window:0"),
+            binding("Ctrl+a 2", "select_window:1"),
+            binding("Ctrl+a 3", "select_window:2"),
+            binding("Ctrl+a 4", "select_window:3"),
+            binding("Ctrl+a 5", "select_window:4"),
+            binding("Ctrl+a 6", "select_window:5"),
+            binding("Ctrl+a 7", "select_window:6"),
+            binding("Ctrl+a 8", "select_window:7"),
+            binding("Ctrl+a 9", "select_window:8"),
+            binding("Ctrl+a h", "select_pane_left"),
+            binding("Ctrl+a j", "select_pane_down"),
+            binding("Ctrl+a k", "select_pane_up"),
+            binding("Ctrl+a l", "select_pane_right"),
+            binding("Alt+Left", "select_pane_left"),
+            binding("Alt+Down", "select_pane_down"),
+            binding("Alt+Up", "select_pane_up"),
+            binding("Alt+Right", "select_pane_right"),
+        ],
+    }
+}
+
+fn binding(keys: &str, command: &str) -> KeymapBinding {
+    KeymapBinding {
+        keys: keys.into(),
+        command: command.into(),
     }
 }
