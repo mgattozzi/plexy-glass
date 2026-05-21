@@ -4,11 +4,13 @@
 mod build;
 mod encode;
 mod parser;
+mod paste;
 mod spec;
 
 pub use build::build_keymap;
 pub use encode::legacy_bytes;
 pub use parser::{KeyParseOutput, KeyParser};
+pub use paste::{PasteParseOutput, PasteParser};
 pub use spec::{
     parse_chord, parse_chord_seq, parse_command, ChordSpec, CommandSpec, KeyParseError,
 };
