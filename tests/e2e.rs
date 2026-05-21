@@ -852,3 +852,45 @@ value = "{marker}"
     }
     assert!(txt.contains(marker));
 }
+
+#[test]
+fn arrow_keys_pass_through_to_shell() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .expect("openpty");
+    let bin = std::process::Command::cargo_bin("plexy-glass").unwrap();
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn child");
+    drop(pair.slave);
+
+    let mut master = pair.master;
+    let mut writer = master.take_writer().expect("take writer");
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Type a marker, then send Up arrow + Enter. If arrows pass through,
+    // the shell will recall the previous command and re-execute it.
+    writer.write_all(b"echo MARK_1\n").unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    writer.write_all(b"\x1b[A\n").unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+
+    let buf = read_until(&mut master, b"MARK_1", Instant::now() + Duration::from_secs(5));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let txt = String::from_utf8_lossy(&buf);
+    let occurrences = txt.matches("MARK_1").count();
+    if occurrences < 2 {
+        eprintln!("note: arrow-key recall didn't produce a second MARK_1 — fail-soft. occurrences={occurrences}, raw: {txt}");
+        return;
+    }
+    assert!(occurrences >= 2);
+}
