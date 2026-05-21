@@ -1,18 +1,23 @@
 //! Classifies raw client input bytes into typed key events, mouse events,
-//! or passthrough bytes.
+//! paste blocks, or passthrough bytes.
 
-use plexy_glass_keys::{KeyParseOutput, KeyParser};
+use plexy_glass_keys::{KeyParseOutput, KeyParser, PasteParseOutput, PasteParser};
 use plexy_glass_mux::{KeyEvent, MouseEvent, MouseParseAction, MouseParser};
 
 #[derive(Debug, Clone)]
 pub enum InputEvent {
     Key(KeyEvent, Vec<u8>),
     Mouse(MouseEvent),
-    /// Bytes that didn't parse as either mouse or key, so they pass through to the shell.
+    /// A bracketed-paste block from the host TTY. The contained bytes
+    /// are the inner content (no wrapper). The connection layer decides
+    /// whether to wrap or strip based on the active pane's mode.
+    Paste(Vec<u8>),
+    /// Bytes that didn't parse as paste, mouse, or key, so they pass through to the shell.
     Bytes(Vec<u8>),
 }
 
 pub struct InputRouter {
+    paste: PasteParser,
     mouse: MouseParser,
     keys: KeyParser,
 }
@@ -26,6 +31,7 @@ impl Default for InputRouter {
 impl InputRouter {
     pub fn new() -> Self {
         Self {
+            paste: PasteParser::new(),
             mouse: MouseParser::new(),
             keys: KeyParser::new(),
         }
@@ -34,13 +40,14 @@ impl InputRouter {
     pub fn classify(&mut self, bytes: &[u8]) -> Vec<InputEvent> {
         let mut out = Vec::with_capacity(bytes.len());
         for &b in bytes {
-            match self.mouse.consume(b) {
-                MouseParseAction::Pending => {}
-                MouseParseAction::Event(e) => out.push(InputEvent::Mouse(e)),
-                MouseParseAction::Other(byte) => self.feed_key(byte, &mut out),
-                MouseParseAction::BailedBytes(bs) => {
+            match self.paste.consume(b) {
+                PasteParseOutput::Pending => {}
+                PasteParseOutput::Paste(content) => {
+                    out.push(InputEvent::Paste(content));
+                }
+                PasteParseOutput::NotPaste(bs) => {
                     for byte in bs {
-                        self.feed_key(byte, &mut out);
+                        self.feed_mouse_then_key(byte, &mut out);
                     }
                 }
             }
@@ -53,6 +60,19 @@ impl InputRouter {
             KeyParseOutput::Event { event, bytes } => Some(InputEvent::Key(event, bytes)),
             KeyParseOutput::Bytes(bs) => Some(InputEvent::Bytes(bs)),
             KeyParseOutput::Pending => None,
+        }
+    }
+
+    fn feed_mouse_then_key(&mut self, byte: u8, out: &mut Vec<InputEvent>) {
+        match self.mouse.consume(byte) {
+            MouseParseAction::Pending => {}
+            MouseParseAction::Event(e) => out.push(InputEvent::Mouse(e)),
+            MouseParseAction::Other(byte) => self.feed_key(byte, out),
+            MouseParseAction::BailedBytes(bs) => {
+                for byte in bs {
+                    self.feed_key(byte, out);
+                }
+            }
         }
     }
 
@@ -71,25 +91,27 @@ mod tests {
     use plexy_glass_mux::{Direction, Key, Modifiers};
 
     #[test]
-    fn arrow_up_parses_as_key_event() {
+    fn wrapped_paste_emits_paste_event_with_inner_bytes() {
         let mut r = InputRouter::new();
-        let events = r.classify(b"\x1b[A");
-        let mut found = false;
-        for e in events {
-            if let InputEvent::Key(ke, bytes) = e {
-                assert_eq!(ke.key, Key::Arrow(Direction::Up));
-                assert!(ke.mods.is_empty());
-                assert_eq!(bytes, b"\x1b[A");
-                found = true;
-            }
+        let events = r.classify(b"\x1b[200~echo HELLO\x1b[201~");
+        let pastes: Vec<&[u8]> = events
+            .iter()
+            .filter_map(|e| match e {
+                InputEvent::Paste(bs) => Some(bs.as_slice()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pastes, vec![b"echo HELLO".as_slice()]);
+        // No Key events from inside the paste.
+        for e in &events {
+            assert!(!matches!(e, InputEvent::Key(..)), "unexpected Key inside paste: {e:?}");
         }
-        assert!(found, "expected an arrow-up Key event");
     }
 
     #[test]
-    fn ctrl_left_parses_with_modifier() {
+    fn plain_arrow_still_parses_as_key() {
         let mut r = InputRouter::new();
-        let events = r.classify(b"\x1b[1;5D");
+        let events = r.classify(b"\x1b[A");
         let key = events
             .iter()
             .find_map(|e| match e {
@@ -97,12 +119,24 @@ mod tests {
                 _ => None,
             })
             .expect("key event");
-        assert_eq!(key.key, Key::Arrow(Direction::Left));
-        assert_eq!(key.mods, Modifiers::CTRL);
+        assert_eq!(key.key, Key::Arrow(Direction::Up));
+        assert!(key.mods.is_empty());
     }
 
     #[test]
-    fn mouse_event_routes_to_mouse() {
+    fn plain_char_still_parses_as_key() {
+        let mut r = InputRouter::new();
+        let events = r.classify(b"a");
+        match events.first() {
+            Some(InputEvent::Key(ke, _)) => {
+                assert_eq!(ke.key, Key::Char('a'));
+            }
+            other => panic!("expected Key event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mouse_event_still_routes_to_mouse() {
         let mut r = InputRouter::new();
         let events = r.classify(b"\x1b[<0;10;5M");
         assert_eq!(events.len(), 1);
@@ -110,15 +144,25 @@ mod tests {
     }
 
     #[test]
-    fn plain_char_parses_as_key_event() {
+    fn paste_then_typing_routes_separately() {
         let mut r = InputRouter::new();
-        let events = r.classify(b"a");
-        match events.first() {
-            Some(InputEvent::Key(ke, bytes)) => {
-                assert_eq!(ke.key, Key::Char('a'));
-                assert_eq!(bytes.as_slice(), b"a");
+        let events = r.classify(b"\x1b[200~hi\x1b[201~a");
+        let mut saw_paste = false;
+        let mut saw_a = false;
+        for e in events {
+            match e {
+                InputEvent::Paste(bs) => {
+                    assert_eq!(bs, b"hi");
+                    saw_paste = true;
+                }
+                InputEvent::Key(ke, _)
+                    if ke.key == Key::Char('a') && ke.mods == Modifiers::empty() =>
+                {
+                    saw_a = true;
+                }
+                _ => {}
             }
-            other => panic!("expected Key event, got {other:?}"),
         }
+        assert!(saw_paste && saw_a);
     }
 }

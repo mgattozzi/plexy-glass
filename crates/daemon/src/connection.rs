@@ -244,6 +244,10 @@ where
                                 }
                             }
                         }
+                        InputEvent::Paste(bs) => {
+                            // Phase: bracketed paste, real wrap/strip logic in Task 3.
+                            let _ = session.handle_input_bytes(&bs).await;
+                        }
                         InputEvent::Bytes(bs) => {
                             let _ = session.handle_input_bytes(&bs).await;
                         }
