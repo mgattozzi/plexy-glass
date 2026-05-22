@@ -7,6 +7,7 @@
 
 pub mod borders;
 pub mod compositor;
+pub mod copy_mode;
 pub mod diff;
 pub mod direction;
 pub mod key;
@@ -20,6 +21,7 @@ pub mod status;
 pub mod virtual_screen;
 
 pub use compositor::{Compositor, PaneView};
+pub use copy_mode::{CopyMode, CopyModeAction, CopyModeHandler, MatchSpan, SearchState};
 pub use diff::DiffRenderer;
 pub use direction::{Direction, SplitDir};
 pub use key::{Key, KeyEvent, Modifiers};
