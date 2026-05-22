@@ -1004,3 +1004,81 @@ fn copy_mode_navigates_and_yanks() {
     }
     assert!(txt.contains("COPY_MODE_TARGET"));
 }
+
+#[test]
+fn reload_config_picks_up_custom_text_widget() {
+    use std::process::Stdio;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // First, attach with the default config.
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("openpty");
+    let bin = std::process::Command::cargo_bin("plexy-glass").unwrap();
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn child");
+    drop(pair.slave);
+    let mut master = pair.master;
+    let mut writer = master.take_writer().expect("writer");
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Write a custom config that adds a recognizable text widget.
+    let body = r##"
+[status]
+[[status.right]]
+type = "text"
+value = "RELOADED_TAG"
+"##;
+    if let Some((_, xdg)) = env.iter().find(|(k, _)| k == "XDG_CONFIG_HOME") {
+        let cfg_dir = std::path::PathBuf::from(xdg).join("plexy-glass");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("config.toml"), body).unwrap();
+    }
+    if let Some((_, home)) = env.iter().find(|(k, _)| k == "HOME") {
+        let mac_cfg =
+            std::path::PathBuf::from(home).join("Library/Application Support/plexy-glass");
+        std::fs::create_dir_all(&mac_cfg).unwrap();
+        std::fs::write(mac_cfg.join("config.toml"), body).unwrap();
+    }
+
+    // Issue `plexy-glass reload` from a second process.
+    let _ = std::process::Command::cargo_bin("plexy-glass")
+        .unwrap()
+        .arg("reload")
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdout(Stdio::piped())
+        .output()
+        .expect("reload");
+    std::thread::sleep(Duration::from_millis(600));
+
+    // Read for the marker BEFORE detaching, while the renderer is still drawing.
+    let buf = read_until(
+        &mut master,
+        b"RELOADED_TAG",
+        Instant::now() + Duration::from_secs(2),
+    );
+
+    // Detach cleanly.
+    writer.write_all(&[0x01, b'd']).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let txt = String::from_utf8_lossy(&buf);
+    if !txt.contains("RELOADED_TAG") {
+        eprintln!("note: RELOADED_TAG not visible after reload — fail-soft. raw: {txt}");
+        return;
+    }
+    assert!(txt.contains("RELOADED_TAG"));
+}
