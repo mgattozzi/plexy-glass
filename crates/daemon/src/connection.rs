@@ -226,8 +226,58 @@ where
                             let action = keymap.consume(ke, raw_bytes);
                             prefix_active.store(keymap.prefix_active(), Ordering::SeqCst);
                             match action {
-                                KeymapAction::PassThrough(_, bytes_back) => {
-                                    let _ = session.handle_input_bytes(&bytes_back).await;
+                                KeymapAction::PassThrough(event_ke, bytes_back) => {
+                                    // If the active pane is in copy mode, route the key event
+                                    // to the CopyModeHandler instead of the shell.
+                                    let active_in_copy_mode = {
+                                        let m = session.window_manager.lock().await;
+                                        m.active_window()
+                                            .active_pane()
+                                            .map(|p| p.is_in_copy_mode())
+                                            .unwrap_or(false)
+                                    };
+                                    if active_in_copy_mode {
+                                        let action = {
+                                            let m = session.window_manager.lock().await;
+                                            let pane_opt = m.active_window().active_pane();
+                                            pane_opt.and_then(|p| {
+                                                let screen = p.with_screen(|s| s.clone());
+                                                p.with_copy_mode_mut(|state| {
+                                                    plexy_glass_mux::CopyModeHandler::handle(
+                                                        &event_ke,
+                                                        state,
+                                                        &screen,
+                                                    )
+                                                })
+                                            })
+                                        };
+                                        match action {
+                                            Some(plexy_glass_mux::CopyModeAction::Render) => {
+                                                session.notify.notify_one();
+                                            }
+                                            Some(plexy_glass_mux::CopyModeAction::Exit) => {
+                                                let m = session.window_manager.lock().await;
+                                                if let Some(p) = m.active_window().active_pane() {
+                                                    p.exit_copy_mode();
+                                                }
+                                                session.notify.notify_one();
+                                            }
+                                            Some(plexy_glass_mux::CopyModeAction::Yank(text)) => {
+                                                let _ = crate::osc_actions::write_clipboard(
+                                                    text.as_bytes(),
+                                                )
+                                                .await;
+                                                let m = session.window_manager.lock().await;
+                                                if let Some(p) = m.active_window().active_pane() {
+                                                    p.exit_copy_mode();
+                                                }
+                                                session.notify.notify_one();
+                                            }
+                                            None => {}
+                                        }
+                                    } else {
+                                        let _ = session.handle_input_bytes(&bytes_back).await;
+                                    }
                                 }
                                 KeymapAction::Command(cmd) => {
                                     if matches!(cmd, Command::Detach) {

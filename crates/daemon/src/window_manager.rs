@@ -197,7 +197,18 @@ impl WindowManager {
             }
             Command::Detach | Command::Cancel => {}
             Command::EnterCopyMode => {
-                // Real logic in Task 10.
+                if let Some(pane) = self.active_window().active_pane() {
+                    let (total_lines, pane_rows, start_line, start_col) = pane.with_screen(|s| {
+                        let scrollback_len = s.scrollback.len() as u32;
+                        let active_rows = u32::from(s.active.num_rows());
+                        let total = scrollback_len + active_rows;
+                        let start_line = scrollback_len + u32::from(s.cursor.row);
+                        let start_col = s.cursor.col;
+                        let pane_rows = s.active.num_rows();
+                        (total, pane_rows, start_line, start_col)
+                    });
+                    pane.enter_copy_mode(total_lines, pane_rows, start_line, start_col);
+                }
             }
         }
         self.notify.notify_one();
