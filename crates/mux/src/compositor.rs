@@ -18,6 +18,9 @@ pub struct PaneView<'a> {
     /// 0 = follow the live screen. N > 0 = show N rows of scrollback above
     /// the active grid; the bottom rows of the active grid are clipped.
     pub scroll_offset: u32,
+    /// When Some, the pane is in copy-mode; the compositor uses the copy-mode
+    /// viewport instead of `scroll_offset` and renders overlays.
+    pub copy_mode: Option<&'a crate::CopyMode>,
 }
 
 pub struct Compositor;
@@ -41,8 +44,18 @@ impl Compositor {
         };
 
         // Copy each pane's emulator cells into its rect, mixing in scrollback
-        // when scroll_offset > 0.
+        // when scroll_offset > 0 (or when copy-mode overrides the viewport).
         for view in panes {
+            let effective_scroll = match view.copy_mode {
+                Some(cm) => {
+                    let total_lines = view.screen.scrollback.len() as u32
+                        + view.screen.active.num_rows() as u32;
+                    total_lines
+                        .saturating_sub(cm.viewport_top)
+                        .saturating_sub(u32::from(view.rect.rows))
+                }
+                None => view.scroll_offset,
+            };
             let max_r = view.rect.rows;
             let max_c = view.rect.cols.min(view.screen.active.num_cols());
             for r in 0..max_r {
@@ -50,9 +63,9 @@ impl Compositor {
                     continue;
                 }
                 let cells_src: Option<&[plexy_glass_emulator::Cell]> =
-                    if view.scroll_offset > 0 {
+                    if effective_scroll > 0 {
                         let scroll_len = view.screen.scrollback.len() as u32;
-                        let want_from_scrollback = view.scroll_offset.min(scroll_len);
+                        let want_from_scrollback = effective_scroll.min(scroll_len);
                         if (r as u32) < want_from_scrollback {
                             // This row comes from scrollback.
                             let sb_idx =
@@ -112,6 +125,61 @@ impl Compositor {
             }
         }
 
+        // Copy-mode selection overlay (per pane).
+        for view in panes {
+            let Some(cm) = view.copy_mode else { continue };
+            let Some(anchor) = cm.anchor else { continue };
+            let (start, end) = if anchor <= cm.cursor {
+                (anchor, cm.cursor)
+            } else {
+                (cm.cursor, anchor)
+            };
+            let viewport_lo = cm.viewport_top;
+            let viewport_hi = cm.viewport_top + u32::from(view.rect.rows);
+            for line in start.0..=end.0 {
+                if line < viewport_lo || line >= viewport_hi {
+                    continue;
+                }
+                let local_row = (line - viewport_lo) as u16;
+                let host_r = view.rect.row + local_row;
+                let row_start = if line == start.0 { start.1 } else { 0 };
+                let row_end = if line == end.0 {
+                    end.1
+                } else {
+                    view.rect.cols.saturating_sub(1)
+                };
+                for c in row_start..=row_end {
+                    let host_c = view.rect.col + c;
+                    if let Some(cell) = screen.cell_mut(host_r, host_c) {
+                        cell.attrs |= plexy_glass_emulator::Attrs::REVERSE;
+                    }
+                }
+            }
+        }
+
+        // Copy-mode search match highlights.
+        for view in panes {
+            let Some(cm) = view.copy_mode else { continue };
+            if cm.search.matches.is_empty() {
+                continue;
+            }
+            let viewport_lo = cm.viewport_top;
+            let viewport_hi = cm.viewport_top + u32::from(view.rect.rows);
+            for m in &cm.search.matches {
+                if m.line_idx < viewport_lo || m.line_idx >= viewport_hi {
+                    continue;
+                }
+                let local_row = (m.line_idx - viewport_lo) as u16;
+                let host_r = view.rect.row + local_row;
+                for c in m.col_start..=m.col_end {
+                    let host_c = view.rect.col + c;
+                    if let Some(cell) = screen.cell_mut(host_r, host_c) {
+                        cell.attrs |= plexy_glass_emulator::Attrs::HIGHLIGHT;
+                    }
+                }
+            }
+        }
+
         // Borders.
         let rects: Vec<(Rect, bool)> = panes.iter().map(|v| (v.rect, v.is_active)).collect();
         borders::draw(&rects, &mut screen);
@@ -121,18 +189,69 @@ impl Compositor {
             paint_status_row(&mut screen, s, host_cols, host_rows.saturating_sub(1));
         }
 
-        // Cursor from the active pane.
+        // Cursor from the active pane, overridden by the copy-mode cursor when present.
         if let Some(active) = panes.iter().find(|v| v.is_active) {
-            let cur = &active.screen.cursor;
-            let r = active.rect.row.saturating_add(cur.row);
-            let c = active.rect.col.saturating_add(cur.col);
-            if r < pane_area_rows && c < host_cols {
+            let cursor_pos = match active.copy_mode {
+                Some(cm) => {
+                    if cm.cursor.0 >= cm.viewport_top
+                        && cm.cursor.0 < cm.viewport_top + u32::from(active.rect.rows)
+                    {
+                        let local_row = (cm.cursor.0 - cm.viewport_top) as u16;
+                        let host_r = active.rect.row.saturating_add(local_row);
+                        let host_c = active.rect.col.saturating_add(cm.cursor.1);
+                        Some((host_r, host_c))
+                    } else {
+                        None
+                    }
+                }
+                None => {
+                    let cur = &active.screen.cursor;
+                    let r = active.rect.row.saturating_add(cur.row);
+                    let c = active.rect.col.saturating_add(cur.col);
+                    if r < pane_area_rows && c < host_cols {
+                        Some((r, c))
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some((r, c)) = cursor_pos
+                && r < pane_area_rows && c < host_cols
+            {
                 screen.cursor = Some((r, c));
             }
-            screen.cursor_visible = active
-                .screen
-                .modes
-                .contains(plexy_glass_emulator::Modes::CURSOR_VISIBLE);
+            screen.cursor_visible = match active.copy_mode {
+                Some(_) => true,
+                None => active
+                    .screen
+                    .modes
+                    .contains(plexy_glass_emulator::Modes::CURSOR_VISIBLE),
+            };
+        }
+
+        // Copy-mode search prompt overlay on the active pane.
+        if let Some(active) = panes.iter().find(|v| v.is_active)
+            && let Some(cm) = active.copy_mode
+            && cm.search.prompt_active
+        {
+            let prompt_row = active.rect.row + active.rect.rows.saturating_sub(1);
+            let mut text = String::from("/");
+            text.push_str(&cm.search.prompt_buf);
+            let prompt_attrs = plexy_glass_emulator::Attrs::REVERSE;
+            for (i, ch) in text.chars().enumerate() {
+                let host_c = active.rect.col + i as u16;
+                if host_c >= host_cols {
+                    break;
+                }
+                let mut buf = [0u8; 4];
+                let s = ch.encode_utf8(&mut buf);
+                let cell = plexy_glass_emulator::Cell {
+                    grapheme: smol_str::SmolStr::new(s),
+                    attrs: prompt_attrs,
+                    ..plexy_glass_emulator::Cell::default()
+                };
+                screen.put(prompt_row, host_c, cell);
+            }
         }
 
         screen
@@ -252,6 +371,7 @@ mod tests {
             screen: e.screen(),
             is_active: true,
             scroll_offset: 0,
+            copy_mode: None,
         };
         let vs = Compositor::compose(&[view], (4, 6), None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
@@ -270,6 +390,7 @@ mod tests {
             screen: e.screen(),
             is_active: true,
             scroll_offset: 0,
+            copy_mode: None,
         };
         let mut sel = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
         sel.extend(0, 4, Rect::new(0, 0, 4, 6));
@@ -299,6 +420,7 @@ mod tests {
             screen: left.screen(),
             is_active: false,
             scroll_offset: 0,
+            copy_mode: None,
         };
         let rv = PaneView {
             id: PaneId(1),
@@ -306,6 +428,7 @@ mod tests {
             screen: right.screen(),
             is_active: true,
             scroll_offset: 0,
+            copy_mode: None,
         };
         let vs = Compositor::compose(&[lv, rv], (4, 7), None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "L");
@@ -333,6 +456,7 @@ mod tests {
             screen: &s,
             is_active: true,
             scroll_offset: 1,
+            copy_mode: None,
         };
         let vs = Compositor::compose(&[view], (2, 4), None, None);
         // Row 0 should be the last scrollback row (BBBB), not CCCC.
@@ -341,5 +465,63 @@ mod tests {
             .collect::<Vec<_>>()
             .join("");
         assert_eq!(r0, "BBBB", "expected BBBB at top; got {r0}");
+    }
+
+    #[test]
+    fn copy_mode_overrides_cursor() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(5, 20);
+        e.advance(b"hello");
+        let screen = e.screen().clone();
+        let cm = crate::CopyMode {
+            cursor: (3, 7),
+            anchor: None,
+            search: crate::SearchState::default(),
+            viewport_top: 0,
+            pane_rows: 5,
+            total_lines: 5,
+        };
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 4, 20),
+            screen: &screen,
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: Some(&cm),
+        };
+        let vs = Compositor::compose(&[view], (5, 20), None, None);
+        assert_eq!(vs.cursor, Some((3, 7)));
+    }
+
+    #[test]
+    fn copy_mode_selection_sets_reverse() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(5, 20);
+        e.advance(b"hello world");
+        let screen = e.screen().clone();
+        let cm = crate::CopyMode {
+            cursor: (0, 4),
+            anchor: Some((0, 0)),
+            search: crate::SearchState::default(),
+            viewport_top: 0,
+            pane_rows: 5,
+            total_lines: 5,
+        };
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 4, 20),
+            screen: &screen,
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: Some(&cm),
+        };
+        let vs = Compositor::compose(&[view], (5, 20), None, None);
+        for c in 0..=4 {
+            let cell = vs.cell(0, c).unwrap();
+            assert!(
+                cell.attrs.contains(plexy_glass_emulator::Attrs::REVERSE),
+                "expected REVERSE at col {c}"
+            );
+        }
     }
 }

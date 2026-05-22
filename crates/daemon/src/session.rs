@@ -50,6 +50,7 @@ async fn render_coordinator(
                 Screen,
                 bool,
                 u32,
+                Option<plexy_glass_mux::CopyMode>,
             )> = Vec::with_capacity(pane_ids.len());
             for id in pane_ids {
                 if let Some(pane) = win.pane(id) {
@@ -59,17 +60,19 @@ async fn render_coordinator(
                     };
                     let screen = pane.with_screen(|s| s.clone());
                     let scroll = pane.scroll_offset();
-                    owned.push((id, rect, screen, id == active_id, scroll));
+                    let copy_mode = pane.with_copy_mode(|cm| cm.clone());
+                    owned.push((id, rect, screen, id == active_id, scroll, copy_mode));
                 }
             }
             let views: Vec<PaneView> = owned
                 .iter()
-                .map(|(id, rect, screen, active, scroll)| PaneView {
+                .map(|(id, rect, screen, active, scroll, cm)| PaneView {
                     id: *id,
                     rect: *rect,
                     screen,
                     is_active: *active,
                     scroll_offset: *scroll,
+                    copy_mode: cm.as_ref(),
                 })
                 .collect();
 
