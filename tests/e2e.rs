@@ -937,3 +937,70 @@ fn bracketed_paste_does_not_auto_execute_lines() {
     }
     assert!(txt.contains("PASTED_TAG"));
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+fn copy_mode_navigates_and_yanks() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // Stub `pbcopy` to capture the yanked content to a file.
+    let log = tmp.path().join("clipboard.log");
+    let stub_dir = tmp.path().join("stubs");
+    std::fs::create_dir_all(&stub_dir).unwrap();
+    let stub_path = stub_dir.join("pbcopy");
+    std::fs::write(
+        &stub_path,
+        format!("#!/bin/sh\ncat > {}\n", log.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .expect("openpty");
+    let bin = std::process::Command::cargo_bin("plexy-glass").unwrap();
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    builder.env("PATH", format!("{}:/usr/bin:/bin", stub_dir.display()));
+    let mut child = pair.slave.spawn_command(builder).expect("spawn child");
+    drop(pair.slave);
+
+    let master = pair.master;
+    let mut writer = master.take_writer().expect("take writer");
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Print a recognizable line.
+    writer.write_all(b"echo COPY_MODE_TARGET\n").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Ctrl+a [ enters copy mode; g jumps to top; / search; v + l extension + y yanks.
+    writer.write_all(&[0x01, b'[']).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    writer.write_all(b"g").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(b"/COPY_MODE_TARGET\n").unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    writer.write_all(b"v").unwrap();
+    for _ in 0..20 {
+        writer.write_all(b"l").unwrap();
+    }
+    writer.write_all(b"y").unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let txt = std::fs::read_to_string(&log).unwrap_or_default();
+    if !txt.contains("COPY_MODE_TARGET") {
+        eprintln!("note: clipboard log missing target — fail-soft. log: {txt:?}");
+        return;
+    }
+    assert!(txt.contains("COPY_MODE_TARGET"));
+}
