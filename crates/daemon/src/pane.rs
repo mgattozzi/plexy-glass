@@ -348,6 +348,18 @@ impl Pane {
             .expect("pane copy_mode mutex poisoned");
         guard.as_ref().map(f)
     }
+
+    /// Notify the pane that its cell size has changed (called from
+    /// `Window::resize` after the layout recomputes pane rects). Keeps
+    /// `CopyMode` state consistent across host resizes.
+    pub fn on_size_changed(&self, new_rows: u16) {
+        let total_lines = self.with_screen(|s| {
+            s.scrollback.len() as u32 + u32::from(s.active.num_rows())
+        });
+        let _ = self.with_copy_mode_mut(|cm| {
+            cm.set_pane_rows(new_rows, total_lines);
+        });
+    }
 }
 
 fn to_portable(size: PtySize) -> PortablePtySize {
@@ -589,6 +601,22 @@ mod tests {
         assert_eq!(cursor.0, 99);
         p.exit_copy_mode();
         assert!(!p.is_in_copy_mode());
+        let _ = p.send_input(bytes::Bytes::from_static(&[0x04])).await;
+    }
+
+    #[tokio::test]
+    async fn on_size_changed_updates_copy_mode_state() {
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).unwrap();
+        p.enter_copy_mode(100, 24, 99, 0);
+        p.on_size_changed(10);
+        let pane_rows = p.with_copy_mode(|cm| cm.pane_rows).unwrap();
+        assert_eq!(pane_rows, 10);
         let _ = p.send_input(bytes::Bytes::from_static(&[0x04])).await;
     }
 }

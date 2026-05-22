@@ -172,13 +172,15 @@ impl Window {
     pub fn resize(&mut self, viewport: Rect) -> Result<(), DaemonError> {
         for (id, pane) in self.panes.iter() {
             if let Some(rect) = self.layout.rect_of(*id, viewport) {
+                let new_rows = rect.rows.max(1);
                 let size = PtySize {
-                    rows: rect.rows.max(1),
+                    rows: new_rows,
                     cols: rect.cols.max(1),
                     pixel_width: 0,
                     pixel_height: 0,
                 };
                 pane.resize(size)?;
+                pane.on_size_changed(new_rows);
             }
         }
         Ok(())
