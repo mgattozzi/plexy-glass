@@ -124,10 +124,10 @@ impl Widget for PrefixIndicatorWidget {
     }
     async fn evaluate(&mut self, ctx: &EvalContext<'_>) -> StyledText {
         if ctx.copy_mode_active {
-            return StyledText::single(SmolStr::new("COPY"), self.style);
+            return StyledText::single(SmolStr::new(" COPY "), self.style);
         }
         if ctx.sync_active {
-            return StyledText::single(SmolStr::new("SYNC"), self.style);
+            return StyledText::single(SmolStr::new(" SYNC "), self.style);
         }
         if !ctx.prefix_active {
             return StyledText::empty();
@@ -304,7 +304,7 @@ mod tests {
             ..ctx_empty()
         };
         let out = w.evaluate(&ctx).await;
-        assert_eq!(out.segments[0].text.as_str(), "COPY");
+        assert_eq!(out.segments[0].text.as_str(), " COPY ");
     }
 
     #[tokio::test]
@@ -318,7 +318,7 @@ mod tests {
             ..ctx_empty()
         };
         let out = w.evaluate(&ctx).await;
-        assert_eq!(out.segments[0].text.as_str(), "SYNC");
+        assert_eq!(out.segments[0].text.as_str(), " SYNC ");
     }
 
     #[tokio::test]
@@ -333,6 +333,6 @@ mod tests {
             ..ctx_empty()
         };
         let out = w.evaluate(&ctx).await;
-        assert_eq!(out.segments[0].text.as_str(), "COPY");
+        assert_eq!(out.segments[0].text.as_str(), " COPY ");
     }
 }

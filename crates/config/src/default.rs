@@ -48,6 +48,10 @@ pub fn built_in_default() -> Config {
                     style: StyleConfig::new("bg", "accent").bold(),
                     padding: Padding { left: 1, right: 1 },
                 },
+                WidgetSpec::PrefixIndicator {
+                    style: StyleConfig::new("bg", "highlight").bold(),
+                    content: " PFX ".into(),
+                },
                 WidgetSpec::Text {
                     value: " ".into(),
                     style: StyleConfig::default(),
