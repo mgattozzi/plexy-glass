@@ -259,16 +259,7 @@ impl Session {
             Arc::clone(&session.notify),
             move || match session_weak.upgrade() {
                 Some(s) => build_snapshot_ctx(&s),
-                None => plexy_glass_status::SnapshotCtx {
-                    session_name: String::new(),
-                    windows: Vec::new(),
-                    active_window: 0,
-                    attached_clients: 0,
-                    prefix_active: false,
-                    active_pane_cwd: None,
-                    copy_mode_active: false,
-                    sync_active: false,
-                },
+                None => empty_snapshot_ctx(),
             },
         );
         // invariant: no other thread holds status_tick_handle at construction time
@@ -397,6 +388,88 @@ impl Session {
         drop(m);
         self.notify.notify_one();
     }
+
+    /// Replace this session's active config Arc, rebuild the status engine
+    /// + tick task, and push the new config Arc to every live pane.
+    ///
+    /// Order of operations matters:
+    /// 1. swap the config slot first so `build_snapshot_ctx` and any other
+    ///    consumer that reads `config_snapshot()` after this call sees the new
+    ///    config;
+    /// 2. abort the old tick task before spawning the new one, so we don't
+    ///    leak tasks;
+    /// 3. install the new status engine + tick handle;
+    /// 4. wake the render coordinator so the new engine/palette take effect
+    ///    on the next frame;
+    /// 5. push the new config to each Pane so OSC color queries (T3) use
+    ///    the new palette.
+    pub async fn swap_config(self: &Arc<Self>, new_config: Arc<plexy_glass_config::Config>) {
+        // (1) Update the config slot first.
+        {
+            // invariant: config_slot mutex is held briefly; no .await holding the lock.
+            let mut slot = self.config_slot.lock().expect("config_slot poisoned");
+            *slot = Arc::clone(&new_config);
+        }
+
+        // Build a fresh `StatusEngine` + tick task.
+        let new_engine =
+            plexy_glass_status::StatusEngine::new(&new_config.status, &new_config.palette);
+        let new_inner = new_engine.inner();
+
+        // (2) Abort the old tick before spawning a new one.
+        {
+            // invariant: status_tick_handle mutex held briefly; no .await holding the lock.
+            let mut slot = self
+                .status_tick_handle
+                .lock()
+                .expect("status_tick_handle poisoned");
+            if let Some(old_tick) = slot.take() {
+                old_tick.abort();
+            }
+        }
+
+        // (3) Install the new engine.
+        {
+            // invariant: status_engine_slot mutex held briefly; no .await holding the lock.
+            let mut slot = self
+                .status_engine_slot
+                .lock()
+                .expect("status_engine_slot poisoned");
+            *slot = new_inner;
+        }
+
+        let session_weak = Arc::downgrade(self);
+        let tick_handle = new_engine.spawn_tick_task(
+            Arc::clone(&self.notify),
+            move || match session_weak.upgrade() {
+                Some(s) => build_snapshot_ctx(&s),
+                None => empty_snapshot_ctx(),
+            },
+        );
+        {
+            // invariant: status_tick_handle mutex held briefly; no .await holding the lock.
+            let mut slot = self
+                .status_tick_handle
+                .lock()
+                .expect("status_tick_handle poisoned");
+            *slot = Some(tick_handle);
+        }
+
+        // (4) Wake the render coordinator so the new engine + palette apply
+        // immediately on the next frame.
+        self.notify.notify_one();
+
+        // (5) Push the new config to every Pane so reader threads pick up
+        // the new palette for OSC color queries (T3 stored config on Pane).
+        let manager = self.window_manager.lock().await;
+        for win in manager.windows() {
+            for id in win.layout().panes() {
+                if let Some(pane) = win.pane(id) {
+                    pane.update_config(Arc::clone(&new_config));
+                }
+            }
+        }
+    }
 }
 
 impl Drop for Session {
@@ -420,6 +493,24 @@ impl Drop for Session {
         {
             handle.abort();
         }
+    }
+}
+
+/// An empty `SnapshotCtx` for the case where the `Weak<Session>` held by the
+/// status tick task can no longer upgrade, i.e. the session has been dropped.
+/// The tick task is normally aborted on Drop, but a tick may have already
+/// started; in that case we return a benign default so widgets render as if
+/// no session were attached.
+fn empty_snapshot_ctx() -> plexy_glass_status::SnapshotCtx {
+    plexy_glass_status::SnapshotCtx {
+        session_name: String::new(),
+        windows: Vec::new(),
+        active_window: 0,
+        attached_clients: 0,
+        prefix_active: false,
+        active_pane_cwd: None,
+        copy_mode_active: false,
+        sync_active: false,
     }
 }
 

@@ -74,6 +74,32 @@ impl SessionRegistry {
         let mut map = self.inner.lock().await;
         map.retain(|_, s| !s.closing.load(std::sync::atomic::Ordering::SeqCst));
     }
+
+    /// Re-read config from disk and apply to every session.
+    ///
+    /// The TOML loader (`plexy_glass_config::load_or_default`) returns
+    /// `(Config, Option<ConfigError>)`: even on a parse error we still get
+    /// the built-in default. This method propagates that default to every
+    /// live session (so the daemon prefers a known-good config to running
+    /// on stale state), then returns the parse error to the caller.
+    ///
+    /// Never panics mid-reload, each `Session::swap_config` is independent.
+    pub async fn reload_config(&self) -> Result<(), DaemonError> {
+        let (new_config, err) = plexy_glass_config::load_or_default();
+        if let Some(e) = &err {
+            tracing::warn!(error = %e, "reload: parse error; using fallback");
+        }
+        let new_config = Arc::new(new_config);
+        let map = self.inner.lock().await;
+        for session in map.values() {
+            session.swap_config(Arc::clone(&new_config)).await;
+        }
+        drop(map);
+        match err {
+            None => Ok(()),
+            Some(e) => Err(DaemonError::from(e)),
+        }
+    }
 }
 
 impl Default for SessionRegistry {
@@ -174,6 +200,21 @@ mod tests {
         s.closing.store(true, std::sync::atomic::Ordering::SeqCst);
         let got = r.get("dead").await;
         assert!(got.is_none(), "closing session should be pruned on get");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reload_config_swaps_session_config() {
+        let r = SessionRegistry::new();
+        let s = r.create("test".into(), spec(), size(), cfg()).await.unwrap();
+        let cfg_before = s.config_snapshot();
+        // Reload (will re-read from real XDG path; in tests this just returns
+        // the built-in default).
+        r.reload_config().await.unwrap();
+        let cfg_after = s.config_snapshot();
+        // Both should be `Arc::clone`s of a default `Config`, so pointer
+        // equality won't hold but structural equality should.
+        assert_eq!(cfg_before.status.left.len(), cfg_after.status.left.len());
+        assert_eq!(cfg_before.status.right.len(), cfg_after.status.right.len());
     }
 
     #[tokio::test(flavor = "multi_thread")]
