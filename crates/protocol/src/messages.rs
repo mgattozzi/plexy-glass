@@ -46,7 +46,7 @@ pub enum ExitStatus {
 }
 
 /// Bumped any time `ClientMsg` or `ServerMsg` changes meaning.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientHello {
@@ -74,6 +74,7 @@ pub enum ClientMsg {
     Resize(PtySize),
     Detach,
     Shutdown,
+    ReloadConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +86,7 @@ pub enum ServerMsg {
     Output(Bytes),
     Exited { status: ExitStatus },
     Error(crate::errors::ProtocolError),
+    ConfigReloaded { error: Option<String> },
 }
 
 #[cfg(test)]

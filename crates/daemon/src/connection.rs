@@ -50,6 +50,14 @@ impl Connection {
                 serve_attach(reader, writer, registry, name, create_if_missing, cmd, size, config)
                     .await
             }
+            ClientMsg::ReloadConfig => {
+                let error = match registry.reload_config().await {
+                    Ok(()) => None,
+                    Err(e) => Some(e.to_string()),
+                };
+                send_msg(&mut writer, &ServerMsg::ConfigReloaded { error }).await?;
+                Ok(())
+            }
             other => {
                 send_msg(
                     &mut writer,
