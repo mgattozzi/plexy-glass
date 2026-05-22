@@ -81,9 +81,31 @@ impl CopyModeHandler {
         state: &mut CopyMode,
         screen: &Screen,
     ) -> CopyModeAction {
+        // Escape / q priority chain (works in both prompt and motion modes):
+        //   1. Close prompt → Render
+        //   2. Clear selection anchor → Render
+        //   3. Exit copy mode
+        if event.mods.is_empty()
+            && matches!(event.key, Key::Escape | Key::Char('q'))
+        {
+            if state.search.prompt_active {
+                state.search.prompt_active = false;
+                state.search.prompt_buf.clear();
+                return CopyModeAction::Render;
+            }
+            if state.anchor.is_some() {
+                state.anchor = None;
+                return CopyModeAction::Render;
+            }
+            return CopyModeAction::Exit;
+        }
+
+        // In prompt mode, route everything else to the prompt handler.
         if state.search.prompt_active {
             return handle_search_prompt(event, state, screen);
         }
+
+        // Otherwise: motion + selection + search-jump + yank dispatch.
         let cols = screen.active.num_cols();
         match (event.mods, event.key) {
             (m, Key::Char('h')) | (m, Key::Arrow(Direction::Left)) if m.is_empty() => {
@@ -156,7 +178,7 @@ impl CopyModeHandler {
             (m, Key::Char('N')) if m == Modifiers::SHIFT => {
                 jump_to_prev_match(state);
             }
-            _ => {} // Task 7 adds escape
+            _ => {}
         }
         CopyModeAction::Render
     }
@@ -266,11 +288,6 @@ fn handle_search_prompt(
             let m = &state.search.matches[next];
             state.cursor = (m.line_idx, m.col_start);
             ensure_visible(state);
-            CopyModeAction::Render
-        }
-        (m, Key::Escape) if m.is_empty() => {
-            state.search.prompt_active = false;
-            state.search.prompt_buf.clear();
             CopyModeAction::Render
         }
         (m, Key::Backspace) if m.is_empty() => {
@@ -595,5 +612,43 @@ mod tests {
         CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut s, &scr);
         assert!(s.search.matches.is_empty());
         assert_eq!(s.cursor.0, 1);
+    }
+
+    #[test]
+    fn escape_in_prompt_closes_prompt_only() {
+        let mut s = CopyMode::new(10, 5, 0, 0);
+        let scr = screen(5, 80);
+        s.search.prompt_active = true;
+        s.search.prompt_buf = "abc".into();
+        let action = CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Escape), &mut s, &scr);
+        assert!(matches!(action, CopyModeAction::Render));
+        assert!(!s.search.prompt_active);
+        assert!(s.search.prompt_buf.is_empty());
+    }
+
+    #[test]
+    fn escape_with_selection_clears_selection() {
+        let mut s = CopyMode::new(10, 5, 5, 3);
+        s.anchor = Some((0, 0));
+        let scr = screen(5, 80);
+        let action = CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Escape), &mut s, &scr);
+        assert!(matches!(action, CopyModeAction::Render));
+        assert!(s.anchor.is_none());
+    }
+
+    #[test]
+    fn escape_in_normal_mode_exits() {
+        let mut s = CopyMode::new(10, 5, 5, 3);
+        let scr = screen(5, 80);
+        let action = CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Escape), &mut s, &scr);
+        assert!(matches!(action, CopyModeAction::Exit));
+    }
+
+    #[test]
+    fn q_in_normal_mode_exits() {
+        let mut s = CopyMode::new(10, 5, 5, 3);
+        let scr = screen(5, 80);
+        let action = CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('q')), &mut s, &scr);
+        assert!(matches!(action, CopyModeAction::Exit));
     }
 }
