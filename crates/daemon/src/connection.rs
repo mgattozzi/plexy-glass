@@ -287,13 +287,27 @@ where
                                         let _ = session.handle_input_bytes(&bytes_back).await;
                                     }
                                 }
-                                KeymapAction::Command(cmd) => {
-                                    if matches!(cmd, Command::Detach) {
+                                KeymapAction::Command(cmd) => match cmd {
+                                    Command::Detach => {
                                         detach_requested = true;
                                         break;
                                     }
-                                    let _ = session.handle_command(cmd).await;
-                                }
+                                    Command::ReloadConfig => {
+                                        let _ = registry.reload_config().await;
+                                        // Rebuild this Connection's keymap from
+                                        // the new config so the user who fired
+                                        // the reload sees binding changes
+                                        // immediately.
+                                        let new_cfg = session.config_snapshot();
+                                        keymap = plexy_glass_keys::build_keymap(
+                                            &new_cfg.keymap,
+                                        );
+                                        session.notify.notify_one();
+                                    }
+                                    other => {
+                                        let _ = session.handle_command(other).await;
+                                    }
+                                },
                                 KeymapAction::Pending => {
                                     session.notify.notify_one();
                                 }

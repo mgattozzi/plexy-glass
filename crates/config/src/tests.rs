@@ -114,3 +114,12 @@ fn built_in_keymap_includes_toggle_sync_panes() {
         .iter()
         .any(|b| b.keys == "Ctrl+a y" && b.command == "toggle_sync_panes"));
 }
+
+#[test]
+fn built_in_keymap_includes_reload_config() {
+    let km = built_in_keymap();
+    assert!(km
+        .bindings
+        .iter()
+        .any(|b| b.keys == "Ctrl+a R" && b.command == "reload_config"));
+}

@@ -110,6 +110,7 @@ pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
         "cancel" => Command::Cancel,
         "enter_copy_mode" => Command::EnterCopyMode,
         "toggle_sync_panes" => Command::ToggleSyncPanes,
+        "reload_config" => Command::ReloadConfig,
         "select_next_pane" => Command::SelectNextPane,
         "select_prev_pane" => Command::SelectPrevPane,
         "select_pane_left" => Command::SelectPane(Direction::Left),
@@ -235,5 +236,11 @@ mod tests {
     fn parses_toggle_sync_panes_command() {
         let c = parse_command("toggle_sync_panes").unwrap();
         assert_eq!(c.command, Command::ToggleSyncPanes);
+    }
+
+    #[test]
+    fn parses_reload_config_command() {
+        let c = parse_command("reload_config").unwrap();
+        assert_eq!(c.command, Command::ReloadConfig);
     }
 }

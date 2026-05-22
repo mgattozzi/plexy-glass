@@ -23,6 +23,7 @@ pub enum Command {
     Cancel,
     EnterCopyMode,
     ToggleSyncPanes,
+    ReloadConfig,
 }
 
 pub type Chord = (Modifiers, Key);

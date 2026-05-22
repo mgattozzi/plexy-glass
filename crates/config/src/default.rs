@@ -112,6 +112,7 @@ pub fn built_in_keymap() -> KeymapConfig {
             binding("Ctrl+a d", "detach"),
             binding("Ctrl+a [", "enter_copy_mode"),
             binding("Ctrl+a y", "toggle_sync_panes"),
+            binding("Ctrl+a R", "reload_config"),
             binding("Ctrl+a 1", "select_window:0"),
             binding("Ctrl+a 2", "select_window:1"),
             binding("Ctrl+a 3", "select_window:2"),
