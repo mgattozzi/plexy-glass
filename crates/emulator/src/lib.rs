@@ -32,6 +32,6 @@ pub use emulator::Emulator;
 pub use grid::{Grid, Row, WrapOrigin};
 pub use hyperlinks::HyperlinkTable;
 pub use modes::Modes;
-pub use screen::{PromptMark, PromptMarkKind, Screen};
+pub use screen::{ColorQuery, PromptMark, PromptMarkKind, Screen};
 pub use scrollback::{Scrollback, DEFAULT_SCROLLBACK_LINES};
 pub use tabs::TabStops;
