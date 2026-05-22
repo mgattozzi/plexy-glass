@@ -28,6 +28,7 @@ struct Inner {
     exit_rx: watch::Receiver<Option<ExitStatus>>,
     emulator: Arc<Mutex<Emulator>>,
     scroll_offset: AtomicU32,
+    copy_mode: Mutex<Option<plexy_glass_mux::CopyMode>>,
 }
 
 impl Pane {
@@ -172,6 +173,7 @@ impl Pane {
                 exit_rx,
                 emulator,
                 scroll_offset: AtomicU32::new(0),
+                copy_mode: Mutex::new(None),
             }),
         })
     }
@@ -282,6 +284,69 @@ impl Pane {
         // invariant: emulator mutex briefly held to read len.
         let emu = self.inner.emulator.lock().expect("pane emulator mutex poisoned");
         emu.screen().scrollback.len() as u32
+    }
+
+    pub fn enter_copy_mode(
+        &self,
+        total_lines: u32,
+        pane_rows: u16,
+        start_line: u32,
+        start_col: u16,
+    ) {
+        // invariant: copy_mode mutex is only contended with the Connection's
+        // brief checks; no async holding.
+        let mut guard = self
+            .inner
+            .copy_mode
+            .lock()
+            .expect("pane copy_mode mutex poisoned");
+        *guard = Some(plexy_glass_mux::CopyMode::new(
+            total_lines,
+            pane_rows,
+            start_line,
+            start_col,
+        ));
+    }
+
+    pub fn exit_copy_mode(&self) {
+        let mut guard = self
+            .inner
+            .copy_mode
+            .lock()
+            .expect("pane copy_mode mutex poisoned");
+        *guard = None;
+    }
+
+    pub fn is_in_copy_mode(&self) -> bool {
+        self.inner
+            .copy_mode
+            .lock()
+            .expect("pane copy_mode mutex poisoned")
+            .is_some()
+    }
+
+    pub fn with_copy_mode_mut<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut plexy_glass_mux::CopyMode) -> R,
+    {
+        let mut guard = self
+            .inner
+            .copy_mode
+            .lock()
+            .expect("pane copy_mode mutex poisoned");
+        guard.as_mut().map(f)
+    }
+
+    pub fn with_copy_mode<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&plexy_glass_mux::CopyMode) -> R,
+    {
+        let guard = self
+            .inner
+            .copy_mode
+            .lock()
+            .expect("pane copy_mode mutex poisoned");
+        guard.as_ref().map(f)
     }
 }
 
@@ -506,5 +571,24 @@ mod tests {
                 .all(|c| c.attrs.contains(Attrs::BOLD))
         });
         assert!(bold, "expected first two cells to be BOLD");
+    }
+
+    #[tokio::test]
+    async fn enter_and_exit_copy_mode() {
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).unwrap();
+        assert!(!p.is_in_copy_mode());
+        p.enter_copy_mode(100, 24, 99, 0);
+        assert!(p.is_in_copy_mode());
+        let cursor = p.with_copy_mode(|s| s.cursor).unwrap();
+        assert_eq!(cursor.0, 99);
+        p.exit_copy_mode();
+        assert!(!p.is_in_copy_mode());
+        let _ = p.send_input(bytes::Bytes::from_static(&[0x04])).await;
     }
 }
