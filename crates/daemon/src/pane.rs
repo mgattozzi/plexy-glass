@@ -5,13 +5,15 @@
 
 use crate::error::DaemonError;
 use bytes::Bytes;
-use plexy_glass_emulator::{Emulator, Screen};
+use plexy_glass_config::{Config, PaletteConfig};
+use plexy_glass_emulator::{ColorQuery, Emulator, Screen};
+use plexy_glass_status::Rgb;
 use plexy_glass_mux::PaneId;
 use plexy_glass_protocol::{ExitStatus, PtySize, SpawnSpec};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize as PortablePtySize};
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 use tracing::{debug, error};
 
@@ -29,6 +31,10 @@ struct Inner {
     emulator: Arc<Mutex<Emulator>>,
     scroll_offset: AtomicU32,
     copy_mode: Mutex<Option<plexy_glass_mux::CopyMode>>,
+    /// Held behind a Mutex so hot reload (Task 8) can swap the Arc.
+    /// Wrapped in Arc so the reader thread can clone a handle without
+    /// borrowing self.
+    config: Arc<Mutex<Arc<Config>>>,
 }
 
 impl Pane {
@@ -38,6 +44,7 @@ impl Pane {
         size: PtySize,
         output_notify: Arc<Notify>,
         death_tx: Option<mpsc::Sender<PaneId>>,
+        config: Arc<Config>,
     ) -> Result<Self, DaemonError> {
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system
@@ -78,6 +85,7 @@ impl Pane {
         let master = pair.master;
 
         let emulator = Arc::new(Mutex::new(Emulator::new(size.rows, size.cols)));
+        let config_slot: Arc<Mutex<Arc<Config>>> = Arc::new(Mutex::new(config));
 
         let output_tx_clone = output_tx.clone();
         let emulator_for_reader = Arc::clone(&emulator);
@@ -87,6 +95,7 @@ impl Pane {
         // them to the child. Without this, TUI line editors block on `ESC[6n`.
         let reply_tx = input_tx.clone();
         let reader_notify_for_self = Arc::clone(&output_notify);
+        let config_for_reader = Arc::clone(&config_slot);
 
         let (clip_tx, mut clip_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
         tokio::spawn(async move {
@@ -107,13 +116,17 @@ impl Pane {
                         return;
                     }
                     Ok(n) => {
-                        let (replies, clip_writes) = {
+                        let (replies, clip_writes, color_queries) = {
                             // invariant: emulator mutex held briefly to advance + drain.
                             let mut e = emulator_for_reader
                                 .lock()
                                 .expect("pane emulator mutex poisoned");
                             e.advance(&buf[..n]);
-                            (e.take_replies(), e.take_clipboard_writes())
+                            (
+                                e.take_replies(),
+                                e.take_clipboard_writes(),
+                                e.take_color_queries(),
+                            )
                         };
                         let chunk = Bytes::copy_from_slice(&buf[..n]);
                         let _ = output_tx_clone.send(chunk);
@@ -126,6 +139,24 @@ impl Pane {
                         }
                         for payload in clip_writes {
                             clip_tx.blocking_send(payload).ok();
+                        }
+                        if !color_queries.is_empty() {
+                            // invariant: config mutex held briefly to clone the palette.
+                            let palette = {
+                                let cfg = config_for_reader
+                                    .lock()
+                                    .expect("pane config mutex poisoned");
+                                cfg.palette.clone()
+                            };
+                            for q in color_queries {
+                                if let Some(bytes) = format_color_reply(q, &palette)
+                                    && let Err(err) =
+                                        reply_tx.blocking_send(Bytes::from(bytes))
+                                {
+                                    debug!(error = %err, "could not forward color reply");
+                                    break;
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -174,8 +205,21 @@ impl Pane {
                 emulator,
                 scroll_offset: AtomicU32::new(0),
                 copy_mode: Mutex::new(None),
+                config: config_slot,
             }),
         })
+    }
+
+    /// Swap the pane's config in place. Called by hot reload so subsequent
+    /// color queries use the new palette.
+    pub fn update_config(&self, new: Arc<Config>) {
+        // invariant: config mutex briefly held to swap the Arc.
+        let mut guard = self
+            .inner
+            .config
+            .lock()
+            .expect("pane config mutex poisoned");
+        *guard = new;
     }
 
     pub fn id(&self) -> PaneId {
@@ -362,6 +406,43 @@ impl Pane {
     }
 }
 
+/// Format an OSC 10/11/12 reply for the given color query using the configured
+/// palette. Returns `None` if the palette is missing the relevant entry or
+/// holds an unparseable hex value, in which case the daemon stays silent
+/// (matches xterm behaviour when no answer is available).
+///
+/// Palette entries are expected to be hex literals (`#RRGGBB`). Indirect
+/// references (e.g. `cursor = "accent"`) are not resolved here, they should
+/// be resolved to hex literals by config-load time.
+fn format_color_reply(query: ColorQuery, palette: &PaletteConfig) -> Option<Vec<u8>> {
+    let (osc_num, key, fallback) = match query {
+        ColorQuery::Foreground => ("10", "fg", None),
+        ColorQuery::Background => ("11", "bg", None),
+        ColorQuery::Cursor => ("12", "cursor", Some("accent")),
+    };
+    let hex = palette
+        .entries
+        .get(key)
+        .or_else(|| fallback.and_then(|k| palette.entries.get(k)))
+        .or_else(|| palette.entries.get("fg"))?
+        .clone();
+    let Rgb { r, g, b } = Rgb::parse_hex(&hex).or_else(|| {
+        tracing::debug!(
+            hex = hex.as_str(),
+            key,
+            "palette entry failed to parse as hex; OSC color reply skipped"
+        );
+        None
+    })?;
+    Some(
+        format!(
+            "\x1b]{osc_num};rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x07",
+            r, r, g, g, b, b,
+        )
+        .into_bytes(),
+    )
+}
+
 fn to_portable(size: PtySize) -> PortablePtySize {
     PortablePtySize {
         rows: size.rows,
@@ -394,6 +475,10 @@ mod tests {
         }
     }
 
+    fn cfg() -> Arc<Config> {
+        Arc::new(plexy_glass_config::built_in_default())
+    }
+
     #[tokio::test]
     async fn echo_hello_round_trips() {
         let spec = SpawnSpec {
@@ -402,7 +487,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).expect("spawn");
+        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
         let mut rx = session.subscribe_output();
 
         let mut got = Vec::new();
@@ -437,7 +522,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).expect("spawn");
+        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
         let mut rx = session.subscribe_output();
 
         session
@@ -479,7 +564,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).expect("spawn");
+        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
         // Wait for the child to exit so the PTY has flushed.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
         // Give the reader thread a beat to drain.
@@ -507,7 +592,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).expect("spawn");
+        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
 
         session
             .resize(PtySize {
@@ -536,7 +621,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).expect("spawn");
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
         assert_eq!(p.scroll_offset(), 0);
     }
 
@@ -548,7 +633,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).expect("spawn");
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
         p.scroll_by(-5, 100);
         assert_eq!(p.scroll_offset(), 0);
         p.scroll_by(3, 10);
@@ -570,7 +655,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).expect("spawn");
+        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -593,7 +678,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).unwrap();
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).unwrap();
         assert!(!p.is_in_copy_mode());
         p.enter_copy_mode(100, 24, 99, 0);
         assert!(p.is_in_copy_mode());
@@ -612,11 +697,73 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None).unwrap();
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).unwrap();
         p.enter_copy_mode(100, 24, 99, 0);
         p.on_size_changed(10);
         let pane_rows = p.with_copy_mode(|cm| cm.pane_rows).unwrap();
         assert_eq!(pane_rows, 10);
         let _ = p.send_input(bytes::Bytes::from_static(&[0x04])).await;
+    }
+
+    #[tokio::test]
+    async fn color_query_path_does_not_panic() {
+        use std::time::Duration;
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let p = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .unwrap();
+        // Send OSC 11 query through cat (which echoes stdin back); the emulator
+        // parses it on the way out, the reader thread drains and replies via
+        // reply_tx.
+        p.send_input(Bytes::copy_from_slice(b"\x1b]11;?\x07"))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Drained queries shouldn't remain in the emulator. Mainly asserts no
+        // panic + the drain path runs without leaving residue.
+        let pending = p
+            .inner
+            .emulator
+            .lock()
+            .expect("pane emulator mutex poisoned")
+            .take_color_queries();
+        assert!(pending.is_empty(), "expected no leftover color queries");
+        let _ = p.send_input(Bytes::from_static(&[0x04])).await;
+    }
+
+    #[test]
+    fn format_color_reply_uses_palette_bg() {
+        let palette = plexy_glass_config::kanagawa_dragon_palette();
+        let bytes = format_color_reply(ColorQuery::Background, &palette).expect("reply");
+        // bg = #1D1C19; expanded RRRR/GGGG/BBBB is 1d1d/1c1c/1919.
+        assert_eq!(bytes, b"\x1b]11;rgb:1d1d/1c1c/1919\x07");
+    }
+
+    #[test]
+    fn format_color_reply_uses_fg() {
+        let palette = plexy_glass_config::kanagawa_dragon_palette();
+        let bytes = format_color_reply(ColorQuery::Foreground, &palette).expect("reply");
+        // fg = #c8c093.
+        assert_eq!(bytes, b"\x1b]10;rgb:c8c8/c0c0/9393\x07");
+    }
+
+    #[test]
+    fn format_color_reply_cursor_falls_back_to_accent() {
+        // Default palette has no `cursor` entry, so fall back to `accent`.
+        let palette = plexy_glass_config::kanagawa_dragon_palette();
+        let bytes = format_color_reply(ColorQuery::Cursor, &palette).expect("reply");
+        // accent = #737c73.
+        assert_eq!(bytes, b"\x1b]12;rgb:7373/7c7c/7373\x07");
     }
 }

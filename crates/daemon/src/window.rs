@@ -17,6 +17,9 @@ pub struct Window {
 }
 
 impl Window {
+    // Window construction needs the full set of plumbing arguments; bundling
+    // them into a struct would obscure the call sites and complicate borrows.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_first(
         id: WindowId,
         name: String,
@@ -25,6 +28,7 @@ impl Window {
         rect: Rect,
         output_notify: std::sync::Arc<tokio::sync::Notify>,
         death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
+        config: std::sync::Arc<plexy_glass_config::Config>,
     ) -> Result<Self, DaemonError> {
         let size = PtySize {
             rows: rect.rows,
@@ -32,7 +36,7 @@ impl Window {
             pixel_width: 0,
             pixel_height: 0,
         };
-        let pane = Pane::spawn(first_pane_id, spec, size, output_notify, death_tx)?;
+        let pane = Pane::spawn(first_pane_id, spec, size, output_notify, death_tx, config)?;
         let mut panes = HashMap::new();
         panes.insert(first_pane_id, pane);
         Ok(Self {
@@ -67,6 +71,8 @@ impl Window {
 
     /// Split the active pane in `dir`. The new pane appears After the existing
     /// one and becomes active.
+    // Same rationale as `spawn_first`, this is pane-creation plumbing.
+    #[allow(clippy::too_many_arguments)]
     pub fn split(
         &mut self,
         dir: SplitDir,
@@ -75,6 +81,7 @@ impl Window {
         viewport: Rect,
         output_notify: std::sync::Arc<tokio::sync::Notify>,
         death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
+        config: std::sync::Arc<plexy_glass_config::Config>,
     ) -> Result<(), DaemonError> {
         self.layout
             .split(self.active, dir, new_pane_id, SplitPosition::After)
@@ -89,7 +96,7 @@ impl Window {
             pixel_width: 0,
             pixel_height: 0,
         };
-        let pane = Pane::spawn(new_pane_id, spec, size, output_notify, death_tx)?;
+        let pane = Pane::spawn(new_pane_id, spec, size, output_notify, death_tx, config)?;
         self.panes.insert(new_pane_id, pane);
         self.focus_history.push_back(self.active);
         self.active = new_pane_id;
@@ -195,6 +202,10 @@ mod tests {
         std::sync::Arc::new(tokio::sync::Notify::new())
     }
 
+    fn cfg() -> std::sync::Arc<plexy_glass_config::Config> {
+        std::sync::Arc::new(plexy_glass_config::built_in_default())
+    }
+
     fn shell_spec() -> SpawnSpec {
         SpawnSpec {
             program: "/bin/cat".into(),
@@ -215,6 +226,7 @@ mod tests {
             viewport,
             notify(),
             None,
+            cfg(),
         )
         .expect("spawn");
         assert_eq!(w.active(), PaneId(0));
@@ -232,9 +244,10 @@ mod tests {
             viewport,
             notify(),
             None,
+            cfg(),
         )
         .unwrap();
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None)
+        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
             .expect("split");
         assert_eq!(w.active(), PaneId(1));
         assert!(w.layout().panes().contains(&PaneId(0)));
@@ -252,9 +265,10 @@ mod tests {
             viewport,
             notify(),
             None,
+            cfg(),
         )
         .unwrap();
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None)
+        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
             .unwrap();
         let outcome = w.close_active().unwrap();
         assert_eq!(outcome, CloseOutcome::SiblingPromoted);

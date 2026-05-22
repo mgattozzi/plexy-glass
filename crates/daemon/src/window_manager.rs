@@ -25,6 +25,9 @@ pub struct WindowManager {
     /// In-flight mouse selection (left-press → drag → release). `None` between
     /// drags.
     selection: Option<Selection>,
+    /// Active config shared with every pane this manager spawns. Hot reload
+    /// (Task 8) swaps this Arc and walks the panes calling `update_config`.
+    config: Arc<plexy_glass_config::Config>,
 }
 
 impl WindowManager {
@@ -33,6 +36,7 @@ impl WindowManager {
         host_size: PtySize,
         notify: Arc<Notify>,
         death_tx: Option<mpsc::Sender<PaneId>>,
+        config: Arc<plexy_glass_config::Config>,
     ) -> Result<Self, DaemonError> {
         let viewport = host_viewport(host_size);
         let first = Window::spawn_first(
@@ -43,6 +47,7 @@ impl WindowManager {
             viewport,
             Arc::clone(&notify),
             death_tx.clone(),
+            Arc::clone(&config),
         )?;
         Ok(Self {
             windows: vec![first],
@@ -54,6 +59,7 @@ impl WindowManager {
             default_spec: first_spec,
             death_tx,
             selection: None,
+            config,
         })
     }
 
@@ -125,8 +131,16 @@ impl WindowManager {
                 spec.cwd = inherit_cwd(self.active_window().active_pane());
                 let notify = Arc::clone(&self.notify);
                 let death = self.death_tx.clone();
-                self.active_window_mut()
-                    .split(SplitDir::Vertical, new_id, spec, viewport, notify, death)?;
+                let config = Arc::clone(&self.config);
+                self.active_window_mut().split(
+                    SplitDir::Vertical,
+                    new_id,
+                    spec,
+                    viewport,
+                    notify,
+                    death,
+                    config,
+                )?;
             }
             Command::SplitH => {
                 let new_id = self.alloc_pane_id();
@@ -134,8 +148,16 @@ impl WindowManager {
                 spec.cwd = inherit_cwd(self.active_window().active_pane());
                 let notify = Arc::clone(&self.notify);
                 let death = self.death_tx.clone();
-                self.active_window_mut()
-                    .split(SplitDir::Horizontal, new_id, spec, viewport, notify, death)?;
+                let config = Arc::clone(&self.config);
+                self.active_window_mut().split(
+                    SplitDir::Horizontal,
+                    new_id,
+                    spec,
+                    viewport,
+                    notify,
+                    death,
+                    config,
+                )?;
             }
             Command::SelectNextPane => self.active_window_mut().select_next(),
             Command::SelectPrevPane => self.active_window_mut().select_prev(),
@@ -167,6 +189,7 @@ impl WindowManager {
                     viewport,
                     Arc::clone(&self.notify),
                     self.death_tx.clone(),
+                    Arc::clone(&self.config),
                 )?;
                 self.windows.push(window);
                 self.active = self.windows.len() - 1;
@@ -427,6 +450,10 @@ mod tests {
         }
     }
 
+    fn cfg() -> Arc<plexy_glass_config::Config> {
+        Arc::new(plexy_glass_config::built_in_default())
+    }
+
     #[tokio::test]
     async fn new_creates_one_window_one_pane() {
         let notify = Arc::new(Notify::new());
@@ -440,6 +467,7 @@ mod tests {
             },
             notify,
             None,
+            cfg(),
         )
         .unwrap();
         assert_eq!(m.windows().len(), 1);
@@ -459,6 +487,7 @@ mod tests {
             },
             notify,
             None,
+            cfg(),
         )
         .unwrap();
         m.handle_command(Command::SplitV).unwrap();
@@ -479,6 +508,7 @@ mod tests {
             },
             notify,
             None,
+            cfg(),
         )
         .unwrap();
         m.handle_command(Command::NewWindow).unwrap();
@@ -499,6 +529,7 @@ mod tests {
             },
             notify,
             None,
+            cfg(),
         )
         .unwrap();
         m.handle_command(Command::SplitV).unwrap();
@@ -527,6 +558,7 @@ mod tests {
             },
             notify,
             None,
+            cfg(),
         )
         .unwrap();
         m.handle_command(Command::SplitH).unwrap();
@@ -557,6 +589,7 @@ mod tests {
             },
             notify,
             None,
+            cfg(),
         )
         .unwrap();
         m.handle_command(Command::SplitV).unwrap();
@@ -588,6 +621,7 @@ mod tests {
             },
             notify,
             None,
+            cfg(),
         )
         .unwrap();
         m.handle_command(Command::NewWindow).unwrap();
@@ -605,6 +639,7 @@ mod tests {
             PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
             notify,
             None,
+            cfg(),
         )
         .unwrap();
         // Inject a cwd directly onto the active pane's screen.

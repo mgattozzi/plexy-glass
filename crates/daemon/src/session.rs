@@ -180,6 +180,7 @@ impl Session {
             first_size,
             Arc::clone(&notify),
             Some(death_tx.clone()),
+            Arc::clone(&config),
         )?;
         let initial_frame = Arc::new(VirtualScreen::blank(first_size.rows, first_size.cols));
         let (frame_tx, frame_rx_template) = watch::channel(initial_frame);

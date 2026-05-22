@@ -141,7 +141,8 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size, Arc::new(Notify::new()), None).unwrap();
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let p = Pane::spawn(PaneId(0), spec, size, Arc::new(Notify::new()), None, cfg).unwrap();
         // Inject a PromptEnd mark at row 0 col 2 and put cursor at col 2.
         p.with_screen_mut(|s| {
             s.prompt_marks.push(PromptMark {
