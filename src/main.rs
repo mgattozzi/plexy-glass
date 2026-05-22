@@ -23,6 +23,8 @@ enum Cmd {
         #[arg(short = 'n', long = "name")]
         name: Option<String>,
     },
+    /// Reload the daemon's config from ~/.config/plexy-glass/config.toml.
+    Reload,
     /// Start the daemon (used internally by auto-spawn; `--foreground` for dev).
     Daemon(plexy_glass_daemon::DaemonArgs),
 }
@@ -66,6 +68,9 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         },
+        Cmd::Reload => {
+            plexy_glass_client::client_reload_config().await?;
+        }
         Cmd::Daemon(args) => {
             plexy_glass_daemon::run(args).await?;
         }

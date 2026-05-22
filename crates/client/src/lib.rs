@@ -81,6 +81,40 @@ pub async fn run(
     Ok(())
 }
 
+/// Send `ReloadConfig` to the daemon and print the result.
+pub async fn client_reload_config() -> Result<(), ClientError> {
+    let socket = default_socket_path()?;
+    let stream = connect_or_spawn(&socket).await?;
+    let (mut reader, mut writer) = tokio::io::split(stream);
+
+    client_handshake(&mut reader, &mut writer).await?;
+
+    let msg = ClientMsg::ReloadConfig;
+    let payload = postcard::to_allocvec(&msg)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
+    Codec::write_frame(&mut writer, &payload).await?;
+
+    let frame = Codec::read_frame(&mut reader)
+        .await?
+        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
+    let reply: ServerMsg = postcard::from_bytes(&frame)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    match reply {
+        ServerMsg::ConfigReloaded { error: None } => {
+            println!("config reloaded");
+            Ok(())
+        }
+        ServerMsg::ConfigReloaded { error: Some(e) } => {
+            eprintln!("config reload error: {e}");
+            Ok(())
+        }
+        ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
+        other => Err(ClientError::Io(std::io::Error::other(format!(
+            "unexpected reply from daemon: {other:?}"
+        )))),
+    }
+}
+
 /// Send `KillSession { name }` to the daemon and print the result.
 pub async fn client_kill_session(name: String) -> Result<(), ClientError> {
     let socket = default_socket_path()?;
