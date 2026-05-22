@@ -13,6 +13,18 @@ use crate::{
 };
 use unicode_width::UnicodeWidthStr;
 
+/// Terminal color queries from inner apps (OSC 10/11/12 with `?` parameter).
+/// Daemon drains and replies with the configured palette colors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorQuery {
+    /// OSC 10 ; ? (foreground color query).
+    Foreground,
+    /// OSC 11 ; ? (background color query).
+    Background,
+    /// OSC 12 ; ? (cursor color query).
+    Cursor,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptMarkKind {
     /// OSC 133 ; A (prompt start).
@@ -58,6 +70,9 @@ pub struct Screen {
     /// OSC 52 clipboard payloads queued for the daemon to flush via
     /// `pbcopy` / `xclip`. Drained by `take_clipboard_writes`.
     pub clipboard_writes: Vec<Vec<u8>>,
+    /// OSC 10/11/12 color queries from the child. Drained by
+    /// `take_color_queries` and answered by the daemon with palette colors.
+    pub color_queries: Vec<ColorQuery>,
 }
 
 impl Screen {
@@ -78,6 +93,7 @@ impl Screen {
             replies: Vec::new(),
             prompt_marks: Vec::new(),
             clipboard_writes: Vec::new(),
+            color_queries: Vec::new(),
         }
     }
 
@@ -91,6 +107,13 @@ impl Screen {
     /// `Emulator::advance` and flushes the payloads via `pbcopy` / `xclip`.
     pub fn take_clipboard_writes(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.clipboard_writes)
+    }
+
+    /// Drain queued color queries. The daemon calls this after
+    /// `Emulator::advance` and writes back the palette color replies to the
+    /// child's stdin.
+    pub fn take_color_queries(&mut self) -> Vec<ColorQuery> {
+        std::mem::take(&mut self.color_queries)
     }
 
     pub fn rows(&self) -> u16 {
@@ -611,11 +634,26 @@ impl Screen {
                     self.cursor.hyperlink_id = self.hyperlinks.intern(&url);
                 }
             }
+            "10" => self.handle_osc_color_query(params, ColorQuery::Foreground),
+            "11" => self.handle_osc_color_query(params, ColorQuery::Background),
+            "12" => self.handle_osc_color_query(params, ColorQuery::Cursor),
             "133" => self.handle_osc_133(params),
             "52" => self.handle_osc_52(params),
             other => {
                 tracing::trace!(cmd = other, "unhandled OSC");
             }
+        }
+    }
+
+    fn handle_osc_color_query(&mut self, params: &[&[u8]], query: ColorQuery) {
+        // params[0] = "10"/"11"/"12", params[1] = payload.
+        // Query form: payload is exactly "?".
+        // Set form (e.g. payload = "#1d1c19"): ignored, the palette is daemon-controlled.
+        let Some(payload) = params.get(1) else { return };
+        if *payload == b"?" {
+            self.color_queries.push(query);
+        } else {
+            tracing::trace!(?query, "OSC color set form ignored (palette is daemon-controlled)");
         }
     }
 
@@ -1090,5 +1128,39 @@ mod tests {
         // Phase 4 set-only: drop these silently.
         let s = parse(b"\x1b]52;c;?\x07");
         assert!(s.clipboard_writes.is_empty());
+    }
+
+    #[test]
+    fn osc_11_query_pushes_background_color_query() {
+        let s = parse(b"\x1b]11;?\x07");
+        assert_eq!(s.color_queries, vec![ColorQuery::Background]);
+    }
+
+    #[test]
+    fn osc_10_query_pushes_foreground_color_query() {
+        let s = parse(b"\x1b]10;?\x07");
+        assert_eq!(s.color_queries, vec![ColorQuery::Foreground]);
+    }
+
+    #[test]
+    fn osc_12_query_pushes_cursor_color_query() {
+        let s = parse(b"\x1b]12;?\x07");
+        assert_eq!(s.color_queries, vec![ColorQuery::Cursor]);
+    }
+
+    #[test]
+    fn osc_11_set_form_is_ignored() {
+        let s = parse(b"\x1b]11;#1d1c19\x07");
+        assert!(s.color_queries.is_empty());
+    }
+
+    #[test]
+    fn take_color_queries_drains() {
+        let mut s = Screen::new(8, 24);
+        s.color_queries.push(ColorQuery::Background);
+        s.color_queries.push(ColorQuery::Foreground);
+        let drained = s.take_color_queries();
+        assert_eq!(drained, vec![ColorQuery::Background, ColorQuery::Foreground]);
+        assert!(s.color_queries.is_empty());
     }
 }
