@@ -132,7 +132,18 @@ impl CopyModeHandler {
             (m, Key::Char('$')) if m == Modifiers::SHIFT => {
                 state.cursor.1 = cols.saturating_sub(1);
             }
-            _ => {} // Tasks 5-7 add v/y/search/escape
+            (m, Key::Char('v')) if m.is_empty() => {
+                state.anchor = if state.anchor.is_some() {
+                    None
+                } else {
+                    Some(state.cursor)
+                };
+            }
+            (m, Key::Char('y')) if m.is_empty() => {
+                let text = extract_selection(state, screen);
+                return CopyModeAction::Yank(text);
+            }
+            _ => {} // Tasks 6-7 add search/escape
         }
         CopyModeAction::Render
     }
@@ -151,6 +162,68 @@ fn ensure_visible(state: &mut CopyMode) {
     }
 }
 
+/// Extract the selected (or current-line) text from the unified
+/// scrollback + active grid line space.
+fn extract_selection(state: &CopyMode, screen: &Screen) -> String {
+    let (start, end) = match state.anchor {
+        Some(anchor) => normalize(anchor, state.cursor),
+        None => {
+            let line = state.cursor.0;
+            (
+                (line, 0),
+                (line, screen.active.num_cols().saturating_sub(1)),
+            )
+        }
+    };
+    let cols = screen.active.num_cols();
+    let scrollback_rows = screen.scrollback.rows();
+    let scrollback_len = scrollback_rows.len() as u32;
+    let mut out = String::new();
+
+    for line in start.0..=end.0 {
+        let row_start = if line == start.0 { start.1 } else { 0 };
+        let row_end = if line == end.0 {
+            end.1
+        } else {
+            cols.saturating_sub(1)
+        };
+        let row_cells: Option<Vec<_>> = if line < scrollback_len {
+            scrollback_rows
+                .get(line as usize)
+                .map(|row| row.cells.clone())
+        } else {
+            let active_row = (line - scrollback_len) as usize;
+            screen.active.rows.get(active_row).map(|r| r.cells.clone())
+        };
+        let Some(cells) = row_cells else { continue };
+        // Trim trailing blanks in this row.
+        let mut last_significant = row_start;
+        for c in row_start..=row_end {
+            if let Some(cell) = cells.get(c as usize)
+                && !cell.is_blank()
+            {
+                last_significant = c;
+            }
+        }
+        for c in row_start..=last_significant {
+            if let Some(cell) = cells.get(c as usize) {
+                if cell.is_wide_spacer() {
+                    continue;
+                }
+                out.push_str(cell.grapheme.as_str());
+            }
+        }
+        if line < end.0 {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn normalize(a: (u32, u16), b: (u32, u16)) -> ((u32, u16), (u32, u16)) {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +233,19 @@ mod tests {
         let mut e = Emulator::new(rows, cols);
         // Push a known byte so the active grid has at least one cell width.
         e.advance(b"x");
+        e.screen().clone()
+    }
+
+    fn screen_with_lines(rows: u16, cols: u16, lines: &[&str]) -> Screen {
+        let mut e = Emulator::new(rows, cols);
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                e.advance(b"\r\n");
+            }
+            e.advance(line.as_bytes());
+        }
+        // Flush any pending grapheme so the last char is in the grid.
+        e.advance(b"\x1b[m");
         e.screen().clone()
     }
 
@@ -273,5 +359,39 @@ mod tests {
         let scr = screen(10, 80);
         CopyModeHandler::handle(&ev(Modifiers::SHIFT, Key::Char('$')), &mut s, &scr);
         assert_eq!(s.cursor.1, 79);
+    }
+
+    #[test]
+    fn v_toggles_anchor() {
+        let mut s = CopyMode::new(10, 5, 3, 2);
+        let scr = screen(5, 80);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('v')), &mut s, &scr);
+        assert_eq!(s.anchor, Some((3, 2)));
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('v')), &mut s, &scr);
+        assert_eq!(s.anchor, None);
+    }
+
+    #[test]
+    fn y_with_selection_yanks_text() {
+        let scr = screen_with_lines(2, 10, &["hello", "world"]);
+        let mut s = CopyMode::new(2, 2, 0, 0);
+        s.anchor = Some((0, 0));
+        s.cursor = (0, 4);
+        let action = CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
+        match action {
+            CopyModeAction::Yank(text) => assert_eq!(text, "hello"),
+            other => panic!("expected Yank, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn y_without_selection_yanks_current_line() {
+        let scr = screen_with_lines(2, 10, &["hello", "world"]);
+        let mut s = CopyMode::new(2, 2, 1, 0);
+        let action = CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
+        match action {
+            CopyModeAction::Yank(text) => assert!(text.contains("world"), "got: {text:?}"),
+            other => panic!("expected Yank, got {other:?}"),
+        }
     }
 }
