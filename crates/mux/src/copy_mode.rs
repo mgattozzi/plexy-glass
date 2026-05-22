@@ -1,7 +1,7 @@
 //! Per-pane copy-mode state and a pure handler that consumes typed key
 //! events to navigate scrollback, select content, and search.
 
-use crate::KeyEvent;
+use crate::{Direction, Key, KeyEvent, Modifiers};
 use plexy_glass_emulator::Screen;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,19 +75,97 @@ pub struct CopyModeHandler;
 
 impl CopyModeHandler {
     /// Consume one key event, mutate state, return the action the caller
-    /// should take. Stub until Tasks 4-7 fill in the dispatch.
+    /// should take.
     pub fn handle(
-        _event: &KeyEvent,
-        _state: &mut CopyMode,
-        _screen: &Screen,
+        event: &KeyEvent,
+        state: &mut CopyMode,
+        screen: &Screen,
     ) -> CopyModeAction {
+        let cols = screen.active.num_cols();
+        match (event.mods, event.key) {
+            (m, Key::Char('h')) | (m, Key::Arrow(Direction::Left)) if m.is_empty() => {
+                state.cursor.1 = state.cursor.1.saturating_sub(1);
+            }
+            (m, Key::Char('l')) | (m, Key::Arrow(Direction::Right)) if m.is_empty() => {
+                state.cursor.1 = (state.cursor.1 + 1).min(cols.saturating_sub(1));
+            }
+            (m, Key::Char('k')) | (m, Key::Arrow(Direction::Up)) if m.is_empty() => {
+                state.cursor.0 = state.cursor.0.saturating_sub(1);
+                ensure_visible(state);
+            }
+            (m, Key::Char('j')) | (m, Key::Arrow(Direction::Down)) if m.is_empty() => {
+                let max_line = state.total_lines.saturating_sub(1);
+                state.cursor.0 = (state.cursor.0 + 1).min(max_line);
+                ensure_visible(state);
+            }
+            (m, Key::PageUp) if m.is_empty() => {
+                state.cursor.0 = state.cursor.0.saturating_sub(u32::from(state.pane_rows));
+                ensure_visible(state);
+            }
+            (m, Key::PageDown) if m.is_empty() => {
+                let max_line = state.total_lines.saturating_sub(1);
+                state.cursor.0 = (state.cursor.0 + u32::from(state.pane_rows)).min(max_line);
+                ensure_visible(state);
+            }
+            (m, Key::Char('d')) if m == Modifiers::CTRL => {
+                let half = u32::from(state.pane_rows / 2);
+                let max_line = state.total_lines.saturating_sub(1);
+                state.cursor.0 = (state.cursor.0 + half).min(max_line);
+                ensure_visible(state);
+            }
+            (m, Key::Char('u')) if m == Modifiers::CTRL => {
+                let half = u32::from(state.pane_rows / 2);
+                state.cursor.0 = state.cursor.0.saturating_sub(half);
+                ensure_visible(state);
+            }
+            (m, Key::Char('g')) if m.is_empty() => {
+                state.cursor = (0, 0);
+                ensure_visible(state);
+            }
+            (m, Key::Char('G')) if m == Modifiers::SHIFT => {
+                state.cursor = (state.total_lines.saturating_sub(1), 0);
+                ensure_visible(state);
+            }
+            (m, Key::Char('0')) if m.is_empty() => {
+                state.cursor.1 = 0;
+            }
+            (m, Key::Char('$')) if m == Modifiers::SHIFT => {
+                state.cursor.1 = cols.saturating_sub(1);
+            }
+            _ => {} // Tasks 5-7 add v/y/search/escape
+        }
         CopyModeAction::Render
+    }
+}
+
+fn ensure_visible(state: &mut CopyMode) {
+    if state.cursor.0 < state.viewport_top {
+        state.viewport_top = state.cursor.0;
+    }
+    let bottom = state.viewport_top + u32::from(state.pane_rows.saturating_sub(1));
+    if state.cursor.0 > bottom {
+        state.viewport_top = state
+            .cursor
+            .0
+            .saturating_sub(u32::from(state.pane_rows.saturating_sub(1)));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plexy_glass_emulator::Emulator;
+
+    fn screen(rows: u16, cols: u16) -> Screen {
+        let mut e = Emulator::new(rows, cols);
+        // Push a known byte so the active grid has at least one cell width.
+        e.advance(b"x");
+        e.screen().clone()
+    }
+
+    fn ev(mods: Modifiers, key: Key) -> KeyEvent {
+        KeyEvent::new(key, mods)
+    }
 
     #[test]
     fn new_clamps_cursor_to_total_lines() {
@@ -107,5 +185,93 @@ mod tests {
         cm.set_pane_rows(3, 4);
         assert_eq!(cm.cursor.0, 3);
         assert_eq!(cm.viewport_top, 1);
+    }
+
+    #[test]
+    fn h_moves_cursor_left_and_clamps() {
+        let mut s = CopyMode::new(10, 5, 5, 3);
+        let scr = screen(10, 80);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('h')), &mut s, &scr);
+        assert_eq!(s.cursor.1, 2);
+        s.cursor.1 = 0;
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('h')), &mut s, &scr);
+        assert_eq!(s.cursor.1, 0);
+    }
+
+    #[test]
+    fn l_moves_cursor_right_and_clamps_at_pane_width() {
+        let mut s = CopyMode::new(10, 5, 5, 78);
+        let scr = screen(10, 80);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('l')), &mut s, &scr);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('l')), &mut s, &scr);
+        assert_eq!(s.cursor.1, 79);
+    }
+
+    #[test]
+    fn k_moves_up_and_scrolls_viewport() {
+        let mut s = CopyMode::new(20, 5, 18, 0);
+        assert_eq!(s.viewport_top, 15);
+        let scr = screen(5, 80);
+        for _ in 0..4 {
+            CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('k')), &mut s, &scr);
+        }
+        assert_eq!(s.cursor.0, 14);
+        assert!(s.viewport_top <= 14);
+    }
+
+    #[test]
+    fn j_moves_down_and_clamps_at_total_lines() {
+        let mut s = CopyMode::new(10, 5, 9, 0);
+        let scr = screen(5, 80);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('j')), &mut s, &scr);
+        assert_eq!(s.cursor.0, 9);
+    }
+
+    #[test]
+    fn page_up_jumps_by_pane_rows() {
+        let mut s = CopyMode::new(50, 10, 40, 0);
+        let scr = screen(10, 80);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::PageUp), &mut s, &scr);
+        assert_eq!(s.cursor.0, 30);
+    }
+
+    #[test]
+    fn ctrl_d_jumps_by_half_pane() {
+        let mut s = CopyMode::new(50, 10, 20, 0);
+        let scr = screen(10, 80);
+        CopyModeHandler::handle(&ev(Modifiers::CTRL, Key::Char('d')), &mut s, &scr);
+        assert_eq!(s.cursor.0, 25);
+    }
+
+    #[test]
+    fn g_jumps_to_top() {
+        let mut s = CopyMode::new(50, 10, 30, 5);
+        let scr = screen(10, 80);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('g')), &mut s, &scr);
+        assert_eq!(s.cursor, (0, 0));
+    }
+
+    #[test]
+    fn shift_g_jumps_to_bottom() {
+        let mut s = CopyMode::new(50, 10, 10, 5);
+        let scr = screen(10, 80);
+        CopyModeHandler::handle(&ev(Modifiers::SHIFT, Key::Char('G')), &mut s, &scr);
+        assert_eq!(s.cursor, (49, 0));
+    }
+
+    #[test]
+    fn zero_jumps_to_col_zero() {
+        let mut s = CopyMode::new(50, 10, 10, 22);
+        let scr = screen(10, 80);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('0')), &mut s, &scr);
+        assert_eq!(s.cursor.1, 0);
+    }
+
+    #[test]
+    fn dollar_jumps_to_last_col() {
+        let mut s = CopyMode::new(50, 10, 10, 0);
+        let scr = screen(10, 80);
+        CopyModeHandler::handle(&ev(Modifiers::SHIFT, Key::Char('$')), &mut s, &scr);
+        assert_eq!(s.cursor.1, 79);
     }
 }
