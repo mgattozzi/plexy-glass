@@ -34,6 +34,7 @@ mod tests {
             prefix_active: false,
             active_pane_cwd: None,
             copy_mode_active: false,
+            sync_active: false,
         }
     }
 

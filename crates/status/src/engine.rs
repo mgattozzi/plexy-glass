@@ -25,6 +25,7 @@ pub struct EvalContext<'a> {
     pub prefix_active: bool,
     pub active_pane_cwd: Option<&'a str>,
     pub copy_mode_active: bool,
+    pub sync_active: bool,
 }
 
 #[allow(dead_code)] // Zone enum reserved for future per-zone APIs; not used yet.
@@ -150,6 +151,7 @@ pub struct SnapshotCtx {
     pub prefix_active: bool,
     pub active_pane_cwd: Option<String>,
     pub copy_mode_active: bool,
+    pub sync_active: bool,
 }
 
 impl SnapshotCtx {
@@ -162,6 +164,7 @@ impl SnapshotCtx {
             prefix_active: self.prefix_active,
             active_pane_cwd: self.active_pane_cwd.as_deref(),
             copy_mode_active: self.copy_mode_active,
+            sync_active: self.sync_active,
         }
     }
 }
@@ -324,6 +327,7 @@ mod tests {
             prefix_active: false,
             active_pane_cwd: None,
             copy_mode_active: false,
+            sync_active: false,
         };
         let handle = engine.spawn_tick_task(notify, snapshot_ctx);
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
@@ -348,6 +352,7 @@ mod tests {
             prefix_active: false,
             active_pane_cwd: None,
             copy_mode_active: false,
+            sync_active: false,
         };
         inner.refresh_event_driven(&ctx).await;
         let snap = inner.snapshot().await;

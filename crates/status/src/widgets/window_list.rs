@@ -54,6 +54,7 @@ mod tests {
             prefix_active: false,
             active_pane_cwd: None,
             copy_mode_active: false,
+            sync_active: false,
         };
         let out = w.evaluate(&ctx).await;
         assert_eq!(out.segments.len(), 2);
@@ -75,6 +76,7 @@ mod tests {
             prefix_active: false,
             active_pane_cwd: None,
             copy_mode_active: false,
+            sync_active: false,
         };
         let out = w.evaluate(&ctx).await;
         assert!(out.segments.is_empty());

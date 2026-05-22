@@ -126,6 +126,9 @@ impl Widget for PrefixIndicatorWidget {
         if ctx.copy_mode_active {
             return StyledText::single(SmolStr::new("COPY"), self.style);
         }
+        if ctx.sync_active {
+            return StyledText::single(SmolStr::new("SYNC"), self.style);
+        }
         if !ctx.prefix_active {
             return StyledText::empty();
         }
@@ -188,6 +191,7 @@ mod tests {
             prefix_active: false,
             active_pane_cwd: None,
             copy_mode_active: false,
+            sync_active: false,
         }
     }
 
@@ -297,6 +301,35 @@ mod tests {
         };
         let ctx = EvalContext {
             copy_mode_active: true,
+            ..ctx_empty()
+        };
+        let out = w.evaluate(&ctx).await;
+        assert_eq!(out.segments[0].text.as_str(), "COPY");
+    }
+
+    #[tokio::test]
+    async fn prefix_indicator_shows_sync_when_sync_active() {
+        let mut w = PrefixIndicatorWidget {
+            style: ResolvedStyle::default(),
+            content: "PFX".into(),
+        };
+        let ctx = EvalContext {
+            sync_active: true,
+            ..ctx_empty()
+        };
+        let out = w.evaluate(&ctx).await;
+        assert_eq!(out.segments[0].text.as_str(), "SYNC");
+    }
+
+    #[tokio::test]
+    async fn copy_mode_beats_sync_in_priority() {
+        let mut w = PrefixIndicatorWidget {
+            style: ResolvedStyle::default(),
+            content: "PFX".into(),
+        };
+        let ctx = EvalContext {
+            copy_mode_active: true,
+            sync_active: true,
             ..ctx_empty()
         };
         let out = w.evaluate(&ctx).await;
