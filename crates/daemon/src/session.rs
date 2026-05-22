@@ -325,7 +325,14 @@ impl Session {
 
     pub async fn handle_input_bytes(&self, bytes: &[u8]) -> Result<(), DaemonError> {
         let manager = self.window_manager.lock().await;
-        if let Some(pane) = manager.active_window().active_pane() {
+        let win = manager.active_window();
+        if win.sync_input {
+            for id in win.layout().panes() {
+                if let Some(pane) = win.pane(id) {
+                    pane.send_input(bytes::Bytes::copy_from_slice(bytes)).await.ok();
+                }
+            }
+        } else if let Some(pane) = win.active_pane() {
             pane.send_input(bytes::Bytes::copy_from_slice(bytes)).await.ok();
         }
         drop(manager);
@@ -546,6 +553,46 @@ mod tests {
         });
         assert!(saw.contains("hello"), "expected 'hello' in active grid; got {saw:?}");
         let _ = pane.send_input(bytes::Bytes::from_static(&[0x04])).await;
+    }
+
+    #[tokio::test]
+    async fn handle_input_bytes_broadcasts_when_sync_active() {
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let s = Session::new("test".into(), spec, size(), cfg()).unwrap();
+        // Split into two panes and enable sync-input mode.
+        s.handle_command(plexy_glass_mux::Command::SplitV).await.unwrap();
+        s.handle_command(plexy_glass_mux::Command::ToggleSyncPanes).await.unwrap();
+        // Broadcast input to both panes.
+        s.handle_input_bytes(b"hello\n").await.unwrap();
+        // Give children time to echo.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let m = s.window_manager.lock().await;
+        let win = m.active_window();
+        let panes = win.layout().panes();
+        assert_eq!(panes.len(), 2, "expected two panes after split");
+        for id in &panes {
+            let pane = win.pane(*id).expect("pane must exist");
+            let saw = pane.with_screen(|screen| {
+                (0..screen.active.num_cols())
+                    .filter_map(|c| {
+                        screen.active.get_cell(0, c).map(|cell| cell.grapheme.as_str().to_string())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            });
+            assert!(saw.contains("hello"), "pane {id:?} missing 'hello' broadcast: {saw:?}");
+        }
+        // Cleanup: send EOF to each pane.
+        for id in &panes {
+            if let Some(p) = win.pane(*id) {
+                let _ = p.send_input(bytes::Bytes::from_static(&[0x04])).await;
+            }
+        }
     }
 
     #[tokio::test]
