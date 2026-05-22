@@ -96,3 +96,12 @@ fn built_in_keymap_has_prefix_bindings() {
             .any(|b| b.keys == "Alt+Right" && b.command == "select_pane_right")
     );
 }
+
+#[test]
+fn built_in_keymap_includes_enter_copy_mode() {
+    let km = built_in_keymap();
+    assert!(km
+        .bindings
+        .iter()
+        .any(|b| b.keys == "Ctrl+a [" && b.command == "enter_copy_mode"));
+}

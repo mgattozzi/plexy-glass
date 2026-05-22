@@ -21,6 +21,7 @@ pub enum Command {
     SelectPrevPane,
     Detach,
     Cancel,
+    EnterCopyMode,
 }
 
 pub type Chord = (Modifiers, Key);

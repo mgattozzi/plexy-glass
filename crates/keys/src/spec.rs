@@ -108,6 +108,7 @@ pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
         "prev_window" => Command::PrevWindow,
         "detach" => Command::Detach,
         "cancel" => Command::Cancel,
+        "enter_copy_mode" => Command::EnterCopyMode,
         "select_next_pane" => Command::SelectNextPane,
         "select_prev_pane" => Command::SelectPrevPane,
         "select_pane_left" => Command::SelectPane(Direction::Left),
@@ -221,5 +222,11 @@ mod tests {
     #[test]
     fn unknown_command_errors() {
         assert!(parse_command("frobnicate").is_err());
+    }
+
+    #[test]
+    fn parses_enter_copy_mode_command() {
+        let c = parse_command("enter_copy_mode").unwrap();
+        assert_eq!(c.command, Command::EnterCopyMode);
     }
 }

@@ -196,6 +196,9 @@ impl WindowManager {
                 tracing::trace!("ZoomToggle: phase-3 no-op");
             }
             Command::Detach | Command::Cancel => {}
+            Command::EnterCopyMode => {
+                // Real logic in Task 10.
+            }
         }
         self.notify.notify_one();
         Ok(())
