@@ -108,14 +108,15 @@ async fn render_coordinator(
                 copy_mode_active,
                 sync_active,
             };
-            session.status_engine.refresh_event_driven(&ctx).await;
+            let engine = session.status_engine_snapshot();
+            engine.refresh_event_driven(&ctx).await;
             // Also flush any interval widgets whose deadline has passed. On
             // the first render this populates widgets the tick task hasn't
             // had a chance to evaluate yet (initial next_due is None, so
             // they're all considered due); on subsequent renders it's a
             // cheap no-op when the tick task is keeping up.
-            let _ = session.status_engine.refresh_due_intervals(&ctx).await;
-            let snap = session.status_engine.snapshot().await;
+            let _ = engine.refresh_due_intervals(&ctx).await;
+            let snap = engine.snapshot().await;
             let status = StatusLine {
                 left: snap.left.into_iter().flatten().collect(),
                 middle: snap.middle.into_iter().flatten().collect(),
@@ -163,12 +164,27 @@ pub struct Session {
     coordinator_handle: StdMutex<Option<JoinHandle<()>>>,
     /// Holds the death channel receiver until Task 13 wires up the consumer.
     pub pending_death_rx: Mutex<Option<mpsc::Receiver<PaneId>>>,
-    pub status_engine: Arc<plexy_glass_status::EngineInner>,
+    status_engine_slot: StdMutex<Arc<plexy_glass_status::EngineInner>>,
     status_tick_handle: StdMutex<Option<JoinHandle<()>>>,
-    pub config: Arc<plexy_glass_config::Config>,
+    config_slot: StdMutex<Arc<plexy_glass_config::Config>>,
 }
 
 impl Session {
+    /// Snapshot the current active config Arc. Hot reload (Task 8) swaps the
+    /// inner Arc; callers should call this each time they need a current view
+    /// of the config rather than caching across awaits.
+    pub fn config_snapshot(&self) -> Arc<plexy_glass_config::Config> {
+        // invariant: config_slot mutex is held briefly; no .await holding the lock.
+        self.config_slot.lock().expect("config_slot poisoned").clone()
+    }
+
+    /// Snapshot the current status engine Arc. Hot reload swaps the inner
+    /// Arc when the status config changes.
+    pub fn status_engine_snapshot(&self) -> Arc<plexy_glass_status::EngineInner> {
+        // invariant: status_engine_slot mutex is held briefly; no .await holding the lock.
+        self.status_engine_slot.lock().expect("status_engine_slot poisoned").clone()
+    }
+
     pub fn new(
         name: String,
         initial_cmd: SpawnSpec,
@@ -200,9 +216,9 @@ impl Session {
             next_client_id: AtomicU64::new(0),
             coordinator_handle: StdMutex::new(None),
             pending_death_rx: Mutex::new(Some(death_rx)),
-            status_engine,
+            status_engine_slot: StdMutex::new(status_engine),
             status_tick_handle: StdMutex::new(None),
-            config,
+            config_slot: StdMutex::new(config),
         });
         let coord_handle = tokio::spawn(render_coordinator(Arc::clone(&session), frame_tx));
         // invariant: no other thread holds coordinator_handle at construction time
