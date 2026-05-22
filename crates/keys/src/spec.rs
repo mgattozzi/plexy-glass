@@ -109,6 +109,7 @@ pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
         "detach" => Command::Detach,
         "cancel" => Command::Cancel,
         "enter_copy_mode" => Command::EnterCopyMode,
+        "toggle_sync_panes" => Command::ToggleSyncPanes,
         "select_next_pane" => Command::SelectNextPane,
         "select_prev_pane" => Command::SelectPrevPane,
         "select_pane_left" => Command::SelectPane(Direction::Left),
@@ -228,5 +229,11 @@ mod tests {
     fn parses_enter_copy_mode_command() {
         let c = parse_command("enter_copy_mode").unwrap();
         assert_eq!(c.command, Command::EnterCopyMode);
+    }
+
+    #[test]
+    fn parses_toggle_sync_panes_command() {
+        let c = parse_command("toggle_sync_panes").unwrap();
+        assert_eq!(c.command, Command::ToggleSyncPanes);
     }
 }

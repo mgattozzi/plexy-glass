@@ -105,3 +105,12 @@ fn built_in_keymap_includes_enter_copy_mode() {
         .iter()
         .any(|b| b.keys == "Ctrl+a [" && b.command == "enter_copy_mode"));
 }
+
+#[test]
+fn built_in_keymap_includes_toggle_sync_panes() {
+    let km = built_in_keymap();
+    assert!(km
+        .bindings
+        .iter()
+        .any(|b| b.keys == "Ctrl+a y" && b.command == "toggle_sync_panes"));
+}

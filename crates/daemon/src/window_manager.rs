@@ -218,6 +218,10 @@ impl WindowManager {
             Command::ZoomToggle => {
                 tracing::trace!("ZoomToggle: phase-3 no-op");
             }
+            Command::ToggleSyncPanes => {
+                let win = self.active_window_mut();
+                win.sync_input = !win.sync_input;
+            }
             Command::Detach | Command::Cancel => {}
             Command::EnterCopyMode => {
                 if let Some(pane) = self.active_window().active_pane() {
@@ -657,5 +661,23 @@ mod tests {
         assert_eq!(super::cwd_from_osc7("file:///tmp"), Some("/tmp".to_string()));
         assert_eq!(super::cwd_from_osc7("file://localhost/tmp"), Some("/tmp".to_string()));
         assert_eq!(super::cwd_from_osc7("not-a-file-url"), None);
+    }
+
+    #[tokio::test]
+    async fn toggle_sync_panes_flips_the_flag() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        assert!(!m.active_window().sync_input);
+        m.handle_command(Command::ToggleSyncPanes).unwrap();
+        assert!(m.active_window().sync_input);
+        m.handle_command(Command::ToggleSyncPanes).unwrap();
+        assert!(!m.active_window().sync_input);
     }
 }

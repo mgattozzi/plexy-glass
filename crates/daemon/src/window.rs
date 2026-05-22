@@ -10,6 +10,10 @@ use std::collections::{HashMap, VecDeque};
 pub struct Window {
     pub id: WindowId,
     pub name: String,
+    /// When true, input sent to the active pane is also broadcast to all other
+    /// panes in this window (sync-panes mode). Defaults to false; toggled by
+    /// `Command::ToggleSyncPanes`.
+    pub sync_input: bool,
     panes: HashMap<PaneId, Pane>,
     layout: LayoutTree,
     active: PaneId,
@@ -42,6 +46,7 @@ impl Window {
         Ok(Self {
             id,
             name,
+            sync_input: false,
             panes,
             layout: LayoutTree::single(first_pane_id),
             active: first_pane_id,
