@@ -81,6 +81,9 @@ impl CopyModeHandler {
         state: &mut CopyMode,
         screen: &Screen,
     ) -> CopyModeAction {
+        if state.search.prompt_active {
+            return handle_search_prompt(event, state, screen);
+        }
         let cols = screen.active.num_cols();
         match (event.mods, event.key) {
             (m, Key::Char('h')) | (m, Key::Arrow(Direction::Left)) if m.is_empty() => {
@@ -143,7 +146,17 @@ impl CopyModeHandler {
                 let text = extract_selection(state, screen);
                 return CopyModeAction::Yank(text);
             }
-            _ => {} // Tasks 6-7 add search/escape
+            (m, Key::Char('/')) if m.is_empty() => {
+                state.search.prompt_active = true;
+                state.search.prompt_buf.clear();
+            }
+            (m, Key::Char('n')) if m.is_empty() => {
+                jump_to_next_match(state);
+            }
+            (m, Key::Char('N')) if m == Modifiers::SHIFT => {
+                jump_to_prev_match(state);
+            }
+            _ => {} // Task 7 adds escape
         }
         CopyModeAction::Render
     }
@@ -222,6 +235,117 @@ fn extract_selection(state: &CopyMode, screen: &Screen) -> String {
 
 fn normalize(a: (u32, u16), b: (u32, u16)) -> ((u32, u16), (u32, u16)) {
     if a <= b { (a, b) } else { (b, a) }
+}
+
+fn handle_search_prompt(
+    event: &KeyEvent,
+    state: &mut CopyMode,
+    screen: &Screen,
+) -> CopyModeAction {
+    match (event.mods, event.key) {
+        (m, Key::Enter) if m.is_empty() => {
+            state.search.query = std::mem::take(&mut state.search.prompt_buf);
+            state.search.prompt_active = false;
+            if state.search.query.is_empty() {
+                state.search.matches.clear();
+                state.search.current = 0;
+                return CopyModeAction::Render;
+            }
+            state.search.matches = find_matches(screen, &state.search.query);
+            if state.search.matches.is_empty() {
+                state.search.current = 0;
+                return CopyModeAction::Render;
+            }
+            let next = state
+                .search
+                .matches
+                .iter()
+                .position(|m| m.line_idx >= state.cursor.0)
+                .unwrap_or(0);
+            state.search.current = next;
+            let m = &state.search.matches[next];
+            state.cursor = (m.line_idx, m.col_start);
+            ensure_visible(state);
+            CopyModeAction::Render
+        }
+        (m, Key::Escape) if m.is_empty() => {
+            state.search.prompt_active = false;
+            state.search.prompt_buf.clear();
+            CopyModeAction::Render
+        }
+        (m, Key::Backspace) if m.is_empty() => {
+            state.search.prompt_buf.pop();
+            CopyModeAction::Render
+        }
+        (m, Key::Char(c)) if m.is_empty() || m == Modifiers::SHIFT => {
+            state.search.prompt_buf.push(c);
+            CopyModeAction::Render
+        }
+        _ => CopyModeAction::Render,
+    }
+}
+
+fn jump_to_next_match(state: &mut CopyMode) {
+    if state.search.matches.is_empty() {
+        return;
+    }
+    state.search.current = (state.search.current + 1) % state.search.matches.len();
+    let m = &state.search.matches[state.search.current];
+    state.cursor = (m.line_idx, m.col_start);
+    ensure_visible(state);
+}
+
+fn jump_to_prev_match(state: &mut CopyMode) {
+    if state.search.matches.is_empty() {
+        return;
+    }
+    state.search.current = if state.search.current == 0 {
+        state.search.matches.len() - 1
+    } else {
+        state.search.current - 1
+    };
+    let m = &state.search.matches[state.search.current];
+    state.cursor = (m.line_idx, m.col_start);
+    ensure_visible(state);
+}
+
+fn find_matches(screen: &Screen, query: &str) -> Vec<MatchSpan> {
+    let mut out = Vec::new();
+    if query.is_empty() {
+        return out;
+    }
+    let cols = screen.active.num_cols();
+    let scrollback_rows = screen.scrollback.rows();
+    let scrollback_len = scrollback_rows.len() as u32;
+    let total = scrollback_len + screen.active.num_rows() as u32;
+    for line_idx in 0..total {
+        let cells = if line_idx < scrollback_len {
+            scrollback_rows
+                .get(line_idx as usize)
+                .map(|row| row.cells.clone())
+        } else {
+            let active_row = (line_idx - scrollback_len) as usize;
+            screen.active.rows.get(active_row).map(|r| r.cells.clone())
+        };
+        let Some(cells) = cells else { continue };
+        let line_text: String = cells
+            .iter()
+            .filter(|c| !c.is_wide_spacer())
+            .map(|c| c.grapheme.as_str())
+            .collect();
+        let mut start = 0usize;
+        while let Some(idx) = line_text[start..].find(query) {
+            let col = (start + idx) as u16;
+            let end_col = (col + query.chars().count() as u16).min(cols.saturating_sub(1));
+            out.push(MatchSpan {
+                line_idx,
+                col_start: col,
+                col_end: end_col,
+            });
+            start += idx + query.len();
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -393,5 +517,83 @@ mod tests {
             CopyModeAction::Yank(text) => assert!(text.contains("world"), "got: {text:?}"),
             other => panic!("expected Yank, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn slash_opens_search_prompt() {
+        let mut s = CopyMode::new(10, 5, 0, 0);
+        let scr = screen(5, 80);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('/')), &mut s, &scr);
+        assert!(s.search.prompt_active);
+    }
+
+    #[test]
+    fn search_prompt_appends_typed_chars() {
+        let mut s = CopyMode::new(10, 5, 0, 0);
+        let scr = screen(5, 80);
+        s.search.prompt_active = true;
+        for c in ['f', 'o', 'o'] {
+            CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut s, &scr);
+        }
+        assert_eq!(s.search.prompt_buf, "foo");
+    }
+
+    #[test]
+    fn search_prompt_backspace_deletes() {
+        let mut s = CopyMode::new(10, 5, 0, 0);
+        let scr = screen(5, 80);
+        s.search.prompt_active = true;
+        s.search.prompt_buf = "foo".into();
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Backspace), &mut s, &scr);
+        assert_eq!(s.search.prompt_buf, "fo");
+    }
+
+    #[test]
+    fn search_submit_jumps_to_first_match_below_cursor() {
+        let scr = screen_with_lines(3, 30, &["alpha", "beta passwd here", "gamma"]);
+        let mut s = CopyMode::new(3, 3, 0, 0);
+        s.search.prompt_active = true;
+        s.search.prompt_buf = "passwd".into();
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut s, &scr);
+        assert!(!s.search.prompt_active);
+        assert_eq!(s.search.query, "passwd");
+        assert_eq!(s.search.matches.len(), 1);
+        assert_eq!(s.cursor.0, 1);
+        assert_eq!(s.cursor.1, 5);
+    }
+
+    #[test]
+    fn n_cycles_to_next_match() {
+        let scr = screen_with_lines(3, 30, &["foo", "foo bar foo", "foo baz"]);
+        let mut s = CopyMode::new(3, 3, 0, 0);
+        s.search.prompt_active = true;
+        s.search.prompt_buf = "foo".into();
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut s, &scr);
+        assert!(s.search.matches.len() >= 2);
+        let first_idx = s.search.current;
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('n')), &mut s, &scr);
+        assert_ne!(s.search.current, first_idx);
+    }
+
+    #[test]
+    fn search_empty_query_clears_state() {
+        let scr = screen_with_lines(3, 30, &["alpha", "beta", "gamma"]);
+        let mut s = CopyMode::new(3, 3, 0, 0);
+        s.search.prompt_active = true;
+        s.search.prompt_buf = String::new();
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut s, &scr);
+        assert!(s.search.matches.is_empty());
+        assert!(s.search.query.is_empty());
+    }
+
+    #[test]
+    fn search_no_match_leaves_cursor() {
+        let scr = screen_with_lines(3, 30, &["alpha", "beta", "gamma"]);
+        let mut s = CopyMode::new(3, 3, 1, 0);
+        s.search.prompt_active = true;
+        s.search.prompt_buf = "zzzzz".into();
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut s, &scr);
+        assert!(s.search.matches.is_empty());
+        assert_eq!(s.cursor.0, 1);
     }
 }
