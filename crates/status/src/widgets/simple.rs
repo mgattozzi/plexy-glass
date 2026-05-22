@@ -123,6 +123,9 @@ impl Widget for PrefixIndicatorWidget {
         None
     }
     async fn evaluate(&mut self, ctx: &EvalContext<'_>) -> StyledText {
+        if ctx.copy_mode_active {
+            return StyledText::single(SmolStr::new("COPY"), self.style);
+        }
         if !ctx.prefix_active {
             return StyledText::empty();
         }
@@ -184,6 +187,7 @@ mod tests {
             attached_clients: 1,
             prefix_active: false,
             active_pane_cwd: None,
+            copy_mode_active: false,
         }
     }
 
@@ -283,5 +287,19 @@ mod tests {
         };
         let out = w.evaluate(&ctx).await;
         assert_eq!(out.segments[0].text.as_str(), "PFX");
+    }
+
+    #[tokio::test]
+    async fn prefix_indicator_shows_copy_when_in_copy_mode() {
+        let mut w = PrefixIndicatorWidget {
+            style: ResolvedStyle::default(),
+            content: "PFX".into(),
+        };
+        let ctx = EvalContext {
+            copy_mode_active: true,
+            ..ctx_empty()
+        };
+        let out = w.evaluate(&ctx).await;
+        assert_eq!(out.segments[0].text.as_str(), "COPY");
     }
 }

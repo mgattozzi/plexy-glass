@@ -92,6 +92,11 @@ async fn render_coordinator(
                 .active_window()
                 .active_pane()
                 .and_then(|p| p.with_screen(|s| s.cwd.clone()));
+            let copy_mode_active = m
+                .active_window()
+                .active_pane()
+                .map(|p| p.is_in_copy_mode())
+                .unwrap_or(false);
             let ctx = plexy_glass_status::EvalContext {
                 session_name: &session_name,
                 windows: &windows_data,
@@ -99,6 +104,7 @@ async fn render_coordinator(
                 attached_clients,
                 prefix_active: false,
                 active_pane_cwd: active_pane_cwd.as_deref(),
+                copy_mode_active,
             };
             session.status_engine.refresh_event_driven(&ctx).await;
             // Also flush any interval widgets whose deadline has passed. On
@@ -241,6 +247,7 @@ impl Session {
                     attached_clients: 0,
                     prefix_active: false,
                     active_pane_cwd: None,
+                    copy_mode_active: false,
                 },
             },
         );
@@ -410,6 +417,11 @@ fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::SnapshotCtx
         .active_window()
         .active_pane()
         .and_then(|p| p.with_screen(|s| s.cwd.clone()));
+    let copy_mode_active = manager
+        .active_window()
+        .active_pane()
+        .map(|p| p.is_in_copy_mode())
+        .unwrap_or(false);
     plexy_glass_status::SnapshotCtx {
         session_name,
         windows,
@@ -417,6 +429,7 @@ fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::SnapshotCtx
         attached_clients,
         prefix_active: false,
         active_pane_cwd,
+        copy_mode_active,
     }
 }
 

@@ -33,6 +33,7 @@ mod tests {
             attached_clients: 1,
             prefix_active: false,
             active_pane_cwd: None,
+            copy_mode_active: false,
         }
     }
 
