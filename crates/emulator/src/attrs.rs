@@ -12,6 +12,10 @@ bitflags::bitflags! {
         const REVERSE       = 1 << 5;
         const HIDDEN        = 1 << 6;
         const STRIKETHROUGH = 1 << 7;
+        /// Search-match highlight (copy-mode). The renderer should paint a
+        /// distinctive background (yellow) so matches stand out from
+        /// REVERSE (which copy-mode selection uses).
+        const HIGHLIGHT     = 1 << 8;
     }
 }
 

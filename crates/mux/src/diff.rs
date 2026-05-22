@@ -159,6 +159,11 @@ fn apply_sgr_delta(out: &mut String, prev: &CellAttrs, cell: &Cell) {
     if new.attrs.contains(Attrs::REVERSE) {
         out.push_str("\x1b[7m");
     }
+    if new.attrs.contains(Attrs::HIGHLIGHT) {
+        // Bright-yellow background (16-colour) distinguishes search matches
+        // from REVERSE-based copy-mode selection.
+        out.push_str("\x1b[103m");
+    }
     if new.attrs.contains(Attrs::STRIKETHROUGH) {
         out.push_str("\x1b[9m");
     }
