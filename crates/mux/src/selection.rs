@@ -94,6 +94,97 @@ impl Iterator for SelectionCells {
     }
 }
 
+/// Hardcoded word-char predicate for double-click word selection. Matches
+/// alphanumeric, `_`, `.`, `-`, `/`, `~`. Multi-codepoint graphemes (emoji,
+/// combining marks) are treated as word chars. A configurable `[mouse]
+/// word_chars` knob is a future follow-up.
+fn is_word_char(g: &str) -> bool {
+    let mut chars = g.chars();
+    let Some(ch) = chars.next() else { return false };
+    if chars.next().is_some() {
+        return true;
+    }
+    ch.is_alphanumeric() || matches!(ch, '_' | '.' | '-' | '/' | '~')
+}
+
+/// Return a `Word`-kind `Selection` covering the word at (row, col), or
+/// `None` if the click is on a non-word cell. Walks outward through
+/// graphemes on the same row.
+pub fn word_at(
+    source_pane: PaneId,
+    screen: &plexy_glass_emulator::Screen,
+    row: u16,
+    col: u16,
+) -> Option<Selection> {
+    let cols = screen.active.num_cols();
+    if col >= cols {
+        return None;
+    }
+    let cell = screen.active.get_cell(row, col)?;
+    if !is_word_char(cell.grapheme.as_str()) {
+        return None;
+    }
+    let mut start = col;
+    while start > 0 {
+        let prev = start - 1;
+        if screen
+            .active
+            .get_cell(row, prev)
+            .map(|c| is_word_char(c.grapheme.as_str()))
+            .unwrap_or(false)
+        {
+            start = prev;
+        } else {
+            break;
+        }
+    }
+    let mut end = col;
+    while end + 1 < cols {
+        let next = end + 1;
+        if screen
+            .active
+            .get_cell(row, next)
+            .map(|c| is_word_char(c.grapheme.as_str()))
+            .unwrap_or(false)
+        {
+            end = next;
+        } else {
+            break;
+        }
+    }
+    Some(Selection {
+        source_pane,
+        anchor: (row, start),
+        head: (row, end),
+        kind: SelectionKind::Word,
+    })
+}
+
+/// Return a `Line`-kind `Selection` covering the row from col 0 to the last
+/// non-blank cell. Returns `None` if the row is entirely blank.
+pub fn line_at(
+    source_pane: PaneId,
+    screen: &plexy_glass_emulator::Screen,
+    row: u16,
+) -> Option<Selection> {
+    let cols = screen.active.num_cols();
+    let mut last = None;
+    for c in 0..cols {
+        if let Some(cell) = screen.active.get_cell(row, c)
+            && !cell.is_blank()
+        {
+            last = Some(c);
+        }
+    }
+    let end = last?;
+    Some(Selection {
+        source_pane,
+        anchor: (row, 0),
+        head: (row, end),
+        kind: SelectionKind::Line,
+    })
+}
+
 /// Pull the selected text out of `screen`. Walks the cells in selection
 /// order; inserts `\n` at row boundaries. Trailing default-blank cells on
 /// each row are trimmed so empty space at the right edge of the pane
@@ -218,5 +309,58 @@ mod tests {
         assert!(txt.starts_with("abc"));
         assert!(txt.contains('\n'));
         assert!(txt.ends_with("def"));
+    }
+
+    #[test]
+    fn word_at_returns_word_range() {
+        let screen = screen_from(1, 20, &["hello world.foo"]);
+        let s = word_at(PaneId(0), &screen, 0, 2).expect("on 'hello'");
+        assert_eq!(s.kind, SelectionKind::Word);
+        assert_eq!(s.anchor, (0, 0));
+        assert_eq!(s.head, (0, 4));
+    }
+
+    #[test]
+    fn word_at_on_whitespace_returns_none() {
+        let screen = screen_from(1, 10, &["foo  bar"]);
+        assert!(word_at(PaneId(0), &screen, 0, 3).is_none());
+    }
+
+    #[test]
+    fn word_at_on_punctuation_returns_none() {
+        let screen = screen_from(1, 10, &["foo,bar"]);
+        assert!(word_at(PaneId(0), &screen, 0, 3).is_none());
+    }
+
+    #[test]
+    fn word_at_includes_underscore_and_dash() {
+        // '=' breaks the word; underscore + dash do not.
+        let screen = screen_from(1, 20, &["foo_bar-baz=junk"]);
+        let s = word_at(PaneId(0), &screen, 0, 2).expect("on 'foo_bar-baz'");
+        assert_eq!(s.anchor, (0, 0));
+        assert_eq!(s.head, (0, 10));
+    }
+
+    #[test]
+    fn word_at_clamps_at_row_edge() {
+        let screen = screen_from(1, 5, &["hello"]);
+        let s = word_at(PaneId(0), &screen, 0, 4).expect("on last 'o'");
+        assert_eq!(s.anchor, (0, 0));
+        assert_eq!(s.head, (0, 4));
+    }
+
+    #[test]
+    fn line_at_trims_trailing_blanks() {
+        let screen = screen_from(1, 20, &["hello"]);
+        let s = line_at(PaneId(0), &screen, 0).expect("non-blank row");
+        assert_eq!(s.kind, SelectionKind::Line);
+        assert_eq!(s.anchor, (0, 0));
+        assert_eq!(s.head, (0, 4));
+    }
+
+    #[test]
+    fn line_at_on_blank_row_returns_none() {
+        let screen = screen_from(2, 10, &["hello", ""]);
+        assert!(line_at(PaneId(0), &screen, 1).is_none());
     }
 }
