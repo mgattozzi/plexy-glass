@@ -323,6 +323,7 @@ impl Session {
                 let now_empty = m.is_empty();
                 drop(m);
                 session_for_death.notify.notify_one();
+                session_for_death.mark_dirty();
                 if now_empty {
                     break;
                 }
@@ -452,6 +453,7 @@ impl Session {
         manager.handle_command(cmd)?;
         drop(manager);
         self.notify.notify_one();
+        self.mark_dirty();
         Ok(())
     }
 
@@ -463,6 +465,9 @@ impl Session {
         manager.handle_mouse(event).await?;
         drop(manager);
         self.notify.notify_one();
+        // Mouse drives border drag-resize + status-bar commands; both change
+        // structural state. handle_input_bytes is unrelated.
+        self.mark_dirty();
         Ok(())
     }
 
@@ -479,11 +484,17 @@ impl Session {
     fn recompute_size_and_notify(&self) {
         let new_size = self.effective_size();
         let mut m = self.window_manager.blocking_lock();
-        if m.host_size() != new_size {
+        let resized = m.host_size() != new_size;
+        if resized {
             let _ = m.on_host_resize(new_size);
         }
         drop(m);
         self.notify.notify_one();
+        // Resize may have clamped split ratios at min-size, so persist the new
+        // shape.
+        if resized {
+            self.mark_dirty();
+        }
     }
 
     /// Replace this session's active config Arc, rebuild the status engine
@@ -911,6 +922,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn split_command_writes_persisted_layout() {
+        let _g = test_isolate_state_dir();
+        let s = Session::new("p5-split".into(), spec(), size(), cfg()).unwrap();
+        s.handle_command(plexy_glass_mux::Command::SplitV).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        let loaded = crate::persist::load_session("p5-split")
+            .expect("load")
+            .expect("file");
+        assert_eq!(loaded.windows[0].panes.len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]
