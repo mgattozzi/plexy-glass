@@ -8,6 +8,7 @@ pub mod listener;
 pub mod osc_actions;
 pub mod pane;
 pub mod paths;
+pub mod persist;
 pub mod registry;
 pub mod renderer;
 pub mod session;
