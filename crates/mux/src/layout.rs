@@ -200,6 +200,129 @@ impl LayoutTree {
         let (new_root, _) = resize_in(root, toward, axis, delta_cells, viewport);
         self.root = Some(new_root);
     }
+
+    /// Return a `BorderHit` if `(row, col)` is exactly on the gutter cell
+    /// between two panes (column for SplitV, row for SplitH).
+    pub fn border_at(&self, viewport: Rect, row: u16, col: u16) -> Option<BorderHit> {
+        let root = self.root.as_ref()?;
+        border_at_recurse(root, viewport, row, col)
+    }
+
+    /// Move the split adjacent to `adjacent_pane` on the given `side` by
+    /// `delta` cells along its orientation axis. Returns the actually-applied
+    /// delta (clamped so each child retains at least `MIN_PANE_CELLS` cells).
+    /// Returns 0 if no matching split exists or the drag bottomed out.
+    pub fn adjust_split(
+        &mut self,
+        adjacent_pane: PaneId,
+        side: BorderSide,
+        delta: i16,
+        viewport: Rect,
+    ) -> i16 {
+        let Some(root) = self.root.as_mut() else { return 0 };
+        adjust_split_recurse(root, viewport, adjacent_pane, side, delta)
+    }
+}
+
+/// Minimum cells per pane along its constrained axis. Borders can't drag a
+/// child below this.
+const MIN_PANE_CELLS: u16 = 4;
+
+fn border_at_recurse(node: &LayoutNode, viewport: Rect, row: u16, col: u16) -> Option<BorderHit> {
+    match node {
+        LayoutNode::Leaf(_) => None,
+        LayoutNode::Split { dir, ratio, first, second } => {
+            let (a, b) = viewport.subdivide(*dir, *ratio);
+            match dir {
+                SplitDir::Vertical => {
+                    // Gutter column sits between `a` and `b` (subdivide reserves
+                    // one separator cell). It's the column after `a`'s last col.
+                    let gutter_col = a.col.saturating_add(a.cols);
+                    if col == gutter_col && row >= a.row && row < a.row.saturating_add(a.rows) {
+                        return Some(BorderHit {
+                            adjacent_pane: rightmost_leaf(first),
+                            side: BorderSide::Right,
+                        });
+                    }
+                }
+                SplitDir::Horizontal => {
+                    let gutter_row = a.row.saturating_add(a.rows);
+                    if row == gutter_row && col >= a.col && col < a.col.saturating_add(a.cols) {
+                        return Some(BorderHit {
+                            adjacent_pane: bottommost_leaf(first),
+                            side: BorderSide::Bottom,
+                        });
+                    }
+                }
+            }
+            border_at_recurse(first, a, row, col).or_else(|| border_at_recurse(second, b, row, col))
+        }
+    }
+}
+
+fn rightmost_leaf(node: &LayoutNode) -> PaneId {
+    match node {
+        LayoutNode::Leaf(id) => *id,
+        LayoutNode::Split { dir, first, second, .. } => match dir {
+            SplitDir::Vertical => rightmost_leaf(second),
+            SplitDir::Horizontal => rightmost_leaf(first),
+        },
+    }
+}
+
+fn bottommost_leaf(node: &LayoutNode) -> PaneId {
+    match node {
+        LayoutNode::Leaf(id) => *id,
+        LayoutNode::Split { dir, first, second, .. } => match dir {
+            SplitDir::Horizontal => bottommost_leaf(second),
+            SplitDir::Vertical => bottommost_leaf(first),
+        },
+    }
+}
+
+fn adjust_split_recurse(
+    node: &mut LayoutNode,
+    viewport: Rect,
+    adjacent_pane: PaneId,
+    side: BorderSide,
+    delta: i16,
+) -> i16 {
+    let LayoutNode::Split { dir, ratio, first, second } = node else {
+        return 0;
+    };
+    let (a, b) = viewport.subdivide(*dir, *ratio);
+    let split_matches = matches!(
+        (*dir, side),
+        (SplitDir::Vertical, BorderSide::Right) | (SplitDir::Horizontal, BorderSide::Bottom),
+    ) && match side {
+        BorderSide::Right => rightmost_leaf(first) == adjacent_pane,
+        BorderSide::Bottom => bottommost_leaf(first) == adjacent_pane,
+    };
+    if split_matches {
+        // subdivide reserves a 1-cell gutter, so total usable = total - 1.
+        let total_usable = match *dir {
+            SplitDir::Vertical => viewport.cols.saturating_sub(1),
+            SplitDir::Horizontal => viewport.rows.saturating_sub(1),
+        };
+        if total_usable < 2 * MIN_PANE_CELLS {
+            return 0;
+        }
+        let first_cells = match *dir {
+            SplitDir::Vertical => a.cols,
+            SplitDir::Horizontal => a.rows,
+        };
+        let new_first = (first_cells as i32 + delta as i32)
+            .max(MIN_PANE_CELLS as i32)
+            .min((total_usable - MIN_PANE_CELLS) as i32) as u16;
+        let applied = new_first as i32 - first_cells as i32;
+        *ratio = (new_first as f32 / total_usable as f32).clamp(0.1, 0.9);
+        return applied as i16;
+    }
+    let from_first = adjust_split_recurse(first, a, adjacent_pane, side, delta);
+    if from_first != 0 {
+        return from_first;
+    }
+    adjust_split_recurse(second, b, adjacent_pane, side, delta)
 }
 
 fn pane_at_in(node: &LayoutNode, viewport: Rect, row: u16, col: u16) -> Option<PaneId> {
@@ -573,5 +696,74 @@ mod tests {
             t.next_in_direction(PaneId(2), vp, Direction::Up),
             Some(PaneId(1))
         );
+    }
+
+    #[test]
+    fn border_at_returns_node_on_vertical_gutter() {
+        let mut t = LayoutTree::single(PaneId(0));
+        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After)
+            .unwrap();
+        let vp = Rect::new(0, 0, 10, 21);
+        // 21 cols → usable 20 → first.cols ≈ 10 → gutter at col 10.
+        let hit = t.border_at(vp, 5, 10).expect("on gutter");
+        assert_eq!(hit.adjacent_pane, PaneId(0));
+        assert_eq!(hit.side, BorderSide::Right);
+    }
+
+    #[test]
+    fn border_at_returns_none_in_pane_interior() {
+        let mut t = LayoutTree::single(PaneId(0));
+        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After)
+            .unwrap();
+        let vp = Rect::new(0, 0, 10, 21);
+        assert!(t.border_at(vp, 5, 5).is_none());
+        assert!(t.border_at(vp, 5, 15).is_none());
+    }
+
+    #[test]
+    fn border_at_on_horizontal_gutter() {
+        let mut t = LayoutTree::single(PaneId(0));
+        t.split(PaneId(0), SplitDir::Horizontal, PaneId(1), SplitPosition::After)
+            .unwrap();
+        let vp = Rect::new(0, 0, 11, 20);
+        // 11 rows → usable 10 → first.rows ≈ 5 → gutter at row 5.
+        let hit = t.border_at(vp, 5, 10).expect("on horizontal gutter");
+        assert_eq!(hit.side, BorderSide::Bottom);
+        assert_eq!(hit.adjacent_pane, PaneId(0));
+    }
+
+    #[test]
+    fn adjust_split_changes_ratio_for_matching_border() {
+        let mut t = LayoutTree::single(PaneId(0));
+        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After)
+            .unwrap();
+        let vp = Rect::new(0, 0, 10, 21);
+        let before = t.rect_of(PaneId(0), vp).unwrap();
+        let applied = t.adjust_split(PaneId(0), BorderSide::Right, 3, vp);
+        assert!(applied > 0, "delta of 3 should apply at least partially");
+        let after = t.rect_of(PaneId(0), vp).unwrap();
+        assert!(after.cols > before.cols, "first pane should grow");
+    }
+
+    #[test]
+    fn adjust_split_clamps_to_min_size() {
+        let mut t = LayoutTree::single(PaneId(0));
+        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After)
+            .unwrap();
+        let vp = Rect::new(0, 0, 10, 21);
+        // Try to shrink the first pane below `MIN_PANE_CELLS` (4) with a huge
+        // negative delta.
+        let applied = t.adjust_split(PaneId(0), BorderSide::Right, -100, vp);
+        // First pane started at ~10 cols and can shrink to 4, so delta no smaller than -6.
+        assert!(applied >= -6, "should clamp at MIN_PANE_CELLS; got {applied}");
+        assert!(applied < 0, "should still apply something");
+    }
+
+    #[test]
+    fn adjust_split_returns_zero_for_nonexistent_border() {
+        let mut t = LayoutTree::single(PaneId(0));
+        let vp = Rect::new(0, 0, 10, 21);
+        let applied = t.adjust_split(PaneId(99), BorderSide::Right, 3, vp);
+        assert_eq!(applied, 0);
     }
 }
