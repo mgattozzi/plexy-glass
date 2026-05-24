@@ -2,12 +2,35 @@
 
 use crate::{error::DaemonError, window::Window};
 use plexy_glass_mux::{
-    Command, MouseButton, MouseEncoding, MouseEvent, MouseKind, PaneId, Rect, Selection,
-    SelectionKind, SplitDir, WindowId, encode_for_child, extract_text,
+    BorderHit, BorderSide, Command, MouseButton, MouseEncoding, MouseEvent, MouseKind, PaneId,
+    Rect, Selection, SelectionKind, SplitDir, WindowId, encode_for_child, extract_text,
 };
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
+
+/// Active border drag-resize. Cleared on Release. While `Some`, all mouse
+/// events go to `handle_resize_drag_event`. Fields read by M5 wiring.
+#[allow(dead_code)] // fields populated by M5
+struct ResizeDrag {
+    adjacent_pane: PaneId,
+    side: BorderSide,
+    last_pos: (u16, u16),
+}
+
+/// Last left-press metadata for multi-click classification (double-click =
+/// Word, triple-click = Line). Resets when the click target changes or the
+/// 400ms window expires. Fields read by M6/M7 wiring.
+#[allow(dead_code)] // fields populated by M6/M7
+struct ClickHistory {
+    pane: PaneId,
+    row: u16,
+    col: u16,
+    button: MouseButton,
+    at: Instant,
+    count: u8,
+}
 
 pub struct WindowManager {
     windows: Vec<Window>,
@@ -28,6 +51,14 @@ pub struct WindowManager {
     /// Active config shared with every pane this manager spawns. Hot reload
     /// (Task 8) swaps this Arc and walks the panes calling `update_config`.
     config: Arc<plexy_glass_config::Config>,
+    /// Border drag-resize in progress (M5). `None` between drags.
+    resize_drag: Option<ResizeDrag>,
+    /// Last left-press for multi-click classification (M6/M7).
+    #[allow(dead_code)] // read by M6/M7
+    click_history: Option<ClickHistory>,
+    /// Row index where the status bar paints, or `None` if the bar is hidden.
+    /// Set by `set_status_bar_row` (M10).
+    status_bar_row: Option<u16>,
 }
 
 impl WindowManager {
@@ -60,6 +91,9 @@ impl WindowManager {
             death_tx,
             selection: None,
             config,
+            resize_drag: None,
+            click_history: None,
+            status_bar_row: None,
         })
     }
 
@@ -255,11 +289,25 @@ impl WindowManager {
         Ok(())
     }
 
-    /// Dispatch one decoded mouse event. See the Phase 4 plan for the
-    /// algorithm: locate the pane under (row, col), optionally forward the raw
-    /// SGR-encoded event to the child if it opted into mouse reporting, and
-    /// otherwise drive focus/hyperlink/click-to-position/selection/wheel.
+    /// Dispatch one decoded mouse event through the 6-rule precedence ladder
+    /// (see docs/superpowers/specs/2026-05-22-full-mouse-design.md §6).
     pub async fn handle_mouse(&mut self, event: MouseEvent) -> Result<(), DaemonError> {
+        // Rule 1: resize-drag in progress consumes everything until release.
+        if self.resize_drag.is_some() {
+            return self.handle_resize_drag_event(event).await;
+        }
+        // Rule 2: status-bar row hit.
+        if self.is_status_bar_row(event.row) {
+            return self.handle_status_bar_event(event).await;
+        }
+        // Rule 3: border hit on left press.
+        if matches!(event.kind, MouseKind::Press)
+            && event.button == MouseButton::Left
+            && let Some(hit) = self.layout_border_at(event.row, event.col)
+        {
+            return self.begin_resize_drag(hit, event.row, event.col).await;
+        }
+        // Rule 4: copy-mode pane.
         let viewport = self.viewport();
         let Some(pane_id) = self
             .active_window()
@@ -268,22 +316,97 @@ impl WindowManager {
         else {
             return Ok(());
         };
+        if self.pane_is_in_copy_mode(pane_id) {
+            return self.handle_copy_mode_mouse(pane_id, event).await;
+        }
+        // Rule 5: pane has child-app mouse-mode on → passthrough.
+        if self.pane_has_any_mouse_mode(pane_id) {
+            return self.forward_mouse_to_pane(pane_id, event).await;
+        }
+        // Rule 6: default daemon handlers.
+        self.handle_default_mouse(pane_id, event, viewport).await
+    }
 
-        // App-mouse-mode passthrough: if the resolved pane's emulator wants
-        // mouse events, forward and return.
-        let wants_mouse = self
-            .active_window()
+    // ----- Precedence-ladder helpers (M2 stubs filled in by M4-M10) -----
+
+    fn is_status_bar_row(&self, row: u16) -> bool {
+        self.status_bar_row == Some(row)
+    }
+
+    async fn handle_status_bar_event(
+        &mut self,
+        _event: MouseEvent,
+    ) -> Result<(), DaemonError> {
+        // M10 fills this in.
+        Ok(())
+    }
+
+    fn layout_border_at(&self, _row: u16, _col: u16) -> Option<BorderHit> {
+        // M4 fills this in.
+        None
+    }
+
+    async fn begin_resize_drag(
+        &mut self,
+        _hit: BorderHit,
+        _row: u16,
+        _col: u16,
+    ) -> Result<(), DaemonError> {
+        // M5 fills this in.
+        Ok(())
+    }
+
+    async fn handle_resize_drag_event(
+        &mut self,
+        _event: MouseEvent,
+    ) -> Result<(), DaemonError> {
+        // M5 fills this in. Until then, drop the stale state on Release so
+        // the ladder doesn't get stuck.
+        if matches!(_event.kind, MouseKind::Release) {
+            self.resize_drag = None;
+        }
+        Ok(())
+    }
+
+    fn pane_is_in_copy_mode(&self, _pane: PaneId) -> bool {
+        // M6 fills this in.
+        false
+    }
+
+    async fn handle_copy_mode_mouse(
+        &mut self,
+        _pane: PaneId,
+        _event: MouseEvent,
+    ) -> Result<(), DaemonError> {
+        // M6 fills this in.
+        Ok(())
+    }
+
+    fn pane_has_any_mouse_mode(&self, pane_id: PaneId) -> bool {
+        self.active_window()
             .pane(pane_id)
             .map(|p| p.with_screen(|s| s.modes.any_mouse_mode_active()))
-            .unwrap_or(false);
-        if wants_mouse {
-            let bytes = encode_for_child(event, MouseEncoding::Sgr);
-            if let Some(pane) = self.active_window().pane(pane_id).cloned() {
-                let _ = pane.send_input(bytes::Bytes::from(bytes)).await;
-            }
-            return Ok(());
-        }
+            .unwrap_or(false)
+    }
 
+    async fn forward_mouse_to_pane(
+        &mut self,
+        pane_id: PaneId,
+        event: MouseEvent,
+    ) -> Result<(), DaemonError> {
+        let bytes = encode_for_child(event, MouseEncoding::Sgr);
+        if let Some(pane) = self.active_window().pane(pane_id).cloned() {
+            let _ = pane.send_input(bytes::Bytes::from(bytes)).await;
+        }
+        Ok(())
+    }
+
+    async fn handle_default_mouse(
+        &mut self,
+        pane_id: PaneId,
+        event: MouseEvent,
+        viewport: Rect,
+    ) -> Result<(), DaemonError> {
         match event.kind {
             MouseKind::Press if event.button == MouseButton::Left => {
                 self.handle_left_press(pane_id, event, viewport).await?;

@@ -30,6 +30,22 @@ pub enum SplitPosition {
     After,
 }
 
+/// Which border of a pane was hit (used by drag-resize). Body added in M4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderSide {
+    Right,
+    Bottom,
+}
+
+/// Result of a border hit-test: the pane whose right/bottom edge was clicked,
+/// plus the side. Combined, these uniquely identify a Split ancestor whose
+/// ratio should be adjusted. Body added in M4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BorderHit {
+    pub adjacent_pane: PaneId,
+    pub side: BorderSide,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseOutcome {
     /// The pane was removed; tree still has at least one leaf.
