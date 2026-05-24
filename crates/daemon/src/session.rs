@@ -175,6 +175,13 @@ pub struct Session {
     status_engine_slot: StdMutex<Arc<plexy_glass_status::EngineInner>>,
     status_tick_handle: StdMutex<Option<JoinHandle<()>>>,
     config_slot: StdMutex<Arc<plexy_glass_config::Config>>,
+    /// True iff structural state changed since the last successful save.
+    /// Set by `mark_dirty`; cleared by the persist task before snapshotting.
+    pub dirty: std::sync::atomic::AtomicBool,
+    /// Wake the persist task. Multiple writers OK; single waiter.
+    pub persist_notify: Arc<Notify>,
+    /// JoinHandle for the persist task; aborted in `Drop`.
+    persist_handle: StdMutex<Option<JoinHandle<()>>>,
 }
 
 impl Session {
@@ -291,6 +298,9 @@ impl Session {
             status_engine_slot: StdMutex::new(status_engine),
             status_tick_handle: StdMutex::new(None),
             config_slot: StdMutex::new(config),
+            dirty: std::sync::atomic::AtomicBool::new(false),
+            persist_notify: Arc::new(Notify::new()),
+            persist_handle: StdMutex::new(None),
         });
         let coord_handle = tokio::spawn(render_coordinator(Arc::clone(&session), frame_tx));
         // invariant: no other thread holds coordinator_handle at construction time
@@ -338,7 +348,22 @@ impl Session {
         *session.status_tick_handle.lock().expect("status tick handle lock poisoned") =
             Some(tick_handle);
 
+        // Spawn the persist task. Uses `Weak<Session>` so it exits naturally
+        // when the registry drops the last strong `Arc`.
+        let persist_weak = Arc::downgrade(&session);
+        let persist_task = tokio::spawn(persist_loop(persist_weak));
+        // invariant: no other thread holds persist_handle at construction time
+        *session.persist_handle.lock().expect("persist_handle lock poisoned") =
+            Some(persist_task);
+
         Ok(session)
+    }
+
+    /// Mark structural state changed. The persist task picks this up,
+    /// debounces 1500ms, and writes the latest snapshot to disk.
+    pub fn mark_dirty(&self) {
+        self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.persist_notify.notify_one();
     }
 
     pub fn list_entry(&self) -> SessionEntry {
@@ -564,6 +589,38 @@ impl Drop for Session {
             .take()
         {
             handle.abort();
+        }
+        if let Some(handle) = self
+            .persist_handle
+            .lock()
+            .expect("persist handle lock poisoned")
+            .take()
+        {
+            handle.abort();
+        }
+    }
+}
+
+/// Background persist task. Awaits the session's `persist_notify`, sleeps
+/// 1.5s to coalesce a burst of changes, then if `dirty` is still set,
+/// snapshots state + writes atomically. Exits when the session is dropped.
+async fn persist_loop(weak: std::sync::Weak<Session>) {
+    loop {
+        let Some(session) = weak.upgrade() else { return };
+        let notify = Arc::clone(&session.persist_notify);
+        drop(session);
+        notify.notified().await;
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let Some(session) = weak.upgrade() else { return };
+        if !session.dirty.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            continue;
+        }
+        let snap = {
+            let wm = session.window_manager.lock().await;
+            session.snapshot_for_persist(&wm)
+        };
+        if let Err(e) = crate::persist::save_session(&snap) {
+            tracing::warn!(error = %e, name = %session.name, "session persist failed");
         }
     }
 }
@@ -821,6 +878,51 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         assert!(s.closing.load(Ordering::SeqCst), "session did not converge to closing");
+    }
+
+    // A shared env mutex with the persist module's tests would be ideal, but
+    // a local one is enough since session tests don't run cross-module.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        old_xdg: Option<std::ffi::OsString>,
+        _tmp: tempfile::TempDir,
+    }
+
+    fn test_isolate_state_dir() -> EnvGuard {
+        let lock = ENV_LOCK.lock().expect("env mutex poisoned");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let old_xdg = std::env::var_os("XDG_STATE_HOME");
+        // SAFETY: env mutation guarded by `ENV_LOCK` for the guard's lifetime.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", tmp.path());
+        }
+        EnvGuard { _lock: lock, old_xdg, _tmp: tmp }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: `ENV_LOCK` is held for `self`'s lifetime.
+            unsafe {
+                match &self.old_xdg {
+                    Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                    None => std::env::remove_var("XDG_STATE_HOME"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mark_dirty_eventually_writes_file() {
+        let _g = test_isolate_state_dir();
+        let s = Session::new("dirty-test".into(), spec(), size(), cfg()).unwrap();
+        s.mark_dirty();
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        let loaded = crate::persist::load_session("dirty-test")
+            .expect("load")
+            .expect("file should exist");
+        assert_eq!(loaded.name, "dirty-test");
     }
 
     #[tokio::test]
