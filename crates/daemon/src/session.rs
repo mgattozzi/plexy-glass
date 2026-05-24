@@ -193,6 +193,70 @@ impl Session {
         self.status_engine_slot.lock().expect("status_engine_slot poisoned").clone()
     }
 
+    /// Build a `SessionStateV1` reflecting current in-memory state. Caller
+    /// must hold the `window_manager` lock; the snapshot is point-in-time
+    /// consistent with that lock window. Serialization happens off-lock.
+    pub fn snapshot_for_persist(
+        &self,
+        wm: &WindowManager,
+    ) -> crate::persist::SessionStateV1 {
+        use crate::persist::{
+            LayoutDirV1, LayoutStateV1, PaneStateV1, SCHEMA_VERSION, SessionStateV1, WindowStateV1,
+        };
+        let windows = wm
+            .windows()
+            .iter()
+            .map(|w| {
+                let layout_tree = w.layout();
+                let leaves = layout_tree.dfs_leaves();
+                let panes: Vec<PaneStateV1> = leaves
+                    .iter()
+                    .map(|pid| {
+                        let cwd = w
+                            .pane(*pid)
+                            .and_then(|p| p.with_screen(|s| s.cwd.clone()));
+                        PaneStateV1 { cwd }
+                    })
+                    .collect();
+                let layout = layout_tree
+                    .map_layout(
+                        |_pane_id, idx| LayoutStateV1::Leaf(idx),
+                        |dir, ratio, first, second| LayoutStateV1::Split {
+                            dir: match dir {
+                                plexy_glass_mux::SplitDir::Vertical => LayoutDirV1::Vertical,
+                                plexy_glass_mux::SplitDir::Horizontal => LayoutDirV1::Horizontal,
+                            },
+                            ratio,
+                            first: Box::new(first),
+                            second: Box::new(second),
+                        },
+                    )
+                    // invariant: WindowManager never holds a window with an empty layout.
+                    .unwrap_or(LayoutStateV1::Leaf(0));
+                let active_pane_id = w.active();
+                let active_pane = leaves
+                    .iter()
+                    .position(|p| *p == active_pane_id)
+                    .map(|i| i as u32)
+                    .unwrap_or(0);
+                WindowStateV1 {
+                    name: w.name.clone(),
+                    sync_input: w.sync_input,
+                    active_pane,
+                    panes,
+                    layout,
+                }
+            })
+            .collect();
+        SessionStateV1 {
+            schema: SCHEMA_VERSION,
+            name: self.name.clone(),
+            created: chrono::DateTime::<chrono::Utc>::from(self.created),
+            active_window: wm.active_idx(),
+            windows,
+        }
+    }
+
     pub fn new(
         name: String,
         initial_cmd: SpawnSpec,
@@ -757,5 +821,40 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         assert!(s.closing.load(Ordering::SeqCst), "session did not converge to closing");
+    }
+
+    #[tokio::test]
+    async fn snapshot_for_persist_captures_single_pane_session() {
+        let s = Session::new("snap1".into(), spec(), size(), cfg()).unwrap();
+        let wm = s.window_manager.lock().await;
+        let snap = s.snapshot_for_persist(&wm);
+        assert_eq!(snap.name, "snap1");
+        assert_eq!(snap.schema, crate::persist::SCHEMA_VERSION);
+        assert_eq!(snap.windows.len(), 1);
+        assert_eq!(snap.windows[0].panes.len(), 1);
+        assert!(matches!(
+            snap.windows[0].layout,
+            crate::persist::LayoutStateV1::Leaf(0)
+        ));
+    }
+
+    #[tokio::test]
+    async fn snapshot_for_persist_captures_two_pane_split() {
+        let s = Session::new("snap2".into(), spec(), size(), cfg()).unwrap();
+        {
+            let mut wm = s.window_manager.lock().await;
+            wm.handle_command(plexy_glass_mux::Command::SplitV).unwrap();
+        }
+        let wm = s.window_manager.lock().await;
+        let snap = s.snapshot_for_persist(&wm);
+        assert_eq!(snap.windows[0].panes.len(), 2);
+        match &snap.windows[0].layout {
+            crate::persist::LayoutStateV1::Split { dir, first, second, .. } => {
+                assert_eq!(*dir, crate::persist::LayoutDirV1::Vertical);
+                assert!(matches!(**first, crate::persist::LayoutStateV1::Leaf(0)));
+                assert!(matches!(**second, crate::persist::LayoutStateV1::Leaf(1)));
+            }
+            other => panic!("expected Split, got {other:?}"),
+        }
     }
 }

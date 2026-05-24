@@ -201,6 +201,30 @@ impl LayoutTree {
         self.root = Some(new_root);
     }
 
+    /// DFS-order list of pane IDs. Used by callers building on-disk pane
+    /// indices (persistence), and the order is stable for a given tree.
+    pub fn dfs_leaves(&self) -> Vec<PaneId> {
+        let mut out = Vec::new();
+        if let Some(root) = self.root.as_ref() {
+            dfs_collect(root, &mut out);
+        }
+        out
+    }
+
+    /// Walk the layout into a generic recursive structure. `leaf(pane_id, dfs_idx)`
+    /// builds a leaf result; `split(dir, ratio, first, second)` combines two
+    /// already-recursed children into a split result. Returns `None` if the
+    /// tree is empty.
+    pub fn map_layout<L, S, R>(&self, mut leaf: L, mut split: S) -> Option<R>
+    where
+        L: FnMut(PaneId, u32) -> R,
+        S: FnMut(SplitDir, f32, R, R) -> R,
+    {
+        let root = self.root.as_ref()?;
+        let mut idx: u32 = 0;
+        Some(map_node(root, &mut idx, &mut leaf, &mut split))
+    }
+
     /// Return a `BorderHit` if `(row, col)` is exactly on the gutter cell
     /// between two panes (column for SplitV, row for SplitH).
     pub fn border_at(&self, viewport: Rect, row: u16, col: u16) -> Option<BorderHit> {
@@ -323,6 +347,35 @@ fn adjust_split_recurse(
         return from_first;
     }
     adjust_split_recurse(second, b, adjacent_pane, side, delta)
+}
+
+fn dfs_collect(node: &LayoutNode, out: &mut Vec<PaneId>) {
+    match node {
+        LayoutNode::Leaf(id) => out.push(*id),
+        LayoutNode::Split { first, second, .. } => {
+            dfs_collect(first, out);
+            dfs_collect(second, out);
+        }
+    }
+}
+
+fn map_node<L, S, R>(node: &LayoutNode, idx: &mut u32, leaf: &mut L, split: &mut S) -> R
+where
+    L: FnMut(PaneId, u32) -> R,
+    S: FnMut(SplitDir, f32, R, R) -> R,
+{
+    match node {
+        LayoutNode::Leaf(id) => {
+            let r = leaf(*id, *idx);
+            *idx += 1;
+            r
+        }
+        LayoutNode::Split { dir, ratio, first, second } => {
+            let f = map_node(first, idx, leaf, split);
+            let s = map_node(second, idx, leaf, split);
+            split(*dir, *ratio, f, s)
+        }
+    }
 }
 
 fn pane_at_in(node: &LayoutNode, viewport: Rect, row: u16, col: u16) -> Option<PaneId> {
