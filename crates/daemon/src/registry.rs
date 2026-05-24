@@ -111,6 +111,11 @@ impl SessionRegistry {
         })?;
         session.closing.store(true, std::sync::atomic::Ordering::SeqCst);
         session.notify.notify_one();
+        // Best-effort: remove the persisted state file. NotFound is fine, a
+        // session that was never marked dirty has no on-disk file.
+        if let Err(e) = crate::persist::delete_session(name) {
+            tracing::debug!(error = %e, %name, "delete saved session file (non-fatal)");
+        }
         Ok(())
     }
 
@@ -259,6 +264,46 @@ mod tests {
         // equality won't hold but structural equality should.
         assert_eq!(cfg_before.status.left.len(), cfg_after.status.left.len());
         assert_eq!(cfg_before.status.right.len(), cfg_after.status.right.len());
+    }
+
+    static REG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct RegEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        old_xdg: Option<std::ffi::OsString>,
+        _tmp: tempfile::TempDir,
+    }
+
+    fn reg_isolate_state_dir() -> RegEnvGuard {
+        let lock = REG_ENV_LOCK.lock().expect("reg env mutex poisoned");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let old_xdg = std::env::var_os("XDG_STATE_HOME");
+        // SAFETY: env mutation guarded by REG_ENV_LOCK for guard lifetime.
+        unsafe { std::env::set_var("XDG_STATE_HOME", tmp.path()); }
+        RegEnvGuard { _lock: lock, old_xdg, _tmp: tmp }
+    }
+    impl Drop for RegEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: REG_ENV_LOCK held for self's lifetime.
+            unsafe {
+                match &self.old_xdg {
+                    Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                    None => std::env::remove_var("XDG_STATE_HOME"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn kill_deletes_saved_file() {
+        let _g = reg_isolate_state_dir();
+        let r = SessionRegistry::new();
+        let s = r.create("kill-me".into(), spec(), size(), cfg()).await.unwrap();
+        s.mark_dirty();
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(crate::persist::load_session("kill-me").unwrap().is_some());
+        r.kill("kill-me").await.unwrap();
+        assert!(crate::persist::load_session("kill-me").unwrap().is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
