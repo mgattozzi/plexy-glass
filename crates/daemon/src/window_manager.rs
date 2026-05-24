@@ -554,6 +554,21 @@ impl WindowManager {
         let local_row = event.row.saturating_sub(pane_rect.row);
         let local_col = event.col.saturating_sub(pane_rect.col);
 
+        // Shift+left-click EXTENDS the existing selection in this pane
+        // instead of starting a new one (M7).
+        if event.modifiers.shift
+            && self
+                .selection
+                .as_ref()
+                .map(|s| s.source_pane == pane_id)
+                .unwrap_or(false)
+        {
+            if let Some(sel) = self.selection.as_mut() {
+                sel.extend(local_row, local_col, pane_rect);
+            }
+            return Ok(());
+        }
+
         // OSC 8 hyperlink under the cell? Open in the OS browser; suppress
         // selection start.
         let url = self.active_window().pane(pane_id).and_then(|p| {
@@ -579,13 +594,27 @@ impl WindowManager {
             return Ok(());
         }
 
-        // Otherwise: start a selection anchored at this cell.
-        self.selection = Some(Selection::start(
-            pane_id,
-            local_row,
-            local_col,
-            SelectionKind::Char,
-        ));
+        // Multi-click classification (M7): double = Word, triple = Line.
+        let count = self.classify_click_count(pane_id, &event);
+        let new_sel = if count >= 3 {
+            self.active_window()
+                .pane(pane_id)
+                .and_then(|p| p.with_screen(|s| plexy_glass_mux::line_at(pane_id, s, local_row)))
+        } else if count == 2 {
+            self.active_window().pane(pane_id).and_then(|p| {
+                p.with_screen(|s| plexy_glass_mux::word_at(pane_id, s, local_row, local_col))
+            })
+        } else {
+            None
+        };
+        self.selection = new_sel.or_else(|| {
+            Some(Selection::start(
+                pane_id,
+                local_row,
+                local_col,
+                SelectionKind::Char,
+            ))
+        });
         Ok(())
     }
 
@@ -951,6 +980,54 @@ mod tests {
         };
         m.handle_mouse(event).await.unwrap();
         assert!(m.resize_drag.is_some());
+    }
+
+    #[tokio::test]
+    async fn classify_click_count_increments_within_window() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        let event = MouseEvent {
+            kind: MouseKind::Press,
+            button: MouseButton::Left,
+            modifiers: plexy_glass_mux::MouseModifiers::default(),
+            row: 5,
+            col: 5,
+        };
+        assert_eq!(m.classify_click_count(PaneId(0), &event), 1);
+        assert_eq!(m.classify_click_count(PaneId(0), &event), 2);
+        assert_eq!(m.classify_click_count(PaneId(0), &event), 3);
+        // Clamps at 3.
+        assert_eq!(m.classify_click_count(PaneId(0), &event), 3);
+    }
+
+    #[tokio::test]
+    async fn classify_click_count_resets_on_target_change() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        let mut event = MouseEvent {
+            kind: MouseKind::Press,
+            button: MouseButton::Left,
+            modifiers: plexy_glass_mux::MouseModifiers::default(),
+            row: 5,
+            col: 5,
+        };
+        assert_eq!(m.classify_click_count(PaneId(0), &event), 1);
+        event.col = 10; // different target
+        assert_eq!(m.classify_click_count(PaneId(0), &event), 1);
     }
 
     #[tokio::test]

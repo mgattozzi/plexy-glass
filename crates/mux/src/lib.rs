@@ -30,6 +30,6 @@ pub use layout::{BorderHit, BorderSide, CloseOutcome, LayoutError, LayoutTree, S
 pub use mouse::{encode_for_child, MouseButton, MouseEncoding, MouseEvent, MouseKind, MouseModifiers, MouseParseAction, MouseParser};
 pub use pane_id::{PaneId, WindowId};
 pub use rect::Rect;
-pub use selection::{Selection, SelectionKind, extract_text};
+pub use selection::{Selection, SelectionKind, extract_text, line_at, word_at};
 pub use status::StatusLine;
 pub use virtual_screen::VirtualScreen;
