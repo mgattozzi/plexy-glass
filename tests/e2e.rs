@@ -1082,3 +1082,99 @@ value = "RELOADED_TAG"
     }
     assert!(txt.contains("RELOADED_TAG"));
 }
+
+/// Smoke-test that mouse-click bytes traverse the client → daemon path without
+/// breaking the pipe. We split a window then send a synthetic SGR press +
+/// release on the left half; the daemon parses + routes + responds (focus
+/// switch is invisible from the host PTY without extra plumbing, so we just
+/// verify no panic / no broken pipe).
+#[test]
+fn mouse_click_traverses_wire_without_panic() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("openpty");
+    let bin = std::process::Command::cargo_bin("plexy-glass").expect("binary built");
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn");
+    drop(pair.slave);
+    let master = pair.master;
+    let mut writer = master.take_writer().expect("writer");
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Ctrl+a v → split vertically.
+    writer.write_all(&[0x01, b'v']).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Synthetic SGR press + release on the left half (col 5).
+    writer.write_all(b"\x1b[<0;5;5M").unwrap();
+    writer.write_all(b"\x1b[<0;5;5m").unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Detach cleanly.
+    writer.write_all(&[0x01, b'd']).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = child.kill();
+    let _ = child.wait();
+    // Test passes if the daemon didn't panic and the writer didn't break.
+}
+
+/// Smoke-test that a mouse drag-resize sequence (press on gutter → drag right →
+/// release) flows end-to-end. Fail-soft: timing variance may cause the daemon
+/// to interpret the click outside the gutter, in which case the test passes
+/// silently. Mainly verifies no broken pipe.
+#[test]
+fn mouse_drag_resize_traverses_wire() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("openpty");
+    let bin = std::process::Command::cargo_bin("plexy-glass").expect("binary built");
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn");
+    drop(pair.slave);
+    let master = pair.master;
+    let mut writer = master.take_writer().expect("writer");
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Split + then synthetic press → drag → release on the gutter.
+    writer.write_all(&[0x01, b'v']).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    // 80-col viewport with 0.5 ratio → gutter ~col 40.
+    writer.write_all(b"\x1b[<0;40;5M").unwrap();
+    for col in [41u16, 42, 43, 44, 45] {
+        let bytes = format!("\x1b[<32;{col};5M");
+        writer.write_all(bytes.as_bytes()).unwrap();
+    }
+    writer.write_all(b"\x1b[<0;45;5m").unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+
+    writer.write_all(&[0x01, b'd']).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = child.kill();
+    let _ = child.wait();
+}
