@@ -1,4 +1,4 @@
-use crate::ResolvedStyle;
+use crate::{ClickAction, ResolvedStyle};
 use smol_str::SmolStr;
 use std::time::Duration;
 
@@ -6,6 +6,10 @@ use std::time::Duration;
 pub struct Segment {
     pub text: SmolStr,
     pub style: ResolvedStyle,
+    /// If Some, this segment's painted columns become a click target. The
+    /// daemon's status-bar click dispatcher consults the action and fires
+    /// the matching command.
+    pub click_action: Option<ClickAction>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -20,7 +24,25 @@ impl StyledText {
 
     pub fn single(text: impl Into<SmolStr>, style: ResolvedStyle) -> Self {
         Self {
-            segments: vec![Segment { text: text.into(), style }],
+            segments: vec![Segment {
+                text: text.into(),
+                style,
+                click_action: None,
+            }],
+        }
+    }
+
+    pub fn single_clickable(
+        text: impl Into<SmolStr>,
+        style: ResolvedStyle,
+        action: ClickAction,
+    ) -> Self {
+        Self {
+            segments: vec![Segment {
+                text: text.into(),
+                style,
+                click_action: Some(action),
+            }],
         }
     }
 

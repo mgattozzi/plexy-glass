@@ -281,6 +281,60 @@ pub struct SegmentSnapshot {
     pub right: Vec<Vec<crate::widget::Segment>>,
 }
 
+impl SegmentSnapshot {
+    /// Iterate every segment across all three zones in paint order.
+    pub fn iter_segments(&self) -> impl Iterator<Item = &crate::widget::Segment> {
+        self.left
+            .iter()
+            .chain(self.middle.iter())
+            .chain(self.right.iter())
+            .flat_map(|widget_segments| widget_segments.iter())
+    }
+
+    /// Build a flat list of clickable col-range → action regions.
+    ///
+    /// Assumes segments are painted contiguously starting at column 0. The render
+    /// coordinator translates the ranges to viewport-absolute columns when it paints
+    /// each zone (zones don't always start at col 0), so until per-zone hit tables
+    /// are wired, callers can use this as a rough cut.
+    pub fn click_hits(&self) -> Vec<StatusHit> {
+        let mut out = Vec::new();
+        let mut col: u16 = 0;
+        for seg in self.iter_segments() {
+            let width = seg.text.chars().count() as u16;
+            if let Some(action) = seg.click_action {
+                out.push(StatusHit {
+                    col_range: col..col + width,
+                    action,
+                });
+            }
+            col = col.saturating_add(width);
+        }
+        out
+    }
+}
+
+/// What command a click on a status-bar segment should fire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickAction {
+    SelectWindow(usize),
+    ToggleSyncPanes,
+    ExitCopyMode,
+    Detach,
+    NoOp,
+}
+
+/// One clickable region in the rendered status bar: column range + action.
+/// Computed by the render coordinator from a `SegmentSnapshot` and pushed to
+/// `WindowManager::set_status_hits` so click dispatch can binary-search by
+/// column. Note that column ranges are zone-relative; the render coordinator
+/// translates to viewport-absolute columns when it paints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusHit {
+    pub col_range: std::ops::Range<u16>,
+    pub action: ClickAction,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -54,7 +54,11 @@ impl Widget for SessionWidget {
         for _ in 0..self.pad_right {
             buf.push(' ');
         }
-        StyledText::single(SmolStr::new(buf), self.style)
+        StyledText::single_clickable(
+            SmolStr::new(buf),
+            self.style,
+            crate::ClickAction::Detach,
+        )
     }
 }
 
@@ -124,10 +128,18 @@ impl Widget for PrefixIndicatorWidget {
     }
     async fn evaluate(&mut self, ctx: &EvalContext<'_>) -> StyledText {
         if ctx.copy_mode_active {
-            return StyledText::single(SmolStr::new(" COPY "), self.style);
+            return StyledText::single_clickable(
+                SmolStr::new(" COPY "),
+                self.style,
+                crate::ClickAction::ExitCopyMode,
+            );
         }
         if ctx.sync_active {
-            return StyledText::single(SmolStr::new(" SYNC "), self.style);
+            return StyledText::single_clickable(
+                SmolStr::new(" SYNC "),
+                self.style,
+                crate::ClickAction::ToggleSyncPanes,
+            );
         }
         if !ctx.prefix_active {
             return StyledText::empty();

@@ -5,7 +5,10 @@ mod style;
 mod widget;
 mod widgets;
 
-pub use engine::{EngineInner, EvalContext, SegmentSnapshot, SnapshotCtx, StatusEngine, WindowSummary};
+pub use engine::{
+    ClickAction, EngineInner, EvalContext, SegmentSnapshot, SnapshotCtx, StatusEngine, StatusHit,
+    WindowSummary,
+};
 pub use style::{resolve_style, ResolvedStyle, Rgb};
 pub use widget::{Segment, StyledText, Widget};
 pub use widgets::{

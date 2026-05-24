@@ -1,4 +1,4 @@
-use crate::{EvalContext, ResolvedStyle, Segment, StyledText, Widget};
+use crate::{ClickAction, EvalContext, ResolvedStyle, Segment, StyledText, Widget};
 use async_trait::async_trait;
 use smol_str::SmolStr;
 use std::time::Duration;
@@ -25,6 +25,7 @@ impl Widget for WindowListWidget {
             segments.push(Segment {
                 text: SmolStr::new(label),
                 style,
+                click_action: Some(ClickAction::SelectWindow(i)),
             });
         }
         StyledText { segments }
@@ -60,6 +61,32 @@ mod tests {
         assert_eq!(out.segments.len(), 2);
         assert!(out.segments[0].text.contains("shell0"));
         assert!(out.segments[1].text.contains("shell1"));
+    }
+
+    #[tokio::test]
+    async fn window_list_emits_select_window_actions_per_window() {
+        let mut w = WindowListWidget {
+            active_style: ResolvedStyle::default(),
+            inactive_style: ResolvedStyle::default(),
+        };
+        let windows = vec![
+            WindowSummary { name: "alpha".into(), active: true },
+            WindowSummary { name: "beta".into(), active: false },
+        ];
+        let ctx = EvalContext {
+            session_name: "main",
+            windows: &windows,
+            active_window: 0,
+            attached_clients: 1,
+            prefix_active: false,
+            active_pane_cwd: None,
+            copy_mode_active: false,
+            sync_active: false,
+        };
+        let out = w.evaluate(&ctx).await;
+        let actions: Vec<_> = out.segments.iter().filter_map(|s| s.click_action).collect();
+        assert!(actions.contains(&ClickAction::SelectWindow(0)));
+        assert!(actions.contains(&ClickAction::SelectWindow(1)));
     }
 
     #[tokio::test]
