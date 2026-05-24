@@ -412,18 +412,82 @@ impl WindowManager {
         }
     }
 
-    fn pane_is_in_copy_mode(&self, _pane: PaneId) -> bool {
-        // M6 fills this in.
-        false
+    fn pane_is_in_copy_mode(&self, pane: PaneId) -> bool {
+        self.active_window()
+            .pane(pane)
+            .map(|p| p.is_in_copy_mode())
+            .unwrap_or(false)
     }
 
     async fn handle_copy_mode_mouse(
         &mut self,
-        _pane: PaneId,
-        _event: MouseEvent,
+        pane_id: PaneId,
+        event: MouseEvent,
     ) -> Result<(), DaemonError> {
-        // M6 fills this in.
+        let click_count = self.classify_click_count(pane_id, &event);
+        let Some(pane) = self.active_window().pane(pane_id).cloned() else {
+            return Ok(());
+        };
+        // The handler mutates copy-mode state; we need both with_screen + with_copy_mode_mut.
+        let action: Option<plexy_glass_mux::CopyModeAction> = pane.with_screen(|screen| {
+            pane.with_copy_mode_mut(|cm| cm.handle_mouse(&event, click_count, screen))
+        });
+        if let Some(action) = action {
+            use plexy_glass_mux::CopyModeAction;
+            match action {
+                CopyModeAction::Render => self.notify.notify_one(),
+                CopyModeAction::Exit => {
+                    pane.exit_copy_mode();
+                    self.notify.notify_one();
+                }
+                CopyModeAction::Yank(text) => {
+                    tokio::spawn(async move {
+                        let _ = crate::osc_actions::write_clipboard(text.as_bytes()).await;
+                    });
+                    pane.exit_copy_mode();
+                    self.notify.notify_one();
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Classify the current left-press as count=1/2/3 based on time + target
+    /// match against `click_history`. Updates `click_history` and returns
+    /// the new count. Non-left-press events return 1 without updating.
+    fn classify_click_count(&mut self, pane: PaneId, event: &MouseEvent) -> u8 {
+        if !matches!(event.kind, MouseKind::Press) || event.button != MouseButton::Left {
+            return 1;
+        }
+        let now = Instant::now();
+        let same_target = match &self.click_history {
+            Some(h) => {
+                h.pane == pane
+                    && h.row == event.row
+                    && h.col == event.col
+                    && h.button == MouseButton::Left
+                    && now.saturating_duration_since(h.at)
+                        < std::time::Duration::from_millis(400)
+            }
+            None => false,
+        };
+        let count = if same_target {
+            self.click_history
+                .as_ref()
+                .map(|h| h.count.saturating_add(1).min(3))
+                .unwrap_or(1)
+        } else {
+            1
+        };
+        self.click_history = Some(ClickHistory {
+            pane,
+            row: event.row,
+            col: event.col,
+            button: MouseButton::Left,
+            at: now,
+            count,
+        });
+        count
     }
 
     fn pane_has_any_mouse_mode(&self, pane_id: PaneId) -> bool {

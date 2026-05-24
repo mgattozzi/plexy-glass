@@ -1,7 +1,7 @@
 //! Per-pane copy-mode state and a pure handler that consumes typed key
 //! events to navigate scrollback, select content, and search.
 
-use crate::{Direction, Key, KeyEvent, Modifiers};
+use crate::{Direction, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseKind};
 use plexy_glass_emulator::Screen;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +55,117 @@ impl CopyMode {
             pane_rows,
             total_lines,
         }
+    }
+
+    /// Translate a mouse event in pane-viewport coords into copy-mode state
+    /// changes. `click_count` (1/2/3) is computed by the caller from a
+    /// 400ms-window same-target classifier. Returns `Render` so the caller
+    /// repaints; copy-mode mouse never auto-yanks (use `y` to yank, matching
+    /// the keyboard flow).
+    pub fn handle_mouse(
+        &mut self,
+        event: &MouseEvent,
+        click_count: u8,
+        screen: &Screen,
+    ) -> CopyModeAction {
+        let max_line = self.total_lines.saturating_sub(1);
+        let line = self
+            .viewport_top
+            .saturating_add(event.row as u32)
+            .min(max_line);
+        match (event.kind, event.button) {
+            (MouseKind::Press, MouseButton::Left) => {
+                self.cursor = (line, event.col);
+                self.anchor = Some(self.cursor);
+                if click_count >= 3 {
+                    self.select_line_at_cursor(screen);
+                } else if click_count == 2 {
+                    self.select_word_at_cursor(screen);
+                }
+                CopyModeAction::Render
+            }
+            (MouseKind::Move, MouseButton::Left) => {
+                if self.anchor.is_none() {
+                    self.anchor = Some(self.cursor);
+                }
+                self.cursor = (line, event.col);
+                CopyModeAction::Render
+            }
+            (MouseKind::Release, MouseButton::Left) => CopyModeAction::Render,
+            (MouseKind::Wheel { delta }, _) => {
+                if delta > 0 {
+                    self.viewport_top = self.viewport_top.saturating_sub(delta as u32);
+                } else {
+                    let max_top = self
+                        .total_lines
+                        .saturating_sub(self.pane_rows as u32);
+                    self.viewport_top = (self.viewport_top + (-delta) as u32).min(max_top);
+                }
+                CopyModeAction::Render
+            }
+            _ => CopyModeAction::Render,
+        }
+    }
+
+    /// Expand cursor + anchor to span the word containing `cursor`. Walks
+    /// cells outward on the unified line.
+    fn select_word_at_cursor(&mut self, screen: &Screen) {
+        let (line, col) = self.cursor;
+        let Some(cells) = unified_line_cells(screen, line) else { return };
+        let cols = cells.len();
+        if (col as usize) >= cols {
+            return;
+        }
+        let on_word = cells
+            .get(col as usize)
+            .map(|c| is_word_grapheme(c.grapheme.as_str()))
+            .unwrap_or(false);
+        if !on_word {
+            return;
+        }
+        let mut start = col;
+        while start > 0 {
+            let prev = start - 1;
+            if cells
+                .get(prev as usize)
+                .map(|c| is_word_grapheme(c.grapheme.as_str()))
+                .unwrap_or(false)
+            {
+                start = prev;
+            } else {
+                break;
+            }
+        }
+        let mut end = col;
+        while (end as usize) + 1 < cols {
+            let next = end + 1;
+            if cells
+                .get(next as usize)
+                .map(|c| is_word_grapheme(c.grapheme.as_str()))
+                .unwrap_or(false)
+            {
+                end = next;
+            } else {
+                break;
+            }
+        }
+        self.anchor = Some((line, start));
+        self.cursor = (line, end);
+    }
+
+    /// Expand cursor + anchor to span the entire line (col 0 → last non-blank).
+    fn select_line_at_cursor(&mut self, screen: &Screen) {
+        let line = self.cursor.0;
+        let Some(cells) = unified_line_cells(screen, line) else { return };
+        let mut last = None;
+        for (i, cell) in cells.iter().enumerate() {
+            if !cell.is_blank() {
+                last = Some(i as u16);
+            }
+        }
+        let Some(end) = last else { return };
+        self.anchor = Some((line, 0));
+        self.cursor = (line, end);
     }
 
     /// Called by `Pane` on resize / scrollback growth.
@@ -195,6 +306,31 @@ fn ensure_visible(state: &mut CopyMode) {
             .0
             .saturating_sub(u32::from(state.pane_rows.saturating_sub(1)));
     }
+}
+
+/// Fetch a unified-line's cells (scrollback rows come first, then active
+/// rows). Used by mouse word/line selection inside copy mode.
+fn unified_line_cells(screen: &Screen, line: u32) -> Option<Vec<plexy_glass_emulator::Cell>> {
+    let scrollback_rows = screen.scrollback.rows();
+    let scrollback_len = scrollback_rows.len() as u32;
+    if line < scrollback_len {
+        scrollback_rows
+            .get(line as usize)
+            .map(|row| row.cells.clone())
+    } else {
+        let active_row = (line - scrollback_len) as usize;
+        screen.active.rows.get(active_row).map(|r| r.cells.clone())
+    }
+}
+
+/// Word-char predicate shared with `selection::word_at` semantics.
+fn is_word_grapheme(g: &str) -> bool {
+    let mut chars = g.chars();
+    let Some(ch) = chars.next() else { return false };
+    if chars.next().is_some() {
+        return true;
+    }
+    ch.is_alphanumeric() || matches!(ch, '_' | '.' | '-' | '/' | '~')
 }
 
 /// Extract the selected (or current-line) text from the unified
