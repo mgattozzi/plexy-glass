@@ -42,10 +42,12 @@ pub async fn run(
     let stdin_fd = stdin.as_fd();
     let _tty_guard = HostTty::enter_raw(stdin_fd)?;
     tty::install_emergency_restore(stdin_fd, _tty_guard.original_termios());
-    // Enable SGR-encoded mouse coords (?1006h) and any-event tracking (?1003h).
+    // Enable SGR-encoded mouse coords (?1006h) and button-event tracking
+    // (?1002h, motion reported only while a button is held). ?1003h would
+    // also flood the daemon with hover motion events, and we don't use hover.
     use std::io::Write as _;
     let mut stdout = std::io::stdout();
-    let _ = stdout.write_all(b"\x1b[?1006h\x1b[?1003h");
+    let _ = stdout.write_all(b"\x1b[?1006h\x1b[?1002h");
     let _ = stdout.flush();
     // Enable the kitty keyboard protocol so the daemon receives
     // unambiguous modifier info. Terminals that don't support it
