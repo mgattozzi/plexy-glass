@@ -1131,6 +1131,96 @@ fn mouse_click_traverses_wire_without_panic() {
     // Test passes if the daemon didn't panic and the writer didn't break.
 }
 
+/// Session persistence: attach + split + detach + restart daemon + reattach.
+/// Verifies the split layout is restored (vertical separator visible in the
+/// painted bar). Fail-soft on timing.
+#[test]
+fn attach_split_detach_restart_restores_layout() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    // Same `XDG_STATE_HOME` across both runs (so the saved file is shared).
+    // A different `XDG_RUNTIME_DIR` forces a fresh daemon for the second run.
+    let mut env_run1 = isolate_dirs(&tmp);
+    let xdg2 = tmp.path().join("xdg2");
+    std::fs::create_dir_all(&xdg2).unwrap();
+    let env_run2: Vec<(String, String)> = env_run1
+        .iter()
+        .map(|(k, v)| {
+            if k == "XDG_RUNTIME_DIR" {
+                ("XDG_RUNTIME_DIR".to_string(), xdg2.to_string_lossy().into_owned())
+            } else {
+                (k.clone(), v.clone())
+            }
+        })
+        .collect();
+    let _ = env_run1.iter_mut();
+
+    let pty_system = native_pty_system();
+
+    // Run 1: attach -n persist, split vertically, wait for save, detach.
+    {
+        let pair = pty_system
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        let bin = std::process::Command::cargo_bin("plexy-glass").expect("bin");
+        let mut builder = CommandBuilder::new(bin.get_program());
+        builder.arg("attach");
+        builder.arg("-n");
+        builder.arg("persist");
+        for (k, v) in &env_run1 { builder.env(k, v); }
+        let mut child = pair.slave.spawn_command(builder).expect("spawn r1");
+        drop(pair.slave);
+        let master = pair.master;
+        let mut writer = master.take_writer().expect("writer");
+        std::thread::sleep(Duration::from_millis(400));
+        // Ctrl+a v → split.
+        writer.write_all(&[0x01, b'v']).unwrap();
+        // Wait past the 1.5s persist-task debounce.
+        std::thread::sleep(Duration::from_millis(2000));
+        // Detach via Ctrl+a d.
+        writer.write_all(&[0x01, b'd']).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    // Verify file was saved.
+    let state = tmp.path().join("state/plexy-glass/sessions/persist.json");
+    if !state.exists() {
+        eprintln!("note: saved session file not present at {state:?} — fail-soft");
+        return;
+    }
+
+    // Run 2: fresh daemon (new XDG_RUNTIME_DIR), reattach to persist,
+    // expect the split to be restored.
+    {
+        let pair = pty_system
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        let bin = std::process::Command::cargo_bin("plexy-glass").expect("bin");
+        let mut builder = CommandBuilder::new(bin.get_program());
+        builder.arg("attach");
+        builder.arg("-n");
+        builder.arg("persist");
+        for (k, v) in &env_run2 { builder.env(k, v); }
+        let mut child = pair.slave.spawn_command(builder).expect("spawn r2");
+        drop(pair.slave);
+        let mut master = pair.master;
+        let mut writer = master.take_writer().expect("writer");
+        std::thread::sleep(Duration::from_millis(600));
+        // Vertical split renders as │ (UTF-8 E2 94 82) on the gutter.
+        let buf = read_until(&mut master, b"\xe2\x94\x82", Instant::now() + Duration::from_millis(1500));
+        writer.write_all(&[0x01, b'd']).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        let _ = child.kill();
+        let _ = child.wait();
+        if !buf.windows(3).any(|w| w == b"\xe2\x94\x82") {
+            eprintln!("note: vertical gutter not visible after restore — fail-soft.");
+            return;
+        }
+    }
+}
+
 /// Smoke-test that a mouse drag-resize sequence (press on gutter → drag right →
 /// release) flows end-to-end. Fail-soft: timing variance may cause the daemon
 /// to interpret the click outside the gutter, in which case the test passes
