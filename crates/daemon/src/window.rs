@@ -93,8 +93,35 @@ impl Window {
         death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
         config: std::sync::Arc<plexy_glass_config::Config>,
     ) -> Result<(), DaemonError> {
+        self.split_at(
+            self.active,
+            dir,
+            new_pane_id,
+            spec,
+            viewport,
+            output_notify,
+            death_tx,
+            config,
+        )
+    }
+
+    /// Like `split`, but splits an arbitrary `target_pane_id` instead of the
+    /// active one. The active pane stays the same. Used by session restore
+    /// to rebuild a saved layout depth-first.
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_at(
+        &mut self,
+        target_pane_id: PaneId,
+        dir: SplitDir,
+        new_pane_id: PaneId,
+        spec: SpawnSpec,
+        viewport: Rect,
+        output_notify: std::sync::Arc<tokio::sync::Notify>,
+        death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
+        config: std::sync::Arc<plexy_glass_config::Config>,
+    ) -> Result<(), DaemonError> {
         self.layout
-            .split(self.active, dir, new_pane_id, SplitPosition::After)
+            .split(target_pane_id, dir, new_pane_id, SplitPosition::After)
             .map_err(|e| DaemonError::Io(std::io::Error::other(format!("layout: {e}"))))?;
         let rect = self
             .layout

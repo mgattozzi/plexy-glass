@@ -60,6 +60,50 @@ impl SessionRegistry {
         Ok(session)
     }
 
+    /// Attach-or-create with restore.
+    ///
+    /// An existing in-memory session wins; else try the saved file; else fresh
+    /// `create`. Failures on the saved-file path fall back to fresh and log at
+    /// warn.
+    pub async fn attach_or_create(
+        &self,
+        name: String,
+        cmd: SpawnSpec,
+        size: PtySize,
+        config: Arc<plexy_glass_config::Config>,
+    ) -> Result<Arc<Session>, DaemonError> {
+        validate_name(&name)?;
+        // Fast path: already running.
+        {
+            let map = self.inner.lock().await;
+            if let Some(s) = map.get(&name)
+                && !s.closing.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Ok(Arc::clone(s));
+            }
+        }
+        // Try restore.
+        match crate::persist::load_session(&name) {
+            Ok(Some(saved)) => {
+                match Session::restore_from(saved, cmd.clone(), size, Arc::clone(&config)).await {
+                    Ok(session) => {
+                        let mut map = self.inner.lock().await;
+                        map.insert(name, Arc::clone(&session));
+                        return Ok(session);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, %name, "session restore failed; falling back to fresh");
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, %name, "saved session load failed; falling back to fresh");
+            }
+        }
+        self.create(name, cmd, size, config).await
+    }
+
     pub async fn kill(&self, name: &str) -> Result<(), DaemonError> {
         let mut map = self.inner.lock().await;
         let session = map.remove(name).ok_or_else(|| {

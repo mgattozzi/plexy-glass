@@ -367,6 +367,136 @@ impl Session {
         self.persist_notify.notify_one();
     }
 
+    /// Build a Session from a saved on-disk state. The base shell is the
+    /// same as `new`; we then replay structural changes (splits, extra
+    /// windows, names, sync_input, focus) to reach the saved layout.
+    /// Each restored pane spawns the caller-supplied `base_spec` with cwd
+    /// set from the saved state. Split ratios reset to 50/50 (a v1
+    /// limitation; users can mouse-drag to restore).
+    pub async fn restore_from(
+        saved: crate::persist::SessionStateV1,
+        base_spec: plexy_glass_protocol::SpawnSpec,
+        size: PtySize,
+        config: Arc<plexy_glass_config::Config>,
+    ) -> Result<Arc<Self>, DaemonError> {
+        let first_window = saved.windows.first().ok_or_else(|| {
+            DaemonError::Io(std::io::Error::other("restored session has zero windows"))
+        })?;
+        let first_pane_saved = first_window.panes.first().ok_or_else(|| {
+            DaemonError::Io(std::io::Error::other("restored window has zero panes"))
+        })?;
+        let mut first_spec = base_spec.clone();
+        first_spec.cwd = first_pane_saved.cwd.clone();
+
+        let session = Self::new(saved.name.clone(), first_spec, size, Arc::clone(&config))?;
+        {
+            let mut wm = session.window_manager.lock().await;
+            // Window 0 already exists from Session::new with its first pane, so
+            // restore its name + remaining panes via replay.
+            wm.set_window_name(0, first_window.name.clone());
+            replay_window_layout(&mut wm, 0, first_window, &base_spec)?;
+            for (wi, w) in saved.windows.iter().enumerate().skip(1) {
+                let first_pane = w.panes.first().ok_or_else(|| {
+                    DaemonError::Io(std::io::Error::other(format!(
+                        "restored window {wi} has zero panes"
+                    )))
+                })?;
+                let mut spec_for_first = base_spec.clone();
+                spec_for_first.cwd = first_pane.cwd.clone();
+                wm.new_window_with_spec(spec_for_first, w.name.clone())?;
+                replay_window_layout(&mut wm, wi, w, &base_spec)?;
+            }
+            // Restore per-window flags + active-pane focus.
+            for (i, saved_w) in saved.windows.iter().enumerate() {
+                if let Some(win) = wm.windows_mut().get_mut(i) {
+                    win.sync_input = saved_w.sync_input;
+                    let leaves = win.layout().dfs_leaves();
+                    if let Some(pid) = leaves.get(saved_w.active_pane as usize) {
+                        win.focus(*pid);
+                    }
+                }
+            }
+            let active = saved
+                .active_window
+                .min(wm.windows().len().saturating_sub(1));
+            wm.set_active_window(active);
+        }
+        // Round-trip: re-save the restored shape (also catches any drift
+        // between the saved file and what we actually built).
+        session.mark_dirty();
+        Ok(session)
+    }
+}
+
+/// Replay a saved layout for `window_idx`. The window's first pane is
+/// already present; we walk the saved layout depth-first, splitting the
+/// existing structure at each Split node to spawn the next pane.
+fn replay_window_layout(
+    wm: &mut WindowManager,
+    window_idx: usize,
+    saved: &crate::persist::WindowStateV1,
+    base_spec: &plexy_glass_protocol::SpawnSpec,
+) -> Result<(), DaemonError> {
+    let mut ops: Vec<ReplayOp> = Vec::new();
+    collect_replay_ops(&saved.layout, 0, &mut ops);
+    for op in ops {
+        let mut spec = base_spec.clone();
+        spec.cwd = saved
+            .panes
+            .get(op.new_pane_dfs_idx as usize)
+            .and_then(|p| p.cwd.clone());
+        wm.split_window_at_dfs(window_idx, op.target_dfs_idx, op.dir, spec)?;
+    }
+    Ok(())
+}
+
+struct ReplayOp {
+    /// DFS index of the existing pane being split.
+    target_dfs_idx: u32,
+    /// DFS index that the newly-spawned pane will occupy AFTER the split.
+    new_pane_dfs_idx: u32,
+    dir: plexy_glass_mux::SplitDir,
+}
+
+fn collect_replay_ops(node: &crate::persist::LayoutStateV1, base_dfs: u32, out: &mut Vec<ReplayOp>) {
+    use crate::persist::{LayoutDirV1, LayoutStateV1};
+    match node {
+        LayoutStateV1::Leaf(_) => {}
+        LayoutStateV1::Split { dir, first, second, .. } => {
+            let target = leftmost_leaf_dfs(first, base_dfs);
+            let first_size = count_leaves(first);
+            let new_pane = base_dfs + first_size;
+            out.push(ReplayOp {
+                target_dfs_idx: target,
+                new_pane_dfs_idx: new_pane,
+                dir: match dir {
+                    LayoutDirV1::Vertical => plexy_glass_mux::SplitDir::Vertical,
+                    LayoutDirV1::Horizontal => plexy_glass_mux::SplitDir::Horizontal,
+                },
+            });
+            collect_replay_ops(first, base_dfs, out);
+            collect_replay_ops(second, base_dfs + first_size, out);
+        }
+    }
+}
+
+fn leftmost_leaf_dfs(node: &crate::persist::LayoutStateV1, base: u32) -> u32 {
+    match node {
+        crate::persist::LayoutStateV1::Leaf(_) => base,
+        crate::persist::LayoutStateV1::Split { first, .. } => leftmost_leaf_dfs(first, base),
+    }
+}
+
+fn count_leaves(node: &crate::persist::LayoutStateV1) -> u32 {
+    match node {
+        crate::persist::LayoutStateV1::Leaf(_) => 1,
+        crate::persist::LayoutStateV1::Split { first, second, .. } => {
+            count_leaves(first) + count_leaves(second)
+        }
+    }
+}
+
+impl Session {
     pub fn list_entry(&self) -> SessionEntry {
         let m = self.window_manager.blocking_lock();
         let clients = self.clients.blocking_lock().len() as u8;
@@ -922,6 +1052,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_from_round_trips_single_pane_session() {
+        let _g = test_isolate_state_dir();
+        let original = Session::new("rt".into(), spec(), size(), cfg()).unwrap();
+        original.mark_dirty();
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        drop(original);
+        let saved = crate::persist::load_session("rt")
+            .expect("load")
+            .expect("file");
+        let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
+        let wm = restored.window_manager.lock().await;
+        assert_eq!(wm.windows().len(), 1);
+        assert_eq!(wm.windows()[0].layout().panes().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_from_round_trips_two_pane_split() {
+        let _g = test_isolate_state_dir();
+        let original = Session::new("rt2".into(), spec(), size(), cfg()).unwrap();
+        original
+            .handle_command(plexy_glass_mux::Command::SplitV)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        drop(original);
+        let saved = crate::persist::load_session("rt2")
+            .expect("load")
+            .expect("file");
+        let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
+        let wm = restored.window_manager.lock().await;
+        assert_eq!(wm.windows()[0].layout().panes().len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]

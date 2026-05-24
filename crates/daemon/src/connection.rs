@@ -102,7 +102,8 @@ where
             None if create_if_missing => {
                 let spec = cmd.unwrap_or_else(default_spawn_spec);
                 let cfg = Arc::clone(&config);
-                match registry.create(n.clone(), spec, size, cfg).await {
+                // `attach_or_create` restores from disk if a saved file exists.
+                match registry.attach_or_create(n.clone(), spec, size, cfg).await {
                     Ok(s) => s,
                     Err(DaemonError::Protocol(perr)) => {
                         return send_msg(&mut writer, &ServerMsg::Error(perr)).await;
@@ -125,7 +126,8 @@ where
                 0 => {
                     let spec = cmd.unwrap_or_else(default_spawn_spec);
                     let cfg = Arc::clone(&config);
-                    match registry.create("main".into(), spec, size, cfg).await {
+                    // `attach_or_create` restores "main" from disk if saved.
+                    match registry.attach_or_create("main".into(), spec, size, cfg).await {
                         Ok(s) => s,
                         Err(DaemonError::Protocol(perr)) => {
                             return send_msg(&mut writer, &ServerMsg::Error(perr)).await;

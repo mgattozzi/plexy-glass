@@ -168,6 +168,79 @@ impl WindowManager {
         &mut self.windows[self.active]
     }
 
+    pub fn windows_mut(&mut self) -> &mut [Window] {
+        &mut self.windows
+    }
+
+    pub fn set_active_window(&mut self, idx: usize) {
+        if idx < self.windows.len() {
+            self.active = idx;
+        }
+    }
+
+    /// Spawn a new window using a caller-supplied spec (used by session
+    /// restore, where every restored window's first pane gets its own cwd).
+    pub fn new_window_with_spec(
+        &mut self,
+        spec: SpawnSpec,
+        name: String,
+    ) -> Result<(), DaemonError> {
+        let id = WindowId(self.next_window_id);
+        self.next_window_id += 1;
+        let first_pane = self.alloc_pane_id();
+        let viewport = self.viewport();
+        let window = Window::spawn_first(
+            id,
+            name,
+            first_pane,
+            spec,
+            viewport,
+            Arc::clone(&self.notify),
+            self.death_tx.clone(),
+            Arc::clone(&self.config),
+        )?;
+        self.windows.push(window);
+        self.active = self.windows.len() - 1;
+        Ok(())
+    }
+
+    /// Split an existing window's pane at DFS index `target_dfs_idx`. Used by
+    /// session restore.
+    pub fn split_window_at_dfs(
+        &mut self,
+        window_idx: usize,
+        target_dfs_idx: u32,
+        dir: SplitDir,
+        spec: SpawnSpec,
+    ) -> Result<(), DaemonError> {
+        let viewport = self.viewport();
+        let new_id = self.alloc_pane_id();
+        let win = self
+            .windows
+            .get_mut(window_idx)
+            .ok_or_else(|| DaemonError::Io(std::io::Error::other(format!("window {window_idx} missing"))))?;
+        let leaves = win.layout().dfs_leaves();
+        let target_pane = *leaves
+            .get(target_dfs_idx as usize)
+            .ok_or_else(|| DaemonError::Io(std::io::Error::other(format!("dfs idx {target_dfs_idx} out of range"))))?;
+        win.split_at(
+            target_pane,
+            dir,
+            new_id,
+            spec,
+            viewport,
+            Arc::clone(&self.notify),
+            self.death_tx.clone(),
+            Arc::clone(&self.config),
+        )
+    }
+
+    pub fn set_window_name(&mut self, window_idx: usize, name: String) {
+        if let Some(w) = self.windows.get_mut(window_idx) {
+            w.name = name;
+        }
+    }
+
     pub fn windows(&self) -> &[Window] {
         &self.windows
     }
