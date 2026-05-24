@@ -30,7 +30,7 @@ async fn render_coordinator(
         .await;
 
         let frame = {
-            let m = session.window_manager.lock().await;
+            let mut m = session.window_manager.lock().await;
             if m.is_empty() {
                 let host = m.host_size();
                 let virt = build_session_end_frame(host);
@@ -117,6 +117,14 @@ async fn render_coordinator(
             // cheap no-op when the tick task is keeping up.
             let _ = engine.refresh_due_intervals(&ctx).await;
             let snap = engine.snapshot().await;
+            // Push clickable regions to the window manager so the next
+            // status-bar click can dispatch the matching command (M10).
+            let hits = snap.click_hits();
+            let host_size = m.host_size();
+            // Default status position is Bottom (`built_in_default`). Future:
+            // honor `cfg.status.position` when we plumb it through.
+            m.set_status_bar_row(Some(host_size.rows.saturating_sub(1)));
+            m.set_status_hits(hits);
             let status = StatusLine {
                 left: snap.left.into_iter().flatten().collect(),
                 middle: snap.middle.into_iter().flatten().collect(),

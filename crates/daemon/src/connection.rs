@@ -222,6 +222,13 @@ where
                     match event {
                         InputEvent::Mouse(me) => {
                             let _ = session.handle_mouse(me).await;
+                            // Status-bar Detach click sets WindowManager.detach_requested.
+                            // Propagate it to the local flag so this connection exits.
+                            let mut mgr = session.window_manager.lock().await;
+                            if mgr.detach_requested {
+                                mgr.detach_requested = false;
+                                detach_requested = true;
+                            }
                         }
                         InputEvent::Key(ke, raw_bytes) => {
                             // Snap scrollback to live on any keystroke.

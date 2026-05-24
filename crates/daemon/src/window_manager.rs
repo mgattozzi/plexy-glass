@@ -59,6 +59,13 @@ pub struct WindowManager {
     /// Row index where the status bar paints, or `None` if the bar is hidden.
     /// Set by `set_status_bar_row` (M10).
     status_bar_row: Option<u16>,
+    /// Clickable regions in the current status bar. Refreshed each render
+    /// tick via `set_status_hits`. M10.
+    status_hits: Vec<plexy_glass_status::StatusHit>,
+    /// Set when a status-bar click on the session widget fires `Detach`.
+    /// `Connection::serve_attach` polls this each iteration of its input loop
+    /// and exits when true.
+    pub detach_requested: bool,
 }
 
 impl WindowManager {
@@ -94,7 +101,20 @@ impl WindowManager {
             resize_drag: None,
             click_history: None,
             status_bar_row: None,
+            status_hits: Vec::new(),
+            detach_requested: false,
         })
+    }
+
+    /// Set the row index where the status bar paints (or `None` to disable
+    /// status-bar click routing). Called by the render coordinator.
+    pub fn set_status_bar_row(&mut self, row: Option<u16>) {
+        self.status_bar_row = row;
+    }
+
+    /// Update the clickable-region table from the latest status snapshot.
+    pub fn set_status_hits(&mut self, hits: Vec<plexy_glass_status::StatusHit>) {
+        self.status_hits = hits;
     }
 
     /// Read-only access to the in-flight selection, if any. Used by the
@@ -335,9 +355,42 @@ impl WindowManager {
 
     async fn handle_status_bar_event(
         &mut self,
-        _event: MouseEvent,
+        event: MouseEvent,
     ) -> Result<(), DaemonError> {
-        // M10 fills this in.
+        if !matches!(event.kind, MouseKind::Press) || event.button != MouseButton::Left {
+            return Ok(());
+        }
+        let Some(hit) = self
+            .status_hits
+            .iter()
+            .find(|h| h.col_range.contains(&event.col))
+            .cloned()
+        else {
+            return Ok(());
+        };
+        use plexy_glass_status::ClickAction;
+        match hit.action {
+            ClickAction::SelectWindow(idx) => {
+                // SelectWindow takes u8; clamp on overflow (unlikely with
+                // realistic window counts).
+                let n = u8::try_from(idx).unwrap_or(u8::MAX);
+                self.handle_command(Command::SelectWindow(n))?;
+            }
+            ClickAction::ToggleSyncPanes => {
+                self.handle_command(Command::ToggleSyncPanes)?;
+            }
+            ClickAction::ExitCopyMode => {
+                if let Some(pane) = self.active_window().active_pane().cloned() {
+                    pane.exit_copy_mode();
+                }
+                self.notify.notify_one();
+            }
+            ClickAction::Detach => {
+                self.detach_requested = true;
+                self.notify.notify_one();
+            }
+            ClickAction::NoOp => {}
+        }
         Ok(())
     }
 
