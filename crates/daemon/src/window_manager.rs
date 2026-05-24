@@ -341,31 +341,75 @@ impl WindowManager {
         Ok(())
     }
 
-    fn layout_border_at(&self, _row: u16, _col: u16) -> Option<BorderHit> {
-        // M4 fills this in.
-        None
+    fn layout_border_at(&self, row: u16, col: u16) -> Option<BorderHit> {
+        self.active_window()
+            .layout()
+            .border_at(self.viewport(), row, col)
     }
 
     async fn begin_resize_drag(
         &mut self,
-        _hit: BorderHit,
-        _row: u16,
-        _col: u16,
+        hit: BorderHit,
+        row: u16,
+        col: u16,
     ) -> Result<(), DaemonError> {
-        // M5 fills this in.
+        self.resize_drag = Some(ResizeDrag {
+            adjacent_pane: hit.adjacent_pane,
+            side: hit.side,
+            last_pos: (row, col),
+        });
         Ok(())
     }
 
     async fn handle_resize_drag_event(
         &mut self,
-        _event: MouseEvent,
+        event: MouseEvent,
     ) -> Result<(), DaemonError> {
-        // M5 fills this in. Until then, drop the stale state on Release so
-        // the ladder doesn't get stuck.
-        if matches!(_event.kind, MouseKind::Release) {
-            self.resize_drag = None;
+        let Some(drag) = self.resize_drag.as_mut() else {
+            return Ok(());
+        };
+        match event.kind {
+            MouseKind::Move => {
+                let delta = match drag.side {
+                    BorderSide::Right => event.col as i16 - drag.last_pos.1 as i16,
+                    BorderSide::Bottom => event.row as i16 - drag.last_pos.0 as i16,
+                };
+                if delta == 0 {
+                    return Ok(());
+                }
+                let pane = drag.adjacent_pane;
+                let side = drag.side;
+                let viewport = self.viewport();
+                let applied = self
+                    .active_window_mut()
+                    .layout_mut()
+                    .adjust_split(pane, side, delta, viewport);
+                if applied != 0 {
+                    // Step last_pos by the actually-applied delta so we don't
+                    // accumulate slip when the drag bottoms out at min-size.
+                    let drag = self.resize_drag.as_mut().expect("just held above");
+                    match side {
+                        BorderSide::Right => {
+                            drag.last_pos.1 = (drag.last_pos.1 as i16 + applied) as u16;
+                        }
+                        BorderSide::Bottom => {
+                            drag.last_pos.0 = (drag.last_pos.0 as i16 + applied) as u16;
+                        }
+                    }
+                    self.active_window_mut().resize(viewport)?;
+                    self.notify.notify_one();
+                }
+                Ok(())
+            }
+            MouseKind::Release => {
+                self.resize_drag = None;
+                let viewport = self.viewport();
+                self.active_window_mut().resize(viewport)?;
+                self.notify.notify_one();
+                Ok(())
+            }
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     fn pane_is_in_copy_mode(&self, _pane: PaneId) -> bool {
@@ -805,5 +849,69 @@ mod tests {
         assert!(m.active_window().sync_input);
         m.handle_command(Command::ToggleSyncPanes).unwrap();
         assert!(!m.active_window().sync_input);
+    }
+
+    async fn make_two_pane_manager() -> WindowManager {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::SplitV).unwrap();
+        m
+    }
+
+    fn gutter_col_for(m: &WindowManager) -> u16 {
+        let vp = m.viewport();
+        m.active_window()
+            .layout()
+            .rect_of(PaneId(0), vp)
+            .map(|r| r.col + r.cols)
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn border_press_starts_resize_drag() {
+        let mut m = make_two_pane_manager().await;
+        let gutter = gutter_col_for(&m);
+        let event = MouseEvent {
+            kind: MouseKind::Press,
+            button: MouseButton::Left,
+            modifiers: plexy_glass_mux::MouseModifiers::default(),
+            row: 5,
+            col: gutter,
+        };
+        m.handle_mouse(event).await.unwrap();
+        assert!(m.resize_drag.is_some());
+    }
+
+    #[tokio::test]
+    async fn resize_drag_release_clears_state() {
+        let mut m = make_two_pane_manager().await;
+        let gutter = gutter_col_for(&m);
+        m.handle_mouse(MouseEvent {
+            kind: MouseKind::Press,
+            button: MouseButton::Left,
+            modifiers: plexy_glass_mux::MouseModifiers::default(),
+            row: 5,
+            col: gutter,
+        })
+        .await
+        .unwrap();
+        assert!(m.resize_drag.is_some());
+        m.handle_mouse(MouseEvent {
+            kind: MouseKind::Release,
+            button: MouseButton::Left,
+            modifiers: plexy_glass_mux::MouseModifiers::default(),
+            row: 5,
+            col: gutter,
+        })
+        .await
+        .unwrap();
+        assert!(m.resize_drag.is_none());
     }
 }

@@ -74,6 +74,11 @@ impl Window {
         &self.layout
     }
 
+    /// Mutable layout access for in-place ratio updates (drag-resize).
+    pub fn layout_mut(&mut self) -> &mut LayoutTree {
+        &mut self.layout
+    }
+
     /// Split the active pane in `dir`. The new pane appears After the existing
     /// one and becomes active.
     // Same rationale as `spawn_first`, this is pane-creation plumbing.
