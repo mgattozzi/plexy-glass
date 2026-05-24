@@ -525,12 +525,49 @@ impl WindowManager {
             MouseKind::Move if event.button == MouseButton::Left => {
                 self.handle_left_drag(event, viewport);
             }
+            MouseKind::Press if event.button == MouseButton::Middle => {
+                self.handle_middle_press(pane_id).await?;
+            }
             MouseKind::Wheel { delta } => {
                 self.handle_wheel(pane_id, delta);
             }
             _ => {}
         }
         self.notify.notify_one();
+        Ok(())
+    }
+
+    /// Middle-click pastes from the system clipboard. Bracketed-paste-aware:
+    /// if the active pane's emulator has `Modes::BRACKETED_PASTE` on, the
+    /// pasted bytes are wrapped with `\x1b[200~ ... \x1b[201~` so inner apps
+    /// can distinguish paste from typed input.
+    async fn handle_middle_press(&mut self, pane_id: PaneId) -> Result<(), DaemonError> {
+        let bytes = crate::osc_actions::read_clipboard().await;
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let bracketed = self
+            .active_window()
+            .pane(pane_id)
+            .map(|p| {
+                p.with_screen(|s| {
+                    s.modes
+                        .contains(plexy_glass_emulator::Modes::BRACKETED_PASTE)
+                })
+            })
+            .unwrap_or(false);
+        let to_send = if bracketed {
+            let mut v = Vec::with_capacity(bytes.len() + 12);
+            v.extend_from_slice(b"\x1b[200~");
+            v.extend_from_slice(&bytes);
+            v.extend_from_slice(b"\x1b[201~");
+            v
+        } else {
+            bytes
+        };
+        if let Some(pane) = self.active_window().pane(pane_id).cloned() {
+            let _ = pane.send_input(bytes::Bytes::from(to_send)).await;
+        }
         Ok(())
     }
 

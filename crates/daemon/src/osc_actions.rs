@@ -69,6 +69,34 @@ pub async fn write_clipboard(payload: &[u8]) -> Result<(), DaemonError> {
     Ok(())
 }
 
+/// Read the current system clipboard contents. Tries platform-appropriate
+/// CLIs in order; first available wins. Returns an empty `Vec` if no tool is
+/// available or the clipboard is empty.
+pub async fn read_clipboard() -> Vec<u8> {
+    let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbpaste", &[])]
+    } else {
+        &[
+            ("wl-paste", &["-n"]),
+            ("xclip", &["-selection", "clipboard", "-o"]),
+            ("xsel", &["--clipboard", "--output"]),
+        ]
+    };
+    for (program, args) in candidates {
+        match Command::new(program)
+            .args(*args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .await
+        {
+            Ok(out) if out.status.success() => return out.stdout,
+            _ => continue,
+        }
+    }
+    Vec::new()
+}
+
 /// Move the shell cursor in `pane` to local column `click_col` by
 /// synthesizing arrow-key bytes. Only fires when the most recent OSC 133 'B'
 /// (prompt-end) mark on the cursor's row sits at a column <= `click_col`.
