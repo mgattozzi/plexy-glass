@@ -71,7 +71,13 @@ pub async fn write_clipboard(payload: &[u8]) -> Result<(), DaemonError> {
 
 /// Read the current system clipboard contents. Tries platform-appropriate
 /// CLIs in order; first available wins. Returns an empty `Vec` if no tool is
-/// available or the clipboard is empty.
+/// available, the clipboard is empty, or a tool hangs past the timeout.
+///
+/// Each invocation is bounded by a 2s timeout with `kill_on_drop`: a wedged
+/// clipboard helper (e.g. a stuck `pbpaste`/`xclip`) must not stall the
+/// caller. This matters because middle-click paste runs this while the
+/// window-manager lock is held, and an unbounded hang would block session
+/// teardown (`kill`) and client detach.
 pub async fn read_clipboard() -> Vec<u8> {
     let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
         &[("pbpaste", &[])]
@@ -83,15 +89,21 @@ pub async fn read_clipboard() -> Vec<u8> {
         ]
     };
     for (program, args) in candidates {
-        match Command::new(program)
+        let fut = Command::new(program)
             .args(*args)
             .stdin(Stdio::null())
             .stderr(Stdio::null())
-            .output()
-            .await
-        {
-            Ok(out) if out.status.success() => return out.stdout,
-            _ => continue,
+            .kill_on_drop(true)
+            .output();
+        match tokio::time::timeout(std::time::Duration::from_secs(2), fut).await {
+            Ok(Ok(out)) if out.status.success() => return out.stdout,
+            Ok(_) => continue, // tool missing or non-zero: try the next one
+            Err(_) => {
+                // Timed out; the child is killed on drop. Don't try others, a wedged
+                // clipboard system shouldn't multiply the stall.
+                tracing::warn!(program, "clipboard read timed out; skipping paste");
+                return Vec::new();
+            }
         }
     }
     Vec::new()
