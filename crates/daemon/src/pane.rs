@@ -10,7 +10,7 @@ use plexy_glass_emulator::{ColorQuery, Emulator, Screen};
 use plexy_glass_status::Rgb;
 use plexy_glass_mux::PaneId;
 use plexy_glass_protocol::{ExitStatus, PtySize, SpawnSpec};
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize as PortablePtySize};
+use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize as PortablePtySize};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,6 +27,12 @@ struct Inner {
     input_tx: mpsc::Sender<Bytes>,
     output_tx: broadcast::Sender<Bytes>,
     master: Mutex<Box<dyn MasterPty + Send>>,
+    /// Independent kill handle for the child process. Stored because the
+    /// child itself is moved into the detached wait thread; killing via this
+    /// handle is how session teardown (`kill`) terminates the child.
+    /// Dropping the master alone does not, because the reader thread keeps
+    /// the PTY open until the child exits.
+    child_killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     exit_rx: watch::Receiver<Option<ExitStatus>>,
     emulator: Arc<Mutex<Emulator>>,
     scroll_offset: AtomicU32,
@@ -69,6 +75,9 @@ impl Pane {
             .spawn_command(cmd)
             .map_err(|e| DaemonError::Io(std::io::Error::other(format!("spawn: {e}"))))?;
         drop(pair.slave);
+        // Capture an independent kill handle before the child is moved into
+        // the detached wait thread below.
+        let child_killer = child.clone_killer();
 
         let (input_tx, mut input_rx) = mpsc::channel::<Bytes>(64);
         let (output_tx, _) = broadcast::channel::<Bytes>(256);
@@ -201,6 +210,7 @@ impl Pane {
                 input_tx,
                 output_tx,
                 master: Mutex::new(master),
+                child_killer: Mutex::new(child_killer),
                 exit_rx,
                 emulator,
                 scroll_offset: AtomicU32::new(0),
@@ -220,6 +230,20 @@ impl Pane {
             .lock()
             .expect("pane config mutex poisoned");
         *guard = new;
+    }
+
+    /// Terminate the child process. Killing an already-dead child returns an
+    /// error which we ignore. Used by session teardown (`kill`): dropping the
+    /// pane does NOT reliably terminate the child, because the detached reader
+    /// thread holds the PTY master open until the child exits.
+    pub fn kill_child(&self) {
+        // invariant: child_killer mutex briefly held; kill never blocks.
+        let mut killer = self
+            .inner
+            .child_killer
+            .lock()
+            .expect("child_killer mutex poisoned");
+        let _ = killer.kill();
     }
 
     pub fn id(&self) -> PaneId {
@@ -477,6 +501,28 @@ mod tests {
 
     fn cfg() -> Arc<Config> {
         Arc::new(plexy_glass_config::built_in_default())
+    }
+
+    #[tokio::test]
+    async fn kill_child_terminates_the_process() {
+        // A long-lived child that would never exit on its own.
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let p =
+            Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
+        let mut exit = p.exit_rx();
+        assert!(exit.borrow().is_none(), "child should still be running");
+        p.kill_child();
+        // exit_rx flips to Some once the wait thread observes the child dying.
+        let res = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            exit.wait_for(|s| s.is_some()).await
+        })
+        .await;
+        assert!(res.is_ok(), "child did not exit within 5s after kill_child");
     }
 
     #[tokio::test]
