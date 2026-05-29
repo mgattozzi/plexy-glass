@@ -1216,7 +1216,6 @@ fn attach_split_detach_restart_restores_layout() {
         let _ = child.wait();
         if !buf.windows(3).any(|w| w == b"\xe2\x94\x82") {
             eprintln!("note: vertical gutter not visible after restore — fail-soft.");
-            return;
         }
     }
 }
