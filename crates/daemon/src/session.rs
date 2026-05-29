@@ -390,14 +390,13 @@ impl Session {
     /// Pane children are terminated separately via `terminate_panes`.
     pub fn begin_close(&self) {
         self.closing.store(true, Ordering::SeqCst);
-        if let Some(h) = self
-            .persist_handle
-            .lock()
-            .expect("persist handle lock poisoned")
-            .take()
-        {
-            h.abort();
-        }
+        // NB: the persist task is NOT aborted here, it must be stopped
+        // *and awaited* (see `stop_persist`) before `kill` deletes the file,
+        // because `JoinHandle::abort` is cooperative and `save_session` has no
+        // await point, so a fire-and-forget abort could let an in-flight save
+        // re-create the file after deletion. `closing` (set above) makes the
+        // task bail at its next poll; `stop_persist` guarantees it has fully
+        // stopped. Drop still aborts persist as a backstop.
         if let Some(h) = self
             .death_handle
             .lock()
@@ -415,6 +414,25 @@ impl Session {
             h.abort();
         }
         self.notify.notify_one();
+    }
+
+    /// Abort the persist task and WAIT for it to fully stop. Must be called
+    /// (and awaited) before deleting a session's saved file on `kill`: a bare
+    /// `abort()` is cooperative and cannot interrupt a synchronous
+    /// `save_session`, so without this await an in-flight save could land the
+    /// file back on disk *after* `delete_session` removed it.
+    pub async fn stop_persist(&self) {
+        let handle = self
+            .persist_handle
+            .lock()
+            .expect("persist handle lock poisoned")
+            .take();
+        if let Some(h) = handle {
+            h.abort();
+            // Await the task's termination (Err = cancelled, Ok = it finished
+            // its current save first). Either way it is dead afterwards.
+            let _ = h.await;
+        }
     }
 
     /// Terminate every pane's child process. Async because it needs the

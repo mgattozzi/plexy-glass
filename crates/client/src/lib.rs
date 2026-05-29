@@ -73,14 +73,24 @@ pub async fn run(
 
     let stdout = tokio::io::stdout();
     let stdin_for_pump = tokio::io::stdin();
-    let exit_status = pump(reader, writer, stdin_for_pump, stdout, resize_rx).await?;
+    // Once `pump` has read stdin, `tokio::io::stdin()` has spawned an internal
+    // blocking read thread that never finishes (the PTY stdin has no further
+    // input and is not closed), so dropping the runtime would HANG waiting for
+    // it. We must therefore `std::process::exit` on BOTH the success and the
+    // error path rather than returning, and restore the TTY first, since
+    // `process::exit` skips destructors. (Errors *before* pump can still use
+    // `?`: the blocking reader hasn't been spawned yet, so the runtime drops
+    // cleanly there.)
+    let exit_status = match pump(reader, writer, stdin_for_pump, stdout, resize_rx).await {
+        Ok(s) => s,
+        Err(e) => {
+            info!(error = %e, "session ended with error");
+            let _ = tty_guard.restore();
+            eprintln!("plexy-glass: {e}");
+            std::process::exit(1);
+        }
+    };
     info!(?exit_status, "session ended");
-    // Restore the host TTY, then exit the process explicitly. We must NOT
-    // simply return: `tokio::io::stdin()` spawns an internal blocking read
-    // thread that never finishes (the PTY stdin has no further input and is
-    // not closed), so dropping the runtime would hang waiting for it and the
-    // client would never exit (e.g. after the daemon kills/ends the session).
-    // `std::process::exit` skips destructors, so restore the TTY first.
     let _ = tty_guard.restore();
     let code = match exit_status {
         plexy_glass_protocol::ExitStatus::Code(c) => c,

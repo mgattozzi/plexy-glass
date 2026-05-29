@@ -111,16 +111,20 @@ impl SessionRegistry {
                 DaemonError::Protocol(ProtocolError::SessionNotFound { name: name.to_string() })
             })?
         };
-        // 1. Stop persistence + abort the Arc-pinning tasks, signal the
-        //    coordinator to emit a final frame and exit (which tears down any
-        //    attached clients).
+        // 1. Set closing + abort the Arc-pinning tasks (death/tick), signal the
+        //    coordinator to emit a final frame and exit (tearing down attached
+        //    clients).
         session.begin_close();
-        // 2. Terminate pane children. Dropping panes alone does not SIGHUP
+        // 2. Stop the persist task AND await its termination, so no in-flight
+        //    `save_session` can re-create the file after we delete it below.
+        session.stop_persist().await;
+        // 3. Terminate pane children. Dropping panes alone does not SIGHUP
         //    them (the reader thread holds the PTY master open).
         session.terminate_panes().await;
-        // 3. Delete the saved file. Safe now: the persist task is aborted and
-        //    guards on `closing`, so it cannot resurrect this file. `NotFound`
-        //    is fine, a session never marked dirty has no on-disk file.
+        // 4. Delete the saved file. Safe now: the persist task is fully stopped
+        //    (awaited above) and guards on `closing`, so it cannot resurrect
+        //    this file. `NotFound` is fine, a session never marked dirty has no
+        //    on-disk file.
         if let Err(e) = crate::persist::delete_session(name) {
             tracing::debug!(error = %e, %name, "delete saved session file (non-fatal)");
         }
