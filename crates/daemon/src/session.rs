@@ -355,9 +355,14 @@ impl Session {
         let session_weak = Arc::downgrade(&session);
         let tick_handle = engine.spawn_tick_task(
             Arc::clone(&session.notify),
-            move || match session_weak.upgrade() {
-                Some(s) => build_snapshot_ctx(&s),
-                None => empty_snapshot_ctx(),
+            move || {
+                let weak = session_weak.clone();
+                async move {
+                    match weak.upgrade() {
+                        Some(s) => build_snapshot_ctx(&s).await,
+                        None => empty_snapshot_ctx(),
+                    }
+                }
             },
         );
         // invariant: no other thread holds status_tick_handle at construction time
@@ -762,9 +767,14 @@ impl Session {
         let session_weak = Arc::downgrade(self);
         let tick_handle = new_engine.spawn_tick_task(
             Arc::clone(&self.notify),
-            move || match session_weak.upgrade() {
-                Some(s) => build_snapshot_ctx(&s),
-                None => empty_snapshot_ctx(),
+            move || {
+                let weak = session_weak.clone();
+                async move {
+                    match weak.upgrade() {
+                        Some(s) => build_snapshot_ctx(&s).await,
+                        None => empty_snapshot_ctx(),
+                    }
+                }
             },
         );
         {
@@ -883,12 +893,14 @@ fn empty_snapshot_ctx() -> plexy_glass_status::SnapshotCtx {
 }
 
 /// Build an owned snapshot of session state for the status tick closure.
-/// Runs synchronously inside the tick task; uses `blocking_lock` for the
-/// async mutexes since the tick task lives on the multi-thread runtime.
-fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::SnapshotCtx {
-    let manager = session.window_manager.blocking_lock();
+/// MUST be async (not `blocking_lock`): the tick task runs on a runtime
+/// worker thread, where `tokio::sync::Mutex::blocking_lock` panics
+/// ("Cannot block the current thread from within a runtime"). Using the
+/// async lock is also runtime-agnostic (works on current-thread test runtimes).
+async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::SnapshotCtx {
+    let manager = session.window_manager.lock().await;
     let session_name = session.name.clone();
-    let attached_clients = session.clients.blocking_lock().len() as u8;
+    let attached_clients = session.clients.lock().await.len() as u8;
     let active_idx = manager.active_idx();
     let windows: Vec<plexy_glass_status::WindowSummary> = manager
         .windows()
@@ -949,6 +961,22 @@ mod tests {
         let s = Session::new("main".into(), spec(), size(), cfg()).expect("construct session");
         assert_eq!(s.name, "main");
         assert!(!s.closing.load(Ordering::SeqCst));
+    }
+
+    // Regression: `build_snapshot_ctx` used `blocking_lock` and was driven by the
+    // status tick task on a runtime worker thread, which PANICS ("Cannot block
+    // the current thread from within a runtime"). It is now async, so calling it
+    // from a spawned task (a worker thread on the multi-thread runtime, the exact
+    // scenario the tick task hits) must succeed and return real state.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_snapshot_ctx_works_from_spawned_task() {
+        let s = Session::new("snapctx".into(), spec(), size(), cfg()).unwrap();
+        let s2 = Arc::clone(&s);
+        let ctx = tokio::spawn(async move { build_snapshot_ctx(&s2).await })
+            .await
+            .expect("tick-style snapshot task must not panic");
+        assert_eq!(ctx.session_name, "snapctx");
+        assert_eq!(ctx.windows.len(), 1);
     }
 
     #[tokio::test]

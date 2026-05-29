@@ -175,16 +175,23 @@ impl StatusEngine {
     /// The task signals `notify.notify_one()` after each refresh batch so
     /// the render coordinator wakes up. The returned `JoinHandle` should
     /// be aborted by the owner on session shutdown.
-    pub fn spawn_tick_task(
+    pub fn spawn_tick_task<F, Fut>(
         &self,
         notify: std::sync::Arc<tokio::sync::Notify>,
-        snapshot_ctx: impl Fn() -> SnapshotCtx + Send + Sync + 'static,
-    ) -> tokio::task::JoinHandle<()> {
+        snapshot_ctx: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = SnapshotCtx> + Send,
+    {
         let inner = Arc::clone(&self.inner);
         let snapshot_ctx = std::sync::Arc::new(snapshot_ctx);
         tokio::spawn(async move {
             loop {
-                let owned = (snapshot_ctx)();
+                // Awaited (not a blocking call): the snapshot closure may take
+                // async locks, and this task runs on a runtime worker thread
+                // where blocking would panic.
+                let owned = (snapshot_ctx)().await;
                 let ctx = owned.as_eval_context();
                 let next_deadline = inner.refresh_due_intervals(&ctx).await;
                 notify.notify_one();
@@ -373,15 +380,17 @@ mod tests {
                 counter_inc.fetch_add(1, Ordering::SeqCst);
             }
         });
-        let snapshot_ctx = || SnapshotCtx {
-            session_name: "test".into(),
-            windows: vec![],
-            active_window: 0,
-            attached_clients: 1,
-            prefix_active: false,
-            active_pane_cwd: None,
-            copy_mode_active: false,
-            sync_active: false,
+        let snapshot_ctx = || async {
+            SnapshotCtx {
+                session_name: "test".into(),
+                windows: vec![],
+                active_window: 0,
+                attached_clients: 1,
+                prefix_active: false,
+                active_pane_cwd: None,
+                copy_mode_active: false,
+                sync_active: false,
+            }
         };
         let handle = engine.spawn_tick_task(notify, snapshot_ctx);
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
