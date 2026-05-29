@@ -1,0 +1,23 @@
+# nextest configuration.
+#
+# Many tests allocate real PTYs (the e2e suite spawns a daemon + panes; the
+# daemon unit tests spawn panes). nextest runs each test in its own process
+# with high parallelism, which can exhaust the OS PTY table (observed as
+# "openpty: ... Unknown error: -6" on macOS). Cap the concurrency of
+# PTY-heavy tests via test groups.
+
+[test-groups]
+# e2e tests are heavyweight (daemon + multiple PTYs each), so we run one
+# at a time.
+e2e = { max-threads = 1 }
+# Daemon unit tests spawn a pane or two each, so a small cap keeps the total
+# concurrent PTY count well under the system limit.
+pty = { max-threads = 4 }
+
+[[profile.default.overrides]]
+filter = 'binary(e2e)'
+test-group = 'e2e'
+
+[[profile.default.overrides]]
+filter = 'package(plexy-glass-daemon)'
+test-group = 'pty'

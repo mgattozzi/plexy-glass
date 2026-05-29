@@ -50,7 +50,9 @@ scope. If a step is wrong, fix the plan first, then proceed.
 - Rust 2024 edition.
 - `cargo clippy --workspace --all-targets -- -D warnings` must pass before
   any task is considered done.
-- `cargo test --workspace` must pass before any task is considered done.
+- `cargo nextest run --workspace` must pass before any task is considered
+  done (faster than `cargo test`). Note: nextest does **not** run doc-tests;
+  if you add any, also run `cargo test --workspace --doc`.
 - No `unwrap`/`expect` in non-test code except for invariants that cannot
   fail (each documented with a one-line `// invariant:` comment).
 - No `#[allow]` annotations without a one-line justification comment.
