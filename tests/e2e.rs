@@ -78,6 +78,56 @@ fn read_until(
     acc
 }
 
+/// Re-issue `stty size` to the child shell and read until `needle` (e.g. the
+/// expected "ROWS COLS" string) appears, retrying until `overall_deadline`.
+/// Converts a timing-dependent single-probe into poll-until-condition: a
+/// resize that has not yet propagated when the first probe runs is simply
+/// re-probed, so the test no longer depends on a fixed post-resize sleep.
+fn probe_until_size(
+    writer: &mut Box<dyn std::io::Write + Send>,
+    master: &mut Box<dyn portable_pty::MasterPty + Send>,
+    needle: &[u8],
+    overall_deadline: Instant,
+) -> bool {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+    // ONE persistent reader accumulating into a shared buffer. (Spawning a new
+    // reader per probe would let concurrent readers steal each other's bytes,
+    // so the needle could straddle two buffers and never be found.)
+    let mut reader = master.try_clone_reader().expect("clone reader");
+    let acc = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let acc_rd = Arc::clone(&acc);
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => acc_rd.lock().expect("acc poisoned").extend_from_slice(&chunk[..n]),
+            }
+        }
+    });
+    while Instant::now() < overall_deadline {
+        // `tr ' ' x` makes the size a space-free token (e.g. "49x200"). The
+        // daemon's diff renderer positions cells with cursor moves and SKIPS
+        // unchanged spaces, so a spaced "49 200" never appears contiguously in
+        // the rendered byte stream; a space-free token renders as-is.
+        if writer.write_all(b"stty size | tr ' ' x\n").is_err() {
+            return false;
+        }
+        let _ = writer.flush();
+        std::thread::sleep(Duration::from_millis(500));
+        if acc
+            .lock()
+            .expect("acc poisoned")
+            .windows(needle.len())
+            .any(|w| w == needle)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[test]
 fn smoke_echo_hello_round_trips() {
     let tmp = tempfile::tempdir().unwrap();
@@ -167,27 +217,16 @@ fn sigwinch_propagates_to_child() {
         })
         .expect("resize");
 
-    // Give the resize event time to propagate.
-    std::thread::sleep(Duration::from_millis(200));
-
-    // Ask the inner shell to print its idea of the size. We don't issue
-    // `exit` here because Phase 3 now auto-closes the only pane when its
-    // child dies, which tears down the connection before read_until can
-    // observe the bytes.
-    writer.write_all(b"stty size\n").expect("write stty");
-
-    let buf = read_until(&mut master, b"49 200", Instant::now() + Duration::from_secs(10));
+    // Poll the child's reported size, re-issuing `stty size` until the resize
+    // has propagated (host 50 rows minus the 1 status row = 49; cols 200).
+    // This replaces a fixed post-resize sleep, which raced the async resize
+    // chain (SIGWINCH → socket → daemon → TIOCSWINSZ).
+    let ok = probe_until_size(&mut writer, &mut master, b"49x200", Instant::now() + Duration::from_secs(10));
 
     let _ = child.kill();
     let _ = child.wait();
 
-    // Phase 3 reserves the bottom row for the status bar, so usable rows =
-    // host_rows - 1 (50 - 1 = 49).
-    assert!(
-        buf.windows(6).any(|w| w == b"49 200"),
-        "expected stty to report 49 200 after resize (host 50 - 1 status row). raw: {:?}",
-        String::from_utf8_lossy(&buf)
-    );
+    assert!(ok, "child never reported 49 200 after SIGWINCH resize");
 }
 
 #[test]
@@ -279,20 +318,16 @@ fn mux_resize_propagates_to_all_panes() {
             pixel_height: 0,
         })
         .expect("resize");
-    std::thread::sleep(Duration::from_millis(400));
 
-    writer.write_all(b"stty size\n").expect("stty right");
-
-    let buf = read_until(&mut master, b"29", Instant::now() + Duration::from_secs(8));
+    // The active pane is the right pane of the vertical split. After resize to
+    // 30x100: usable rows = 30 - 1 status = 29; cols 100 split 50/49 (gutter)
+    // → the focused (second) pane is 49 cols. Poll until the resize lands.
+    let ok = probe_until_size(&mut writer, &mut master, b"29x49", Instant::now() + Duration::from_secs(10));
 
     let _ = child.kill();
     let _ = child.wait();
 
-    let txt = String::from_utf8_lossy(&buf);
-    assert!(
-        txt.contains("29 "),
-        "expected stty to report 29 rows after resize (host 30 - 1 status row). raw: {txt}"
-    );
+    assert!(ok, "active pane never reported 29 49 after resize");
 }
 
 #[test]
