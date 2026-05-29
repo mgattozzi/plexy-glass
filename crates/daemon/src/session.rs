@@ -1101,10 +1101,6 @@ mod tests {
         assert!(s.closing.load(Ordering::SeqCst), "session did not converge to closing");
     }
 
-    // A shared env mutex with the persist module's tests would be ideal, but
-    // a local one is enough since session tests don't run cross-module.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         old_xdg: Option<std::ffi::OsString>,
@@ -1112,7 +1108,8 @@ mod tests {
     }
 
     fn test_isolate_state_dir() -> EnvGuard {
-        let lock = ENV_LOCK.lock().expect("env mutex poisoned");
+        // Crate-wide lock: serializes against persist/registry env-mutating tests.
+        let lock = crate::STATE_ENV_LOCK.lock().expect("env mutex poisoned");
         let tmp = tempfile::tempdir().expect("tempdir");
         let old_xdg = std::env::var_os("XDG_STATE_HOME");
         // SAFETY: env mutation guarded by `ENV_LOCK` for the guard's lifetime.

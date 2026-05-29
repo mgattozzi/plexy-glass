@@ -274,8 +274,6 @@ mod tests {
         assert_eq!(cfg_before.status.right.len(), cfg_after.status.right.len());
     }
 
-    static REG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     struct RegEnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         old_xdg: Option<std::ffi::OsString>,
@@ -283,7 +281,8 @@ mod tests {
     }
 
     fn reg_isolate_state_dir() -> RegEnvGuard {
-        let lock = REG_ENV_LOCK.lock().expect("reg env mutex poisoned");
+        // Crate-wide lock: serializes against persist/session env-mutating tests.
+        let lock = crate::STATE_ENV_LOCK.lock().expect("reg env mutex poisoned");
         let tmp = tempfile::tempdir().expect("tempdir");
         let old_xdg = std::env::var_os("XDG_STATE_HOME");
         // SAFETY: env mutation guarded by REG_ENV_LOCK for guard lifetime.

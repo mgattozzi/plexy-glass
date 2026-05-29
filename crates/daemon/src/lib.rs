@@ -1,5 +1,14 @@
 //! plexy-glass daemon.
 
+/// Crate-wide serialization for tests that mutate process-global env vars
+/// (notably `XDG_STATE_HOME` for the persist/session/registry suites).
+///
+/// All such tests must lock this single mutex. Per-module locks would not
+/// serialize across modules, so concurrent tests could clobber each other's
+/// `XDG_STATE_HOME` and read the wrong session directory.
+#[cfg(test)]
+pub(crate) static STATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub mod args;
 pub mod connection;
 pub mod error;

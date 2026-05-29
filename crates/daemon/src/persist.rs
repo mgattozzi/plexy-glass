@@ -122,10 +122,6 @@ pub fn delete_session(name: &str) -> Result<(), PersistError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Env-touching tests share one mutex; we mutate `XDG_STATE_HOME`.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -134,7 +130,9 @@ mod tests {
     }
 
     fn isolate() -> EnvGuard {
-        let lock = ENV_LOCK.lock().expect("env mutex poisoned");
+        // Crate-wide lock: persist/session/registry tests all mutate
+        // `XDG_STATE_HOME` and must serialize against each other.
+        let lock = crate::STATE_ENV_LOCK.lock().expect("env mutex poisoned");
         let tmp = tempfile::tempdir().expect("tempdir");
         let old_xdg = std::env::var_os("XDG_STATE_HOME");
         // SAFETY: env mutation is guarded by `ENV_LOCK`, held for the guard's lifetime.
