@@ -1131,6 +1131,88 @@ fn mouse_click_traverses_wire_without_panic() {
     // Test passes if the daemon didn't panic and the writer didn't break.
 }
 
+/// Kill correctness: `plexy-glass kill -n NAME` from a second connection must
+/// tear down a session that still has a client attached, AND the saved file
+/// must stay deleted (the persist task must not resurrect it). Reproduces the
+/// reported "kill doesn't actually kill / file comes back" bug.
+#[test]
+fn kill_from_second_connection_ends_attached_session() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let pty_system = native_pty_system();
+
+    // Attach (run1, PTY), split, wait for the persist debounce to save.
+    let pair = pty_system
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .expect("openpty");
+    let bin = std::process::Command::cargo_bin("plexy-glass").expect("bin");
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    builder.arg("-n");
+    builder.arg("victim");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn run1");
+    drop(pair.slave);
+    let master = pair.master;
+    let mut writer = master.take_writer().expect("writer");
+    // Continuously drain the PTY master, mirroring a real terminal. Without
+    // this the master buffer fills, the client blocks on stdout writes, and
+    // can't process the disconnect to exit. That's a test artifact, not a
+    // daemon bug.
+    let mut drain_reader = master.try_clone_reader().expect("clone reader");
+    let drain = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        loop {
+            match drain_reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    });
+    std::thread::sleep(Duration::from_millis(400));
+    writer.write_all(&[0x01, b'v']).unwrap(); // Ctrl+a v split
+    std::thread::sleep(Duration::from_millis(2000)); // persist debounce
+
+    let state = tmp.path().join("state/plexy-glass/sessions/victim.json");
+    if !state.exists() {
+        eprintln!("note: victim.json not saved (precondition) — fail-soft");
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    }
+
+    // Kill from a SECOND connection while run1 is still attached.
+    let out = std::process::Command::cargo_bin("plexy-glass")
+        .unwrap()
+        .arg("kill")
+        .arg("-n")
+        .arg("victim")
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .output()
+        .expect("kill");
+    assert!(out.status.success(), "kill command failed: {out:?}");
+
+    // HARD ASSERT 1: the attached run1 client is torn down (process exits).
+    // Use a blocking wait() on a thread (portable_pty try_wait can fail to
+    // reap a PTY child) with a channel + timeout.
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let status = child.wait();
+        let _ = done_tx.send(status);
+    });
+    let exited = done_rx.recv_timeout(Duration::from_secs(8)).is_ok();
+    let _ = drain.join();
+    assert!(exited, "attached client was not torn down by kill");
+
+    // HARD ASSERT 2: the saved file stays deleted (no persist resurrection).
+    std::thread::sleep(Duration::from_millis(2000));
+    assert!(!state.exists(), "saved session file resurrected after kill");
+}
+
 /// Session persistence: attach + split + detach + restart daemon + reattach.
 /// Verifies the split layout is restored (vertical separator visible in the
 /// painted bar). Fail-soft on timing.

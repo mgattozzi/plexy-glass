@@ -40,8 +40,8 @@ pub async fn run(
 
     let stdin = tokio::io::stdin();
     let stdin_fd = stdin.as_fd();
-    let _tty_guard = HostTty::enter_raw(stdin_fd)?;
-    tty::install_emergency_restore(stdin_fd, _tty_guard.original_termios());
+    let mut tty_guard = HostTty::enter_raw(stdin_fd)?;
+    tty::install_emergency_restore(stdin_fd, tty_guard.original_termios());
     // Enable SGR-encoded mouse coords (?1006h) and button-event tracking
     // (?1002h, motion reported only while a button is held). ?1003h would
     // also flood the daemon with hover motion events, and we don't use hover.
@@ -75,12 +75,18 @@ pub async fn run(
     let stdin_for_pump = tokio::io::stdin();
     let exit_status = pump(reader, writer, stdin_for_pump, stdout, resize_rx).await?;
     info!(?exit_status, "session ended");
-    if let plexy_glass_protocol::ExitStatus::Code(c) = exit_status
-        && c != 0
-    {
-        std::process::exit(c);
-    }
-    Ok(())
+    // Restore the host TTY, then exit the process explicitly. We must NOT
+    // simply return: `tokio::io::stdin()` spawns an internal blocking read
+    // thread that never finishes (the PTY stdin has no further input and is
+    // not closed), so dropping the runtime would hang waiting for it and the
+    // client would never exit (e.g. after the daemon kills/ends the session).
+    // `std::process::exit` skips destructors, so restore the TTY first.
+    let _ = tty_guard.restore();
+    let code = match exit_status {
+        plexy_glass_protocol::ExitStatus::Code(c) => c,
+        _ => 0,
+    };
+    std::process::exit(code);
 }
 
 /// Send `ReloadConfig` to the daemon and print the result.

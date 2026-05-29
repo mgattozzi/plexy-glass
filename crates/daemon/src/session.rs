@@ -1181,6 +1181,85 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn kill_closes_split_unix_socket_to_client() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _g = test_isolate_state_dir();
+        let s = Session::new("sp".into(), spec(), size(), cfg()).unwrap();
+        let handle = tokio::task::block_in_place(|| s.register_client(size())).unwrap();
+        let frame_rx = handle.frame_rx.clone();
+
+        // Real bidirectional socket, split exactly like serve_attach does.
+        let (client_sock, server_sock) = tokio::net::UnixStream::pair().unwrap();
+        let (mut server_read, server_write) = tokio::io::split(server_sock);
+
+        let renderer = crate::renderer::Renderer::new();
+        let mut renderer_task = tokio::spawn(async move {
+            let _ = renderer.run(frame_rx, server_write).await;
+        });
+
+        // Mini serve_attach: hold the read half, break when the renderer ends,
+        // then drop the read half (mimics serve_attach returning).
+        let conn = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut renderer_task => break,
+                    r = server_read.read(&mut buf) => {
+                        if matches!(r, Ok(0) | Err(_)) { break; }
+                    }
+                }
+            }
+            // `server_read` drops here.
+        });
+
+        s.begin_close();
+        s.terminate_panes().await;
+
+        let (mut cr, mut cw) = tokio::io::split(client_sock);
+        // Keep a writer so we don't close our own side prematurely.
+        let _ = cw.write_all(b"").await;
+        let mut buf = vec![0u8; 64 * 1024];
+        let got_eof = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                match cr.read(&mut buf).await {
+                    Ok(0) => break true,
+                    Ok(_) => continue,
+                    Err(_) => break true,
+                }
+            }
+        })
+        .await;
+        let _ = conn.await;
+        assert!(
+            got_eof.is_ok() && got_eof.unwrap(),
+            "split unix socket to client never closed after kill"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn begin_close_drops_frame_tx_so_clients_detach() {
+        let _g = test_isolate_state_dir();
+        let s = Session::new("fx".into(), spec(), size(), cfg()).unwrap();
+        // A client's renderer watches this; when the coordinator drops
+        // frame_tx, changed() returns Err and the renderer (hence client)
+        // tears down.
+        let mut frame_rx = s.frame_rx_template.clone();
+        s.begin_close();
+        s.terminate_panes().await;
+        // The frame channel must close (all senders dropped) promptly.
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if frame_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "frame_tx never dropped after begin_close");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn begin_close_is_idempotent_and_stops_persist() {
         let _g = test_isolate_state_dir();
         let s = Session::new("bc".into(), spec(), size(), cfg()).unwrap();
