@@ -29,6 +29,14 @@ async fn render_coordinator(
         })
         .await;
 
+        // Kill teardown: when the session is closing, emit a final blank
+        // frame and exit so frame_tx drops and attached clients detach.
+        if session.closing.load(Ordering::SeqCst) {
+            let host = { session.window_manager.lock().await.host_size() };
+            let _ = frame_tx.send(Arc::new(build_session_end_frame(host)));
+            break;
+        }
+
         let frame = {
             let mut m = session.window_manager.lock().await;
             if m.is_empty() {
@@ -372,6 +380,56 @@ impl Session {
     pub fn mark_dirty(&self) {
         self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
         self.persist_notify.notify_one();
+    }
+
+    /// Deterministically tear the session down. Idempotent. Stops the persist
+    /// task FIRST so it cannot re-save during teardown, aborts the
+    /// death-consumer (blocked on recv, pins an Arc) and status-tick task,
+    /// then wakes the coordinator so it observes `closing`, emits a final
+    /// blank frame, and exits (dropping `frame_tx` so attached clients detach).
+    /// Pane children are terminated separately via `terminate_panes`.
+    pub fn begin_close(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+        if let Some(h) = self
+            .persist_handle
+            .lock()
+            .expect("persist handle lock poisoned")
+            .take()
+        {
+            h.abort();
+        }
+        if let Some(h) = self
+            .death_handle
+            .lock()
+            .expect("death handle lock poisoned")
+            .take()
+        {
+            h.abort();
+        }
+        if let Some(h) = self
+            .status_tick_handle
+            .lock()
+            .expect("status tick handle lock poisoned")
+            .take()
+        {
+            h.abort();
+        }
+        self.notify.notify_one();
+    }
+
+    /// Terminate every pane's child process. Async because it needs the
+    /// window-manager lock. Safe to call after `begin_close`. Dropping panes
+    /// alone does not SIGHUP children (the reader thread holds the PTY), so
+    /// this is required for `kill` to actually end the children.
+    pub async fn terminate_panes(&self) {
+        let wm = self.window_manager.lock().await;
+        for w in wm.windows() {
+            for id in w.layout().panes() {
+                if let Some(p) = w.pane(id) {
+                    p.kill_child();
+                }
+            }
+        }
     }
 
     /// Build a Session from a saved on-disk state. The base shell is the
@@ -746,6 +804,14 @@ impl Drop for Session {
         {
             handle.abort();
         }
+        if let Some(handle) = self
+            .death_handle
+            .lock()
+            .expect("death handle lock poisoned")
+            .take()
+        {
+            handle.abort();
+        }
     }
 }
 
@@ -755,11 +821,18 @@ impl Drop for Session {
 async fn persist_loop(weak: std::sync::Weak<Session>) {
     loop {
         let Some(session) = weak.upgrade() else { return };
+        if session.closing.load(Ordering::SeqCst) {
+            return;
+        }
         let notify = Arc::clone(&session.persist_notify);
         drop(session);
         notify.notified().await;
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         let Some(session) = weak.upgrade() else { return };
+        // Never resurrect a file after kill: bail if the session is closing.
+        if session.closing.load(Ordering::SeqCst) {
+            return;
+        }
         if !session.dirty.swap(false, std::sync::atomic::Ordering::Relaxed) {
             continue;
         }
@@ -1105,6 +1178,27 @@ mod tests {
             .expect("load")
             .expect("file");
         assert_eq!(loaded.windows[0].panes.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn begin_close_is_idempotent_and_stops_persist() {
+        let _g = test_isolate_state_dir();
+        let s = Session::new("bc".into(), spec(), size(), cfg()).unwrap();
+        s.mark_dirty();
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(crate::persist::load_session("bc").unwrap().is_some());
+        crate::persist::delete_session("bc").unwrap();
+        // Close, then try hard to make the persist task re-save.
+        s.begin_close();
+        s.begin_close(); // idempotent: must not panic
+        s.mark_dirty();
+        s.persist_notify.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(
+            crate::persist::load_session("bc").unwrap().is_none(),
+            "persist task re-saved the file after begin_close"
+        );
+        s.terminate_panes().await; // exercise the path; child dies
     }
 
     #[tokio::test(flavor = "multi_thread")]
