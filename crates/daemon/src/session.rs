@@ -175,6 +175,10 @@ pub struct Session {
     status_engine_slot: StdMutex<Arc<plexy_glass_status::EngineInner>>,
     status_tick_handle: StdMutex<Option<JoinHandle<()>>>,
     config_slot: StdMutex<Arc<plexy_glass_config::Config>>,
+    /// JoinHandle for the death-consumer task. It pins a strong `Arc` (blocked
+    /// on `death_rx.recv()`), so teardown must abort it explicitly, since `Drop`
+    /// can never run while it holds the `Arc`.
+    death_handle: StdMutex<Option<JoinHandle<()>>>,
     /// True iff structural state changed since the last successful save.
     /// Set by `mark_dirty`; cleared by the persist task before snapshotting.
     pub dirty: std::sync::atomic::AtomicBool,
@@ -301,6 +305,7 @@ impl Session {
             dirty: std::sync::atomic::AtomicBool::new(false),
             persist_notify: Arc::new(Notify::new()),
             persist_handle: StdMutex::new(None),
+            death_handle: StdMutex::new(None),
         });
         let coord_handle = tokio::spawn(render_coordinator(Arc::clone(&session), frame_tx));
         // invariant: no other thread holds coordinator_handle at construction time
@@ -315,7 +320,7 @@ impl Session {
             .take()
             .expect("invariant: pending_death_rx is Some after Session::new");
         let session_for_death = Arc::clone(&session);
-        tokio::spawn(async move {
+        let death_task = tokio::spawn(async move {
             let mut death_rx = death_rx;
             while let Some(pane_id) = death_rx.recv().await {
                 let mut m = session_for_death.window_manager.lock().await;
@@ -329,6 +334,8 @@ impl Session {
                 }
             }
         });
+        // invariant: no other thread holds death_handle at construction time.
+        *session.death_handle.lock().expect("death handle lock poisoned") = Some(death_task);
 
         // Spawn the status tick task. Capture a `Weak<Session>` so the task
         // doesn't keep the session alive on its own; when the registry
