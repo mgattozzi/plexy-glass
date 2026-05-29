@@ -533,30 +533,36 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
-        let mut rx = session.subscribe_output();
+        let pane = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg())
+            .expect("spawn");
 
-        let mut got = Vec::new();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        // Poll the emulator screen rather than the broadcast channel: /bin/echo
+        // exits almost immediately, so its output can be broadcast (and lost)
+        // before a subscriber attaches. The screen retains the rendered output
+        // regardless of subscription timing, so it is the race-free signal.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut found = false;
         while tokio::time::Instant::now() < deadline {
-            if let Ok(Ok(chunk)) =
-                tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
-            {
-                got.extend_from_slice(&chunk);
-            }
-            if got.windows(5).any(|w| w == b"hello") {
+            let row0 = pane.with_screen(|s| {
+                (0..s.active.num_cols())
+                    .filter_map(|c| {
+                        s.active
+                            .get_cell(0, c)
+                            .map(|cell| cell.grapheme.as_str().to_string())
+                    })
+                    .collect::<String>()
+            });
+            if row0.contains("hello") {
+                found = true;
                 break;
             }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        assert!(
-            got.windows(5).any(|w| w == b"hello"),
-            "got: {:?}",
-            String::from_utf8_lossy(&got)
-        );
+        assert!(found, "emulator screen never showed 'hello'");
 
-        let status = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait())
+        let status = tokio::time::timeout(std::time::Duration::from_secs(2), pane.wait())
             .await
-            .expect("session.wait");
+            .expect("pane.wait");
         assert!(matches!(status, ExitStatus::Code(0)), "got {status:?}");
     }
 
