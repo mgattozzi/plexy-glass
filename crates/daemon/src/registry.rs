@@ -105,14 +105,22 @@ impl SessionRegistry {
     }
 
     pub async fn kill(&self, name: &str) -> Result<(), DaemonError> {
-        let mut map = self.inner.lock().await;
-        let session = map.remove(name).ok_or_else(|| {
-            DaemonError::Protocol(ProtocolError::SessionNotFound { name: name.to_string() })
-        })?;
-        session.closing.store(true, std::sync::atomic::Ordering::SeqCst);
-        session.notify.notify_one();
-        // Best-effort: remove the persisted state file. NotFound is fine, a
-        // session that was never marked dirty has no on-disk file.
+        let session = {
+            let mut map = self.inner.lock().await;
+            map.remove(name).ok_or_else(|| {
+                DaemonError::Protocol(ProtocolError::SessionNotFound { name: name.to_string() })
+            })?
+        };
+        // 1. Stop persistence + abort the Arc-pinning tasks, signal the
+        //    coordinator to emit a final frame and exit (which tears down any
+        //    attached clients).
+        session.begin_close();
+        // 2. Terminate pane children. Dropping panes alone does not SIGHUP
+        //    them (the reader thread holds the PTY master open).
+        session.terminate_panes().await;
+        // 3. Delete the saved file. Safe now: the persist task is aborted and
+        //    guards on `closing`, so it cannot resurrect this file. `NotFound`
+        //    is fine, a session never marked dirty has no on-disk file.
         if let Err(e) = crate::persist::delete_session(name) {
             tracing::debug!(error = %e, %name, "delete saved session file (non-fatal)");
         }
@@ -292,6 +300,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn kill_with_pinned_session_keeps_file_deleted() {
+        let _g = reg_isolate_state_dir();
+        let r = SessionRegistry::new();
+        // Hold the strong Arc across the kill to simulate an attached client /
+        // running coordinator that pins the Session past the kill (the exact
+        // condition under which the bug resurrected the file).
+        let s = r.create("pinned".into(), spec(), size(), cfg()).await.unwrap();
+        s.mark_dirty();
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(crate::persist::load_session("pinned").unwrap().is_some());
+
+        r.kill("pinned").await.unwrap();
+        assert!(r.get("pinned").await.is_none(), "session still in registry after kill");
+        // Try to make the (now-aborted) persist task resurrect the file.
+        s.mark_dirty();
+        s.persist_notify.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(
+            crate::persist::load_session("pinned").unwrap().is_none(),
+            "file resurrected after kill while session Arc was held"
+        );
+        drop(s);
     }
 
     #[tokio::test(flavor = "multi_thread")]
