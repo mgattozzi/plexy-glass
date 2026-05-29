@@ -637,16 +637,32 @@ impl Session {
     }
 
     pub fn effective_size(&self) -> PtySize {
-        let clients = self.clients.blocking_lock();
-        if clients.is_empty() {
-            let m = self.window_manager.blocking_lock();
-            return m.host_size();
+        // Lock-order discipline: every dual-lock site must take window_manager
+        // BEFORE clients (see render_coordinator / build_snapshot_ctx). So we
+        // must NOT hold the clients guard while acquiring window_manager, since
+        // that would be a clients->WM order, inverting against the WM->clients
+        // sites and risking an AB-BA deadlock (esp. at last-client-detach, the
+        // empty branch below). Read what we need from clients, release that
+        // guard, then take window_manager separately.
+        let sizes: Option<PtySize> = {
+            let clients = self.clients.blocking_lock();
+            if clients.is_empty() {
+                None
+            } else {
+                Some(PtySize {
+                    rows: clients.iter().map(|c| c.size.rows).min().unwrap_or(1),
+                    cols: clients.iter().map(|c| c.size.cols).min().unwrap_or(1),
+                    pixel_width: clients.iter().map(|c| c.size.pixel_width).min().unwrap_or(0),
+                    pixel_height: clients.iter().map(|c| c.size.pixel_height).min().unwrap_or(0),
+                })
+            }
+        };
+        match sizes {
+            Some(s) => s,
+            // No clients: fall back to the current host size. The clients guard
+            // is already released, so this takes window_manager alone.
+            None => self.window_manager.blocking_lock().host_size(),
         }
-        let rows = clients.iter().map(|c| c.size.rows).min().unwrap_or(1);
-        let cols = clients.iter().map(|c| c.size.cols).min().unwrap_or(1);
-        let pw = clients.iter().map(|c| c.size.pixel_width).min().unwrap_or(0);
-        let ph = clients.iter().map(|c| c.size.pixel_height).min().unwrap_or(0);
-        PtySize { rows, cols, pixel_width: pw, pixel_height: ph }
     }
 
     pub async fn handle_input_bytes(&self, bytes: &[u8]) -> Result<(), DaemonError> {
