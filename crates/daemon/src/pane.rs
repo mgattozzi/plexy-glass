@@ -53,9 +53,27 @@ impl Pane {
         config: Arc<Config>,
     ) -> Result<Self, DaemonError> {
         let pty_system = portable_pty::native_pty_system();
-        let pair = pty_system
-            .openpty(to_portable(size))
-            .map_err(|e| DaemonError::Io(std::io::Error::other(format!("openpty: {e}"))))?;
+        // openpty can transiently fail under load (the OS PTY table is briefly
+        // exhausted, observed as "Unknown error: -6" on macOS), so we retry a few
+        // times with a short backoff before giving up. This hardens both heavy
+        // real-world use and parallel test runs that allocate many PTYs.
+        let pair = {
+            let mut attempt = 0;
+            loop {
+                match pty_system.openpty(to_portable(size)) {
+                    Ok(p) => break p,
+                    Err(_) if attempt < 5 => {
+                        attempt += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(10 * attempt));
+                    }
+                    Err(e) => {
+                        return Err(DaemonError::Io(std::io::Error::other(format!(
+                            "openpty: {e}"
+                        ))));
+                    }
+                }
+            }
+        };
 
         let mut cmd = CommandBuilder::new(&spec.program);
         cmd.args(&spec.args);

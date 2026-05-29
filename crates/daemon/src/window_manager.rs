@@ -1218,4 +1218,87 @@ mod tests {
         .unwrap();
         assert!(m.resize_drag.is_none());
     }
+
+    // K8: deterministic resize propagation (no PTY/timing). Proves
+    // on_host_resize → Window::resize → Pane::resize → emulator resize for
+    // every pane. The flaky e2e resize tests were the only prior coverage.
+    #[tokio::test]
+    async fn on_host_resize_propagates_to_all_panes() {
+        let mut m = make_two_pane_manager().await; // 24x80, vertical split
+        m.on_host_resize(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let vp = m.viewport();
+        assert_eq!(vp.cols, 120, "viewport width did not update");
+        let win = m.active_window();
+        let panes = win.layout().panes();
+        assert_eq!(panes.len(), 2);
+        for id in panes {
+            let rect = win.layout().rect_of(id, vp).expect("rect");
+            let (er, ec) = win
+                .pane(id)
+                .unwrap()
+                .with_screen(|s| (s.active.num_rows(), s.active.num_cols()));
+            assert_eq!(er, rect.rows, "pane {id:?} emulator rows != layout rect");
+            assert_eq!(ec, rect.cols, "pane {id:?} emulator cols != layout rect");
+        }
+    }
+
+    // K9: mouse precedence ladder. The wheel rung routes to the active pane.
+    #[tokio::test]
+    async fn wheel_event_routes_to_active_pane_without_panic() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        let pane = m.active_window().layout().panes()[0];
+        let before = m.active_window().pane(pane).unwrap().scroll_offset();
+        m.handle_mouse(MouseEvent {
+            kind: MouseKind::Wheel { delta: 3 },
+            button: MouseButton::None,
+            modifiers: plexy_glass_mux::MouseModifiers::default(),
+            row: 2,
+            col: 2,
+        })
+        .await
+        .unwrap();
+        // No scrollback yet → offset clamps to 0; the rung routed without error.
+        let after = m.active_window().pane(pane).unwrap().scroll_offset();
+        assert!(after >= before);
+    }
+
+    // K9: mouse precedence ladder. A status-bar click dispatches its action.
+    #[tokio::test]
+    async fn status_bar_click_dispatches_select_window() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::NewWindow).unwrap(); // 2 windows, active = 1
+        assert_eq!(m.active_idx(), 1);
+        m.set_status_bar_row(Some(23));
+        m.set_status_hits(vec![plexy_glass_status::StatusHit {
+            col_range: 0..5,
+            action: plexy_glass_status::ClickAction::SelectWindow(0),
+        }]);
+        m.handle_mouse(MouseEvent {
+            kind: MouseKind::Press,
+            button: MouseButton::Left,
+            modifiers: plexy_glass_mux::MouseModifiers::default(),
+            row: 23,
+            col: 2,
+        })
+        .await
+        .unwrap();
+        assert_eq!(m.active_idx(), 0, "status-bar click did not select window 0");
+    }
 }
