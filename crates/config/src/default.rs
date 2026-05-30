@@ -140,6 +140,9 @@ pub fn built_in_keymap() -> KeymapConfig {
             binding("Ctrl+a L", "resize_pane_right"),
             binding("Ctrl+a Tab", "select_last_window"),
             binding("Ctrl+a ;", "select_last_pane"),
+            binding("Ctrl+a ,", "rename_window"),
+            binding("Ctrl+a .", "rename_pane"),
+            binding("Ctrl+a ?", "show_help"),
         ],
     }
 }

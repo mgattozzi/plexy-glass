@@ -123,6 +123,9 @@ pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
         "resize_pane_down" => Command::ResizePane(Direction::Down),
         "select_last_window" => Command::SelectLastWindow,
         "select_last_pane" => Command::SelectLastPane,
+        "rename_window" => Command::RenameWindow,
+        "rename_pane" => Command::RenamePane,
+        "show_help" => Command::ShowHelp,
         "select_window" => {
             let arg_str = arg.ok_or_else(|| KeyParseError::MissingArg {
                 command: name.to_string(),
@@ -227,6 +230,21 @@ mod tests {
     fn parses_last_window_pane_commands() {
         assert_eq!(parse_command("select_last_window").unwrap().command, Command::SelectLastWindow);
         assert_eq!(parse_command("select_last_pane").unwrap().command, Command::SelectLastPane);
+    }
+
+    #[test]
+    fn parses_overlay_commands() {
+        assert_eq!(parse_command("rename_window").unwrap().command, Command::RenameWindow);
+        assert_eq!(parse_command("rename_pane").unwrap().command, Command::RenamePane);
+        assert_eq!(parse_command("show_help").unwrap().command, Command::ShowHelp);
+    }
+
+    #[test]
+    fn parses_overlay_chords() {
+        // The default bindings use comma / period / question chords.
+        assert_eq!(parse_chord(",").unwrap(), (Modifiers::empty(), Key::Char(',')));
+        assert_eq!(parse_chord(".").unwrap(), (Modifiers::empty(), Key::Char('.')));
+        assert_eq!(parse_chord("?").unwrap(), (Modifiers::empty(), Key::Char('?')));
     }
 
     #[test]

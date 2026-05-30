@@ -131,3 +131,11 @@ fn built_in_keymap_includes_resize_and_last_bindings() {
     assert!(km.bindings.iter().any(|b| b.keys == "Ctrl+a Tab" && b.command == "select_last_window"));
     assert!(km.bindings.iter().any(|b| b.keys == "Ctrl+a ;" && b.command == "select_last_pane"));
 }
+
+#[test]
+fn built_in_keymap_includes_overlay_bindings() {
+    let km = built_in_keymap();
+    assert!(km.bindings.iter().any(|b| b.keys == "Ctrl+a ," && b.command == "rename_window"));
+    assert!(km.bindings.iter().any(|b| b.keys == "Ctrl+a ." && b.command == "rename_pane"));
+    assert!(km.bindings.iter().any(|b| b.keys == "Ctrl+a ?" && b.command == "show_help"));
+}

@@ -30,6 +30,16 @@ pub enum StatusPlacement {
     Bottom,
 }
 
+/// A render-ready view of the active interactive overlay, built by the daemon
+/// each frame. Painted on top of the pane band (and borders).
+pub enum OverlayView<'a> {
+    /// A single-line rename prompt. `label` is e.g. "rename window".
+    RenamePrompt { label: &'a str, buf: &'a str },
+    /// A scrollable help page: `(keys, description)` rows plus the top line
+    /// index. The compositor clamps `scroll` to the content height.
+    Help { lines: &'a [(String, String)], scroll: u16 },
+}
+
 pub struct Compositor;
 
 impl Compositor {
@@ -39,6 +49,7 @@ impl Compositor {
         status: Option<&StatusLine>,
         placement: StatusPlacement,
         selection: Option<&crate::selection::Selection>,
+        overlay: Option<&OverlayView<'_>>,
     ) -> VirtualScreen {
         let (host_rows, host_cols) = host_size;
         let host_rows = host_rows.max(1);
@@ -281,7 +292,168 @@ impl Compositor {
             }
         }
 
+        // Interactive overlay (rename prompt / help), painted last so it sits
+        // on top of panes, borders, and the cursor logic above.
+        if let Some(ov) = overlay {
+            paint_overlay(&mut screen, ov, pane_row_offset, pane_area_rows, host_cols);
+        }
+
         screen
+    }
+}
+
+/// Paint the active overlay over the pane band.
+fn paint_overlay(
+    screen: &mut VirtualScreen,
+    overlay: &OverlayView<'_>,
+    pane_row_offset: u16,
+    pane_area_rows: u16,
+    cols: u16,
+) {
+    match overlay {
+        OverlayView::RenamePrompt { label, buf } => {
+            // A full-width REVERSE bar on the bottom row of the pane band.
+            let row = pane_row_offset + pane_area_rows.saturating_sub(1);
+            let text = format!(" {label} \u{25b8} {buf}");
+            let attrs = plexy_glass_emulator::Attrs::REVERSE;
+            // Fill the row with REVERSE blanks first, then the text.
+            for c in 0..cols {
+                put_char(screen, row, c, ' ', attrs);
+            }
+            let mut end_col = 0u16;
+            for (i, ch) in text.chars().enumerate() {
+                let col = i as u16;
+                if col >= cols {
+                    break;
+                }
+                put_char(screen, row, col, ch, attrs);
+                end_col = col + 1;
+            }
+            // Block cursor just past the buffer.
+            if end_col < cols {
+                put_char(screen, row, end_col, '\u{2588}', attrs);
+            }
+            screen.cursor = Some((row, end_col.min(cols.saturating_sub(1))));
+            screen.cursor_visible = false; // the block glyph is the cursor
+        }
+        OverlayView::Help { lines, scroll } => {
+            paint_help_box(screen, lines, *scroll, pane_row_offset, pane_area_rows, cols);
+        }
+    }
+}
+
+/// Draw a centered bordered help box listing `(keys, description)` rows.
+fn paint_help_box(
+    screen: &mut VirtualScreen,
+    lines: &[(String, String)],
+    scroll: u16,
+    pane_row_offset: u16,
+    pane_area_rows: u16,
+    cols: u16,
+) {
+    let title = " Keybindings ";
+    let footer = " j/k scroll \u{b7} esc close ";
+    // Key column width = widest key string (cap to keep the box reasonable).
+    let key_w = lines.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0).min(20);
+    let content_w = lines
+        .iter()
+        .map(|(k, d)| key_w.max(k.chars().count()) + 2 + d.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(title.chars().count())
+        .max(footer.chars().count());
+    // Box width includes 1 cell of padding each side + 2 borders.
+    let inner_w = (content_w + 2).min(cols.saturating_sub(2) as usize);
+    let box_w = (inner_w + 2) as u16;
+    // Height: top border + visible rows + footer + bottom border.
+    let max_visible = pane_area_rows.saturating_sub(3) as usize; // borders + footer
+    let visible = lines.len().min(max_visible.max(1));
+    let box_h = (visible as u16) + 3;
+    if box_w < 3 || box_h < 4 || box_w > cols {
+        return; // viewport too small to draw a meaningful box
+    }
+    let max_scroll = lines.len().saturating_sub(visible);
+    let top = (scroll as usize).min(max_scroll);
+
+    let row0 = pane_row_offset + (pane_area_rows.saturating_sub(box_h)) / 2;
+    let col0 = (cols.saturating_sub(box_w)) / 2;
+    let attrs = plexy_glass_emulator::Attrs::empty();
+
+    // Clear interior + draw border frame.
+    for r in 0..box_h {
+        for c in 0..box_w {
+            let ch = border_glyph(r, c, box_h, box_w);
+            put_char(screen, row0 + r, col0 + c, ch, attrs);
+        }
+    }
+    // Title centered on the top border.
+    let tcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(title.chars().count()) / 2) as u16;
+    put_str(screen, row0, tcol, title, attrs, col0 + box_w - 1);
+    // Footer centered on the bottom border.
+    let fcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(footer.chars().count()) / 2) as u16;
+    put_str(screen, row0 + box_h - 1, fcol, footer, attrs, col0 + box_w - 1);
+
+    // Content rows.
+    for (i, (keys, desc)) in lines.iter().skip(top).take(visible).enumerate() {
+        let r = row0 + 1 + i as u16;
+        let line = format!("{keys:<key_w$}  {desc}", key_w = key_w);
+        put_str(screen, r, col0 + 1, &line, attrs, col0 + box_w - 1);
+    }
+}
+
+/// Box-drawing glyph for cell (r, c) within a `h`x`w` frame; space inside.
+fn border_glyph(r: u16, c: u16, h: u16, w: u16) -> char {
+    let last_r = h - 1;
+    let last_c = w - 1;
+    match (r, c) {
+        (0, 0) => '\u{250c}',
+        (0, cc) if cc == last_c => '\u{2510}',
+        (rr, 0) if rr == last_r => '\u{2514}',
+        (rr, cc) if rr == last_r && cc == last_c => '\u{2518}',
+        (0, _) | (_, 0) => {
+            if r == 0 || r == last_r {
+                '\u{2500}'
+            } else {
+                '\u{2502}'
+            }
+        }
+        (rr, _) if rr == last_r => '\u{2500}',
+        (_, cc) if cc == last_c => '\u{2502}',
+        _ => ' ',
+    }
+}
+
+/// Put a single char with attrs at (row, col), clipped to the screen.
+fn put_char(screen: &mut VirtualScreen, row: u16, col: u16, ch: char, attrs: plexy_glass_emulator::Attrs) {
+    if row >= screen.rows || col >= screen.cols {
+        return;
+    }
+    let mut buf = [0u8; 4];
+    let s = ch.encode_utf8(&mut buf);
+    let cell = plexy_glass_emulator::Cell {
+        grapheme: smol_str::SmolStr::new(s),
+        attrs,
+        ..plexy_glass_emulator::Cell::default()
+    };
+    screen.put(row, col, cell);
+}
+
+/// Put a string starting at (row, col), stopping at `max_col` (exclusive) or
+/// the screen edge.
+fn put_str(
+    screen: &mut VirtualScreen,
+    row: u16,
+    col: u16,
+    text: &str,
+    attrs: plexy_glass_emulator::Attrs,
+    max_col: u16,
+) {
+    for (i, ch) in text.chars().enumerate() {
+        let c = col.saturating_add(i as u16);
+        if c >= max_col || c >= screen.cols {
+            break;
+        }
+        put_char(screen, row, c, ch, attrs);
     }
 }
 
@@ -400,7 +572,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
         };
-        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, None);
+        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
         assert_eq!(vs.cursor, Some((0, 2)));
     }
@@ -421,7 +593,7 @@ mod tests {
         };
         let mut sel = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
         sel.extend(0, 4, Rect::new(0, 0, 4, 6));
-        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel));
+        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel), None);
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -457,7 +629,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
         };
-        let vs = Compositor::compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None);
+        let vs = Compositor::compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "L");
         assert_eq!(vs.cell(0, 4).unwrap().grapheme.as_str(), "R");
         // Border column.
@@ -485,7 +657,7 @@ mod tests {
             scroll_offset: 1,
             copy_mode: None,
         };
-        let vs = Compositor::compose(&[view], (2, 4), None, StatusPlacement::Bottom, None);
+        let vs = Compositor::compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None);
         // Row 0 should be the last scrollback row (BBBB), not CCCC.
         let r0: String = (0..4)
             .map(|c| vs.cell(0, c).unwrap().grapheme.as_str().to_string())
@@ -516,7 +688,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: Some(&cm),
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None);
+        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None);
         assert_eq!(vs.cursor, Some((3, 7)));
     }
 
@@ -542,7 +714,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: Some(&cm),
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None);
+        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None);
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -579,7 +751,7 @@ mod tests {
             copy_mode: None,
         };
         let status = status_with_left("AB");
-        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None);
+        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "A", "status at row 0");
         assert_eq!(vs.cell(0, 1).unwrap().grapheme.as_str(), "B");
         assert_eq!(vs.cell(1, 0).unwrap().grapheme.as_str(), "X", "pane shifted to row 1");
@@ -599,8 +771,62 @@ mod tests {
             copy_mode: None,
         };
         let status = status_with_left("AB");
-        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None);
+        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "X", "pane stays at row 0");
         assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "A", "status at last row");
+    }
+
+    #[test]
+    fn overlay_rename_prompt_paints_reverse_bottom_row() {
+        use plexy_glass_emulator::Attrs;
+        let mut e = Emulator::new(4, 20);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 4, 20),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+        };
+        let ov = OverlayView::RenamePrompt { label: "rename window", buf: "hi" };
+        let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov));
+        // Bottom row (3) is a REVERSE prompt bar.
+        assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "prompt bar is REVERSE");
+        // Text " rename window \u{25b8} hi", with 'r' at col 1.
+        assert_eq!(vs.cell(3, 1).unwrap().grapheme.as_str(), "r");
+    }
+
+    #[test]
+    fn overlay_help_box_renders_border_and_rows() {
+        let mut e = Emulator::new(10, 40);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 10, 40),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+        };
+        let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
+        let ov = OverlayView::Help { lines: &lines, scroll: 0 };
+        let vs = Compositor::compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov));
+        let mut found_corner = false;
+        let mut found_text = false;
+        for r in 0..10 {
+            let mut row = String::new();
+            for c in 0..40 {
+                row.push_str(vs.cell(r, c).unwrap().grapheme.as_str());
+            }
+            if row.contains('\u{250c}') {
+                found_corner = true;
+            }
+            if row.contains("New window") {
+                found_text = true;
+            }
+        }
+        assert!(found_corner, "help box top-left corner drawn");
+        assert!(found_text, "help row text drawn");
     }
 }

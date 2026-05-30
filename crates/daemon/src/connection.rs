@@ -245,6 +245,26 @@ where
                             }
                         }
                         InputEvent::Key(ke, raw_bytes) => {
+                            // An open overlay (rename / help) captures every key
+                            // before the keymap or the shell, the same routing
+                            // as copy mode below. The overlay was opened by a
+                            // Command, so the opening keystroke already went
+                            // through the keymap; every subsequent key lands
+                            // here until commit/cancel.
+                            let overlay_active = {
+                                let m = session.window_manager.lock().await;
+                                m.overlay().is_some()
+                            };
+                            if overlay_active {
+                                let redraw = {
+                                    let mut m = session.window_manager.lock().await;
+                                    m.handle_overlay_key(&ke)
+                                };
+                                if redraw {
+                                    session.notify.notify_one();
+                                }
+                                continue;
+                            }
                             // Snap scrollback to live on any keystroke.
                             {
                                 let manager = session.window_manager.lock().await;

@@ -37,6 +37,10 @@ struct Inner {
     emulator: Arc<Mutex<Emulator>>,
     scroll_offset: AtomicU32,
     copy_mode: Mutex<Option<plexy_glass_mux::CopyMode>>,
+    /// User-assigned pane name (distinct from the shell-set terminal title on
+    /// the emulator screen). `None` until the user renames the pane; shown on
+    /// the pane's top border and persisted in the saved-session file.
+    name: Mutex<Option<String>>,
     /// Held behind a Mutex so hot reload (Task 8) can swap the Arc.
     /// Wrapped in Arc so the reader thread can clone a handle without
     /// borrowing self.
@@ -233,6 +237,7 @@ impl Pane {
                 emulator,
                 scroll_offset: AtomicU32::new(0),
                 copy_mode: Mutex::new(None),
+                name: Mutex::new(None),
                 config: config_slot,
             }),
         })
@@ -266,6 +271,18 @@ impl Pane {
 
     pub fn id(&self) -> PaneId {
         self.inner.id
+    }
+
+    /// The user-assigned pane name, if any (cloned out from under the lock).
+    pub fn name(&self) -> Option<String> {
+        // invariant: name mutex briefly held to clone the value out.
+        self.inner.name.lock().expect("name mutex poisoned").clone()
+    }
+
+    /// Set (or clear, with `None`) the user-assigned pane name.
+    pub fn set_name(&self, name: Option<String>) {
+        // invariant: name mutex briefly held to store the value.
+        *self.inner.name.lock().expect("name mutex poisoned") = name;
     }
 
     pub async fn send_input(&self, bytes: Bytes) -> Result<(), DaemonError> {

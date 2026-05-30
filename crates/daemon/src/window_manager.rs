@@ -2,8 +2,9 @@
 
 use crate::{error::DaemonError, window::Window};
 use plexy_glass_mux::{
-    BorderHit, BorderSide, Command, MouseButton, MouseEncoding, MouseEvent, MouseKind, PaneId,
-    Rect, Selection, SelectionKind, SplitDir, WindowId, encode_for_child, extract_text,
+    BorderHit, BorderSide, Command, KeyEvent, MouseButton, MouseEncoding, MouseEvent, MouseKind,
+    Overlay, OverlayAction, OverlayHandler, PaneId, Rect, RenameTarget, Selection, SelectionKind,
+    SplitDir, WindowId, encode_for_child, extract_text,
 };
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
@@ -74,6 +75,13 @@ pub struct WindowManager {
     /// Previously-active window index, for `select_last_window`. Updated on
     /// every window switch.
     last_active_window: Option<usize>,
+    /// Active interactive overlay (rename prompt / help), or `None`. Session-
+    /// shared, mirroring copy mode. While `Some`, the connection routes keys to
+    /// `handle_overlay_key` instead of the keymap/shell.
+    overlay: Option<Overlay>,
+    /// The pane a pane-rename overlay targets, captured when the overlay opens
+    /// so a focus change cannot retarget it.
+    rename_pane_target: Option<PaneId>,
 }
 
 impl WindowManager {
@@ -113,6 +121,8 @@ impl WindowManager {
             status_hits: Vec::new(),
             detach_requested: false,
             last_active_window: None,
+            overlay: None,
+            rename_pane_target: None,
         })
     }
 
@@ -128,6 +138,85 @@ impl WindowManager {
     /// Update the clickable-region table from the latest status snapshot.
     pub fn set_status_hits(&mut self, hits: Vec<plexy_glass_status::StatusHit>) {
         self.status_hits = hits;
+    }
+
+    /// The active overlay, if any. Read by the render coordinator and by the
+    /// connection layer to decide whether to capture keys.
+    pub fn overlay(&self) -> Option<&Overlay> {
+        self.overlay.as_ref()
+    }
+
+    /// Open a rename prompt seeded with the active window's current name.
+    pub fn open_rename_window(&mut self) {
+        let buf = self.active_window().name.clone();
+        self.overlay = Some(Overlay::Rename { target: RenameTarget::Window, buf });
+        self.rename_pane_target = None;
+    }
+
+    /// Open a rename prompt for the active pane, capturing its id so a later
+    /// focus change cannot retarget the commit.
+    pub fn open_rename_pane(&mut self) {
+        let pid = self.active_window().active();
+        let buf = self
+            .active_window()
+            .pane(pid)
+            .and_then(|p| p.name())
+            .unwrap_or_default();
+        self.overlay = Some(Overlay::Rename { target: RenameTarget::Pane, buf });
+        self.rename_pane_target = Some(pid);
+    }
+
+    /// Open the scrollable help overlay.
+    pub fn open_help(&mut self) {
+        self.overlay = Some(Overlay::Help { scroll: 0 });
+        self.rename_pane_target = None;
+    }
+
+    fn close_overlay(&mut self) {
+        self.overlay = None;
+        self.rename_pane_target = None;
+    }
+
+    /// Feed one key to the active overlay. Returns whether the frame should be
+    /// recomposed. On commit, applies the rename to the active window or the
+    /// captured pane; an empty (whitespace-only) name is a no-op rename.
+    pub fn handle_overlay_key(&mut self, event: &KeyEvent) -> bool {
+        let (action, target) = {
+            let Some(overlay) = self.overlay.as_mut() else {
+                return false;
+            };
+            let action = OverlayHandler::handle(event, overlay);
+            let target = match overlay {
+                Overlay::Rename { target, .. } => Some(*target),
+                Overlay::Help { .. } => None,
+            };
+            (action, target)
+        };
+        match action {
+            OverlayAction::None => false,
+            OverlayAction::Redraw => true,
+            OverlayAction::Cancel => {
+                self.close_overlay();
+                true
+            }
+            OverlayAction::Commit(text) => {
+                if !text.is_empty() {
+                    match target {
+                        Some(RenameTarget::Window) => self.set_window_name(self.active, text),
+                        Some(RenameTarget::Pane) => {
+                            if let Some(pid) = self.rename_pane_target
+                                && let Some(p) = self.active_window().pane(pid)
+                            {
+                                p.set_name(Some(text));
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                self.close_overlay();
+                true
+            }
+        }
     }
 
     /// Read-only access to the in-flight selection, if any. Used by the
@@ -407,6 +496,9 @@ impl WindowManager {
                 self.active_window_mut().resize(viewport)?;
             }
             Command::KillWindow => self.close_active_window(),
+            Command::RenameWindow => self.open_rename_window(),
+            Command::RenamePane => self.open_rename_pane(),
+            Command::ShowHelp => self.open_help(),
             Command::ZoomToggle => {
                 self.active_window_mut().toggle_zoom();
                 // The zoom-aware resize handles both directions: it sizes a
@@ -1233,6 +1325,116 @@ mod tests {
         assert!(m.active_window().sync_input);
         m.handle_command(Command::ToggleSyncPanes).unwrap();
         assert!(!m.active_window().sync_input);
+    }
+
+    fn okey(k: plexy_glass_mux::Key) -> plexy_glass_mux::KeyEvent {
+        plexy_glass_mux::KeyEvent::plain(k)
+    }
+
+    fn type_str(m: &mut WindowManager, s: &str) {
+        for c in s.chars() {
+            m.handle_overlay_key(&okey(plexy_glass_mux::Key::Char(c)));
+        }
+    }
+
+    #[tokio::test]
+    async fn rename_window_overlay_commits_name() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        let orig = m.active_window().name.clone();
+        m.handle_command(Command::RenameWindow).unwrap();
+        // The prompt seeds with the current name for in-place editing.
+        match m.overlay() {
+            Some(plexy_glass_mux::Overlay::Rename { buf, .. }) => assert_eq!(*buf, orig),
+            other => panic!("expected a rename overlay, got {other:?}"),
+        }
+        // Clear the seeded name, then type a fresh one.
+        for _ in 0..orig.chars().count() {
+            m.handle_overlay_key(&okey(plexy_glass_mux::Key::Backspace));
+        }
+        type_str(&mut m, "build");
+        assert!(m.handle_overlay_key(&okey(plexy_glass_mux::Key::Enter)));
+        assert!(m.overlay().is_none(), "overlay closed on commit");
+        assert_eq!(m.active_window().name, "build");
+    }
+
+    #[tokio::test]
+    async fn rename_window_escape_cancels_without_change() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        let orig = m.active_window().name.clone();
+        m.handle_command(Command::RenameWindow).unwrap();
+        type_str(&mut m, "zzz");
+        m.handle_overlay_key(&okey(plexy_glass_mux::Key::Escape));
+        assert!(m.overlay().is_none());
+        assert_eq!(m.active_window().name, orig, "cancel leaves the name unchanged");
+    }
+
+    #[tokio::test]
+    async fn rename_pane_overlay_sets_pane_name() {
+        let mut m = make_two_pane_manager().await;
+        let active = m.active_window().active();
+        m.handle_command(Command::RenamePane).unwrap();
+        type_str(&mut m, "logs");
+        m.handle_overlay_key(&okey(plexy_glass_mux::Key::Enter));
+        assert!(m.overlay().is_none());
+        assert_eq!(
+            m.active_window().pane(active).and_then(|p| p.name()).as_deref(),
+            Some("logs")
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_rename_commit_is_noop_but_closes() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        let orig = m.active_window().name.clone();
+        m.handle_command(Command::RenameWindow).unwrap();
+        // Clear the seeded name entirely, then commit empty.
+        for _ in 0..orig.chars().count() {
+            m.handle_overlay_key(&okey(plexy_glass_mux::Key::Backspace));
+        }
+        m.handle_overlay_key(&okey(plexy_glass_mux::Key::Enter));
+        assert!(m.overlay().is_none());
+        assert_eq!(m.active_window().name, orig, "empty commit does not rename");
+    }
+
+    #[tokio::test]
+    async fn show_help_opens_and_dismisses() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::ShowHelp).unwrap();
+        assert!(matches!(m.overlay(), Some(plexy_glass_mux::Overlay::Help { .. })));
+        m.handle_overlay_key(&okey(plexy_glass_mux::Key::Char('q')));
+        assert!(m.overlay().is_none());
     }
 
     async fn make_two_pane_manager() -> WindowManager {

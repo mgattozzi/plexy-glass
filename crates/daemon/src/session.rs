@@ -165,12 +165,32 @@ async fn render_coordinator(
             };
             let selection = m.selection().cloned();
 
+            // Build the active overlay's render view (rename prompt / help).
+            // `help_lines` is deferred-init so the Help view can borrow it.
+            let help_lines: Vec<(String, String)>;
+            let overlay_view = match m.overlay() {
+                Some(plexy_glass_mux::Overlay::Rename { target, buf }) => {
+                    let label = match target {
+                        plexy_glass_mux::RenameTarget::Window => "rename window",
+                        plexy_glass_mux::RenameTarget::Pane => "rename pane",
+                    };
+                    Some(plexy_glass_mux::OverlayView::RenamePrompt { label, buf })
+                }
+                Some(plexy_glass_mux::Overlay::Help { scroll }) => {
+                    let cfg = session.config_snapshot();
+                    help_lines = build_help_lines(&cfg);
+                    Some(plexy_glass_mux::OverlayView::Help { lines: &help_lines, scroll: *scroll })
+                }
+                None => None,
+            };
+
             Compositor::compose(
                 &views,
                 (host.rows, host.cols),
                 Some(&status),
                 placement,
                 selection.as_ref(),
+                overlay_view.as_ref(),
             )
         };
         let _ = frame_tx.send(Arc::new(frame));
@@ -182,6 +202,82 @@ async fn render_coordinator(
 
 fn build_session_end_frame(host: PtySize) -> plexy_glass_mux::VirtualScreen {
     plexy_glass_mux::VirtualScreen::blank(host.rows, host.cols)
+}
+
+/// Build the effective keybinding list for the help overlay: the built-in
+/// defaults (when `inherit_defaults`) overlaid with the user's bindings, later
+/// bindings overriding earlier ones by key chord, preserving first-seen order.
+fn build_help_lines(config: &plexy_glass_config::Config) -> Vec<(String, String)> {
+    fn upsert(
+        ordered: &mut Vec<(String, String)>,
+        index: &mut std::collections::HashMap<String, usize>,
+        keys: &str,
+        command: &str,
+    ) {
+        let entry = (keys.to_string(), command_label(command));
+        if let Some(&i) = index.get(keys) {
+            ordered[i] = entry;
+        } else {
+            index.insert(keys.to_string(), ordered.len());
+            ordered.push(entry);
+        }
+    }
+    let km = &config.keymap;
+    let mut ordered: Vec<(String, String)> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    if km.inherit_defaults {
+        for b in plexy_glass_config::built_in_keymap().bindings {
+            upsert(&mut ordered, &mut index, &b.keys, &b.command);
+        }
+    }
+    for b in &km.bindings {
+        upsert(&mut ordered, &mut index, &b.keys, &b.command);
+    }
+    ordered
+}
+
+/// Friendly label for a keymap command string; falls back to the raw command.
+fn command_label(command: &str) -> String {
+    let label = match command {
+        "new_window" => "New window",
+        "split_v" => "Split vertical",
+        "split_h" => "Split horizontal",
+        "kill_pane" => "Kill pane",
+        "kill_window" => "Kill window",
+        "zoom_toggle" => "Zoom pane",
+        "next_window" => "Next window",
+        "prev_window" => "Previous window",
+        "detach" => "Detach",
+        "cancel" => "Cancel",
+        "enter_copy_mode" => "Copy mode",
+        "toggle_sync_panes" => "Toggle sync panes",
+        "reload_config" => "Reload config",
+        "select_next_pane" => "Next pane",
+        "select_prev_pane" => "Previous pane",
+        "select_pane_left" => "Focus pane left",
+        "select_pane_right" => "Focus pane right",
+        "select_pane_up" => "Focus pane up",
+        "select_pane_down" => "Focus pane down",
+        "resize_pane_left" => "Resize pane left",
+        "resize_pane_right" => "Resize pane right",
+        "resize_pane_up" => "Resize pane up",
+        "resize_pane_down" => "Resize pane down",
+        "select_last_window" => "Last window",
+        "select_last_pane" => "Last pane",
+        "rename_window" => "Rename window",
+        "rename_pane" => "Rename pane",
+        "show_help" => "Help",
+        other => {
+            if let Some(n) = other
+                .strip_prefix("select_window:")
+                .and_then(|x| x.parse::<u32>().ok())
+            {
+                return format!("Select window {}", n + 1);
+            }
+            return other.to_string();
+        }
+    };
+    label.to_string()
 }
 
 pub struct ClientHandle {
