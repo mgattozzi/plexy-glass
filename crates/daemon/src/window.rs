@@ -14,6 +14,11 @@ pub struct Window {
     /// panes in this window (sync-panes mode). Defaults to false; toggled by
     /// `Command::ToggleSyncPanes`.
     pub sync_input: bool,
+    /// When `Some`, the named pane is zoomed: it renders at the full viewport
+    /// and other panes are hidden. This is a view overlay (the layout tree is
+    /// NOT mutated), so unzoom restores exactly. Cleared by any structural
+    /// change.
+    pub zoomed: Option<PaneId>,
     panes: HashMap<PaneId, Pane>,
     layout: LayoutTree,
     active: PaneId,
@@ -47,6 +52,7 @@ impl Window {
             id,
             name,
             sync_input: false,
+            zoomed: None,
             panes,
             layout: LayoutTree::single(first_pane_id),
             active: first_pane_id,
@@ -56,6 +62,35 @@ impl Window {
 
     pub fn active(&self) -> PaneId {
         self.active
+    }
+
+    pub fn is_zoomed(&self) -> bool {
+        self.zoomed.is_some()
+    }
+
+    /// Toggle zoom on the active pane. Returns the new zoom state.
+    pub fn toggle_zoom(&mut self) -> bool {
+        if self.zoomed.is_some() {
+            self.zoomed = None;
+        } else {
+            self.zoomed = Some(self.active);
+        }
+        self.zoomed.is_some()
+    }
+
+    /// Clear zoom if set. Returns true if it was zoomed.
+    pub fn clear_zoom(&mut self) -> bool {
+        self.zoomed.take().is_some()
+    }
+
+    /// The most recently focused pane other than the current active one, if
+    /// it still exists. Used by `select_last_pane` (Task 3).
+    pub fn last_pane(&self) -> Option<PaneId> {
+        self.focus_history
+            .iter()
+            .rev()
+            .find(|p| **p != self.active && self.panes.contains_key(p))
+            .copied()
     }
 
     pub fn active_pane(&self) -> Option<&Pane> {

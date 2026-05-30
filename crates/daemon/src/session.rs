@@ -50,8 +50,14 @@ async fn render_coordinator(
             let win = m.active_window();
             let layout = win.layout();
             let active_id = win.active();
+            let zoomed = win.zoomed;
 
-            let pane_ids = layout.panes();
+            // When zoomed, render ONLY the zoomed pane at the full viewport;
+            // otherwise render every pane at its layout rect.
+            let pane_ids: Vec<plexy_glass_mux::PaneId> = match zoomed {
+                Some(zid) => vec![zid],
+                None => layout.panes(),
+            };
             let mut owned: Vec<(
                 plexy_glass_mux::PaneId,
                 plexy_glass_mux::Rect,
@@ -62,9 +68,13 @@ async fn render_coordinator(
             )> = Vec::with_capacity(pane_ids.len());
             for id in pane_ids {
                 if let Some(pane) = win.pane(id) {
-                    let rect = match layout.rect_of(id, viewport) {
-                        Some(r) => r,
-                        None => continue,
+                    let rect = if zoomed == Some(id) {
+                        viewport
+                    } else {
+                        match layout.rect_of(id, viewport) {
+                            Some(r) => r,
+                            None => continue,
+                        }
                     };
                     let screen = pane.with_screen(|s| s.clone());
                     let scroll = pane.scroll_offset();
@@ -106,6 +116,7 @@ async fn render_coordinator(
                 .map(|p| p.is_in_copy_mode())
                 .unwrap_or(false);
             let sync_active = m.active_window().sync_input;
+            let zoom_active = m.active_window().is_zoomed();
             let ctx = plexy_glass_status::EvalContext {
                 session_name: &session_name,
                 windows: &windows_data,
@@ -115,6 +126,7 @@ async fn render_coordinator(
                 active_pane_cwd: active_pane_cwd.as_deref(),
                 copy_mode_active,
                 sync_active,
+                zoom_active,
             };
             let engine = session.status_engine_snapshot();
             engine.refresh_event_driven(&ctx).await;
@@ -905,6 +917,7 @@ fn empty_snapshot_ctx() -> plexy_glass_status::SnapshotCtx {
         active_pane_cwd: None,
         copy_mode_active: false,
         sync_active: false,
+        zoom_active: false,
     }
 }
 
@@ -937,6 +950,7 @@ async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::Snaps
         .map(|p| p.is_in_copy_mode())
         .unwrap_or(false);
     let sync_active = manager.active_window().sync_input;
+    let zoom_active = manager.active_window().is_zoomed();
     plexy_glass_status::SnapshotCtx {
         session_name,
         windows,
@@ -946,6 +960,7 @@ async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::Snaps
         active_pane_cwd,
         copy_mode_active,
         sync_active,
+        zoom_active,
     }
 }
 

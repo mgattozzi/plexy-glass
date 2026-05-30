@@ -141,6 +141,9 @@ impl Widget for PrefixIndicatorWidget {
                 crate::ClickAction::ToggleSyncPanes,
             );
         }
+        if ctx.zoom_active {
+            return StyledText::single(SmolStr::new(" Z "), self.style);
+        }
         if !ctx.prefix_active {
             return StyledText::empty();
         }
@@ -204,6 +207,7 @@ mod tests {
             active_pane_cwd: None,
             copy_mode_active: false,
             sync_active: false,
+            zoom_active: false,
         }
     }
 
@@ -346,5 +350,27 @@ mod tests {
         };
         let out = w.evaluate(&ctx).await;
         assert_eq!(out.segments[0].text.as_str(), " COPY ");
+    }
+
+    #[tokio::test]
+    async fn prefix_indicator_shows_z_when_zoomed() {
+        let mut w = PrefixIndicatorWidget {
+            style: ResolvedStyle::default(),
+            content: "PFX".into(),
+        };
+        let ctx = EvalContext { zoom_active: true, ..ctx_empty() };
+        let out = w.evaluate(&ctx).await;
+        assert_eq!(out.segments[0].text.as_str(), " Z ");
+    }
+
+    #[tokio::test]
+    async fn sync_beats_zoom_in_priority() {
+        let mut w = PrefixIndicatorWidget {
+            style: ResolvedStyle::default(),
+            content: "PFX".into(),
+        };
+        let ctx = EvalContext { sync_active: true, zoom_active: true, ..ctx_empty() };
+        let out = w.evaluate(&ctx).await;
+        assert_eq!(out.segments[0].text.as_str(), " SYNC ");
     }
 }

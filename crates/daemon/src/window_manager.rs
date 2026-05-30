@@ -249,8 +249,24 @@ impl WindowManager {
         self.active
     }
 
+    /// Clear a zoom overlay (if any) and restore pane sizes. Called before
+    /// structural/navigation commands so the overlay never outlives the
+    /// layout it hid. No-op when not zoomed.
+    fn clear_zoom_restore(&mut self) -> Result<(), DaemonError> {
+        if self.active_window_mut().clear_zoom() {
+            let viewport = self.viewport();
+            self.active_window_mut().resize(viewport)?;
+        }
+        Ok(())
+    }
+
     pub fn handle_command(&mut self, cmd: Command) -> Result<(), DaemonError> {
         let viewport = self.viewport();
+        // Any structural / navigation command clears a zoom overlay first
+        // (zoom is a view of one pane; changing the layout or focus ends it).
+        if command_clears_zoom(&cmd) {
+            self.clear_zoom_restore()?;
+        }
         match cmd {
             Command::SplitV => {
                 let new_id = self.alloc_pane_id();
@@ -343,7 +359,24 @@ impl WindowManager {
             }
             Command::KillWindow => self.close_active_window(),
             Command::ZoomToggle => {
-                tracing::trace!("ZoomToggle: phase-3 no-op");
+                let active = self.active_window().active();
+                let now_zoomed = self.active_window_mut().toggle_zoom();
+                if now_zoomed {
+                    // Resize the zoomed pane's PTY to the full pane area
+                    // (viewport already excludes the status row).
+                    if let Some(pane) = self.active_window().pane(active) {
+                        pane.resize(PtySize {
+                            rows: viewport.rows,
+                            cols: viewport.cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        })
+                        .ok();
+                    }
+                } else {
+                    // Restore every pane to its layout rect.
+                    self.active_window_mut().resize(viewport)?;
+                }
             }
             Command::ToggleSyncPanes => {
                 let win = self.active_window_mut();
@@ -851,6 +884,27 @@ fn host_viewport(host: PtySize) -> Rect {
     Rect::new(0, 0, rows, host.cols.max(1))
 }
 
+/// Whether a command should clear an active zoom overlay before running.
+/// Structural (split/kill/new-window) and navigation (window/pane switch,
+/// resize) commands end zoom; `ZoomToggle`, sync-toggle, copy-mode, detach,
+/// cancel, and reload do not.
+fn command_clears_zoom(cmd: &Command) -> bool {
+    matches!(
+        cmd,
+        Command::SplitV
+            | Command::SplitH
+            | Command::KillPane
+            | Command::KillWindow
+            | Command::NewWindow
+            | Command::NextWindow
+            | Command::PrevWindow
+            | Command::SelectWindow(_)
+            | Command::SelectNextPane
+            | Command::SelectPrevPane
+            | Command::SelectPane(_)
+    )
+}
+
 fn inherit_cwd(active_pane: Option<&crate::pane::Pane>) -> Option<String> {
     active_pane
         .and_then(|p| p.with_screen(|s| s.cwd.clone()))
@@ -1300,5 +1354,47 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(m.active_idx(), 0, "status-bar click did not select window 0");
+    }
+
+    // ---- SP1: pane zoom ----
+
+    #[tokio::test]
+    async fn zoom_toggle_sets_and_clears_zoomed() {
+        let mut m = make_two_pane_manager().await;
+        let active = m.active_window().active();
+        m.handle_command(Command::ZoomToggle).unwrap();
+        assert_eq!(m.active_window().zoomed, Some(active));
+        m.handle_command(Command::ZoomToggle).unwrap();
+        assert!(m.active_window().zoomed.is_none());
+    }
+
+    #[tokio::test]
+    async fn splitting_clears_zoom() {
+        let mut m = make_two_pane_manager().await;
+        m.handle_command(Command::ZoomToggle).unwrap();
+        assert!(m.active_window().is_zoomed());
+        m.handle_command(Command::SplitV).unwrap();
+        assert!(!m.active_window().is_zoomed(), "split must clear zoom");
+    }
+
+    #[tokio::test]
+    async fn zoom_resizes_pane_to_full_then_restores() {
+        let mut m = make_two_pane_manager().await; // 24x80 vertical split
+        let active = m.active_window().active();
+        let vp = m.viewport();
+        m.handle_command(Command::ZoomToggle).unwrap();
+        let zoomed_cols = m
+            .active_window()
+            .pane(active)
+            .unwrap()
+            .with_screen(|s| s.active.num_cols());
+        assert_eq!(zoomed_cols, vp.cols, "zoomed pane should span full width");
+        m.handle_command(Command::ZoomToggle).unwrap();
+        let restored_cols = m
+            .active_window()
+            .pane(active)
+            .unwrap()
+            .with_screen(|s| s.active.num_cols());
+        assert!(restored_cols < vp.cols, "unzoom should restore the split width");
     }
 }

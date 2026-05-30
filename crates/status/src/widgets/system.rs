@@ -110,6 +110,7 @@ mod tests {
             active_pane_cwd: None,
             copy_mode_active: false,
             sync_active: false,
+            zoom_active: false,
         }
     }
 

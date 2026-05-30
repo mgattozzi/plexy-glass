@@ -56,6 +56,7 @@ mod tests {
             active_pane_cwd: None,
             copy_mode_active: false,
             sync_active: false,
+            zoom_active: false,
         };
         let out = w.evaluate(&ctx).await;
         assert_eq!(out.segments.len(), 2);
@@ -82,6 +83,7 @@ mod tests {
             active_pane_cwd: None,
             copy_mode_active: false,
             sync_active: false,
+            zoom_active: false,
         };
         let out = w.evaluate(&ctx).await;
         let actions: Vec<_> = out.segments.iter().filter_map(|s| s.click_action).collect();
@@ -104,6 +106,7 @@ mod tests {
             active_pane_cwd: None,
             copy_mode_active: false,
             sync_active: false,
+            zoom_active: false,
         };
         let out = w.evaluate(&ctx).await;
         assert!(out.segments.is_empty());
