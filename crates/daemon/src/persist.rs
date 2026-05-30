@@ -119,6 +119,32 @@ pub fn delete_session(name: &str) -> Result<(), PersistError> {
     }
 }
 
+/// Enumerate saved sessions on disk: (name, window count, total pane count).
+/// Files that fail to parse / mismatch schema are skipped silently. Sorted by name.
+pub fn list_saved() -> Vec<(String, u8, u8)> {
+    let dir = sessions_dir();
+    let mut out = Vec::new();
+    let Ok(read) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if let Ok(Some(state)) = load_session(stem) {
+            let windows = state.windows.len().min(u8::MAX as usize) as u8;
+            let panes: usize = state.windows.iter().map(|w| w.panes.len()).sum();
+            out.push((state.name, windows, panes.min(u8::MAX as usize) as u8));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +249,31 @@ mod tests {
     fn delete_missing_is_ok() {
         let _g = isolate();
         delete_session("never-saved").expect("delete");
+    }
+
+    #[test]
+    fn list_saved_enumerates_and_sorts() {
+        let _g = isolate();
+        let mut a = sample_state("alpha");
+        a.windows = vec![a.windows[0].clone(), a.windows[0].clone()]; // 2 windows
+        save_session(&a).unwrap();
+        save_session(&sample_state("beta")).unwrap();
+        let listed = list_saved();
+        let names: Vec<_> = listed.iter().map(|(n, _, _)| n.clone()).collect();
+        assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(listed[0].1, 2, "alpha has 2 windows");
+        assert_eq!(listed[0].2, 2, "alpha has 2 panes total (1 per window)");
+        assert_eq!(listed[1].1, 1, "beta has 1 window");
+    }
+
+    #[test]
+    fn list_saved_skips_bad_files() {
+        let _g = isolate();
+        save_session(&sample_state("ok")).unwrap();
+        std::fs::write(sessions_dir().join("broken.json"), b"{not json").unwrap();
+        let listed = list_saved();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].0, "ok");
     }
 
     #[test]

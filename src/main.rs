@@ -17,6 +17,8 @@ enum Cmd {
     },
     /// List all sessions.
     List,
+    /// List sessions saved on disk (running or not).
+    ListSaved,
     /// Kill a single session by name, or the daemon if no -n is given.
     Kill {
         /// Session name to kill. If omitted, kills the daemon.
@@ -46,6 +48,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::List => {
             plexy_glass_client::client_list().await?;
+        }
+        Cmd::ListSaved => {
+            plexy_glass_client::client_list_saved().await?;
         }
         Cmd::Kill { name } => match name {
             Some(session_name) => {

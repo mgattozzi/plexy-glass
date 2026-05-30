@@ -208,6 +208,41 @@ async fn list_sessions_inline() -> Result<Vec<plexy_glass_protocol::SessionEntry
     }
 }
 
+/// List sessions persisted on disk (running or not) and print a table.
+pub async fn client_list_saved() -> Result<(), ClientError> {
+    let socket = default_socket_path()?;
+    let stream = connect_or_spawn(&socket).await?;
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    client_handshake(&mut reader, &mut writer).await?;
+
+    let payload = postcard::to_allocvec(&ClientMsg::ListSavedSessions)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
+    Codec::write_frame(&mut writer, &payload).await?;
+
+    let frame = Codec::read_frame(&mut reader)
+        .await?
+        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
+    let reply: ServerMsg = postcard::from_bytes(&frame)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    match reply {
+        ServerMsg::SavedSessionList { entries } => {
+            if entries.is_empty() {
+                println!("(no saved sessions)");
+            } else {
+                println!("{:<20}  {:>7}  {:>5}", "NAME", "WINDOWS", "PANES");
+                for e in &entries {
+                    println!("{:<20}  {:>7}  {:>5}", e.name, e.windows, e.panes);
+                }
+            }
+            Ok(())
+        }
+        ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
+        other => Err(ClientError::Io(std::io::Error::other(format!(
+            "unexpected reply from daemon: {other:?}"
+        )))),
+    }
+}
+
 /// Attach to a session, creating it if it doesn't exist.
 ///
 /// - explicit name supplied → attach-or-create that name

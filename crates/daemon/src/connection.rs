@@ -39,6 +39,18 @@ impl Connection {
                 send_msg(&mut writer, &ServerMsg::SessionList { entries }).await?;
                 Ok(())
             }
+            ClientMsg::ListSavedSessions => {
+                let entries = crate::persist::list_saved()
+                    .into_iter()
+                    .map(|(name, windows, panes)| plexy_glass_protocol::SavedSessionEntry {
+                        name,
+                        windows,
+                        panes,
+                    })
+                    .collect();
+                send_msg(&mut writer, &ServerMsg::SavedSessionList { entries }).await?;
+                Ok(())
+            }
             ClientMsg::KillSession { name } => match registry.kill(&name).await {
                 Ok(()) => send_msg(&mut writer, &ServerMsg::SessionKilled { name }).await,
                 Err(DaemonError::Protocol(perr)) => {
