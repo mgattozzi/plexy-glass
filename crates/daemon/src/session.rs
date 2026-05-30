@@ -141,9 +141,17 @@ async fn render_coordinator(
             // status-bar click can dispatch the matching command (M10).
             let hits = snap.click_hits();
             let host_size = m.host_size();
-            // Default status position is Bottom (`built_in_default`). Future:
-            // honor `cfg.status.position` when we plumb it through.
-            m.set_status_bar_row(Some(host_size.rows.saturating_sub(1)));
+            // Honor the configured status-bar position for both the click row
+            // and the compositor placement.
+            let placement = match session.config_snapshot().status.position {
+                plexy_glass_config::Position::Top => plexy_glass_mux::StatusPlacement::Top,
+                plexy_glass_config::Position::Bottom => plexy_glass_mux::StatusPlacement::Bottom,
+            };
+            let status_row = match placement {
+                plexy_glass_mux::StatusPlacement::Top => 0u16,
+                plexy_glass_mux::StatusPlacement::Bottom => host_size.rows.saturating_sub(1),
+            };
+            m.set_status_bar_row(Some(status_row));
             m.set_status_hits(hits);
             let status = StatusLine {
                 left: snap.left.into_iter().flatten().collect(),
@@ -156,6 +164,7 @@ async fn render_coordinator(
                 &views,
                 (host.rows, host.cols),
                 Some(&status),
+                placement,
                 selection.as_ref(),
             )
         };

@@ -23,6 +23,13 @@ pub struct PaneView<'a> {
     pub copy_mode: Option<&'a crate::CopyMode>,
 }
 
+/// Where the status bar sits relative to the pane area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusPlacement {
+    Top,
+    Bottom,
+}
+
 pub struct Compositor;
 
 impl Compositor {
@@ -30,6 +37,7 @@ impl Compositor {
         panes: &[PaneView<'_>],
         host_size: (u16, u16),
         status: Option<&StatusLine>,
+        placement: StatusPlacement,
         selection: Option<&crate::selection::Selection>,
     ) -> VirtualScreen {
         let (host_rows, host_cols) = host_size;
@@ -41,6 +49,16 @@ impl Compositor {
             host_rows.saturating_sub(1).max(1)
         } else {
             host_rows
+        };
+        // Panes are laid out in a LOGICAL band `0..pane_area_rows` (all the
+        // clips below operate on that logical row). When the status bar is on
+        // top, the physical screen rows are shifted down by one and the status
+        // is painted at row 0; on the bottom, no shift and status at the last
+        // row. `pane_row_offset` is added at each physical write site only.
+        let (pane_row_offset, status_row): (u16, u16) = match (status.is_some(), placement) {
+            (true, StatusPlacement::Top) => (1, 0),
+            (true, StatusPlacement::Bottom) => (0, host_rows.saturating_sub(1)),
+            (false, _) => (0, 0),
         };
 
         // Copy each pane's emulator cells into its rect, mixing in scrollback
@@ -99,7 +117,7 @@ impl Compositor {
                     }
                     if let Some(cell) = cells.get(c as usize) {
                         screen.put(
-                            view.rect.row.saturating_add(r),
+                            pane_row_offset + view.rect.row.saturating_add(r),
                             view.rect.col.saturating_add(c),
                             cell.clone(),
                         );
@@ -114,11 +132,12 @@ impl Compositor {
         {
             let cols = view.screen.active.num_cols();
             for (row, col) in sel.cells(cols) {
-                let host_r = view.rect.row.saturating_add(row);
+                let logical_r = view.rect.row.saturating_add(row);
                 let host_c = view.rect.col.saturating_add(col);
-                if host_r >= pane_area_rows || host_c >= host_cols {
+                if logical_r >= pane_area_rows || host_c >= host_cols {
                     continue;
                 }
+                let host_r = pane_row_offset + logical_r;
                 if let Some(cell) = screen.cell_mut(host_r, host_c) {
                     cell.attrs |= plexy_glass_emulator::Attrs::REVERSE;
                 }
@@ -141,7 +160,7 @@ impl Compositor {
                     continue;
                 }
                 let local_row = (line - viewport_lo) as u16;
-                let host_r = view.rect.row + local_row;
+                let host_r = pane_row_offset + view.rect.row + local_row;
                 let row_start = if line == start.0 { start.1 } else { 0 };
                 let row_end = if line == end.0 {
                     end.1
@@ -170,7 +189,7 @@ impl Compositor {
                     continue;
                 }
                 let local_row = (m.line_idx - viewport_lo) as u16;
-                let host_r = view.rect.row + local_row;
+                let host_r = pane_row_offset + view.rect.row + local_row;
                 for c in m.col_start..=m.col_end {
                     let host_c = view.rect.col + c;
                     if let Some(cell) = screen.cell_mut(host_r, host_c) {
@@ -180,13 +199,21 @@ impl Compositor {
             }
         }
 
-        // Borders.
-        let rects: Vec<(Rect, bool)> = panes.iter().map(|v| (v.rect, v.is_active)).collect();
+        // Borders. Offset rects by `pane_row_offset` so separators land on the
+        // physical pane band (matters for top status placement).
+        let rects: Vec<(Rect, bool)> = panes
+            .iter()
+            .map(|v| {
+                let mut r = v.rect;
+                r.row = r.row.saturating_add(pane_row_offset);
+                (r, v.is_active)
+            })
+            .collect();
         borders::draw(&rects, &mut screen);
 
         // Status bar.
         if let Some(s) = status {
-            paint_status_row(&mut screen, s, host_cols, host_rows.saturating_sub(1));
+            paint_status_row(&mut screen, s, host_cols, status_row);
         }
 
         // Cursor from the active pane, overridden by the copy-mode cursor when present.
@@ -218,7 +245,7 @@ impl Compositor {
             if let Some((r, c)) = cursor_pos
                 && r < pane_area_rows && c < host_cols
             {
-                screen.cursor = Some((r, c));
+                screen.cursor = Some((pane_row_offset + r, c));
             }
             screen.cursor_visible = match active.copy_mode {
                 Some(_) => true,
@@ -234,7 +261,7 @@ impl Compositor {
             && let Some(cm) = active.copy_mode
             && cm.search.prompt_active
         {
-            let prompt_row = active.rect.row + active.rect.rows.saturating_sub(1);
+            let prompt_row = pane_row_offset + active.rect.row + active.rect.rows.saturating_sub(1);
             let mut text = String::from("/");
             text.push_str(&cm.search.prompt_buf);
             let prompt_attrs = plexy_glass_emulator::Attrs::REVERSE;
@@ -373,7 +400,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
         };
-        let vs = Compositor::compose(&[view], (4, 6), None, None);
+        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
         assert_eq!(vs.cursor, Some((0, 2)));
     }
@@ -394,7 +421,7 @@ mod tests {
         };
         let mut sel = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
         sel.extend(0, 4, Rect::new(0, 0, 4, 6));
-        let vs = Compositor::compose(&[view], (4, 6), None, Some(&sel));
+        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel));
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -430,7 +457,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
         };
-        let vs = Compositor::compose(&[lv, rv], (4, 7), None, None);
+        let vs = Compositor::compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "L");
         assert_eq!(vs.cell(0, 4).unwrap().grapheme.as_str(), "R");
         // Border column.
@@ -458,7 +485,7 @@ mod tests {
             scroll_offset: 1,
             copy_mode: None,
         };
-        let vs = Compositor::compose(&[view], (2, 4), None, None);
+        let vs = Compositor::compose(&[view], (2, 4), None, StatusPlacement::Bottom, None);
         // Row 0 should be the last scrollback row (BBBB), not CCCC.
         let r0: String = (0..4)
             .map(|c| vs.cell(0, c).unwrap().grapheme.as_str().to_string())
@@ -489,7 +516,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: Some(&cm),
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, None);
+        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None);
         assert_eq!(vs.cursor, Some((3, 7)));
     }
 
@@ -515,7 +542,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: Some(&cm),
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, None);
+        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None);
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -523,5 +550,57 @@ mod tests {
                 "expected REVERSE at col {c}"
             );
         }
+    }
+
+    fn status_with_left(text: &str) -> StatusLine {
+        StatusLine {
+            left: vec![plexy_glass_status::Segment {
+                text: text.into(),
+                style: plexy_glass_status::ResolvedStyle::default(),
+                click_action: None,
+            }],
+            middle: vec![],
+            right: vec![],
+        }
+    }
+
+    #[test]
+    fn status_top_paints_row_zero_and_panes_below() {
+        // Host 3 rows; pane area = 2 rows. Top placement → status at row 0,
+        // pane shifted to rows 1..3.
+        let mut e = Emulator::new(2, 4);
+        pane(&mut e, b"X ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 2, 4),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+        };
+        let status = status_with_left("AB");
+        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None);
+        assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "A", "status at row 0");
+        assert_eq!(vs.cell(0, 1).unwrap().grapheme.as_str(), "B");
+        assert_eq!(vs.cell(1, 0).unwrap().grapheme.as_str(), "X", "pane shifted to row 1");
+    }
+
+    #[test]
+    fn status_bottom_paints_last_row_and_panes_above() {
+        // Regression guard for the offset-0 path: status at row N-1, pane at row 0.
+        let mut e = Emulator::new(2, 4);
+        pane(&mut e, b"X ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 2, 4),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+        };
+        let status = status_with_left("AB");
+        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None);
+        assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "X", "pane stays at row 0");
+        assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "A", "status at last row");
     }
 }

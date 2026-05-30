@@ -20,7 +20,7 @@ pub mod selection;
 pub mod status;
 pub mod virtual_screen;
 
-pub use compositor::{Compositor, PaneView};
+pub use compositor::{Compositor, PaneView, StatusPlacement};
 pub use copy_mode::{CopyMode, CopyModeAction, CopyModeHandler, MatchSpan, SearchState};
 pub use diff::DiffRenderer;
 pub use direction::{Direction, SplitDir};
