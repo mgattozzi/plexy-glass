@@ -134,6 +134,12 @@ pub fn built_in_keymap() -> KeymapConfig {
             binding("Alt+Down", "select_pane_down"),
             binding("Alt+Up", "select_pane_up"),
             binding("Alt+Right", "select_pane_right"),
+            binding("Ctrl+a H", "resize_pane_left"),
+            binding("Ctrl+a J", "resize_pane_down"),
+            binding("Ctrl+a K", "resize_pane_up"),
+            binding("Ctrl+a L", "resize_pane_right"),
+            binding("Ctrl+a Tab", "select_last_window"),
+            binding("Ctrl+a ;", "select_last_pane"),
         ],
     }
 }

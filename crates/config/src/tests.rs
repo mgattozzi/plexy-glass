@@ -123,3 +123,11 @@ fn built_in_keymap_includes_reload_config() {
         .iter()
         .any(|b| b.keys == "Ctrl+a R" && b.command == "reload_config"));
 }
+
+#[test]
+fn built_in_keymap_includes_resize_and_last_bindings() {
+    let km = built_in_keymap();
+    assert!(km.bindings.iter().any(|b| b.keys == "Ctrl+a L" && b.command == "resize_pane_right"));
+    assert!(km.bindings.iter().any(|b| b.keys == "Ctrl+a Tab" && b.command == "select_last_window"));
+    assert!(km.bindings.iter().any(|b| b.keys == "Ctrl+a ;" && b.command == "select_last_pane"));
+}

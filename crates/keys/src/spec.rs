@@ -117,6 +117,12 @@ pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
         "select_pane_right" => Command::SelectPane(Direction::Right),
         "select_pane_up" => Command::SelectPane(Direction::Up),
         "select_pane_down" => Command::SelectPane(Direction::Down),
+        "resize_pane_left" => Command::ResizePane(Direction::Left),
+        "resize_pane_right" => Command::ResizePane(Direction::Right),
+        "resize_pane_up" => Command::ResizePane(Direction::Up),
+        "resize_pane_down" => Command::ResizePane(Direction::Down),
+        "select_last_window" => Command::SelectLastWindow,
+        "select_last_pane" => Command::SelectLastPane,
         "select_window" => {
             let arg_str = arg.ok_or_else(|| KeyParseError::MissingArg {
                 command: name.to_string(),
@@ -209,6 +215,18 @@ mod tests {
     fn command_with_arg() {
         let c = parse_command("select_window:0").unwrap();
         assert_eq!(c.command, Command::SelectWindow(0));
+    }
+
+    #[test]
+    fn parses_resize_pane_commands() {
+        assert_eq!(parse_command("resize_pane_right").unwrap().command, Command::ResizePane(Direction::Right));
+        assert_eq!(parse_command("resize_pane_up").unwrap().command, Command::ResizePane(Direction::Up));
+    }
+
+    #[test]
+    fn parses_last_window_pane_commands() {
+        assert_eq!(parse_command("select_last_window").unwrap().command, Command::SelectLastWindow);
+        assert_eq!(parse_command("select_last_pane").unwrap().command, Command::SelectLastPane);
     }
 
     #[test]

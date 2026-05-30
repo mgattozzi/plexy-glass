@@ -66,6 +66,9 @@ pub struct WindowManager {
     /// `Connection::serve_attach` polls this each iteration of its input loop
     /// and exits when true.
     pub detach_requested: bool,
+    /// Previously-active window index, for `select_last_window`. Updated on
+    /// every window switch.
+    last_active_window: Option<usize>,
 }
 
 impl WindowManager {
@@ -103,6 +106,7 @@ impl WindowManager {
             status_bar_row: None,
             status_hits: Vec::new(),
             detach_requested: false,
+            last_active_window: None,
         })
     }
 
@@ -249,6 +253,17 @@ impl WindowManager {
         self.active
     }
 
+    /// Switch the active window to `idx`, recording the current window as the
+    /// "last active" so `select_last_window` can toggle back. No-op for an
+    /// out-of-range or same index.
+    fn switch_to_window(&mut self, idx: usize) {
+        if idx >= self.windows.len() || idx == self.active {
+            return;
+        }
+        self.last_active_window = Some(self.active);
+        self.active = idx;
+    }
+
     /// Clear a zoom overlay (if any) and restore pane sizes. Called before
     /// structural/navigation commands so the overlay never outlives the
     /// layout it hid. No-op when not zoomed.
@@ -335,27 +350,51 @@ impl WindowManager {
                     Arc::clone(&self.config),
                 )?;
                 self.windows.push(window);
+                self.last_active_window = Some(self.active);
                 self.active = self.windows.len() - 1;
             }
             Command::NextWindow => {
                 if !self.windows.is_empty() {
-                    self.active = (self.active + 1) % self.windows.len();
+                    let idx = (self.active + 1) % self.windows.len();
+                    self.switch_to_window(idx);
                 }
             }
             Command::PrevWindow => {
                 if !self.windows.is_empty() {
-                    self.active = if self.active == 0 {
+                    let idx = if self.active == 0 {
                         self.windows.len() - 1
                     } else {
                         self.active - 1
                     };
+                    self.switch_to_window(idx);
                 }
             }
             Command::SelectWindow(n) => {
-                let idx = usize::from(n);
-                if idx < self.windows.len() {
-                    self.active = idx;
+                self.switch_to_window(usize::from(n));
+            }
+            Command::SelectLastWindow => {
+                if let Some(prev) = self.last_active_window {
+                    self.switch_to_window(prev);
                 }
+            }
+            Command::SelectLastPane => {
+                if let Some(p) = self.active_window().last_pane() {
+                    self.active_window_mut().focus(p);
+                }
+            }
+            Command::ResizePane(dir) => {
+                let active = self.active_window().active();
+                const STEP: i32 = 3;
+                let (axis, delta) = match dir {
+                    plexy_glass_mux::Direction::Left => (SplitDir::Vertical, -STEP),
+                    plexy_glass_mux::Direction::Right => (SplitDir::Vertical, STEP),
+                    plexy_glass_mux::Direction::Up => (SplitDir::Horizontal, -STEP),
+                    plexy_glass_mux::Direction::Down => (SplitDir::Horizontal, STEP),
+                };
+                self.active_window_mut()
+                    .layout_mut()
+                    .resize_split(active, axis, delta, viewport);
+                self.active_window_mut().resize(viewport)?;
             }
             Command::KillWindow => self.close_active_window(),
             Command::ZoomToggle => {
@@ -902,6 +941,9 @@ fn command_clears_zoom(cmd: &Command) -> bool {
             | Command::SelectNextPane
             | Command::SelectPrevPane
             | Command::SelectPane(_)
+            | Command::ResizePane(_)
+            | Command::SelectLastWindow
+            | Command::SelectLastPane
     )
 }
 
@@ -1396,5 +1438,80 @@ mod tests {
             .unwrap()
             .with_screen(|s| s.active.num_cols());
         assert!(restored_cols < vp.cols, "unzoom should restore the split width");
+    }
+
+    // ---- SP2: pane resize keybindings ----
+
+    #[tokio::test]
+    async fn resize_pane_right_widens_active_pane() {
+        let mut m = make_two_pane_manager().await; // vertical split; active = second (right)
+        let vp = m.viewport();
+        let active = m.active_window().active();
+        let before = m.active_window().layout().rect_of(active, vp).unwrap().cols;
+        m.handle_command(Command::ResizePane(plexy_glass_mux::Direction::Right)).unwrap();
+        let after = m.active_window().layout().rect_of(active, vp).unwrap().cols;
+        assert!(after >= before, "active pane should not shrink when growing right");
+    }
+
+    #[tokio::test]
+    async fn resize_single_pane_is_noop() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::ResizePane(plexy_glass_mux::Direction::Left)).unwrap();
+        assert_eq!(m.active_window().layout().panes().len(), 1);
+    }
+
+    // ---- SP3: last-window / last-pane ----
+
+    #[tokio::test]
+    async fn last_window_toggle_returns_to_previous() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::NewWindow).unwrap(); // active = 1, last = 0
+        assert_eq!(m.active_idx(), 1);
+        m.handle_command(Command::SelectLastWindow).unwrap();
+        assert_eq!(m.active_idx(), 0, "should return to window 0");
+        m.handle_command(Command::SelectLastWindow).unwrap();
+        assert_eq!(m.active_idx(), 1, "toggling again returns to window 1");
+    }
+
+    #[tokio::test]
+    async fn last_window_noop_when_single() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::SelectLastWindow).unwrap();
+        assert_eq!(m.active_idx(), 0);
+    }
+
+    #[tokio::test]
+    async fn last_pane_returns_to_previous() {
+        let mut m = make_two_pane_manager().await; // 2 panes, active = second
+        let second = m.active_window().active();
+        let panes = m.active_window().layout().panes();
+        let first = *panes.iter().find(|p| **p != second).unwrap();
+        m.active_window_mut().focus(first);
+        m.handle_command(Command::SelectLastPane).unwrap();
+        assert_eq!(m.active_window().active(), second, "last-pane returns to previous pane");
     }
 }
