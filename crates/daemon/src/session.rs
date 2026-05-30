@@ -50,7 +50,10 @@ async fn render_coordinator(
             let win = m.active_window();
             let layout = win.layout();
             let active_id = win.active();
-            let zoomed = win.zoomed;
+            // Ignore a zoom that points at a pane that no longer exists, so a
+            // momentarily-stale overlay falls back to rendering all panes
+            // instead of a blank viewport.
+            let zoomed = win.zoomed.filter(|zid| win.pane(*zid).is_some());
 
             // When zoomed, render ONLY the zoomed pane at the full viewport;
             // otherwise render every pane at its layout rect.

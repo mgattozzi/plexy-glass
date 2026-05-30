@@ -160,6 +160,7 @@ impl WindowManager {
             if self.active >= self.windows.len() && !self.windows.is_empty() {
                 self.active = self.windows.len() - 1;
             }
+            self.fixup_last_active_after_removal(idx);
         }
         self.notify.notify_one();
         Ok(())
@@ -407,24 +408,11 @@ impl WindowManager {
             }
             Command::KillWindow => self.close_active_window(),
             Command::ZoomToggle => {
-                let active = self.active_window().active();
-                let now_zoomed = self.active_window_mut().toggle_zoom();
-                if now_zoomed {
-                    // Resize the zoomed pane's PTY to the full pane area
-                    // (viewport already excludes the status row).
-                    if let Some(pane) = self.active_window().pane(active) {
-                        pane.resize(PtySize {
-                            rows: viewport.rows,
-                            cols: viewport.cols,
-                            pixel_width: 0,
-                            pixel_height: 0,
-                        })
-                        .ok();
-                    }
-                } else {
-                    // Restore every pane to its layout rect.
-                    self.active_window_mut().resize(viewport)?;
-                }
+                self.active_window_mut().toggle_zoom();
+                // The zoom-aware resize handles both directions: it sizes a
+                // newly-zoomed pane to the full viewport, or restores every
+                // pane to its layout rect on un-zoom.
+                self.active_window_mut().resize(viewport)?;
             }
             Command::ToggleSyncPanes => {
                 let win = self.active_window_mut();
@@ -929,12 +917,31 @@ impl WindowManager {
         if self.windows.is_empty() {
             return;
         }
-        self.windows.remove(self.active);
+        let removed = self.active;
+        self.windows.remove(removed);
         if self.windows.is_empty() {
+            self.last_active_window = None;
             return;
         }
         if self.active >= self.windows.len() {
             self.active = self.windows.len() - 1;
+        }
+        self.fixup_last_active_after_removal(removed);
+    }
+
+    /// Repair `last_active_window` after the window at `removed` is dropped:
+    /// the toggle target is cleared if it *was* the removed window, shifted
+    /// down by one if it sat after the removed slot, and left alone otherwise.
+    /// Also clears it if it would now alias the active window (toggling to the
+    /// window you are already on is meaningless).
+    fn fixup_last_active_after_removal(&mut self, removed: usize) {
+        self.last_active_window = match self.last_active_window {
+            Some(i) if i == removed => None,
+            Some(i) if i > removed => Some(i - 1),
+            other => other,
+        };
+        if self.last_active_window == Some(self.active) {
+            self.last_active_window = None;
         }
     }
 
@@ -1586,5 +1593,57 @@ mod tests {
         m.active_window_mut().focus(first);
         m.handle_command(Command::SelectLastPane).unwrap();
         assert_eq!(m.active_window().active(), second, "last-pane returns to previous pane");
+    }
+
+    // SP6: killing the active window must keep `last_active_window` valid.
+    // Regression for a stale index that pointed past the shifted window list.
+    #[tokio::test]
+    async fn kill_window_keeps_last_active_index_valid() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::NewWindow).unwrap(); // W1, active=1, last=0
+        m.handle_command(Command::NewWindow).unwrap(); // W2, active=2, last=1
+        m.handle_command(Command::SelectWindow(0)).unwrap(); // active=0, last=Some(2) -> W2
+        assert_eq!(m.active_idx(), 0);
+        let w2_id = m.windows()[2].id;
+        // Kill W0 (active). windows shift to [W1, W2]; last (was index 2)
+        // must follow W2 to its new index 1, not dangle at 2.
+        m.handle_command(Command::KillWindow).unwrap();
+        assert_eq!(m.windows().len(), 2);
+        m.handle_command(Command::SelectLastWindow).unwrap();
+        assert_eq!(m.windows()[m.active_idx()].id, w2_id, "toggle lands on the original W2");
+    }
+
+    // SP6: a window removed by pane-death (its last pane exited) must shift
+    // `last_active_window` the same way `active` is shifted.
+    #[tokio::test]
+    async fn pane_death_window_removal_keeps_last_active_valid() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::NewWindow).unwrap(); // W1 (pane 1)
+        m.handle_command(Command::NewWindow).unwrap(); // W2 (pane 2)
+        m.handle_command(Command::SelectWindow(0)).unwrap(); // active=0, last=Some(2) -> W2
+        let w2_id = m.windows()[2].id;
+        // W1's sole pane (PaneId(1)) dies, so window index 1 is removed.
+        m.handle_pane_death(PaneId(1)).unwrap();
+        assert_eq!(m.windows().len(), 2);
+        // last (was index 2, after the removed index 1) must follow W2 to
+        // index 1 so the toggle still reaches it.
+        m.handle_command(Command::SelectLastWindow).unwrap();
+        assert_eq!(m.windows()[m.active_idx()].id, w2_id, "toggle lands on the original W2");
     }
 }

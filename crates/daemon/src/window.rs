@@ -179,6 +179,11 @@ impl Window {
     pub fn close_pane(&mut self, id: PaneId) -> Result<CloseOutcome, DaemonError> {
         let outcome = self.layout.close(id);
         self.panes.remove(&id);
+        // Drop a zoom overlay that pointed at the closed pane so it never
+        // outlives its target (a dangling zoom renders a blank viewport).
+        if self.zoomed == Some(id) {
+            self.zoomed = None;
+        }
         if id == self.active {
             // Collect history first to avoid simultaneous borrows of self.
             let alive_history: Vec<PaneId> = self
@@ -250,17 +255,26 @@ impl Window {
 
     pub fn resize(&mut self, viewport: Rect) -> Result<(), DaemonError> {
         for (id, pane) in self.panes.iter() {
-            if let Some(rect) = self.layout.rect_of(*id, viewport) {
-                let new_rows = rect.rows.max(1);
-                let size = PtySize {
-                    rows: new_rows,
-                    cols: rect.cols.max(1),
-                    pixel_width: 0,
-                    pixel_height: 0,
-                };
-                pane.resize(size)?;
-                pane.on_size_changed(new_rows);
-            }
+            // A zoomed pane fills the whole viewport regardless of its latent
+            // layout rect; hidden panes still track their layout rect so an
+            // un-zoom restores the split instantly at the correct size.
+            let rect = if self.zoomed == Some(*id) {
+                viewport
+            } else {
+                match self.layout.rect_of(*id, viewport) {
+                    Some(r) => r,
+                    None => continue,
+                }
+            };
+            let new_rows = rect.rows.max(1);
+            let size = PtySize {
+                rows: new_rows,
+                cols: rect.cols.max(1),
+                pixel_width: 0,
+                pixel_height: 0,
+            };
+            pane.resize(size)?;
+            pane.on_size_changed(new_rows);
         }
         Ok(())
     }
@@ -345,5 +359,56 @@ mod tests {
         let outcome = w.close_active().unwrap();
         assert_eq!(outcome, CloseOutcome::SiblingPromoted);
         assert_eq!(w.active(), PaneId(0));
+    }
+
+    #[tokio::test]
+    async fn resize_keeps_zoomed_pane_at_full_viewport() {
+        let viewport = Rect::new(0, 0, 24, 80);
+        let mut w = Window::spawn_first(
+            WindowId(0),
+            "w0".into(),
+            PaneId(0),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+        )
+        .unwrap();
+        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
+            .unwrap();
+        assert!(w.toggle_zoom(), "active pane is now zoomed");
+        // A subsequent host resize must keep the zoomed pane at the full
+        // viewport, not collapse it back to its split rect.
+        let new_vp = Rect::new(0, 0, 40, 100);
+        w.resize(new_vp).unwrap();
+        let (rows, cols) = w
+            .pane(PaneId(1))
+            .unwrap()
+            .with_screen(|s| (s.active.num_rows(), s.active.num_cols()));
+        assert_eq!((rows, cols), (40, 100), "zoomed pane must track the full viewport");
+    }
+
+    #[tokio::test]
+    async fn close_pane_clears_zoom_when_zoomed_pane_dies() {
+        let viewport = Rect::new(0, 0, 24, 80);
+        let mut w = Window::spawn_first(
+            WindowId(0),
+            "w0".into(),
+            PaneId(0),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+        )
+        .unwrap();
+        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
+            .unwrap();
+        assert!(w.toggle_zoom());
+        assert!(w.is_zoomed());
+        let outcome = w.close_pane(PaneId(1)).unwrap();
+        assert_eq!(outcome, CloseOutcome::SiblingPromoted);
+        assert!(!w.is_zoomed(), "zoom must clear when its target pane is closed");
     }
 }
