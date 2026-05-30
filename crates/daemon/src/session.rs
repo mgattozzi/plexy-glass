@@ -147,11 +147,13 @@ async fn render_coordinator(
                 plexy_glass_config::Position::Top => plexy_glass_mux::StatusPlacement::Top,
                 plexy_glass_config::Position::Bottom => plexy_glass_mux::StatusPlacement::Bottom,
             };
-            let status_row = match placement {
-                plexy_glass_mux::StatusPlacement::Top => 0u16,
-                plexy_glass_mux::StatusPlacement::Bottom => host_size.rows.saturating_sub(1),
+            let (status_row, pane_row_offset) = match placement {
+                plexy_glass_mux::StatusPlacement::Top => (0u16, 1u16),
+                plexy_glass_mux::StatusPlacement::Bottom => {
+                    (host_size.rows.saturating_sub(1), 0u16)
+                }
             };
-            m.set_status_bar_row(Some(status_row));
+            m.set_status_layout(Some(status_row), pane_row_offset);
             m.set_status_hits(hits);
             let status = StatusLine {
                 left: snap.left.into_iter().flatten().collect(),

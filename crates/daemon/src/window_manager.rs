@@ -56,9 +56,14 @@ pub struct WindowManager {
     /// Last left-press for multi-click classification (M6/M7).
     #[allow(dead_code)] // read by M6/M7
     click_history: Option<ClickHistory>,
-    /// Row index where the status bar paints, or `None` if the bar is hidden.
-    /// Set by `set_status_bar_row` (M10).
+    /// Physical row index where the status bar paints, or `None` if the bar is
+    /// hidden. Set by `set_status_layout` (M10).
     status_bar_row: Option<u16>,
+    /// Vertical offset of the logical pane band from physical row 0: `0` when
+    /// the status bar is at the bottom, `1` when it is at the top. Mouse events
+    /// arrive in physical coordinates; this offset translates them into the
+    /// layout's logical pane-coordinate space. Set by `set_status_layout`.
+    pane_row_offset: u16,
     /// Clickable regions in the current status bar. Refreshed each render
     /// tick via `set_status_hits`. M10.
     status_hits: Vec<plexy_glass_status::StatusHit>,
@@ -104,16 +109,20 @@ impl WindowManager {
             resize_drag: None,
             click_history: None,
             status_bar_row: None,
+            pane_row_offset: 0,
             status_hits: Vec::new(),
             detach_requested: false,
             last_active_window: None,
         })
     }
 
-    /// Set the row index where the status bar paints (or `None` to disable
-    /// status-bar click routing). Called by the render coordinator.
-    pub fn set_status_bar_row(&mut self, row: Option<u16>) {
-        self.status_bar_row = row;
+    /// Record the physical status-bar row (or `None` to disable status-bar
+    /// click routing) and the pane band's vertical offset (`0` for a bottom
+    /// bar, `1` for a top bar). Called by the render coordinator each frame so
+    /// mouse hit-testing stays aligned with the compositor's placement.
+    pub fn set_status_layout(&mut self, status_row: Option<u16>, pane_row_offset: u16) {
+        self.status_bar_row = status_row;
+        self.pane_row_offset = pane_row_offset;
     }
 
     /// Update the clickable-region table from the latest status snapshot.
@@ -457,13 +466,21 @@ impl WindowManager {
     /// Dispatch one decoded mouse event through the 6-rule precedence ladder
     /// (see docs/superpowers/specs/2026-05-22-full-mouse-design.md §6).
     pub async fn handle_mouse(&mut self, event: MouseEvent) -> Result<(), DaemonError> {
+        // Rule 2 (first): status-bar row hit. The bar lives outside the pane
+        // band, so test it against the *physical* row before translating. A
+        // drag in progress still consumes everything, including moves that
+        // stray onto the status row.
+        if self.resize_drag.is_none() && self.is_status_bar_row(event.row) {
+            return self.handle_status_bar_event(event).await;
+        }
+        // Everything below addresses panes/borders, which live in the layout's
+        // logical coordinate space. Translate away the status-bar offset (1 row
+        // when the bar is on top; 0 otherwise, leaving bottom placement byte
+        // for byte unchanged).
+        let event = self.to_pane_coords(event);
         // Rule 1: resize-drag in progress consumes everything until release.
         if self.resize_drag.is_some() {
             return self.handle_resize_drag_event(event).await;
-        }
-        // Rule 2: status-bar row hit.
-        if self.is_status_bar_row(event.row) {
-            return self.handle_status_bar_event(event).await;
         }
         // Rule 3: border hit on left press.
         if matches!(event.kind, MouseKind::Press)
@@ -496,6 +513,14 @@ impl WindowManager {
 
     fn is_status_bar_row(&self, row: u16) -> bool {
         self.status_bar_row == Some(row)
+    }
+
+    /// Translate a physical mouse event into the layout's logical pane
+    /// coordinates by removing the status-bar offset. A no-op when the bar is
+    /// at the bottom (offset 0).
+    fn to_pane_coords(&self, mut event: MouseEvent) -> MouseEvent {
+        event.row = event.row.saturating_sub(self.pane_row_offset);
+        event
     }
 
     async fn handle_status_bar_event(
@@ -1315,6 +1340,54 @@ mod tests {
         assert!(m.resize_drag.is_none());
     }
 
+    // SP4: with the status bar on top, mouse events (physical coords) must be
+    // shifted up by one row before hitting the logical pane/border layout.
+    // A physical click on the logical gutter row is *inside* a pane; the
+    // border lives one physical row lower.
+    #[tokio::test]
+    async fn status_top_offset_shifts_border_hit_row() {
+        use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
+
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::SplitH).unwrap(); // stacked top/bottom panes
+        let vp = m.viewport();
+        let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
+        let r1 = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
+        let top = if r0.row <= r1.row { r0 } else { r1 };
+        let gutter_row = top.row + top.rows; // logical border row between panes
+
+        // Status bar on top → pane band shifted down one physical row.
+        m.set_status_layout(Some(0), 1);
+        let press = |row| MouseEvent {
+            kind: MouseKind::Press,
+            button: MouseButton::Left,
+            modifiers: MouseModifiers::default(),
+            row,
+            col: 4,
+        };
+
+        // Physical gutter_row → logical gutter_row-1 (inside top pane): no drag.
+        m.handle_mouse(press(gutter_row)).await.unwrap();
+        assert!(
+            m.resize_drag.is_none(),
+            "physical gutter row is inside a pane under top placement"
+        );
+        // One physical row lower → logical border row: starts a resize drag.
+        m.handle_mouse(press(gutter_row + 1)).await.unwrap();
+        assert!(
+            m.resize_drag.is_some(),
+            "physical gutter_row+1 maps to the logical border under top placement"
+        );
+    }
+
     // K8: deterministic resize propagation (no PTY/timing). Proves
     // on_host_resize → Window::resize → Pane::resize → emulator resize for
     // every pane. The flaky e2e resize tests were the only prior coverage.
@@ -1381,7 +1454,7 @@ mod tests {
         .unwrap();
         m.handle_command(Command::NewWindow).unwrap(); // 2 windows, active = 1
         assert_eq!(m.active_idx(), 1);
-        m.set_status_bar_row(Some(23));
+        m.set_status_layout(Some(23), 0);
         m.set_status_hits(vec![plexy_glass_status::StatusHit {
             col_range: 0..5,
             action: plexy_glass_status::ClickAction::SelectWindow(0),
