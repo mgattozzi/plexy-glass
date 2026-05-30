@@ -367,14 +367,25 @@ fn rename_window_via_overlay_updates_status_bar() {
 
     // The window name renders in the status-bar window list.
     let out = read_until(&mut master, b"renamedwin", Instant::now() + Duration::from_secs(10));
-
-    let _ = child.kill();
-    let _ = child.wait();
-
     let txt = String::from_utf8_lossy(&out);
     assert!(
         txt.contains("renamedwin"),
         "renamed window name should appear in the status bar. raw: {txt}"
+    );
+
+    // The committed rename must also be persisted: the overlay path previously
+    // updated the screen but never scheduled a save, so the name was lost on
+    // restart. Wait out the ~1.5s persist debounce, then read the saved file.
+    std::thread::sleep(Duration::from_millis(2000));
+    let session_file = tmp.path().join("state/plexy-glass/sessions/main.json");
+    let saved = std::fs::read_to_string(&session_file).unwrap_or_default();
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        saved.contains("renamedwin"),
+        "renamed window name should be persisted to {session_file:?}. contents: {saved}"
     );
 }
 

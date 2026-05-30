@@ -74,18 +74,15 @@ fn is_border(r: u16, c: u16, band: Rect, rects: &[Rect]) -> bool {
     !rects.iter().any(|rect| rect.contains(r, c))
 }
 
-/// Whether `(r, c)` is orthogonally adjacent to (or inside) `rect`.
+/// Whether `(r, c)` lies on `rect`'s one-cell border ring, the cells of the
+/// frame box immediately surrounding the pane, corners included. A border cell
+/// in this ring belongs to the pane's frame and gets the active highlight.
 fn touches(r: u16, c: u16, rect: Rect) -> bool {
-    let within_rows = r >= rect.row.saturating_sub(1) && r <= rect.bottom_edge_row().saturating_add(1);
-    let within_cols = c >= rect.col.saturating_sub(1) && c <= rect.right_edge_col().saturating_add(1);
-    // Adjacent on a vertical edge or a horizontal edge (not diagonal-only).
-    let col_edge = (c + 1 == rect.col || c == rect.right_edge_col().saturating_add(1))
-        && r >= rect.row
-        && r <= rect.bottom_edge_row();
-    let row_edge = (r + 1 == rect.row || r == rect.bottom_edge_row().saturating_add(1))
-        && c >= rect.col
-        && c <= rect.right_edge_col();
-    (within_rows && within_cols) && (col_edge || row_edge)
+    let top = rect.row.saturating_sub(1);
+    let bottom = rect.bottom_edge_row().saturating_add(1);
+    let left = rect.col.saturating_sub(1);
+    let right = rect.right_edge_col().saturating_add(1);
+    r >= top && r <= bottom && c >= left && c <= right
 }
 
 fn box_glyph(n: bool, s: bool, e: bool, w: bool) -> &'static str {
@@ -183,6 +180,22 @@ mod tests {
         // Title " ed " starts two cells in (col 2): space, e, d, space.
         assert_eq!(screen.cell(0, 3).unwrap().grapheme.as_str(), "e");
         assert_eq!(screen.cell(0, 4).unwrap().grapheme.as_str(), "d");
+    }
+
+    #[test]
+    fn active_pane_frame_highlights_corners() {
+        use plexy_glass_emulator::Attrs;
+        let band = Rect::new(0, 0, 5, 7);
+        let pane = Rect::new(1, 1, 3, 5);
+        let mut screen = VirtualScreen::blank(5, 7);
+        draw(&[frame(pane, true, None)], band, &mut screen);
+        // The active pane's frame is bold all the way around, corners included.
+        for (r, c) in [(0u16, 0u16), (0, 6), (4, 0), (4, 6)] {
+            assert!(
+                screen.cell(r, c).unwrap().attrs.contains(Attrs::BOLD),
+                "active frame corner ({r},{c}) should be bold"
+            );
+        }
     }
 
     #[test]

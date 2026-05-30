@@ -11,6 +11,17 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
 
+/// How the caller should follow up after feeding a key to the active overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayKeyResult {
+    /// Key ignored; nothing changed.
+    Ignored,
+    /// Overlay state changed (typing / scroll / cancel); recompose only.
+    Redraw,
+    /// A rename committed and changed a name; recompose AND persist.
+    Committed,
+}
+
 /// Active border drag-resize. Cleared on Release. While `Some`, all mouse
 /// events go to `handle_resize_drag_event`. Fields read by M5 wiring.
 #[allow(dead_code)] // fields populated by M5
@@ -177,13 +188,15 @@ impl WindowManager {
         self.rename_pane_target = None;
     }
 
-    /// Feed one key to the active overlay. Returns whether the frame should be
-    /// recomposed. On commit, applies the rename to the active window or the
-    /// captured pane; an empty (whitespace-only) name is a no-op rename.
-    pub fn handle_overlay_key(&mut self, event: &KeyEvent) -> bool {
+    /// Feed one key to the active overlay. On commit, applies the rename to the
+    /// active window or the captured pane; an empty (whitespace-only) name is a
+    /// no-op rename. The return tells the caller how to follow up: `Ignored`
+    /// (nothing), `Redraw` (recompose only), or `Committed` (recompose AND
+    /// persist, a name actually changed).
+    pub fn handle_overlay_key(&mut self, event: &KeyEvent) -> OverlayKeyResult {
         let (action, target) = {
             let Some(overlay) = self.overlay.as_mut() else {
-                return false;
+                return OverlayKeyResult::Ignored;
             };
             let action = OverlayHandler::handle(event, overlay);
             let target = match overlay {
@@ -193,28 +206,37 @@ impl WindowManager {
             (action, target)
         };
         match action {
-            OverlayAction::None => false,
-            OverlayAction::Redraw => true,
+            OverlayAction::None => OverlayKeyResult::Ignored,
+            OverlayAction::Redraw => OverlayKeyResult::Redraw,
             OverlayAction::Cancel => {
                 self.close_overlay();
-                true
+                OverlayKeyResult::Redraw
             }
             OverlayAction::Commit(text) => {
+                let mut changed = false;
                 if !text.is_empty() {
                     match target {
-                        Some(RenameTarget::Window) => self.set_window_name(self.active, text),
+                        Some(RenameTarget::Window) => {
+                            self.set_window_name(self.active, text);
+                            changed = true;
+                        }
                         Some(RenameTarget::Pane) => {
                             if let Some(pid) = self.rename_pane_target
                                 && let Some(p) = self.active_window().pane(pid)
                             {
                                 p.set_name(Some(text));
+                                changed = true;
                             }
                         }
                         None => {}
                     }
                 }
                 self.close_overlay();
-                true
+                if changed {
+                    OverlayKeyResult::Committed
+                } else {
+                    OverlayKeyResult::Redraw
+                }
             }
         }
     }
@@ -1366,7 +1388,11 @@ mod tests {
             m.handle_overlay_key(&okey(plexy_glass_mux::Key::Backspace));
         }
         type_str(&mut m, "build");
-        assert!(m.handle_overlay_key(&okey(plexy_glass_mux::Key::Enter)));
+        // A real rename reports `Committed` so the connection persists it.
+        assert_eq!(
+            m.handle_overlay_key(&okey(plexy_glass_mux::Key::Enter)),
+            OverlayKeyResult::Committed
+        );
         assert!(m.overlay().is_none(), "overlay closed on commit");
         assert_eq!(m.active_window().name, "build");
     }
@@ -1421,7 +1447,12 @@ mod tests {
         for _ in 0..orig.chars().count() {
             m.handle_overlay_key(&okey(plexy_glass_mux::Key::Backspace));
         }
-        m.handle_overlay_key(&okey(plexy_glass_mux::Key::Enter));
+        // Empty commit closes the overlay but changes nothing, so it must NOT
+        // report Committed (no needless persist).
+        assert_eq!(
+            m.handle_overlay_key(&okey(plexy_glass_mux::Key::Enter)),
+            OverlayKeyResult::Redraw
+        );
         assert!(m.overlay().is_none());
         assert_eq!(m.active_window().name, orig, "empty commit does not rename");
     }

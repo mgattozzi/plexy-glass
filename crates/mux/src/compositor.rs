@@ -375,8 +375,10 @@ fn paint_help_box(
     let max_visible = pane_area_rows.saturating_sub(3) as usize; // borders + footer
     let visible = lines.len().min(max_visible.max(1));
     let box_h = (visible as u16) + 3;
-    if box_w < 3 || box_h < 4 || box_w > cols {
-        return; // viewport too small to draw a meaningful box
+    if box_w < 3 || box_h < 4 || box_w > cols || box_h > pane_area_rows {
+        // Viewport too small to draw a meaningful box without overflowing the
+        // pane band (and painting over the status row).
+        return;
     }
     let max_scroll = lines.len().saturating_sub(visible);
     let top = (scroll as usize).min(max_scroll);
@@ -845,5 +847,37 @@ mod tests {
         }
         assert!(found_corner, "help box top-left corner drawn");
         assert!(found_text, "help row text drawn");
+    }
+
+    #[test]
+    fn help_box_suppressed_when_pane_area_too_small() {
+        // Host 4 rows with a status bar → pane band is 3 rows; the smallest
+        // help box is 4 rows, so it must be suppressed rather than overflow
+        // onto the status row.
+        let mut e = Emulator::new(3, 40);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 3, 40),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+        };
+        let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
+        let ov = OverlayView::Help { lines: &lines, scroll: 0 };
+        let status = status_with_left("S");
+        let vs =
+            Compositor::compose(&[view], (4, 40), Some(&status), StatusPlacement::Bottom, None, Some(&ov));
+        let mut found_corner = false;
+        for r in 0..4 {
+            for c in 0..40 {
+                if vs.cell(r, c).unwrap().grapheme.as_str() == "\u{250c}" {
+                    found_corner = true;
+                }
+            }
+        }
+        assert!(!found_corner, "help box must be suppressed when it would overflow the band");
     }
 }

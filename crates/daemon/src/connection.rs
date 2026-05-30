@@ -256,12 +256,21 @@ where
                                 m.overlay().is_some()
                             };
                             if overlay_active {
-                                let redraw = {
+                                let result = {
                                     let mut m = session.window_manager.lock().await;
                                     m.handle_overlay_key(&ke)
                                 };
-                                if redraw {
-                                    session.notify.notify_one();
+                                match result {
+                                    crate::window_manager::OverlayKeyResult::Ignored => {}
+                                    crate::window_manager::OverlayKeyResult::Redraw => {
+                                        session.notify.notify_one();
+                                    }
+                                    crate::window_manager::OverlayKeyResult::Committed => {
+                                        // A rename changed persistent state: redraw
+                                        // and schedule a debounced save.
+                                        session.notify.notify_one();
+                                        session.mark_dirty();
+                                    }
                                 }
                                 continue;
                             }
