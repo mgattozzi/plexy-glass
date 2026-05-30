@@ -1043,8 +1043,14 @@ impl WindowManager {
 }
 
 fn host_viewport(host: PtySize) -> Rect {
-    let rows = host.rows.saturating_sub(1).max(1);
-    Rect::new(0, 0, rows, host.cols.max(1))
+    // The pane band reserves one row for the status bar; full pane frames then
+    // inset the layout region by one cell on every side (top/bottom/left/right)
+    // so the outer frame has cells to occupy. Pane content rects therefore
+    // start at (1, 1). The compositor's `pane_row_offset` shifts this physical
+    // band down by one more row when the status bar is on top.
+    let rows = host.rows.saturating_sub(3).max(1); // 1 status + 2 frame rows
+    let cols = host.cols.saturating_sub(2).max(1); // 2 frame cols
+    Rect::new(1, 1, rows, cols)
 }
 
 /// Whether a command should clear an active zoom overlay before running.
@@ -1606,7 +1612,9 @@ mod tests {
         m.on_host_resize(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
             .unwrap();
         let vp = m.viewport();
-        assert_eq!(vp.cols, 120, "viewport width did not update");
+        // The layout region is inset by the pane frame: full width (120) minus
+        // the two outer frame columns.
+        assert_eq!(vp.cols, 118, "viewport width did not update (120 - 2 frame cols)");
         let win = m.active_window();
         let panes = win.layout().panes();
         assert_eq!(panes.len(), 2);

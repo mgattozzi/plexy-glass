@@ -218,15 +218,16 @@ fn sigwinch_propagates_to_child() {
         .expect("resize");
 
     // Poll the child's reported size, re-issuing `stty size` until the resize
-    // has propagated (host 50 rows minus the 1 status row = 49; cols 200).
-    // This replaces a fixed post-resize sleep, which raced the async resize
-    // chain (SIGWINCH → socket → daemon → TIOCSWINSZ).
-    let ok = probe_until_size(&mut writer, &mut master, b"49x200", Instant::now() + Duration::from_secs(10));
+    // has propagated. Host 50x200, single pane with a full frame: rows = 50 - 1
+    // status - 2 frame = 47; cols = 200 - 2 frame = 198. This replaces a fixed
+    // post-resize sleep, which raced the async resize chain (SIGWINCH → socket
+    // → daemon → TIOCSWINSZ).
+    let ok = probe_until_size(&mut writer, &mut master, b"47x198", Instant::now() + Duration::from_secs(10));
 
     let _ = child.kill();
     let _ = child.wait();
 
-    assert!(ok, "child never reported 49 200 after SIGWINCH resize");
+    assert!(ok, "child never reported 47 198 after SIGWINCH resize");
 }
 
 #[test]
@@ -320,14 +321,61 @@ fn mux_resize_propagates_to_all_panes() {
         .expect("resize");
 
     // The active pane is the right pane of the vertical split. After resize to
-    // 30x100: usable rows = 30 - 1 status = 29; cols 100 split 50/49 (gutter)
-    // → the focused (second) pane is 49 cols. Poll until the resize lands.
-    let ok = probe_until_size(&mut writer, &mut master, b"29x49", Instant::now() + Duration::from_secs(10));
+    // 30x100, with a full pane frame: rows = 30 - 1 status - 2 frame = 27;
+    // cols = 100 - 2 frame = 98, split with a 1-col gutter → left 49, right 48,
+    // so the focused (second) pane is 27x48. Poll until the resize lands.
+    let ok = probe_until_size(&mut writer, &mut master, b"27x48", Instant::now() + Duration::from_secs(10));
 
     let _ = child.kill();
     let _ = child.wait();
 
-    assert!(ok, "active pane never reported 29 49 after resize");
+    assert!(ok, "active pane never reported 27 48 after resize");
+}
+
+#[test]
+fn rename_window_via_overlay_updates_status_bar() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .expect("openpty");
+
+    let bin = std::process::Command::cargo_bin("plexy-glass").expect("binary built");
+    let mut builder = CommandBuilder::new(bin.get_program());
+    builder.arg("attach");
+    for (k, v) in &env {
+        builder.env(k, v);
+    }
+    let mut child = pair.slave.spawn_command(builder).expect("spawn child");
+    drop(pair.slave);
+
+    let mut master = pair.master;
+    let mut writer = master.take_writer().expect("take writer");
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Ctrl+a , opens the rename-window overlay (seeded with the current name).
+    writer.write_all(&[0x01, b',']).expect("open rename");
+    let _ = writer.flush();
+    std::thread::sleep(Duration::from_millis(250));
+    // Append a unique marker and commit with Enter. We don't clear the seed
+    // because the marker is a unique substring regardless of the pre-filled name.
+    writer.write_all(b"renamedwin\r").expect("type + enter");
+    let _ = writer.flush();
+
+    // The window name renders in the status-bar window list.
+    let out = read_until(&mut master, b"renamedwin", Instant::now() + Duration::from_secs(10));
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let txt = String::from_utf8_lossy(&out);
+    assert!(
+        txt.contains("renamedwin"),
+        "renamed window name should appear in the status bar. raw: {txt}"
+    );
 }
 
 #[test]
@@ -366,15 +414,16 @@ fn mux_kill_pane_collapses_layout() {
 
     writer.write_all(b"stty size\n").expect("stty");
 
-    let buf = read_until(&mut master, b"80", Instant::now() + Duration::from_secs(8));
+    let buf = read_until(&mut master, b"78", Instant::now() + Duration::from_secs(8));
 
     let _ = child.kill();
     let _ = child.wait();
 
     let txt = String::from_utf8_lossy(&buf);
     assert!(
-        txt.contains("80"),
-        "expected stty cols ~80 after kill. raw: {txt}"
+        // host cols 80 minus the 2 outer pane-frame columns.
+        txt.contains("78"),
+        "expected stty cols ~78 after kill. raw: {txt}"
     );
 }
 

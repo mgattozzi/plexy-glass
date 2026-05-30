@@ -21,6 +21,9 @@ pub struct PaneView<'a> {
     /// When Some, the pane is in copy-mode; the compositor uses the copy-mode
     /// viewport instead of `scroll_offset` and renders overlays.
     pub copy_mode: Option<&'a crate::CopyMode>,
+    /// User-assigned pane name, painted on the pane's top border. `None` hides
+    /// the title (plain border).
+    pub title: Option<&'a str>,
 }
 
 /// Where the status bar sits relative to the pane area.
@@ -210,17 +213,20 @@ impl Compositor {
             }
         }
 
-        // Borders. Offset rects by `pane_row_offset` so separators land on the
-        // physical pane band (matters for top status placement).
-        let rects: Vec<(Rect, bool)> = panes
+        // Full pane frames. Offset each pane rect by `pane_row_offset` so the
+        // frame lands on the physical pane band (matters for top status). The
+        // band is the whole physical pane area; the layout already inset pane
+        // rects by one cell on every side to leave room for the frame.
+        let band = Rect::new(pane_row_offset, 0, pane_area_rows, host_cols);
+        let frames: Vec<borders::PaneFrame<'_>> = panes
             .iter()
             .map(|v| {
                 let mut r = v.rect;
                 r.row = r.row.saturating_add(pane_row_offset);
-                (r, v.is_active)
+                borders::PaneFrame { rect: r, active: v.is_active, title: v.title }
             })
             .collect();
-        borders::draw(&rects, &mut screen);
+        borders::draw(&frames, band, &mut screen);
 
         // Status bar.
         if let Some(s) = status {
@@ -571,6 +577,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            title: None,
         };
         let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
@@ -590,6 +597,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            title: None,
         };
         let mut sel = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
         sel.extend(0, 4, Rect::new(0, 0, 4, 6));
@@ -620,6 +628,7 @@ mod tests {
             is_active: false,
             scroll_offset: 0,
             copy_mode: None,
+            title: None,
         };
         let rv = PaneView {
             id: PaneId(1),
@@ -628,6 +637,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            title: None,
         };
         let vs = Compositor::compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "L");
@@ -656,6 +666,7 @@ mod tests {
             is_active: true,
             scroll_offset: 1,
             copy_mode: None,
+            title: None,
         };
         let vs = Compositor::compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None);
         // Row 0 should be the last scrollback row (BBBB), not CCCC.
@@ -687,6 +698,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: Some(&cm),
+            title: None,
         };
         let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None);
         assert_eq!(vs.cursor, Some((3, 7)));
@@ -713,6 +725,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: Some(&cm),
+            title: None,
         };
         let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None);
         for c in 0..=4 {
@@ -749,6 +762,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            title: None,
         };
         let status = status_with_left("AB");
         let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None);
@@ -769,6 +783,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            title: None,
         };
         let status = status_with_left("AB");
         let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None);
@@ -788,6 +803,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            title: None,
         };
         let ov = OverlayView::RenamePrompt { label: "rename window", buf: "hi" };
         let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov));
@@ -808,6 +824,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            title: None,
         };
         let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };

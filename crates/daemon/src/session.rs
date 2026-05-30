@@ -9,11 +9,23 @@ use std::time::SystemTime;
 use tokio::sync::{mpsc, watch, Mutex, Notify};
 use tokio::task::JoinHandle;
 
+/// Per-pane data captured under the window-manager lock, owned so the borrowed
+/// `PaneView`s handed to the compositor don't keep the lock held during
+/// `compose`.
+struct OwnedPane {
+    id: plexy_glass_mux::PaneId,
+    rect: plexy_glass_mux::Rect,
+    screen: plexy_glass_emulator::Screen,
+    is_active: bool,
+    scroll: u32,
+    copy_mode: Option<plexy_glass_mux::CopyMode>,
+    name: Option<String>,
+}
+
 async fn render_coordinator(
     session: Arc<Session>,
     frame_tx: watch::Sender<Arc<VirtualScreen>>,
 ) {
-    use plexy_glass_emulator::Screen;
     use plexy_glass_mux::{Compositor, PaneView, StatusLine};
     use std::time::Duration;
     const DEBOUNCE: Duration = Duration::from_millis(16);
@@ -61,14 +73,7 @@ async fn render_coordinator(
                 Some(zid) => vec![zid],
                 None => layout.panes(),
             };
-            let mut owned: Vec<(
-                plexy_glass_mux::PaneId,
-                plexy_glass_mux::Rect,
-                Screen,
-                bool,
-                u32,
-                Option<plexy_glass_mux::CopyMode>,
-            )> = Vec::with_capacity(pane_ids.len());
+            let mut owned: Vec<OwnedPane> = Vec::with_capacity(pane_ids.len());
             for id in pane_ids {
                 if let Some(pane) = win.pane(id) {
                     let rect = if zoomed == Some(id) {
@@ -79,21 +84,27 @@ async fn render_coordinator(
                             None => continue,
                         }
                     };
-                    let screen = pane.with_screen(|s| s.clone());
-                    let scroll = pane.scroll_offset();
-                    let copy_mode = pane.with_copy_mode(|cm| cm.clone());
-                    owned.push((id, rect, screen, id == active_id, scroll, copy_mode));
+                    owned.push(OwnedPane {
+                        id,
+                        rect,
+                        screen: pane.with_screen(|s| s.clone()),
+                        is_active: id == active_id,
+                        scroll: pane.scroll_offset(),
+                        copy_mode: pane.with_copy_mode(|cm| cm.clone()),
+                        name: pane.name(),
+                    });
                 }
             }
             let views: Vec<PaneView> = owned
                 .iter()
-                .map(|(id, rect, screen, active, scroll, cm)| PaneView {
-                    id: *id,
-                    rect: *rect,
-                    screen,
-                    is_active: *active,
-                    scroll_offset: *scroll,
-                    copy_mode: cm.as_ref(),
+                .map(|p| PaneView {
+                    id: p.id,
+                    rect: p.rect,
+                    screen: &p.screen,
+                    is_active: p.is_active,
+                    scroll_offset: p.scroll,
+                    copy_mode: p.copy_mode.as_ref(),
+                    title: p.name.as_deref(),
                 })
                 .collect();
 
@@ -353,10 +364,10 @@ impl Session {
                 let panes: Vec<PaneStateV1> = leaves
                     .iter()
                     .map(|pid| {
-                        let cwd = w
-                            .pane(*pid)
-                            .and_then(|p| p.with_screen(|s| s.cwd.clone()));
-                        PaneStateV1 { cwd }
+                        let pane = w.pane(*pid);
+                        let cwd = pane.and_then(|p| p.with_screen(|s| s.cwd.clone()));
+                        let name = pane.and_then(|p| p.name());
+                        PaneStateV1 { cwd, name }
                     })
                     .collect();
                 let layout = layout_tree
@@ -621,6 +632,15 @@ impl Session {
                 if let Some(win) = wm.windows_mut().get_mut(i) {
                     win.sync_input = saved_w.sync_input;
                     let leaves = win.layout().dfs_leaves();
+                    // Restore user-assigned pane names by DFS index (the same
+                    // order panes were serialized in).
+                    for (li, pid) in leaves.iter().enumerate() {
+                        if let Some(ps) = saved_w.panes.get(li)
+                            && let Some(p) = win.pane(*pid)
+                        {
+                            p.set_name(ps.name.clone());
+                        }
+                    }
                     if let Some(pid) = leaves.get(saved_w.active_pane as usize) {
                         win.focus(*pid);
                     }
@@ -1350,6 +1370,30 @@ mod tests {
         let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
         let wm = restored.window_manager.lock().await;
         assert_eq!(wm.windows()[0].layout().panes().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_from_round_trips_pane_name() {
+        let _g = test_isolate_state_dir();
+        let original = Session::new("rtn".into(), spec(), size(), cfg()).unwrap();
+        {
+            let wm = original.window_manager.lock().await;
+            let pid = wm.active_window().active();
+            wm.active_window().pane(pid).unwrap().set_name(Some("logs".into()));
+        }
+        original.mark_dirty();
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        drop(original);
+        let saved = crate::persist::load_session("rtn").expect("load").expect("file");
+        assert_eq!(saved.windows[0].panes[0].name.as_deref(), Some("logs"));
+        let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
+        let wm = restored.window_manager.lock().await;
+        let pid = wm.active_window().active();
+        assert_eq!(
+            wm.active_window().pane(pid).unwrap().name().as_deref(),
+            Some("logs"),
+            "pane name survives save + restore"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

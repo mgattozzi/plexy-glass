@@ -8,7 +8,13 @@ use std::io::Write;
 use std::path::PathBuf;
 
 /// Schema version. Bump on any non-additive on-disk format change.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// v1 -> v2: added `PaneStateV1.name` (optional, `#[serde(default)]`). v1 files
+/// still load (the missing field defaults to `None`) so loads accept either.
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// Oldest on-disk schema this build can still load (older files are rejected).
+const MIN_SUPPORTED_SCHEMA: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +40,10 @@ pub struct WindowStateV1 {
 #[serde(deny_unknown_fields)]
 pub struct PaneStateV1 {
     pub cwd: Option<String>,
+    /// User-assigned pane name (schema v2+). Absent in v1 files, where
+    /// `#[serde(default)]` fills it as `None`.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -104,7 +114,10 @@ pub fn load_session(name: &str) -> Result<Option<SessionStateV1>, PersistError> 
         Err(e) => return Err(PersistError::Io(e)),
     };
     let state: SessionStateV1 = serde_json::from_slice(&bytes)?;
-    if state.schema != SCHEMA_VERSION {
+    // Accept any schema in the supported range (additive-only fields use
+    // serde defaults, so older files still deserialize). Saves always write
+    // the current SCHEMA_VERSION.
+    if !(MIN_SUPPORTED_SCHEMA..=SCHEMA_VERSION).contains(&state.schema) {
         return Err(PersistError::Schema(state.schema));
     }
     Ok(Some(state))
@@ -190,7 +203,7 @@ mod tests {
                 name: "shell".into(),
                 sync_input: false,
                 active_pane: 0,
-                panes: vec![PaneStateV1 { cwd: Some("/tmp".into()) }],
+                panes: vec![PaneStateV1 { cwd: Some("/tmp".into()), name: None }],
                 layout: LayoutStateV1::Leaf(0),
             }],
         }
@@ -249,6 +262,34 @@ mod tests {
     fn delete_missing_is_ok() {
         let _g = isolate();
         delete_session("never-saved").expect("delete");
+    }
+
+    #[test]
+    fn loads_v1_file_without_name_field() {
+        let _g = isolate();
+        let dir = sessions_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        // A schema-1 file: the pane has `cwd` but no `name` key at all.
+        std::fs::write(
+            dir.join("old.json"),
+            br#"{"schema":1,"name":"old","created":"2026-05-24T12:00:00Z","active_window":0,"windows":[{"name":"shell","sync_input":false,"active_pane":0,"panes":[{"cwd":"/tmp"}],"layout":{"Leaf":0}}]}"#,
+        )
+        .unwrap();
+        let loaded = load_session("old").expect("load").expect("present");
+        assert_eq!(loaded.windows[0].panes[0].name, None, "missing name defaults to None");
+        assert_eq!(loaded.windows[0].panes[0].cwd.as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn pane_name_round_trips_in_v2() {
+        let _g = isolate();
+        let mut s = sample_state("named");
+        s.windows[0].panes[0].name = Some("logs".into());
+        save_session(&s).expect("save");
+        let loaded = load_session("named").expect("load").expect("present");
+        assert_eq!(loaded.schema, SCHEMA_VERSION);
+        assert_eq!(loaded.schema, 2, "saves write the current schema");
+        assert_eq!(loaded.windows[0].panes[0].name.as_deref(), Some("logs"));
     }
 
     #[test]
