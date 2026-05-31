@@ -368,6 +368,9 @@ fn paint_overlay(
         }
         OverlayView::Help { lines, scroll } => {
             paint_help_box(screen, lines, *scroll, pane_row_offset, pane_area_rows, cols);
+            // Suppress the underlying pane cursor while the box is up, matching
+            // the rename/command overlays (otherwise it shows behind the box).
+            screen.cursor_visible = false;
         }
         OverlayView::Command { buf } => {
             // A full-width REVERSE bar on the bottom row of the pane band,
@@ -976,6 +979,9 @@ mod tests {
         }
         assert!(found_corner, "help box top-left corner drawn");
         assert!(found_text, "help row text drawn");
+        // The help overlay must suppress the underlying pane cursor (the pane
+        // is live with a visible cursor), matching rename/command overlays.
+        assert!(!vs.cursor_visible, "help overlay hides the pane cursor");
     }
 
     #[test]
