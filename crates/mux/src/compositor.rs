@@ -8,7 +8,7 @@ use crate::{
     status::StatusLine,
     virtual_screen::VirtualScreen,
 };
-use plexy_glass_emulator::Screen;
+use plexy_glass_emulator::{Screen, display_width};
 
 pub struct PaneView<'a> {
     pub id: PaneId,
@@ -293,20 +293,7 @@ impl Compositor {
             let mut text = String::from("/");
             text.push_str(&cm.search.prompt_buf);
             let prompt_attrs = plexy_glass_emulator::Attrs::REVERSE;
-            for (i, ch) in text.chars().enumerate() {
-                let host_c = active.rect.col + i as u16;
-                if host_c >= host_cols {
-                    break;
-                }
-                let mut buf = [0u8; 4];
-                let s = ch.encode_utf8(&mut buf);
-                let cell = plexy_glass_emulator::Cell {
-                    grapheme: smol_str::SmolStr::new(s),
-                    attrs: prompt_attrs,
-                    ..plexy_glass_emulator::Cell::default()
-                };
-                screen.put(prompt_row, host_c, cell);
-            }
+            put_str(&mut screen, prompt_row, active.rect.col, &text, prompt_attrs, host_cols);
         }
 
         // Transient status-line message: a full-width REVERSE bar on the bottom
@@ -320,13 +307,7 @@ impl Compositor {
             for c in 0..host_cols {
                 put_char(&mut screen, row, c, ' ', attrs);
             }
-            for (i, ch) in format!(" {msg}").chars().enumerate() {
-                let col = i as u16;
-                if col >= host_cols {
-                    break;
-                }
-                put_char(&mut screen, row, col, ch, attrs);
-            }
+            put_str(&mut screen, row, 0, &format!(" {msg}"), attrs, host_cols);
         }
 
         // Interactive overlay (rename prompt / help), painted last so it sits
@@ -357,16 +338,8 @@ fn paint_overlay(
             for c in 0..cols {
                 put_char(screen, row, c, ' ', attrs);
             }
-            let mut end_col = 0u16;
-            for (i, ch) in text.chars().enumerate() {
-                let col = i as u16;
-                if col >= cols {
-                    break;
-                }
-                put_char(screen, row, col, ch, attrs);
-                end_col = col + 1;
-            }
-            // Block cursor just past the buffer.
+            // Block cursor just past the text (at its true display end).
+            let end_col = put_str(screen, row, 0, &text, attrs, cols);
             if end_col < cols {
                 put_char(screen, row, end_col, '\u{2588}', attrs);
             }
@@ -394,15 +367,7 @@ fn paint_overlay(
             for c in 0..cols {
                 put_char(screen, row, c, ' ', attrs);
             }
-            let mut end_col = 0u16;
-            for (i, ch) in text.chars().enumerate() {
-                let col = i as u16;
-                if col >= cols {
-                    break;
-                }
-                put_char(screen, row, col, ch, attrs);
-                end_col = col + 1;
-            }
+            let end_col = put_str(screen, row, 0, &text, attrs, cols);
             if end_col < cols {
                 put_char(screen, row, end_col, '\u{2588}', attrs);
             }
@@ -423,15 +388,17 @@ fn paint_help_box(
 ) {
     let title = " Keybindings ";
     let footer = " j/k scroll \u{b7} esc close ";
-    // Key column width = widest key string (cap to keep the box reasonable).
-    let key_w = lines.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0).min(20);
+    // Key column width = widest key string in display columns (cap to keep the
+    // box reasonable).
+    let dw = |s: &str| display_width(s) as usize;
+    let key_w = lines.iter().map(|(k, _)| dw(k)).max().unwrap_or(0).min(20);
     let content_w = lines
         .iter()
-        .map(|(k, d)| key_w.max(k.chars().count()) + 2 + d.chars().count())
+        .map(|(k, d)| key_w.max(dw(k)) + 2 + dw(d))
         .max()
         .unwrap_or(0)
-        .max(title.chars().count())
-        .max(footer.chars().count());
+        .max(dw(title))
+        .max(dw(footer));
     // Box width includes 1 cell of padding each side + 2 borders.
     let inner_w = (content_w + 2).min(cols.saturating_sub(2) as usize);
     let box_w = (inner_w + 2) as u16;
@@ -459,16 +426,18 @@ fn paint_help_box(
         }
     }
     // Title centered on the top border.
-    let tcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(title.chars().count()) / 2) as u16;
+    let tcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(title)) / 2) as u16;
     put_str(screen, row0, tcol, title, attrs, col0 + box_w - 1);
     // Footer centered on the bottom border.
-    let fcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(footer.chars().count()) / 2) as u16;
+    let fcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(footer)) / 2) as u16;
     put_str(screen, row0 + box_h - 1, fcol, footer, attrs, col0 + box_w - 1);
 
-    // Content rows.
+    // Content rows. Pad the key column to `key_w` *display* columns (keys are
+    // ASCII today, but pad by width so a wide glyph would still align).
     for (i, (keys, desc)) in lines.iter().skip(top).take(visible).enumerate() {
         let r = row0 + 1 + i as u16;
-        let line = format!("{keys:<key_w$}  {desc}", key_w = key_w);
+        let pad = " ".repeat(key_w.saturating_sub(dw(keys)));
+        let line = format!("{keys}{pad}  {desc}");
         put_str(screen, r, col0 + 1, &line, attrs, col0 + box_w - 1);
     }
 }
@@ -504,14 +473,15 @@ fn paint_session_picker(
     let row_count = rows.len().max(1); // empty list still needs 1 message row
     let visible = row_count.min(max_visible);
 
+    let dw = |s: &str| display_width(s) as usize;
     let content_w = rows
         .iter()
-        .map(|s| s.chars().count())
+        .map(|s| dw(s))
         .chain([
-            filter_line.chars().count(),
-            title.chars().count(),
-            footer.chars().count(),
-            if rows.is_empty() { empty_msg.chars().count() } else { 0 },
+            dw(&filter_line),
+            dw(title),
+            dw(footer),
+            if rows.is_empty() { dw(empty_msg) } else { 0 },
         ])
         .max()
         .unwrap_or(0);
@@ -537,9 +507,9 @@ fn paint_session_picker(
         }
     }
     // Title + footer centered on the borders.
-    let tcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(title.chars().count()) / 2) as u16;
+    let tcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(title)) / 2) as u16;
     put_str(screen, row0, tcol, title, plain, col0 + box_w - 1);
-    let fcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(footer.chars().count()) / 2) as u16;
+    let fcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(footer)) / 2) as u16;
     put_str(screen, row0 + box_h - 1, fcol, footer, plain, col0 + box_w - 1);
 
     let inner_left = col0 + 1;
@@ -588,10 +558,23 @@ fn border_glyph(r: u16, c: u16, h: u16, w: u16) -> char {
     }
 }
 
-/// Put a single char with attrs at (row, col), clipped to the screen.
-fn put_char(screen: &mut VirtualScreen, row: u16, col: u16, ch: char, attrs: plexy_glass_emulator::Attrs) {
+/// Put a single char with attrs at (row, col), clipped to the screen. A
+/// double-width char also writes a wide spacer in the next column. Returns the
+/// display columns consumed (0 if clipped, else 1 or 2).
+fn put_char(
+    screen: &mut VirtualScreen,
+    row: u16,
+    col: u16,
+    ch: char,
+    attrs: plexy_glass_emulator::Attrs,
+) -> u16 {
     if row >= screen.rows || col >= screen.cols {
-        return;
+        return 0;
+    }
+    // A placed glyph occupies at least one cell, even a lone combining mark.
+    let w = plexy_glass_emulator::char_width(ch).max(1);
+    if w == 2 && col + 1 >= screen.cols {
+        return 0; // a wide glyph would straddle the edge; don't split it
     }
     let mut buf = [0u8; 4];
     let s = ch.encode_utf8(&mut buf);
@@ -601,10 +584,17 @@ fn put_char(screen: &mut VirtualScreen, row: u16, col: u16, ch: char, attrs: ple
         ..plexy_glass_emulator::Cell::default()
     };
     screen.put(row, col, cell);
+    if w == 2 {
+        screen.put(row, col + 1, plexy_glass_emulator::Cell::wide_spacer());
+    }
+    w
 }
 
-/// Put a string starting at (row, col), stopping at `max_col` (exclusive) or
-/// the screen edge.
+/// Put a string starting at (row, col), advancing by each grapheme's display
+/// width (a wide grapheme writes a spacer in its second column). Stops at
+/// `max_col` (exclusive) or the screen edge, never splitting a wide grapheme.
+/// Returns the display column just past the last grapheme written, so callers
+/// can place a trailing cursor at the true end of the text.
 fn put_str(
     screen: &mut VirtualScreen,
     row: u16,
@@ -612,14 +602,28 @@ fn put_str(
     text: &str,
     attrs: plexy_glass_emulator::Attrs,
     max_col: u16,
-) {
-    for (i, ch) in text.chars().enumerate() {
-        let c = col.saturating_add(i as u16);
+) -> u16 {
+    let mut c = col;
+    for (g, w) in plexy_glass_emulator::graphemes_with_width(text) {
         if c >= max_col || c >= screen.cols {
             break;
         }
-        put_char(screen, row, c, ch, attrs);
+        // A wide grapheme needs both its columns inside the bounds.
+        if w == 2 && (c + 1 >= max_col || c + 1 >= screen.cols) {
+            break;
+        }
+        let cell = plexy_glass_emulator::Cell {
+            grapheme: smol_str::SmolStr::new(g),
+            attrs,
+            ..plexy_glass_emulator::Cell::default()
+        };
+        screen.put(row, c, cell);
+        if w == 2 {
+            screen.put(row, c + 1, plexy_glass_emulator::Cell::wide_spacer());
+        }
+        c += w;
     }
+    c
 }
 
 fn paint_status_row(
@@ -1133,6 +1137,39 @@ mod tests {
         assert!(found_marker, "current session marked with *");
         assert!(selected_reverse, "selected row painted REVERSE");
         assert!(!vs.cursor_visible, "picker hides the pane cursor");
+    }
+
+    #[test]
+    fn session_picker_places_wide_grapheme_with_spacer() {
+        let mut e = Emulator::new(10, 50);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 10, 50),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+        };
+        // A CJK session name must be sized and placed as one cell + a spacer.
+        let entries = vec![picker_view("中文", "中文", false)];
+        let ov = OverlayView::SessionPicker { entries: &entries, filter: "", selected: 0 };
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let mut found = false;
+        for r in 0..10 {
+            for c in 0..49 {
+                if vs.cell(r, c).unwrap().grapheme.as_str() == "中" {
+                    // The wide grapheme's second column is a wide spacer.
+                    assert!(
+                        vs.cell(r, c + 1).unwrap().grapheme.is_empty(),
+                        "wide grapheme must be followed by a wide spacer"
+                    );
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "wide grapheme rendered in the picker");
     }
 
     #[test]

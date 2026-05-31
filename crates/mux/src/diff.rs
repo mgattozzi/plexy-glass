@@ -43,7 +43,7 @@ impl DiffRenderer {
                     apply_sgr_delta(&mut out, &current_attrs, cell);
                     current_attrs = CellAttrs::from_cell(cell);
                     out.push_str(cell.grapheme.as_str());
-                    let w = grapheme_advance(cell.grapheme.as_str());
+                    let w = plexy_glass_emulator::grapheme_advance(cell.grapheme.as_str());
                     c += w;
                 }
             }
@@ -78,7 +78,7 @@ impl DiffRenderer {
                         apply_sgr_delta(&mut out, &current_attrs, cell);
                         current_attrs = CellAttrs::from_cell(cell);
                         out.push_str(cell.grapheme.as_str());
-                        let w = grapheme_advance(cell.grapheme.as_str());
+                        let w = plexy_glass_emulator::grapheme_advance(cell.grapheme.as_str());
                         c += w;
                     }
                 }
@@ -108,14 +108,6 @@ impl Default for DiffRenderer {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Column advance for a grapheme: at least 1, clamped to u16 range.
-fn grapheme_advance(s: &str) -> u16 {
-    let w = unicode_width::UnicodeWidthStr::width(s);
-    // invariant: terminal cell widths are 0..=2 for any one grapheme, so this
-    // never overflows u16. We still clamp defensively.
-    u16::try_from(w).unwrap_or(1).max(1)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

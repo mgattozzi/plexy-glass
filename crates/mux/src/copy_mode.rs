@@ -481,20 +481,38 @@ fn find_matches(screen: &Screen, query: &str) -> Vec<MatchSpan> {
             screen.active.rows.get(active_row).map(|r| r.cells.clone())
         };
         let Some(cells) = cells else { continue };
-        let line_text: String = cells
-            .iter()
-            .filter(|c| !c.is_wide_spacer())
-            .map(|c| c.grapheme.as_str())
-            .collect();
+        // Build the line's text from non-spacer cells, recording where each
+        // grapheme starts in BOTH the text (byte offset) and the grid (column).
+        // A cell's grid column is its index, since the cells vector includes the
+        // wide-spacer half of each wide grapheme.
+        let mut line_text = String::new();
+        let mut starts: Vec<(usize, u16)> = Vec::new();
+        let mut grid_col = 0u16;
+        for c in cells.iter() {
+            if c.is_wide_spacer() {
+                grid_col += 1;
+                continue;
+            }
+            starts.push((line_text.len(), grid_col));
+            line_text.push_str(c.grapheme.as_str());
+            grid_col += 1;
+        }
+        // The match occupies `display_width(query)` grid columns, starting at the
+        // grid column of the grapheme at the matched byte offset.
+        let span = plexy_glass_emulator::display_width(query).max(1);
         let mut start = 0usize;
         while let Some(idx) = line_text[start..].find(query) {
-            let col = (start + idx) as u16;
-            let end_col = (col + query.chars().count() as u16).min(cols.saturating_sub(1));
-            out.push(MatchSpan {
-                line_idx,
-                col_start: col,
-                col_end: end_col,
-            });
+            let byte_off = start + idx;
+            let col_start = starts
+                .iter()
+                .rev()
+                .find(|(b, _)| *b <= byte_off)
+                .map(|(_, gc)| *gc)
+                .unwrap_or(0);
+            let col_end = col_start
+                .saturating_add(span.saturating_sub(1))
+                .min(cols.saturating_sub(1));
+            out.push(MatchSpan { line_idx, col_start, col_end });
             start += idx + query.len();
         }
     }
@@ -528,6 +546,33 @@ mod tests {
 
     fn ev(mods: Modifiers, key: Key) -> KeyEvent {
         KeyEvent::new(key, mods)
+    }
+
+    #[test]
+    fn find_matches_maps_to_grid_columns_after_a_wide_char() {
+        // 中 occupies grid columns 0-1, so "ab" begins at grid column 2.
+        let s = screen_with_lines(4, 20, &["中ab"]);
+        let m = find_matches(&s, "ab");
+        assert_eq!(m.len(), 1);
+        assert_eq!((m[0].col_start, m[0].col_end), (2, 3));
+    }
+
+    #[test]
+    fn find_matches_wide_query_spans_correct_columns() {
+        // x at col 0; "中文" starts at col 1 and occupies 4 grid columns (1..=4).
+        let s = screen_with_lines(4, 20, &["x中文"]);
+        let m = find_matches(&s, "中文");
+        assert_eq!(m.len(), 1);
+        assert_eq!((m[0].col_start, m[0].col_end), (1, 4));
+    }
+
+    #[test]
+    fn find_matches_ascii_span_is_exact() {
+        // Regression: "ab" at col 0 highlights exactly cols 0..=1, not 0..=2.
+        let s = screen_with_lines(4, 20, &["ab cd"]);
+        let m = find_matches(&s, "ab");
+        assert_eq!(m.len(), 1);
+        assert_eq!((m[0].col_start, m[0].col_end), (0, 1));
     }
 
     #[test]

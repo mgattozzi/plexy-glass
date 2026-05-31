@@ -9,7 +9,7 @@
 //! crosses uniformly for the frame and the separators.
 
 use crate::{rect::Rect, virtual_screen::VirtualScreen};
-use plexy_glass_emulator::{Attrs, Cell, Color};
+use plexy_glass_emulator::{Attrs, Cell, Color, graphemes_with_width};
 use smol_str::SmolStr;
 
 /// One pane to frame: its content `rect` (in the same physical coordinate
@@ -116,19 +116,25 @@ fn paint_title(
 ) {
     // " name " reads cleanly against the border line.
     let text = format!(" {title} ");
-    for (i, ch) in text.chars().enumerate() {
-        let c = start.saturating_add(i as u16);
+    let mut c = start;
+    for (g, w) in graphemes_with_width(&text) {
+        // `max_col` is inclusive here (the last border column the title may use).
         if c > max_col || c >= screen.cols {
             break;
         }
-        let mut buf = [0u8; 4];
-        let s = ch.encode_utf8(&mut buf);
-        let mut cell = Cell { grapheme: SmolStr::new(s), ..Cell::default() };
+        if w == 2 && (c + 1 > max_col || c + 1 >= screen.cols) {
+            break; // don't split a wide grapheme across the edge
+        }
+        let mut cell = Cell { grapheme: SmolStr::new(g), ..Cell::default() };
         if active {
             cell.attrs = Attrs::BOLD;
             cell.fg = Color::Indexed(12);
         }
         screen.put(row, c, cell);
+        if w == 2 {
+            screen.put(row, c + 1, Cell::wide_spacer());
+        }
+        c += w;
     }
 }
 
