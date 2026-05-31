@@ -4,13 +4,14 @@ use crate::{
     InputEvent, InputRouter, error::DaemonError, registry::SessionRegistry, renderer::Renderer,
     session::Session,
 };
-use plexy_glass_mux::{Command, KeymapAction};
+use plexy_glass_mux::{Command, KeymapAction, PromptCommand, VirtualScreen};
 use plexy_glass_protocol::{
     ClientMsg, Codec, ProtocolError, PtySize, ServerMsg, SpawnSpec, server_handshake,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{mpsc, watch};
 
 pub struct Connection;
 
@@ -100,15 +101,16 @@ async fn serve_attach<R, W>(
     name: Option<String>,
     create_if_missing: bool,
     cmd: Option<SpawnSpec>,
-    size: PtySize,
+    mut size: PtySize,
     config: Arc<plexy_glass_config::Config>,
 ) -> Result<(), DaemonError>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    // Resolve or create the session.
-    let session = match name {
+    // Resolve or create the session. `session` is reassigned in place by
+    // `switch_session` when the client switches to another session.
+    let mut session = match name {
         Some(n) => match registry.get(&n).await {
             Some(s) => s,
             None if create_if_missing => {
@@ -188,7 +190,7 @@ where
         Err(join) => return Err(DaemonError::Io(std::io::Error::other(join.to_string()))),
     };
 
-    let client_id = handle.client_id;
+    let mut client_id = handle.client_id;
     let session_name = session.name.clone();
 
     send_msg(
@@ -198,11 +200,14 @@ where
     .await?;
 
     // Spawn the per-Connection renderer task. It owns the writer half from
-    // here on out.
+    // here on out. `switch_tx` lets the input loop re-point the renderer at a
+    // different session's frame stream (session switch) without reclaiming the
+    // writer.
     let frame_rx = handle.frame_rx.clone();
+    let (switch_tx, switch_rx) = mpsc::unbounded_channel::<watch::Receiver<Arc<VirtualScreen>>>();
     let renderer = Renderer::new();
     let mut renderer_task = tokio::spawn(async move {
-        let _ = renderer.run(frame_rx, writer).await;
+        let _ = renderer.run(frame_rx, switch_rx, writer).await;
     });
 
     // Input loop.
@@ -271,6 +276,56 @@ where
                                         session.notify.notify_one();
                                         session.mark_dirty();
                                     }
+                                    crate::window_manager::OverlayKeyResult::Command(line) => {
+                                        match plexy_glass_mux::command_prompt::parse(&line) {
+                                            Err(e) => {
+                                                session
+                                                    .set_status_message(e.to_string())
+                                                    .await;
+                                            }
+                                            Ok(PromptCommand::Detach) => {
+                                                detach_requested = true;
+                                            }
+                                            Ok(PromptCommand::Reload) => {
+                                                let _ = registry.reload_config().await;
+                                                let new_cfg = session.config_snapshot();
+                                                keymap = plexy_glass_keys::build_keymap(
+                                                    &new_cfg.keymap,
+                                                );
+                                                session.notify.notify_one();
+                                            }
+                                            Ok(PromptCommand::Switch(name)) => {
+                                                switch_session(
+                                                    &mut session,
+                                                    &mut client_id,
+                                                    size,
+                                                    &registry,
+                                                    &switch_tx,
+                                                    name,
+                                                )
+                                                .await;
+                                            }
+                                            Ok(other) => {
+                                                match session
+                                                    .handle_prompt_command(other)
+                                                    .await
+                                                {
+                                                    Ok(Some(msg)) => {
+                                                        session.set_status_message(msg).await;
+                                                    }
+                                                    Ok(None) => {}
+                                                    Err(e) => {
+                                                        session
+                                                            .set_status_message(e.to_string())
+                                                            .await;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if detach_requested {
+                                    break;
                                 }
                                 continue;
                             }
@@ -354,6 +409,22 @@ where
                                         );
                                         session.notify.notify_one();
                                     }
+                                    Command::CommandPrompt => {
+                                        // Opened here (not in handle_command)
+                                        // because it needs the live session list
+                                        // for `switch ` Tab-completion.
+                                        let names: Vec<String> = registry
+                                            .list()
+                                            .await
+                                            .into_iter()
+                                            .map(|e| e.name)
+                                            .collect();
+                                        {
+                                            let mut m = session.window_manager.lock().await;
+                                            m.open_command_prompt(names);
+                                        }
+                                        session.notify.notify_one();
+                                    }
                                     other => {
                                         let _ = session.handle_command(other).await;
                                     }
@@ -394,9 +465,13 @@ where
                 }
             }
             ClientMsg::Resize(new_size) => {
+                // Track the client's size so a later session switch can register
+                // on the target session at the correct dimensions.
+                size = new_size;
                 let session_for_resize = Arc::clone(&session);
+                let cid = client_id;
                 let _ = tokio::task::spawn_blocking(move || {
-                    session_for_resize.handle_resize(client_id, new_size);
+                    session_for_resize.handle_resize(cid, new_size);
                 })
                 .await;
             }
@@ -420,6 +495,50 @@ async fn cleanup_and_exit(
     .await;
     renderer_task.abort();
     Ok(())
+}
+
+/// Re-point a live client at another running session in place. Registers on the
+/// target *before* deregistering the source so the client is never momentarily
+/// unattached, hands the renderer the target's frame stream (forcing a full
+/// repaint), then swaps the loop's `session`/`client_id`. All failure paths land
+/// on the transient status line and leave the client on the source session.
+async fn switch_session(
+    session: &mut Arc<Session>,
+    client_id: &mut u64,
+    size: PtySize,
+    registry: &Arc<SessionRegistry>,
+    switch_tx: &mpsc::UnboundedSender<watch::Receiver<Arc<VirtualScreen>>>,
+    name: String,
+) {
+    let Some(target) = registry.get(&name).await else {
+        session.set_status_message(format!("no session: {name}")).await;
+        return;
+    };
+    if target.name == session.name {
+        session.set_status_message(format!("already on {name}")).await;
+        return;
+    }
+    // `register_client` takes a `blocking_lock` internally, so keep it off the runtime.
+    let target_for_register = Arc::clone(&target);
+    let new_handle = match tokio::task::spawn_blocking(move || {
+        target_for_register.register_client(size)
+    })
+    .await
+    {
+        Ok(Ok(h)) => h,
+        _ => {
+            session
+                .set_status_message(format!("cannot switch to {name}"))
+                .await;
+            return;
+        }
+    };
+    // Re-point the renderer (rebind + invalidate + full repaint).
+    let _ = switch_tx.send(new_handle.frame_rx.clone());
+    let old = std::mem::replace(session, target);
+    let old_id = std::mem::replace(client_id, new_handle.client_id);
+    let _ = tokio::task::spawn_blocking(move || old.deregister_client(old_id)).await;
+    session.set_status_message(format!("switched to {name}")).await;
 }
 
 fn wrap_paste(inner: &[u8]) -> Vec<u8> {
@@ -516,6 +635,94 @@ mod tests {
         }
         assert!(saw_attached, "missing Attached");
         assert!(saw_output, "missing Output");
+
+        server.abort();
+    }
+
+    // `Ctrl+a : switch b <Enter>` moves this client from session "a" to the
+    // pre-existing live session "b": registered on b, deregistered from a.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn command_prompt_switch_moves_client_between_sessions() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+
+        // Pre-create the switch target "b" (0 clients, so it stays alive detached).
+        registry
+            .attach_or_create("b".into(), cat(), size, Arc::clone(&cfg))
+            .await
+            .unwrap();
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        let attach = ClientMsg::AttachOrCreate {
+            name: Some("a".into()),
+            create_if_missing: true,
+            cmd: Some(cat()),
+            size,
+        };
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&attach).unwrap())
+            .await
+            .unwrap();
+
+        // Drain server output so the socket never backs up.
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while cr.read(&mut buf).await.unwrap_or(0) > 0 {}
+        });
+
+        let clients_of = |entries: &[plexy_glass_protocol::SessionEntry], name: &str| {
+            entries.iter().find(|e| e.name == name).map(|e| e.clients)
+        };
+        let wait_until = |want_a: u8, want_b: u8| {
+            let registry = Arc::clone(&registry);
+            async move {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let entries = registry.list().await;
+                    if clients_of(&entries, "a") == Some(want_a)
+                        && clients_of(&entries, "b") == Some(want_b)
+                    {
+                        return;
+                    }
+                    if Instant::now() > deadline {
+                        panic!(
+                            "timed out: a={:?} b={:?} (want a={want_a} b={want_b})",
+                            clients_of(&entries, "a"),
+                            clients_of(&entries, "b")
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+
+        // Attach completed: a has the client, b has none.
+        wait_until(1, 0).await;
+
+        // Drive the command prompt: Ctrl+a (0x01), ':', "switch b", Enter (0x0d).
+        let input = ClientMsg::Input(bytes::Bytes::from_static(b"\x01:switch b\r"));
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&input).unwrap())
+            .await
+            .unwrap();
+
+        // The client has moved: b now has it, a has none.
+        wait_until(0, 1).await;
 
         server.abort();
     }

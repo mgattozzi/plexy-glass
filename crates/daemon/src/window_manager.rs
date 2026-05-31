@@ -22,7 +22,7 @@ struct StatusMessage {
 }
 
 /// How the caller should follow up after feeding a key to the active overlay.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayKeyResult {
     /// Key ignored; nothing changed.
     Ignored,
@@ -30,6 +30,10 @@ pub enum OverlayKeyResult {
     Redraw,
     /// A rename committed and changed a name; recompose AND persist.
     Committed,
+    /// A command-prompt line was committed. The connection layer parses and
+    /// dispatches it (it may switch sessions / detach / reload, which need
+    /// connection-scoped state). The string is the raw, trimmed command line.
+    Command(String),
 }
 
 /// Active border drag-resize. Cleared on Release. While `Some`, all mouse
@@ -107,7 +111,13 @@ pub struct WindowManager {
     /// Painted on the bottom content row when no overlay is open; cleared lazily
     /// once expired (see `take_active_message`).
     status_message: Option<StatusMessage>,
+    /// Durable command-prompt history (newest last, capped). Cloned into the
+    /// command overlay at open time for Up/Down recall; appended on commit.
+    command_history: Vec<String>,
 }
+
+/// Maximum retained command-prompt history entries.
+const COMMAND_HISTORY_CAP: usize = 100;
 
 impl WindowManager {
     pub fn new(
@@ -149,6 +159,7 @@ impl WindowManager {
             overlay: None,
             rename_pane_target: None,
             status_message: None,
+            command_history: Vec::new(),
         })
     }
 
@@ -220,6 +231,19 @@ impl WindowManager {
         self.rename_pane_target = None;
     }
 
+    /// Open the command prompt. `completions` is a snapshot of live session
+    /// names for Tab-completing a `switch ` argument. History is cloned from the
+    /// durable list so Up/Down recall survives reopening within the session.
+    pub fn open_command_prompt(&mut self, completions: Vec<String>) {
+        self.overlay = Some(Overlay::Command {
+            buf: String::new(),
+            history: self.command_history.clone(),
+            hist_idx: None,
+            completions,
+        });
+        self.rename_pane_target = None;
+    }
+
     fn close_overlay(&mut self) {
         self.overlay = None;
         self.rename_pane_target = None;
@@ -231,16 +255,17 @@ impl WindowManager {
     /// (nothing), `Redraw` (recompose only), or `Committed` (recompose AND
     /// persist, a name actually changed).
     pub fn handle_overlay_key(&mut self, event: &KeyEvent) -> OverlayKeyResult {
-        let (action, target) = {
+        let (action, target, is_command) = {
             let Some(overlay) = self.overlay.as_mut() else {
                 return OverlayKeyResult::Ignored;
             };
             let action = OverlayHandler::handle(event, overlay);
             let target = match overlay {
                 Overlay::Rename { target, .. } => Some(*target),
-                Overlay::Help { .. } => None,
+                _ => None,
             };
-            (action, target)
+            let is_command = matches!(overlay, Overlay::Command { .. });
+            (action, target, is_command)
         };
         match action {
             OverlayAction::None => OverlayKeyResult::Ignored,
@@ -248,6 +273,19 @@ impl WindowManager {
             OverlayAction::Cancel => {
                 self.close_overlay();
                 OverlayKeyResult::Redraw
+            }
+            OverlayAction::Commit(text) if is_command => {
+                // Command prompt: record history (coalescing consecutive dups,
+                // capped) and hand the raw line to the connection to dispatch.
+                if self.command_history.last() != Some(&text) {
+                    self.command_history.push(text.clone());
+                    if self.command_history.len() > COMMAND_HISTORY_CAP {
+                        let excess = self.command_history.len() - COMMAND_HISTORY_CAP;
+                        self.command_history.drain(0..excess);
+                    }
+                }
+                self.close_overlay();
+                OverlayKeyResult::Command(text)
             }
             OverlayAction::Commit(text) => {
                 let mut changed = false;

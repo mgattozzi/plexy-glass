@@ -4,7 +4,8 @@
 //! mode), and the compositor renders the overlay. This module only decides how
 //! one key event mutates an overlay and what the caller should do next.
 
-use crate::{Key, KeyEvent, Modifiers};
+use crate::command_prompt::{self, Completion};
+use crate::{Direction, Key, KeyEvent, Modifiers};
 
 /// What a rename overlay targets. The concrete window/pane is resolved by the
 /// daemon at open time, not stored here.
@@ -22,6 +23,16 @@ pub enum Overlay {
     /// A scrollable read-only page (e.g. the keybinding list). `scroll` is the
     /// top line index; the renderer clamps it to the content length.
     Help { scroll: u16 },
+    /// A single-line command prompt (`Ctrl+a :`). `history` is a read-only copy
+    /// of the session's command history (newest last) for Up/Down recall;
+    /// `hist_idx` is `None` while editing a fresh line. `completions` is a
+    /// session-name snapshot used to Tab-complete a `switch ` argument.
+    Command {
+        buf: String,
+        history: Vec<String>,
+        hist_idx: Option<usize>,
+        completions: Vec<String>,
+    },
 }
 
 /// The caller's follow-up after feeding a key to an overlay.
@@ -50,6 +61,9 @@ impl OverlayHandler {
         match overlay {
             Overlay::Rename { buf, .. } => handle_rename(event, buf),
             Overlay::Help { scroll } => handle_help(event, scroll),
+            Overlay::Command { buf, history, hist_idx, completions } => {
+                handle_command_prompt(event, buf, history, hist_idx, completions)
+            }
         }
     }
 }
@@ -109,12 +123,279 @@ fn handle_help(event: &KeyEvent, scroll: &mut u16) -> OverlayAction {
     }
 }
 
+fn handle_command_prompt(
+    event: &KeyEvent,
+    buf: &mut String,
+    history: &[String],
+    hist_idx: &mut Option<usize>,
+    completions: &[String],
+) -> OverlayAction {
+    match (event.mods, event.key) {
+        (m, Key::Escape) if m.is_empty() => OverlayAction::Cancel,
+        // Empty/whitespace line cancels; otherwise commit the trimmed line.
+        (_, Key::Enter) | (_, Key::KeypadEnter) => {
+            let trimmed = buf.trim();
+            if trimmed.is_empty() {
+                OverlayAction::Cancel
+            } else {
+                OverlayAction::Commit(trimmed.to_string())
+            }
+        }
+        (m, Key::Backspace) if m.is_empty() => {
+            *hist_idx = None;
+            if buf.pop().is_some() {
+                OverlayAction::Redraw
+            } else {
+                OverlayAction::None
+            }
+        }
+        // Ctrl+U clears the line (arrives as Char('u') + CTRL, like the help
+        // overlay's Ctrl+u page-up).
+        (m, Key::Char('u')) if m == Modifiers::CTRL => {
+            *hist_idx = None;
+            if buf.is_empty() {
+                OverlayAction::None
+            } else {
+                buf.clear();
+                OverlayAction::Redraw
+            }
+        }
+        (m, Key::Tab) if m.is_empty() => complete_in_place(buf, completions),
+        (m, Key::Arrow(Direction::Up)) if m.is_empty() => history_recall(buf, history, hist_idx, true),
+        (m, Key::Arrow(Direction::Down)) if m.is_empty() => {
+            history_recall(buf, history, hist_idx, false)
+        }
+        // Printable scalar (plain or shifted). Reject control combos.
+        (m, Key::Char(c)) if m.is_empty() || m == Modifiers::SHIFT => {
+            *hist_idx = None;
+            buf.push(c);
+            OverlayAction::Redraw
+        }
+        _ => OverlayAction::None,
+    }
+}
+
+/// Tab-complete the verb (first token) or, after `switch `, the session-name
+/// argument. Mutates `buf` in place; returns whether anything changed.
+fn complete_in_place(buf: &mut String, completions: &[String]) -> OverlayAction {
+    let trimmed_start = buf.trim_start();
+    let leading_ws = buf.len() - trimmed_start.len();
+
+    if let Some(rest) = trimmed_start.strip_prefix("switch ") {
+        // Complete the trailing session-name token against the snapshot.
+        let arg = rest.trim_start();
+        let cands: Vec<&str> = completions.iter().map(String::as_str).collect();
+        match command_prompt::complete(arg, &cands) {
+            Completion::Unique(s) | Completion::Partial(s) => {
+                let keep = buf.len() - arg.len();
+                buf.truncate(keep);
+                buf.push_str(&s);
+                OverlayAction::Redraw
+            }
+            Completion::None => OverlayAction::None,
+        }
+    } else if !trimmed_start.contains(char::is_whitespace) {
+        // Single token, no trailing space yet → complete the verb.
+        match command_prompt::complete(trimmed_start, command_prompt::VERBS) {
+            Completion::Unique(s) => {
+                buf.truncate(leading_ws);
+                buf.push_str(&s);
+                buf.push(' '); // bare verb → ready for an argument
+                OverlayAction::Redraw
+            }
+            Completion::Partial(s) => {
+                buf.truncate(leading_ws);
+                buf.push_str(&s);
+                OverlayAction::Redraw
+            }
+            Completion::None => OverlayAction::None,
+        }
+    } else {
+        OverlayAction::None
+    }
+}
+
+/// Walk command history. `older = true` for Up (toward older entries, starting
+/// at the newest), `false` for Down (toward newer; past the newest restores a
+/// fresh empty line). `history` is newest-last.
+fn history_recall(
+    buf: &mut String,
+    history: &[String],
+    hist_idx: &mut Option<usize>,
+    older: bool,
+) -> OverlayAction {
+    if history.is_empty() {
+        return OverlayAction::None;
+    }
+    if older {
+        let new_idx = match *hist_idx {
+            None => history.len() - 1,
+            Some(0) => 0,
+            Some(i) => i - 1,
+        };
+        *hist_idx = Some(new_idx);
+        *buf = history[new_idx].clone();
+        OverlayAction::Redraw
+    } else {
+        match *hist_idx {
+            None => OverlayAction::None,
+            Some(i) if i + 1 < history.len() => {
+                *hist_idx = Some(i + 1);
+                *buf = history[i + 1].clone();
+                OverlayAction::Redraw
+            }
+            Some(_) => {
+                *hist_idx = None;
+                buf.clear();
+                OverlayAction::Redraw
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn ev(mods: Modifiers, key: Key) -> KeyEvent {
         KeyEvent::new(key, mods)
+    }
+
+    fn cmd() -> Overlay {
+        Overlay::Command {
+            buf: String::new(),
+            history: Vec::new(),
+            hist_idx: None,
+            completions: Vec::new(),
+        }
+    }
+
+    fn cmd_with(history: Vec<&str>, completions: Vec<&str>) -> Overlay {
+        Overlay::Command {
+            buf: String::new(),
+            history: history.into_iter().map(String::from).collect(),
+            hist_idx: None,
+            completions: completions.into_iter().map(String::from).collect(),
+        }
+    }
+
+    fn buf_of(o: &Overlay) -> &str {
+        let Overlay::Command { buf, .. } = o else { panic!("expected command overlay") };
+        buf
+    }
+
+    #[test]
+    fn command_types_and_commits_trimmed() {
+        let mut o = cmd();
+        for c in "  new  ".chars() {
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+        }
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
+            OverlayAction::Commit("new".into())
+        );
+    }
+
+    #[test]
+    fn command_empty_enter_cancels() {
+        let mut o = cmd();
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
+            OverlayAction::Cancel
+        );
+        // Whitespace-only too.
+        let mut o = cmd();
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(' ')), &mut o);
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
+            OverlayAction::Cancel
+        );
+    }
+
+    #[test]
+    fn command_backspace_and_ctrl_u() {
+        let mut o = Overlay::Command {
+            buf: "split h".into(),
+            history: Vec::new(),
+            hist_idx: None,
+            completions: Vec::new(),
+        };
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Backspace), &mut o);
+        assert_eq!(buf_of(&o), "split ");
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::CTRL, Key::Char('u')), &mut o),
+            OverlayAction::Redraw
+        );
+        assert_eq!(buf_of(&o), "");
+        // Ctrl+U on an empty buffer is a no-op.
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::CTRL, Key::Char('u')), &mut o),
+            OverlayAction::None
+        );
+    }
+
+    #[test]
+    fn command_escape_cancels() {
+        let mut o = cmd();
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Escape), &mut o),
+            OverlayAction::Cancel
+        );
+    }
+
+    #[test]
+    fn command_tab_completes_unique_verb_with_space() {
+        let mut o = cmd();
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char('z')), &mut o);
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
+        assert_eq!(buf_of(&o), "zoom ");
+    }
+
+    #[test]
+    fn command_tab_completes_partial_prefix() {
+        let mut o = cmd();
+        // "ren" -> "rename" (shared by rename / rename-pane), no trailing space.
+        for c in "ren".chars() {
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+        }
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
+        assert_eq!(buf_of(&o), "rename");
+    }
+
+    #[test]
+    fn command_tab_completes_switch_session_name() {
+        let mut o = cmd_with(vec![], vec!["work", "web"]);
+        for c in "switch we".chars() {
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+        }
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
+        assert_eq!(buf_of(&o), "switch web");
+    }
+
+    #[test]
+    fn command_history_up_down() {
+        let mut o = cmd_with(vec!["new", "split h"], vec![]);
+        // Up -> newest ("split h"), Up again -> older ("new"), clamp.
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut o);
+        assert_eq!(buf_of(&o), "split h");
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut o);
+        assert_eq!(buf_of(&o), "new");
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut o);
+        assert_eq!(buf_of(&o), "new"); // clamped at oldest
+        // Down -> newer ("split h"), Down again -> fresh empty line.
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o);
+        assert_eq!(buf_of(&o), "split h");
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o);
+        assert_eq!(buf_of(&o), "");
+    }
+
+    #[test]
+    fn command_down_on_fresh_line_is_noop() {
+        let mut o = cmd_with(vec!["new"], vec![]);
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o),
+            OverlayAction::None
+        );
     }
 
     fn rename() -> Overlay {

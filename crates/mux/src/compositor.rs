@@ -41,6 +41,9 @@ pub enum OverlayView<'a> {
     /// A scrollable help page: `(keys, description)` rows plus the top line
     /// index. The compositor clamps `scroll` to the content height.
     Help { lines: &'a [(String, String)], scroll: u16 },
+    /// A single-line command prompt. Rendered like `RenamePrompt` but with a
+    /// leading `:` instead of a label.
+    Command { buf: &'a str },
 }
 
 pub struct Compositor;
@@ -365,6 +368,30 @@ fn paint_overlay(
         }
         OverlayView::Help { lines, scroll } => {
             paint_help_box(screen, lines, *scroll, pane_row_offset, pane_area_rows, cols);
+        }
+        OverlayView::Command { buf } => {
+            // A full-width REVERSE bar on the bottom row of the pane band,
+            // ":<buf>" with a block cursor just past the text.
+            let row = pane_row_offset + pane_area_rows.saturating_sub(1);
+            let text = format!(" :{buf}");
+            let attrs = plexy_glass_emulator::Attrs::REVERSE;
+            for c in 0..cols {
+                put_char(screen, row, c, ' ', attrs);
+            }
+            let mut end_col = 0u16;
+            for (i, ch) in text.chars().enumerate() {
+                let col = i as u16;
+                if col >= cols {
+                    break;
+                }
+                put_char(screen, row, col, ch, attrs);
+                end_col = col + 1;
+            }
+            if end_col < cols {
+                put_char(screen, row, end_col, '\u{2588}', attrs);
+            }
+            screen.cursor = Some((row, end_col.min(cols.saturating_sub(1))));
+            screen.cursor_visible = false;
         }
     }
 }
@@ -834,6 +861,28 @@ mod tests {
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "prompt bar is REVERSE");
         // Text " rename window \u{25b8} hi", with 'r' at col 1.
         assert_eq!(vs.cell(3, 1).unwrap().grapheme.as_str(), "r");
+    }
+
+    #[test]
+    fn overlay_command_prompt_paints_colon_bar() {
+        use plexy_glass_emulator::Attrs;
+        let mut e = Emulator::new(4, 20);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 4, 20),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+        };
+        let ov = OverlayView::Command { buf: "spl" };
+        let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "command bar is REVERSE");
+        // Text " :spl": ':' at col 1, 's' at col 2.
+        assert_eq!(vs.cell(3, 1).unwrap().grapheme.as_str(), ":");
+        assert_eq!(vs.cell(3, 2).unwrap().grapheme.as_str(), "s");
     }
 
     #[test]

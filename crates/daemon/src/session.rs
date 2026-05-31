@@ -194,6 +194,9 @@ async fn render_coordinator(
                     help_lines = build_help_lines(&cfg);
                     Some(plexy_glass_mux::OverlayView::Help { lines: &help_lines, scroll: *scroll })
                 }
+                Some(plexy_glass_mux::Overlay::Command { buf, .. }) => {
+                    Some(plexy_glass_mux::OverlayView::Command { buf })
+                }
                 None => None,
             };
 
@@ -1589,8 +1592,11 @@ mod tests {
         let (mut server_read, server_write) = tokio::io::split(server_sock);
 
         let renderer = crate::renderer::Renderer::new();
+        // No session switch in this test; keep the sender alive so the switch
+        // arm simply never fires.
+        let (_switch_tx, switch_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut renderer_task = tokio::spawn(async move {
-            let _ = renderer.run(frame_rx, server_write).await;
+            let _ = renderer.run(frame_rx, switch_rx, server_write).await;
         });
 
         // Mini serve_attach: hold the read half, break when the renderer ends,
