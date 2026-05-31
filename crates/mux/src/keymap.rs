@@ -25,6 +25,7 @@ pub enum Command {
     RenameWindow,
     RenamePane,
     ShowHelp,
+    CommandPrompt,
     Detach,
     Cancel,
     EnterCopyMode,

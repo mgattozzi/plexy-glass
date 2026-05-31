@@ -573,6 +573,10 @@ impl WindowManager {
             Command::ReloadConfig => {
                 // Handled by Connection::serve_attach (needs registry access).
             }
+            Command::CommandPrompt => {
+                // Opened at the connection layer (needs the live session list
+                // for Tab-completion); see `Connection::serve_attach`.
+            }
             Command::EnterCopyMode => {
                 if let Some(pane) = self.active_window().active_pane() {
                     let (total_lines, pane_rows, start_line, start_col) = pane.with_screen(|s| {

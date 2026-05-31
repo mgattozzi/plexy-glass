@@ -126,6 +126,7 @@ pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
         "rename_window" => Command::RenameWindow,
         "rename_pane" => Command::RenamePane,
         "show_help" => Command::ShowHelp,
+        "command_prompt" => Command::CommandPrompt,
         "select_window" => {
             let arg_str = arg.ok_or_else(|| KeyParseError::MissingArg {
                 command: name.to_string(),

@@ -281,6 +281,7 @@ fn command_label(command: &str) -> String {
         "rename_window" => "Rename window",
         "rename_pane" => "Rename pane",
         "show_help" => "Help",
+        "command_prompt" => "Command prompt",
         other => {
             if let Some(n) = other
                 .strip_prefix("select_window:")
