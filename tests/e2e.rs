@@ -421,10 +421,19 @@ fn rename_window_via_overlay_updates_status_bar() {
 
     // The committed rename must also be persisted: the overlay path previously
     // updated the screen but never scheduled a save, so the name was lost on
-    // restart. Wait out the ~1.5s persist debounce, then read the saved file.
-    std::thread::sleep(Duration::from_millis(2000));
+    // restart. Poll for the ~1.5s debounced persist to land (a fixed sleep is
+    // too tight once tests run in parallel and the debounce + write slips past
+    // it).
     let session_file = tmp.path().join("state/plexy-glass/sessions/main.json");
-    let saved = std::fs::read_to_string(&session_file).unwrap_or_default();
+    let persist_deadline = Instant::now() + Duration::from_secs(10);
+    let mut saved = String::new();
+    while Instant::now() < persist_deadline {
+        saved = std::fs::read_to_string(&session_file).unwrap_or_default();
+        if saved.contains("renamedwin") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
     let _ = child.kill();
     let _ = child.wait();

@@ -1,17 +1,30 @@
 # nextest configuration.
 #
-# Many tests allocate real PTYs (the e2e suite spawns a daemon + panes; the
-# daemon unit tests spawn panes). nextest runs each test in its own process
-# with high parallelism, which can exhaust the OS PTY table (observed as
-# "openpty: ... Unknown error: -6" on macOS). Cap the concurrency of
-# PTY-heavy tests via test groups.
+# nextest runs each test in its own process, so *most* of the suite
+# already parallelizes freely (mux, emulator, status, config, keys,
+# protocol, client, and the daemon unit tests below). Two test groups
+# are capped:
+#
+#  1. PTY budget: every PTY counts against the OS-wide table (macOS
+#     `kern.tty.ptmx_max` is only 511; exhaustion shows as
+#     "openpty: ... Unknown error: -6"). An e2e test uses about 2-4 PTYs.
+#  2. Timing sensitivity (the binding constraint for e2e): the e2e tests
+#     drive a real daemon + shell over a PTY, step by step, with fixed
+#     `sleep`s between steps and a single-use `read_until` (its reader
+#     keeps draining the PTY after it returns, so it can't be called
+#     twice in one test). Under CPU contention the sleeps are too short
+#     and the asserts flake. Measured: the suite is reliable only at
+#     `e2e = 1`; it flakes at 2+ (e.g. a rename's keystrokes leak to the
+#     shell before the overlay opens, so the rename is lost). Reliably
+#     parallelizing e2e needs a harness rework, a *persistent* PTY
+#     reader that accumulates all output, so multi-step waits poll a
+#     shared buffer instead of sleeping. Until then e2e runs serially.
 
 [test-groups]
-# e2e tests are heavyweight (daemon + multiple PTYs each), so we run one
-# at a time.
+# e2e tests are heavyweight (daemon + shell + PTYs) and timing-sensitive;
+# see the note above before raising this, it reintroduces flakiness.
 e2e = { max-threads = 1 }
-# Daemon unit tests spawn a pane or two each, so a small cap keeps the total
-# concurrent PTY count well under the system limit.
+# Daemon unit tests spawn a pane or two each (proven stable at this cap).
 pty = { max-threads = 4 }
 
 [[profile.default.overrides]]
