@@ -5,9 +5,11 @@ Read this before touching the repo.
 ## Project
 
 plexy-glass is a Rust terminal multiplexer (tmux/zellij-like) with first-class
-OSC handling and Ghostty-style terminal integration. It is decomposed into five
-phases; see `docs/superpowers/specs/` and `docs/superpowers/plans/` for the
-authoritative design and implementation plans.
+OSC handling and Ghostty-style terminal integration. The original five-phase
+plan is complete and the project has grown well beyond it (see **Project
+status** below). `docs/superpowers/specs/` and `docs/superpowers/plans/` hold
+the authoritative design and implementation docs — one spec (and usually one
+plan) per feature, newest by date.
 
 ## Version control: use jj, not git
 
@@ -35,9 +37,10 @@ Notes:
 
 ## Branching
 
-Phase-1 implementation runs **directly on `main`**. Feature branches are not
-required for this personal greenfield project. Each task in the plan should
-produce one commit on main via `jj commit -m "..."`.
+Implementation runs **directly on `main`**. Feature branches are not required
+for this personal greenfield project. Each task in a plan should produce one
+commit via `jj commit -m "..."`; advance the `main` bookmark to the tip when a
+feature is done (`jj bookmark set main -r @-`).
 
 ## Implementation plans
 
@@ -56,6 +59,42 @@ scope. If a step is wrong, fix the plan first, then proceed.
 - No `unwrap`/`expect` in non-test code except for invariants that cannot
   fail (each documented with a one-line `// invariant:` comment).
 - No `#[allow]` annotations without a one-line justification comment.
+
+## Unicode and text width
+
+Terminal layout is measured in **display columns**, never bytes or `char`s. Every
+width / alignment / truncation / centering computation goes through the
+`emulator::width` module — the single source of truth — re-exported from
+`plexy-glass-emulator` (every crate depends on it): `display_width`,
+`char_width`, `grapheme_advance`, `graphemes_with_width`, `truncate_to_width`.
+**Do not** use `s.len()` or `s.chars().count()` for layout — they are correct
+only for ASCII.
+
+- A wide grapheme (CJK, most emoji) occupies two grid cells: the grapheme cell
+  plus a `Cell::wide_spacer()` (empty grapheme) in the next column. The diff
+  renderer skips spacers and advances the cursor by display width.
+- In the mux compositor, `put_char` / `put_str` are the width-aware grid
+  painters — they write the spacer and return the end display column. Paint text
+  through them, and size/center boxes with `display_width`; don't hand-roll
+  `chars().enumerate()` column loops.
+- The emulator core (screen/parser/reflow) is already grapheme- and
+  wide-char-correct; don't reimplement width there.
+
+## Testing notes
+
+- The emulator buffers the trailing grapheme until the next byte arrives (for
+  cluster/combining handling). In tests, feed a trailing byte (or use the
+  `screen_with_lines` helper) so the last grapheme lands in the grid before
+  asserting on it.
+- `tokio::io::duplex` gives two endpoints; bytes written to one are read from
+  the **other**. Drive the client from one endpoint and read daemon output from
+  it — do not split a single endpoint into read+write halves expecting loopback.
+- `Session::register_client` / `deregister_client` take a `blocking_lock`; call
+  them via `spawn_blocking` from async code (see `serve_attach` /
+  `switch_session`).
+- Don't launch multiple `cargo` / `nextest` invocations at once — they serialize
+  on the target-dir lock and look like a hang. Run one at a time (the suite is
+  ~1 minute).
 
 ## Dependencies — always pin to the current latest
 
@@ -82,9 +121,30 @@ longer has), **fix the plan first**, then the manifest. Don't paper over
 plan/reality drift in the Cargo.toml only — the next task gets it wrong
 the same way.
 
-## Phase 1 scope reminders
+## Project status
 
-Phase 1 is the daemon + client + one PTY-backed session foundation. It
-**does not** include: ANSI/VT emulation, detach/reattach, panes/splits,
-multi-client per session, a config file, or OSC interception. Those are
-later phases — do not let scope creep happen.
+Implemented and on `main`: the daemon + client foundation; a full VT emulator
+(grid, scrollback, reflow, wide-char/grapheme correctness); windows, panes,
+H/V splits, zoom, resize; detach/reattach with on-disk session
+persistence/restore; multi-client; copy mode with search; full mouse; bracketed
+paste; sync-panes; a configurable status bar with live reload; deep OSC handling
+(8 hyperlinks, 52 clipboard, 133 prompt marks, 10/11/12 colors, 0/1/2 titles);
+keyboard passthrough; interactive overlays (window/pane rename, help); a
+`Ctrl+a :` **command prompt** with in-place **session switching**
+(`switch_session`); and a `Ctrl+a w` **visual session picker**. Each has a spec
+in `docs/superpowers/specs/`.
+
+The overlay subsystem is the substrate for modal UI: add `Overlay` +
+`OverlayView` variants (mux), an `OverlayHandler` arm, `WindowManager::open_*`
+and an `OverlayKeyResult`, and dispatch at the connection layer (overlays that
+need the registry/session list, like the command prompt and picker, are opened
+there, not in `WindowManager::handle_command`).
+
+Established feature workflow (it has paid off — keep using it): brainstorm →
+write a spec → adversarial self-review of the spec → implement one task per
+`jj commit` (each green under the gates above) → adversarial review of the
+implementation. Workflows (`Workflow` tool) drive the review fan-outs.
+
+Not yet built (future work): `choose-tree` drill-down + kill/rename from the
+picker, declarative session/layout templates, break/join/swap panes, paste
+buffers, capture-pane / pipe-pane, and activity/bell monitoring.
