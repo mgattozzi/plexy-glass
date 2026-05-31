@@ -44,6 +44,13 @@ pub enum OverlayView<'a> {
     /// A single-line command prompt. Rendered like `RenamePrompt` but with a
     /// leading `:` instead of a label.
     Command { buf: &'a str },
+    /// An fzf-style session picker: a centered box with a filter line and the
+    /// filtered session rows, the selected one highlighted.
+    SessionPicker {
+        entries: &'a [crate::overlay::PickerEntry],
+        filter: &'a str,
+        selected: usize,
+    },
 }
 
 pub struct Compositor;
@@ -372,6 +379,12 @@ fn paint_overlay(
             // the rename/command overlays (otherwise it shows behind the box).
             screen.cursor_visible = false;
         }
+        OverlayView::SessionPicker { entries, filter, selected } => {
+            paint_session_picker(
+                screen, entries, filter, *selected, pane_row_offset, pane_area_rows, cols,
+            );
+            screen.cursor_visible = false;
+        }
         OverlayView::Command { buf } => {
             // A full-width REVERSE bar on the bottom row of the pane band,
             // ":<buf>" with a block cursor just past the text.
@@ -457,6 +470,99 @@ fn paint_help_box(
         let r = row0 + 1 + i as u16;
         let line = format!("{keys:<key_w$}  {desc}", key_w = key_w);
         put_str(screen, r, col0 + 1, &line, attrs, col0 + box_w - 1);
+    }
+}
+
+/// Draw the centered session-picker box: a filter line plus the filtered
+/// session rows (current session marked `*`, selected row REVERSE), scrolled to
+/// keep the selection visible.
+fn paint_session_picker(
+    screen: &mut VirtualScreen,
+    entries: &[crate::overlay::PickerEntry],
+    filter: &str,
+    selected: usize,
+    pane_row_offset: u16,
+    pane_area_rows: u16,
+    cols: u16,
+) {
+    let title = " Sessions ";
+    let footer = " \u{2191}/\u{2193} select \u{b7} enter switch \u{b7} esc cancel ";
+    let empty_msg = "(no matching sessions)";
+    let filtered = crate::overlay::picker_filtered_indices(entries, filter);
+    let rows: Vec<String> = filtered
+        .iter()
+        .map(|&i| {
+            let e = &entries[i];
+            let marker = if e.is_current { '*' } else { ' ' };
+            format!("{marker} {}", e.label)
+        })
+        .collect();
+    let filter_line = format!("filter: {filter}");
+
+    // Rows fit between the top border + filter line and the bottom border.
+    let max_visible = (pane_area_rows.saturating_sub(3)).max(1) as usize;
+    let row_count = rows.len().max(1); // empty list still needs 1 message row
+    let visible = row_count.min(max_visible);
+
+    let content_w = rows
+        .iter()
+        .map(|s| s.chars().count())
+        .chain([
+            filter_line.chars().count(),
+            title.chars().count(),
+            footer.chars().count(),
+            if rows.is_empty() { empty_msg.chars().count() } else { 0 },
+        ])
+        .max()
+        .unwrap_or(0);
+    let inner_w = (content_w + 2).min(cols.saturating_sub(2) as usize);
+    let box_w = (inner_w + 2) as u16;
+    let box_h = (visible as u16) + 3; // top border + filter line + rows + bottom
+    if box_w < 3 || box_h < 4 || box_w > cols || box_h > pane_area_rows {
+        return;
+    }
+
+    let sel = selected.min(filtered.len().saturating_sub(1));
+    let top = if sel >= visible { sel - visible + 1 } else { 0 };
+
+    let row0 = pane_row_offset + (pane_area_rows.saturating_sub(box_h)) / 2;
+    let col0 = (cols.saturating_sub(box_w)) / 2;
+    let plain = plexy_glass_emulator::Attrs::empty();
+    let rev = plexy_glass_emulator::Attrs::REVERSE;
+
+    // Border frame.
+    for r in 0..box_h {
+        for c in 0..box_w {
+            put_char(screen, row0 + r, col0 + c, border_glyph(r, c, box_h, box_w), plain);
+        }
+    }
+    // Title + footer centered on the borders.
+    let tcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(title.chars().count()) / 2) as u16;
+    put_str(screen, row0, tcol, title, plain, col0 + box_w - 1);
+    let fcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(footer.chars().count()) / 2) as u16;
+    put_str(screen, row0 + box_h - 1, fcol, footer, plain, col0 + box_w - 1);
+
+    let inner_left = col0 + 1;
+    let inner_right = col0 + box_w - 1; // exclusive max_col for put_str
+
+    // Filter line with a block cursor.
+    put_str(screen, row0 + 1, inner_left, &format!("{filter_line}\u{2588}"), plain, inner_right);
+
+    // Session rows (or the empty-state message).
+    if rows.is_empty() {
+        put_str(screen, row0 + 2, inner_left, empty_msg, plain, inner_right);
+    } else {
+        let end = (top + visible).min(rows.len());
+        for (vis_i, row_idx) in (top..end).enumerate() {
+            let r = row0 + 2 + vis_i as u16;
+            let row_attrs = if row_idx == sel { rev } else { plain };
+            if row_idx == sel {
+                for c in inner_left..inner_right {
+                    put_char(screen, r, c, ' ', row_attrs);
+                }
+            }
+            put_str(screen, r, inner_left, &rows[row_idx], row_attrs, inner_right);
+        }
     }
 }
 
@@ -982,6 +1088,76 @@ mod tests {
         // The help overlay must suppress the underlying pane cursor (the pane
         // is live with a visible cursor), matching rename/command overlays.
         assert!(!vs.cursor_visible, "help overlay hides the pane cursor");
+    }
+
+    fn picker_view(name: &str, label: &str, current: bool) -> crate::overlay::PickerEntry {
+        crate::overlay::PickerEntry { name: name.into(), label: label.into(), is_current: current }
+    }
+
+    #[test]
+    fn session_picker_renders_box_marker_and_selection() {
+        use plexy_glass_emulator::Attrs;
+        let mut e = Emulator::new(10, 50);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 10, 50),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+        };
+        let entries = vec![
+            picker_view("main", "main - 1 win", true),
+            picker_view("work", "work - 2 win", false),
+        ];
+        let ov = OverlayView::SessionPicker { entries: &entries, filter: "", selected: 1 };
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None);
+
+        let mut found_corner = false;
+        let mut found_marker = false;
+        let mut selected_reverse = false;
+        for r in 0..10 {
+            for c in 0..50 {
+                let cell = vs.cell(r, c).unwrap();
+                match cell.grapheme.as_str() {
+                    "\u{250c}" => found_corner = true,
+                    "*" => found_marker = true,
+                    "w" if cell.attrs.contains(Attrs::REVERSE) => selected_reverse = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(found_corner, "picker box border drawn");
+        assert!(found_marker, "current session marked with *");
+        assert!(selected_reverse, "selected row painted REVERSE");
+        assert!(!vs.cursor_visible, "picker hides the pane cursor");
+    }
+
+    #[test]
+    fn session_picker_shows_no_match_message() {
+        let mut e = Emulator::new(10, 50);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 10, 50),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+        };
+        let entries = vec![picker_view("main", "main", true)];
+        let ov = OverlayView::SessionPicker { entries: &entries, filter: "zzz", selected: 0 };
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let mut text = String::new();
+        for r in 0..10 {
+            for c in 0..50 {
+                text.push_str(vs.cell(r, c).unwrap().grapheme.as_str());
+            }
+        }
+        assert!(text.contains("no matching sessions"), "empty-state message shown");
     }
 
     #[test]

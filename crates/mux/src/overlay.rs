@@ -61,6 +61,15 @@ pub enum Overlay {
         hist_idx: Option<usize>,
         completions: Vec<String>,
     },
+    /// An fzf-style session picker. `entries` is a snapshot (sorted by name);
+    /// `filter` is the live substring query; `selected` indexes into the
+    /// *filtered* view (always clamped). Commit switches to the selected
+    /// session.
+    SessionPicker {
+        entries: Vec<PickerEntry>,
+        filter: String,
+        selected: usize,
+    },
 }
 
 /// The caller's follow-up after feeding a key to an overlay.
@@ -91,6 +100,9 @@ impl OverlayHandler {
             Overlay::Help { scroll } => handle_help(event, scroll),
             Overlay::Command { buf, history, hist_idx, completions } => {
                 handle_command_prompt(event, buf, history, hist_idx, completions)
+            }
+            Overlay::SessionPicker { entries, filter, selected } => {
+                handle_session_picker(event, entries, filter, selected)
             }
         }
     }
@@ -281,6 +293,86 @@ fn history_recall(
     }
 }
 
+/// fzf-style picker key handling: printable chars filter, arrows / Ctrl+n /
+/// Ctrl+p navigate, Home/End jump, Enter commits the selected session's name,
+/// Esc cancels. `selected` indexes the filtered view and is clamped on every
+/// filter change.
+fn handle_session_picker(
+    event: &KeyEvent,
+    entries: &[PickerEntry],
+    filter: &mut String,
+    selected: &mut usize,
+) -> OverlayAction {
+    let filtered_len = picker_filtered_indices(entries, filter).len();
+    match (event.mods, event.key) {
+        (m, Key::Escape) if m.is_empty() => OverlayAction::Cancel,
+        (_, Key::Enter) | (_, Key::KeypadEnter) => {
+            let filtered = picker_filtered_indices(entries, filter);
+            match filtered.get(*selected) {
+                Some(&idx) => OverlayAction::Commit(entries[idx].name.clone()),
+                None => OverlayAction::None,
+            }
+        }
+        (m, Key::Arrow(Direction::Up)) if m.is_empty() => move_picker(selected, filtered_len, false),
+        (m, Key::Char('p')) if m == Modifiers::CTRL => move_picker(selected, filtered_len, false),
+        (m, Key::Arrow(Direction::Down)) if m.is_empty() => move_picker(selected, filtered_len, true),
+        (m, Key::Char('n')) if m == Modifiers::CTRL => move_picker(selected, filtered_len, true),
+        (m, Key::Home) if m.is_empty() => set_picker(selected, 0),
+        (m, Key::End) if m.is_empty() => set_picker(selected, filtered_len.saturating_sub(1)),
+        (m, Key::Backspace) if m.is_empty() => {
+            if filter.pop().is_some() {
+                let len = picker_filtered_indices(entries, filter).len();
+                *selected = (*selected).min(len.saturating_sub(1));
+                OverlayAction::Redraw
+            } else {
+                OverlayAction::None
+            }
+        }
+        (m, Key::Char('u')) if m == Modifiers::CTRL => {
+            if filter.is_empty() {
+                OverlayAction::None
+            } else {
+                filter.clear();
+                *selected = 0;
+                OverlayAction::Redraw
+            }
+        }
+        (m, Key::Char(c)) if m.is_empty() || m == Modifiers::SHIFT => {
+            filter.push(c);
+            *selected = 0; // filter changed; reset selection to the top
+            OverlayAction::Redraw
+        }
+        _ => OverlayAction::None,
+    }
+}
+
+fn move_picker(selected: &mut usize, len: usize, down: bool) -> OverlayAction {
+    if len == 0 {
+        return OverlayAction::None;
+    }
+    let max = len - 1;
+    let new = if down {
+        (*selected + 1).min(max)
+    } else {
+        selected.saturating_sub(1)
+    };
+    if new != *selected {
+        *selected = new;
+        OverlayAction::Redraw
+    } else {
+        OverlayAction::None
+    }
+}
+
+fn set_picker(selected: &mut usize, target: usize) -> OverlayAction {
+    if *selected != target {
+        *selected = target;
+        OverlayAction::Redraw
+    } else {
+        OverlayAction::None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,6 +547,137 @@ mod tests {
     fn picker_filter_non_ascii() {
         let es = vec![entry("café"), entry("CAFÉ-2"), entry("tea")];
         assert_eq!(picker_filtered_indices(&es, "café"), vec![0, 1]);
+    }
+
+    fn picker(names: &[&str]) -> Overlay {
+        Overlay::SessionPicker {
+            entries: names.iter().map(|n| entry(n)).collect(),
+            filter: String::new(),
+            selected: 0,
+        }
+    }
+
+    fn picker_state(o: &Overlay) -> (&str, usize) {
+        let Overlay::SessionPicker { filter, selected, .. } = o else {
+            panic!("expected session picker")
+        };
+        (filter, *selected)
+    }
+
+    #[test]
+    fn picker_navigation_clamps_both_ends() {
+        let mut o = picker(&["a", "b", "c"]);
+        // Up at top is a no-op.
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut o),
+            OverlayAction::None
+        );
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o);
+        OverlayHandler::handle(&ev(Modifiers::CTRL, Key::Char('n')), &mut o);
+        assert_eq!(picker_state(&o).1, 2);
+        // Down at bottom is a no-op.
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o),
+            OverlayAction::None
+        );
+        OverlayHandler::handle(&ev(Modifiers::CTRL, Key::Char('p')), &mut o);
+        assert_eq!(picker_state(&o).1, 1);
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Home), &mut o);
+        assert_eq!(picker_state(&o).1, 0);
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::End), &mut o);
+        assert_eq!(picker_state(&o).1, 2);
+    }
+
+    #[test]
+    fn picker_typing_filters_and_resets_selection() {
+        let mut o = picker(&["work", "web", "personal"]);
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::End), &mut o); // selected -> 2
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char('w')), &mut o);
+        let (f, sel) = picker_state(&o);
+        assert_eq!(f, "w");
+        assert_eq!(sel, 0, "filter change resets selection to top");
+        // "we" now matches only "web": navigating down stays put.
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char('e')), &mut o);
+        assert_eq!(picker_state(&o).0, "we");
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o),
+            OverlayAction::None
+        );
+    }
+
+    #[test]
+    fn picker_backspace_reclamps_selection() {
+        let mut o = picker(&["alpha", "alpine", "beta"]);
+        for c in "alp".chars() {
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+        }
+        // "alp" matches alpha, alpine; select the second.
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o);
+        assert_eq!(picker_state(&o).1, 1);
+        // Narrow to "alph" -> only "alpha"; selection must clamp to 0.
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char('h')), &mut o);
+        // (typing reset it to 0 anyway); backspace back to "alp" keeps it valid.
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Backspace), &mut o);
+        assert!(picker_state(&o).1 <= 1);
+    }
+
+    #[test]
+    fn picker_ctrl_u_clears_filter() {
+        let mut o = picker(&["a", "b"]);
+        for c in "xyz".chars() {
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+        }
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::CTRL, Key::Char('u')), &mut o),
+            OverlayAction::Redraw
+        );
+        assert_eq!(picker_state(&o).0, "");
+    }
+
+    #[test]
+    fn picker_enter_commits_selected_name() {
+        let mut o = picker(&["work", "web", "personal"]);
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o); // -> "web"
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
+            OverlayAction::Commit("web".into())
+        );
+    }
+
+    #[test]
+    fn picker_enter_on_empty_filtered_list_is_noop() {
+        let mut o = picker(&["work", "web"]);
+        for c in "zzz".chars() {
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+        }
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
+            OverlayAction::None
+        );
+    }
+
+    #[test]
+    fn picker_escape_cancels() {
+        let mut o = picker(&["a"]);
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Escape), &mut o),
+            OverlayAction::Cancel
+        );
+    }
+
+    #[test]
+    fn picker_enter_resolves_filtered_index_not_absolute() {
+        // After filtering, selected=0 must map to the first *filtered* entry,
+        // not entries[0].
+        let mut o = picker(&["alpha", "beta", "gamma"]);
+        for c in "amm".chars() {
+            // "gamma" contains "amm"
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+        }
+        assert_eq!(
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
+            OverlayAction::Commit("gamma".into())
+        );
     }
 
     fn rename() -> Overlay {

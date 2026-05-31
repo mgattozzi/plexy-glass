@@ -197,6 +197,13 @@ async fn render_coordinator(
                 Some(plexy_glass_mux::Overlay::Command { buf, .. }) => {
                     Some(plexy_glass_mux::OverlayView::Command { buf })
                 }
+                Some(plexy_glass_mux::Overlay::SessionPicker { entries, filter, selected }) => {
+                    Some(plexy_glass_mux::OverlayView::SessionPicker {
+                        entries,
+                        filter,
+                        selected: *selected,
+                    })
+                }
                 None => None,
             };
 

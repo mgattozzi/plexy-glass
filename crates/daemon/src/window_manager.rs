@@ -3,8 +3,8 @@
 use crate::{error::DaemonError, window::Window};
 use plexy_glass_mux::{
     BorderHit, BorderSide, Command, KeyEvent, MouseButton, MouseEncoding, MouseEvent, MouseKind,
-    Overlay, OverlayAction, OverlayHandler, PaneId, Rect, RenameTarget, Selection, SelectionKind,
-    SplitDir, WindowId, encode_for_child, extract_text,
+    Overlay, OverlayAction, OverlayHandler, PaneId, PickerEntry, Rect, RenameTarget, Selection,
+    SelectionKind, SplitDir, WindowId, encode_for_child, extract_text,
 };
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
@@ -34,6 +34,9 @@ pub enum OverlayKeyResult {
     /// dispatches it (it may switch sessions / detach / reload, which need
     /// connection-scoped state). The string is the raw, trimmed command line.
     Command(String),
+    /// A session was chosen in the picker. The connection layer switches this
+    /// client to the named session (via the same path as `switch <name>`).
+    SwitchSession(String),
 }
 
 /// Active border drag-resize. Cleared on Release. While `Some`, all mouse
@@ -244,6 +247,17 @@ impl WindowManager {
         self.rename_pane_target = None;
     }
 
+    /// Open the session picker over a snapshot of live sessions (sorted by name,
+    /// the current one marked). Selection switches via the connection layer.
+    pub fn open_session_picker(&mut self, entries: Vec<PickerEntry>) {
+        self.overlay = Some(Overlay::SessionPicker {
+            entries,
+            filter: String::new(),
+            selected: 0,
+        });
+        self.rename_pane_target = None;
+    }
+
     fn close_overlay(&mut self) {
         self.overlay = None;
         self.rename_pane_target = None;
@@ -255,7 +269,7 @@ impl WindowManager {
     /// (nothing), `Redraw` (recompose only), or `Committed` (recompose AND
     /// persist, a name actually changed).
     pub fn handle_overlay_key(&mut self, event: &KeyEvent) -> OverlayKeyResult {
-        let (action, target, is_command) = {
+        let (action, target, is_command, is_picker) = {
             let Some(overlay) = self.overlay.as_mut() else {
                 return OverlayKeyResult::Ignored;
             };
@@ -265,7 +279,8 @@ impl WindowManager {
                 _ => None,
             };
             let is_command = matches!(overlay, Overlay::Command { .. });
-            (action, target, is_command)
+            let is_picker = matches!(overlay, Overlay::SessionPicker { .. });
+            (action, target, is_command, is_picker)
         };
         match action {
             OverlayAction::None => OverlayKeyResult::Ignored,
@@ -273,6 +288,11 @@ impl WindowManager {
             OverlayAction::Cancel => {
                 self.close_overlay();
                 OverlayKeyResult::Redraw
+            }
+            OverlayAction::Commit(name) if is_picker => {
+                // The picker committed a session name; the connection switches.
+                self.close_overlay();
+                OverlayKeyResult::SwitchSession(name)
             }
             OverlayAction::Commit(text) if is_command => {
                 // Command prompt: record history (coalescing consecutive dups,
@@ -1484,6 +1504,32 @@ mod tests {
         for c in s.chars() {
             m.handle_overlay_key(&okey(plexy_glass_mux::Key::Char(c)));
         }
+    }
+
+    #[tokio::test]
+    async fn session_picker_overlay_commits_switch_session() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.open_session_picker(vec![
+            PickerEntry { name: "main".into(), label: "main".into(), is_current: true },
+            PickerEntry { name: "work".into(), label: "work".into(), is_current: false },
+        ]);
+        assert!(matches!(
+            m.overlay(),
+            Some(plexy_glass_mux::Overlay::SessionPicker { .. })
+        ));
+        // Down to "work", then Enter → SwitchSession("work"); overlay closes.
+        m.handle_overlay_key(&okey(plexy_glass_mux::Key::Arrow(plexy_glass_mux::Direction::Down)));
+        let r = m.handle_overlay_key(&okey(plexy_glass_mux::Key::Enter));
+        assert!(matches!(r, OverlayKeyResult::SwitchSession(ref n) if n == "work"));
+        assert!(m.overlay().is_none(), "picker closes on commit");
     }
 
     #[tokio::test]

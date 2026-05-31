@@ -276,6 +276,17 @@ where
                                         session.notify.notify_one();
                                         session.mark_dirty();
                                     }
+                                    crate::window_manager::OverlayKeyResult::SwitchSession(name) => {
+                                        switch_session(
+                                            &mut session,
+                                            &mut client_id,
+                                            size,
+                                            &registry,
+                                            &switch_tx,
+                                            name,
+                                        )
+                                        .await;
+                                    }
                                     crate::window_manager::OverlayKeyResult::Command(line) => {
                                         match plexy_glass_mux::command_prompt::parse(&line) {
                                             Err(e) => {
@@ -304,6 +315,10 @@ where
                                                     name,
                                                 )
                                                 .await;
+                                            }
+                                            Ok(PromptCommand::ChooseSession) => {
+                                                open_session_picker_overlay(&session, &registry)
+                                                    .await;
                                             }
                                             Ok(other) => {
                                                 match session
@@ -425,6 +440,9 @@ where
                                         }
                                         session.notify.notify_one();
                                     }
+                                    Command::ChooseSession => {
+                                        open_session_picker_overlay(&session, &registry).await;
+                                    }
                                     other => {
                                         let _ = session.handle_command(other).await;
                                     }
@@ -539,6 +557,32 @@ async fn switch_session(
     let old_id = std::mem::replace(client_id, new_handle.client_id);
     let _ = tokio::task::spawn_blocking(move || old.deregister_client(old_id)).await;
     session.set_status_message(format!("switched to {name}")).await;
+}
+
+/// Snapshot the live sessions (sorted by name, current one marked) and open the
+/// session picker. Shared by the `Ctrl+a w` keymap arm and the `:sessions`
+/// command-prompt verb.
+async fn open_session_picker_overlay(session: &Arc<Session>, registry: &Arc<SessionRegistry>) {
+    let current = session.name.clone();
+    let mut entries: Vec<plexy_glass_mux::PickerEntry> = registry
+        .list()
+        .await
+        .into_iter()
+        .map(|e| {
+            let label = format!(
+                "{} \u{2014} {} win, {} panes, {} clients",
+                e.name, e.windows, e.panes, e.clients
+            );
+            let is_current = e.name == current;
+            plexy_glass_mux::PickerEntry { name: e.name, label, is_current }
+        })
+        .collect();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    {
+        let mut m = session.window_manager.lock().await;
+        m.open_session_picker(entries);
+    }
+    session.notify.notify_one();
 }
 
 fn wrap_paste(inner: &[u8]) -> Vec<u8> {
@@ -724,6 +768,86 @@ mod tests {
         // The client has moved: b now has it, a has none.
         wait_until(0, 1).await;
 
+        server.abort();
+    }
+
+    // `Ctrl+a w` opens the picker; typing `b` filters to session "b"; Enter
+    // switches there. Exercises the picker open → filter → commit → switch path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_picker_filters_and_switches() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 10, cols: 40, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        registry
+            .attach_or_create("beta".into(), cat(), size, Arc::clone(&cfg))
+            .await
+            .unwrap();
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        let attach = ClientMsg::AttachOrCreate {
+            name: Some("alpha".into()),
+            create_if_missing: true,
+            cmd: Some(cat()),
+            size,
+        };
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&attach).unwrap())
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while cr.read(&mut buf).await.unwrap_or(0) > 0 {}
+        });
+
+        let clients_of = |entries: &[plexy_glass_protocol::SessionEntry], name: &str| {
+            entries.iter().find(|e| e.name == name).map(|e| e.clients)
+        };
+        let wait_until = |want_alpha: u8, want_beta: u8| {
+            let registry = Arc::clone(&registry);
+            async move {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let entries = registry.list().await;
+                    if clients_of(&entries, "alpha") == Some(want_alpha)
+                        && clients_of(&entries, "beta") == Some(want_beta)
+                    {
+                        return;
+                    }
+                    if Instant::now() > deadline {
+                        panic!(
+                            "timed out: alpha={:?} beta={:?}",
+                            clients_of(&entries, "alpha"),
+                            clients_of(&entries, "beta")
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+        wait_until(1, 0).await;
+
+        // Ctrl+a w (0x01 'w') opens the picker; "b" filters to "beta"; Enter (0x0d).
+        let input = ClientMsg::Input(bytes::Bytes::from_static(b"\x01wb\r"));
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&input).unwrap())
+            .await
+            .unwrap();
+
+        wait_until(0, 1).await;
         server.abort();
     }
 }
