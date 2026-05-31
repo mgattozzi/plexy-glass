@@ -696,8 +696,15 @@ fn paint_cells(screen: &mut VirtualScreen, row: u16, start: u16, cells: &[Status
         if c >= screen.cols {
             break;
         }
+        // A wide grapheme needs both of its columns inside the screen, so refuse
+        // to place one that can't fit its spacer (matches `put_char`/`put_str` and
+        // keeps the cell-grid invariant: a width-2 cell is always followed by a
+        // wide spacer).
+        if *w == 2 && c + 1 >= screen.cols {
+            break;
+        }
         screen.put(row, c, cell_for(g, style));
-        if *w == 2 && c + 1 < screen.cols {
+        if *w == 2 {
             screen.put(row, c + 1, plexy_glass_emulator::Cell::wide_spacer());
         }
         c = c.saturating_add(*w);
@@ -932,6 +939,22 @@ mod tests {
             middle: vec![],
             right: vec![],
         }
+    }
+
+    #[test]
+    fn paint_cells_drops_wide_grapheme_that_cannot_fit_its_spacer() {
+        use plexy_glass_status::ResolvedStyle;
+        // 2-column screen: "a" fits at col 0, but "中" needs cols 1-2 and only
+        // col 1 remains, so it must be dropped (never a width-2 glyph in the last
+        // column with a non-spacer neighbour).
+        let mut vs = VirtualScreen::blank(1, 2);
+        let cells: Vec<StatusCell> = vec![
+            (smol_str::SmolStr::new("a"), 1, ResolvedStyle::default()),
+            (smol_str::SmolStr::new("中"), 2, ResolvedStyle::default()),
+        ];
+        paint_cells(&mut vs, 0, 0, &cells);
+        assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "a");
+        assert_ne!(vs.cell(0, 1).unwrap().grapheme.as_str(), "中", "wide glyph must not straddle the edge");
     }
 
     #[test]
