@@ -403,6 +403,20 @@ impl WindowManager {
         }
     }
 
+    /// Rename the active window (command-prompt `rename` path). Mirrors the
+    /// rename-overlay commit, but the name comes straight from the prompt.
+    pub fn rename_active_window(&mut self, name: String) {
+        self.set_window_name(self.active, name);
+    }
+
+    /// Rename the active pane (command-prompt `rename-pane` path).
+    pub fn rename_active_pane(&mut self, name: String) {
+        let pid = self.active_window().active();
+        if let Some(p) = self.active_window().pane(pid) {
+            p.set_name(Some(name));
+        }
+    }
+
     pub fn windows(&self) -> &[Window] {
         &self.windows
     }

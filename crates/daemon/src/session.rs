@@ -841,6 +841,74 @@ impl Session {
         Ok(())
     }
 
+    /// Apply a parsed command-prompt command. Parity verbs route through the
+    /// existing `handle_command` path; arg-carrying verbs (resize-by-N, renames)
+    /// apply directly. Connection-level verbs (`Detach`/`Reload`/`Switch`) are
+    /// handled by the caller and reach here only defensively. Returns an
+    /// optional confirmation message for the status line.
+    pub async fn handle_prompt_command(
+        &self,
+        cmd: plexy_glass_mux::PromptCommand,
+    ) -> Result<Option<String>, DaemonError> {
+        use plexy_glass_mux::{Command, FocusTarget, PromptCommand};
+        let mapped: Command = match cmd {
+            PromptCommand::NewWindow => Command::NewWindow,
+            PromptCommand::NextWindow => Command::NextWindow,
+            PromptCommand::PrevWindow => Command::PrevWindow,
+            PromptCommand::SelectWindow(n) => Command::SelectWindow(n),
+            PromptCommand::LastWindow => Command::SelectLastWindow,
+            PromptCommand::SplitH => Command::SplitH,
+            PromptCommand::SplitV => Command::SplitV,
+            PromptCommand::Zoom => Command::ZoomToggle,
+            PromptCommand::KillPane => Command::KillPane,
+            PromptCommand::KillWindow => Command::KillWindow,
+            PromptCommand::CopyMode => Command::EnterCopyMode,
+            PromptCommand::ToggleSync => Command::ToggleSyncPanes,
+            PromptCommand::Help => Command::ShowHelp,
+            PromptCommand::Focus(ft) => match ft {
+                FocusTarget::Dir(d) => Command::SelectPane(d),
+                FocusTarget::Next => Command::SelectNextPane,
+                FocusTarget::Prev => Command::SelectPrevPane,
+                FocusTarget::Last => Command::SelectLastPane,
+            },
+            PromptCommand::Resize(dir, n) => {
+                {
+                    let mut m = self.window_manager.lock().await;
+                    for _ in 0..n {
+                        m.handle_command(Command::ResizePane(dir))?;
+                    }
+                }
+                self.notify.notify_one();
+                self.mark_dirty();
+                return Ok(None);
+            }
+            PromptCommand::RenameWindow(name) => {
+                {
+                    let mut m = self.window_manager.lock().await;
+                    m.rename_active_window(name);
+                }
+                self.notify.notify_one();
+                self.mark_dirty();
+                return Ok(None);
+            }
+            PromptCommand::RenamePane(name) => {
+                {
+                    let mut m = self.window_manager.lock().await;
+                    m.rename_active_pane(name);
+                }
+                self.notify.notify_one();
+                self.mark_dirty();
+                return Ok(None);
+            }
+            // Handled at the connection layer; defensive no-op here.
+            PromptCommand::Detach | PromptCommand::Reload | PromptCommand::Switch(_) => {
+                return Ok(None);
+            }
+        };
+        self.handle_command(mapped).await?;
+        Ok(None)
+    }
+
     /// Show a transient status-line message and schedule a single wake so the
     /// expired message is repainted away even if nothing else changes. Any
     /// prior pending wake is aborted first (mirroring `status_tick_handle`), so
@@ -1179,6 +1247,49 @@ mod tests {
         let s = Session::new("main".into(), spec(), size(), cfg()).expect("construct session");
         assert_eq!(s.name, "main");
         assert!(!s.closing.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn handle_prompt_command_applies_effects() {
+        use plexy_glass_mux::{Direction, PromptCommand};
+        let s = Session::new("pc".into(), spec(), size(), cfg()).unwrap();
+
+        // `split h` -> two panes in the active window.
+        s.handle_prompt_command(PromptCommand::SplitH).await.unwrap();
+        assert_eq!(
+            s.window_manager.lock().await.active_window().layout().panes().len(),
+            2
+        );
+
+        // `rename first` -> active window name.
+        s.handle_prompt_command(PromptCommand::RenameWindow("first".into())).await.unwrap();
+        assert_eq!(s.window_manager.lock().await.active_window().name, "first");
+
+        // `rename-pane logs` -> active pane name.
+        s.handle_prompt_command(PromptCommand::RenamePane("logs".into())).await.unwrap();
+        {
+            let m = s.window_manager.lock().await;
+            let pid = m.active_window().active();
+            assert_eq!(
+                m.active_window().pane(pid).and_then(|p| p.name()).as_deref(),
+                Some("logs")
+            );
+        }
+
+        // `new` (active -> window 1), then `win 1` (SelectWindow(0)) returns to "first".
+        s.handle_prompt_command(PromptCommand::NewWindow).await.unwrap();
+        s.handle_prompt_command(PromptCommand::SelectWindow(0)).await.unwrap();
+        assert_eq!(s.window_manager.lock().await.active_window().name, "first");
+
+        // `resize l 3` on the split must not error.
+        s.handle_prompt_command(PromptCommand::Resize(Direction::Left, 3)).await.unwrap();
+
+        // Connection-level verbs are defensive no-ops here.
+        assert!(matches!(s.handle_prompt_command(PromptCommand::Detach).await, Ok(None)));
+        assert!(matches!(
+            s.handle_prompt_command(PromptCommand::Switch("x".into())).await,
+            Ok(None)
+        ));
     }
 
     // Regression: `build_snapshot_ctx` used `blocking_lock` and was driven by the
