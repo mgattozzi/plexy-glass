@@ -53,9 +53,12 @@ scope. If a step is wrong, fix the plan first, then proceed.
 - Rust 2024 edition.
 - `cargo clippy --workspace --all-targets -- -D warnings` must pass before
   any task is considered done.
-- `cargo nextest run --workspace` must pass before any task is considered
-  done (faster than `cargo test`). Note: nextest does **not** run doc-tests;
-  if you add any, also run `cargo test --workspace --doc`.
+- The test runner is **cargo-nextest**, not `cargo test`. The **full workspace
+  suite — `cargo nextest run --workspace` — must pass before any task or feature
+  is considered complete.** Per-crate or name-filtered runs (`-p <crate>`,
+  `nextest run <name>`) are fine for fast iteration, but they are **not** the
+  completion gate; always finish with the full run. nextest does **not** run
+  doc-tests; if you add any, also run `cargo test --workspace --doc`.
 - No `unwrap`/`expect` in non-test code except for invariants that cannot
   fail (each documented with a one-line `// invariant:` comment).
 - No `#[allow]` annotations without a one-line justification comment.
@@ -95,6 +98,15 @@ only for ASCII.
 - Don't launch multiple `cargo` / `nextest` invocations at once — they serialize
   on the target-dir lock and look like a hang. Run one at a time (the suite is
   ~1 minute).
+- Each e2e test spawns a client that auto-spawns a *daemon*; the `TestEnv` guard
+  returned by `isolate_dirs` kills that daemon on drop (`plexy-glass kill` in the
+  test's isolated env). Don't bypass it, or daemons orphan and hold PTYs open.
+- The `e2e` nextest group is capped to **1** in `.config/nextest.toml` on
+  purpose: the e2e tests interact step-by-step with a live daemon over a PTY
+  using fixed `sleep`s and a single-use `read_until`, so they flake under
+  parallelism (measured: reliable at 1, flaky at 2+). Parallelizing them needs a
+  persistent-reader harness (poll a shared output buffer instead of sleeping) —
+  see the comment in `.config/nextest.toml`. Don't just raise the cap.
 
 ## Dependencies — always pin to the current latest
 
