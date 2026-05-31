@@ -285,6 +285,7 @@ fn command_label(command: &str) -> String {
         "rename_pane" => "Rename pane",
         "show_help" => "Help",
         "command_prompt" => "Command prompt",
+        "choose_session" => "Choose session",
         other => {
             if let Some(n) = other
                 .strip_prefix("select_window:")
@@ -904,7 +905,10 @@ impl Session {
                 return Ok(None);
             }
             // Handled at the connection layer; defensive no-op here.
-            PromptCommand::Detach | PromptCommand::Reload | PromptCommand::Switch(_) => {
+            PromptCommand::Detach
+            | PromptCommand::Reload
+            | PromptCommand::Switch(_)
+            | PromptCommand::ChooseSession => {
                 return Ok(None);
             }
         };

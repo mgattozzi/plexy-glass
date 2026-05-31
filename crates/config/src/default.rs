@@ -144,6 +144,7 @@ pub fn built_in_keymap() -> KeymapConfig {
             binding("Ctrl+a .", "rename_pane"),
             binding("Ctrl+a ?", "show_help"),
             binding("Ctrl+a :", "command_prompt"),
+            binding("Ctrl+a w", "choose_session"),
         ],
     }
 }

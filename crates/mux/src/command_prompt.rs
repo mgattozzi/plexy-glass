@@ -41,6 +41,7 @@ pub enum PromptCommand {
     Detach,
     Help,
     Switch(String),
+    ChooseSession,
 }
 
 /// A human-readable parse failure.
@@ -60,8 +61,8 @@ impl std::error::Error for ParseError {}
 /// Static verb names, sorted, for Tab-completion of the first token.
 pub const VERBS: &[&str] = &[
     "copy", "detach", "focus", "help", "kill", "last", "new", "next", "prev",
-    "reload", "rename", "rename-pane", "resize", "split", "switch", "sync",
-    "win", "zoom",
+    "reload", "rename", "rename-pane", "resize", "sessions", "split", "switch",
+    "sync", "win", "zoom",
 ];
 
 fn err(msg: impl Into<String>) -> ParseError {
@@ -112,6 +113,7 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
         "reload" => no_args(PromptCommand::Reload),
         "detach" => no_args(PromptCommand::Detach),
         "help" => no_args(PromptCommand::Help),
+        "sessions" => no_args(PromptCommand::ChooseSession),
         "win" => {
             let [n] = args.as_slice() else {
                 return Err(err("win: expected a window number"));
@@ -355,6 +357,19 @@ mod tests {
     fn switch_takes_the_remainder() {
         assert_eq!(p("switch work").unwrap(), PromptCommand::Switch("work".into()));
         assert_eq!(p("switch").unwrap_err().to_string(), "switch: expected a session name");
+    }
+
+    #[test]
+    fn sessions_verb() {
+        assert_eq!(p("sessions").unwrap(), PromptCommand::ChooseSession);
+        assert_eq!(p("sessions x").unwrap_err().to_string(), "sessions: takes no arguments");
+    }
+
+    #[test]
+    fn verbs_are_sorted() {
+        let mut sorted = VERBS.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(VERBS, sorted.as_slice(), "VERBS must stay sorted for completion");
     }
 
     #[test]
