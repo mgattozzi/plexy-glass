@@ -6,6 +6,7 @@
 //! keymap state machine. The daemon owns the thin wiring on top.
 
 pub mod borders;
+pub mod command_prompt;
 pub mod compositor;
 pub mod copy_mode;
 pub mod diff;
@@ -21,6 +22,7 @@ pub mod selection;
 pub mod status;
 pub mod virtual_screen;
 
+pub use command_prompt::{Completion, FocusTarget, ParseError, PromptCommand};
 pub use compositor::{Compositor, OverlayView, PaneView, StatusPlacement};
 pub use copy_mode::{CopyMode, CopyModeAction, CopyModeHandler, MatchSpan, SearchState};
 pub use diff::DiffRenderer;
