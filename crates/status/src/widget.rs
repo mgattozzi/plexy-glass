@@ -47,9 +47,11 @@ impl StyledText {
     }
 
     pub fn width(&self) -> usize {
+        // Display width (terminal columns), not char count, since wide
+        // graphemes count as two so the alignment math stays correct.
         self.segments
             .iter()
-            .map(|s| s.text.chars().count())
+            .map(|s| plexy_glass_emulator::display_width(&s.text) as usize)
             .sum()
     }
 }

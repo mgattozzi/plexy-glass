@@ -29,8 +29,8 @@ impl Widget for ShellWidget {
         let text = match result {
             Ok(Ok(o)) if o.status.success() => {
                 let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                let truncated: String = s.chars().take(OUTPUT_CAP).collect();
-                truncated
+                // Cap the widget's visual width (display columns), grapheme-safe.
+                plexy_glass_emulator::truncate_to_width(&s, OUTPUT_CAP as u16).to_string()
             }
             _ => "\u{2026}".to_string(),
         };

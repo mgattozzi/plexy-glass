@@ -311,7 +311,9 @@ impl SegmentSnapshot {
         let mut out = Vec::new();
         let mut col: u16 = 0;
         for seg in self.iter_segments() {
-            let width = seg.text.chars().count() as u16;
+            // Display width keeps click ranges aligned with how the compositor
+            // paints wide graphemes (CJK window names, emoji, …).
+            let width = plexy_glass_emulator::display_width(&seg.text);
             if let Some(action) = seg.click_action {
                 out.push(StatusHit {
                     col_range: col..col + width,
