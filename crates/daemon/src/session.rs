@@ -175,6 +175,8 @@ async fn render_coordinator(
                 right: snap.right.into_iter().flatten().collect(),
             };
             let selection = m.selection().cloned();
+            // Transient status-line message (cleared lazily here when expired).
+            let message: Option<String> = m.take_active_message().map(str::to_string);
 
             // Build the active overlay's render view (rename prompt / help).
             // `help_lines` is deferred-init so the Help view can borrow it.
@@ -202,6 +204,7 @@ async fn render_coordinator(
                 placement,
                 selection.as_ref(),
                 overlay_view.as_ref(),
+                message.as_deref(),
             )
         };
         let _ = frame_tx.send(Arc::new(frame));
@@ -327,6 +330,9 @@ pub struct Session {
     pub persist_notify: Arc<Notify>,
     /// JoinHandle for the persist task; aborted in `Drop`.
     persist_handle: StdMutex<Option<JoinHandle<()>>>,
+    /// One-shot wake that repaints an expired status-line message away. Aborted
+    /// and replaced each time a new message is set, and aborted on `Drop`.
+    status_msg_handle: StdMutex<Option<JoinHandle<()>>>,
 }
 
 impl Session {
@@ -442,6 +448,7 @@ impl Session {
             pending_death_rx: Mutex::new(Some(death_rx)),
             status_engine_slot: StdMutex::new(status_engine),
             status_tick_handle: StdMutex::new(None),
+            status_msg_handle: StdMutex::new(None),
             config_slot: StdMutex::new(config),
             dirty: std::sync::atomic::AtomicBool::new(false),
             persist_notify: Arc::new(Notify::new()),
@@ -833,6 +840,47 @@ impl Session {
         Ok(())
     }
 
+    /// Show a transient status-line message and schedule a single wake so the
+    /// expired message is repainted away even if nothing else changes. Any
+    /// prior pending wake is aborted first (mirroring `status_tick_handle`), so
+    /// rapid messages neither leak tasks nor fire redundant notifies.
+    pub async fn set_status_message(self: &Arc<Self>, text: String) {
+        {
+            let mut m = self.window_manager.lock().await;
+            m.set_status_message(text);
+        }
+        self.notify.notify_one();
+
+        let prior = {
+            // invariant: status_msg_handle mutex held briefly; no .await holding the lock.
+            let mut slot = self
+                .status_msg_handle
+                .lock()
+                .expect("status_msg_handle poisoned");
+            slot.take()
+        };
+        if let Some(h) = prior {
+            h.abort();
+        }
+        let weak = Arc::downgrade(self);
+        let handle = tokio::spawn(async move {
+            // Sleep just past the TTL so the message is definitely expired when
+            // the wake-driven recompose runs and clears it.
+            tokio::time::sleep(
+                crate::window_manager::STATUS_TTL + std::time::Duration::from_millis(50),
+            )
+            .await;
+            if let Some(s) = weak.upgrade() {
+                s.notify.notify_one();
+            }
+        });
+        // invariant: status_msg_handle mutex held briefly; no .await holding the lock.
+        *self
+            .status_msg_handle
+            .lock()
+            .expect("status_msg_handle poisoned") = Some(handle);
+    }
+
     pub async fn handle_mouse(
         &self,
         event: plexy_glass_mux::MouseEvent,
@@ -994,6 +1042,14 @@ impl Drop for Session {
             .death_handle
             .lock()
             .expect("death handle lock poisoned")
+            .take()
+        {
+            handle.abort();
+        }
+        if let Some(handle) = self
+            .status_msg_handle
+            .lock()
+            .expect("status msg handle lock poisoned")
             .take()
         {
             handle.abort();

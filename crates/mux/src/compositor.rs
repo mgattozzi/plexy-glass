@@ -53,6 +53,7 @@ impl Compositor {
         placement: StatusPlacement,
         selection: Option<&crate::selection::Selection>,
         overlay: Option<&OverlayView<'_>>,
+        message: Option<&str>,
     ) -> VirtualScreen {
         let (host_rows, host_cols) = host_size;
         let host_rows = host_rows.max(1);
@@ -295,6 +296,26 @@ impl Compositor {
                     ..plexy_glass_emulator::Cell::default()
                 };
                 screen.put(prompt_row, host_c, cell);
+            }
+        }
+
+        // Transient status-line message: a full-width REVERSE bar on the bottom
+        // content row, shown only when no interactive overlay is open (the
+        // overlay owns that row when present).
+        if let Some(msg) = message
+            && overlay.is_none()
+        {
+            let row = pane_row_offset + pane_area_rows.saturating_sub(1);
+            let attrs = plexy_glass_emulator::Attrs::REVERSE;
+            for c in 0..host_cols {
+                put_char(&mut screen, row, c, ' ', attrs);
+            }
+            for (i, ch) in format!(" {msg}").chars().enumerate() {
+                let col = i as u16;
+                if col >= host_cols {
+                    break;
+                }
+                put_char(&mut screen, row, col, ch, attrs);
             }
         }
 
@@ -581,7 +602,7 @@ mod tests {
             copy_mode: None,
             title: None,
         };
-        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None);
+        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
         assert_eq!(vs.cursor, Some((0, 2)));
     }
@@ -603,7 +624,7 @@ mod tests {
         };
         let mut sel = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
         sel.extend(0, 4, Rect::new(0, 0, 4, 6));
-        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel), None);
+        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel), None, None);
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -641,7 +662,7 @@ mod tests {
             copy_mode: None,
             title: None,
         };
-        let vs = Compositor::compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None);
+        let vs = Compositor::compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "L");
         assert_eq!(vs.cell(0, 4).unwrap().grapheme.as_str(), "R");
         // Border column.
@@ -670,7 +691,7 @@ mod tests {
             copy_mode: None,
             title: None,
         };
-        let vs = Compositor::compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None);
+        let vs = Compositor::compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None, None);
         // Row 0 should be the last scrollback row (BBBB), not CCCC.
         let r0: String = (0..4)
             .map(|c| vs.cell(0, c).unwrap().grapheme.as_str().to_string())
@@ -702,7 +723,7 @@ mod tests {
             copy_mode: Some(&cm),
             title: None,
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None);
+        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None);
         assert_eq!(vs.cursor, Some((3, 7)));
     }
 
@@ -729,7 +750,7 @@ mod tests {
             copy_mode: Some(&cm),
             title: None,
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None);
+        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None);
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -767,7 +788,7 @@ mod tests {
             title: None,
         };
         let status = status_with_left("AB");
-        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None);
+        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "A", "status at row 0");
         assert_eq!(vs.cell(0, 1).unwrap().grapheme.as_str(), "B");
         assert_eq!(vs.cell(1, 0).unwrap().grapheme.as_str(), "X", "pane shifted to row 1");
@@ -788,7 +809,7 @@ mod tests {
             title: None,
         };
         let status = status_with_left("AB");
-        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None);
+        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "X", "pane stays at row 0");
         assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "A", "status at last row");
     }
@@ -808,10 +829,69 @@ mod tests {
             title: None,
         };
         let ov = OverlayView::RenamePrompt { label: "rename window", buf: "hi" };
-        let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov));
+        let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None);
         // Bottom row (3) is a REVERSE prompt bar.
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "prompt bar is REVERSE");
         // Text " rename window \u{25b8} hi", with 'r' at col 1.
+        assert_eq!(vs.cell(3, 1).unwrap().grapheme.as_str(), "r");
+    }
+
+    #[test]
+    fn status_message_paints_reverse_bottom_row() {
+        use plexy_glass_emulator::Attrs;
+        let mut e = Emulator::new(4, 20);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 4, 20),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+        };
+        let vs = Compositor::compose(
+            &[view],
+            (4, 20),
+            None,
+            StatusPlacement::Bottom,
+            None,
+            None,
+            Some("no session: foo"),
+        );
+        // Bottom row (3) is a REVERSE message bar; text rendered after a space.
+        assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "message bar is REVERSE");
+        assert_eq!(vs.cell(3, 1).unwrap().grapheme.as_str(), "n");
+        assert_eq!(vs.cell(3, 2).unwrap().grapheme.as_str(), "o");
+    }
+
+    #[test]
+    fn open_overlay_suppresses_status_message() {
+        use plexy_glass_emulator::Attrs;
+        let mut e = Emulator::new(4, 20);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 4, 20),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+        };
+        let ov = OverlayView::RenamePrompt { label: "rename window", buf: "hi" };
+        let vs = Compositor::compose(
+            &[view],
+            (4, 20),
+            None,
+            StatusPlacement::Bottom,
+            None,
+            Some(&ov),
+            Some("this message must not show"),
+        );
+        // The overlay owns the bottom row: 'r' of "rename window" is at col 1,
+        // proving the message did not overwrite it.
+        assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE));
         assert_eq!(vs.cell(3, 1).unwrap().grapheme.as_str(), "r");
     }
 
@@ -830,7 +910,7 @@ mod tests {
         };
         let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
-        let vs = Compositor::compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov));
+        let vs = Compositor::compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov), None);
         let mut found_corner = false;
         let mut found_text = false;
         for r in 0..10 {
@@ -869,7 +949,7 @@ mod tests {
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
         let status = status_with_left("S");
         let vs =
-            Compositor::compose(&[view], (4, 40), Some(&status), StatusPlacement::Bottom, None, Some(&ov));
+            Compositor::compose(&[view], (4, 40), Some(&status), StatusPlacement::Bottom, None, Some(&ov), None);
         let mut found_corner = false;
         for r in 0..4 {
             for c in 0..40 {

@@ -8,8 +8,18 @@ use plexy_glass_mux::{
 };
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{Notify, mpsc};
+
+/// How long a transient status-line message stays visible before it is cleared
+/// on the next recompose. Mirrored by the `Session` wake timer.
+pub(crate) const STATUS_TTL: Duration = Duration::from_secs(3);
+
+/// A transient status-line message and the instant it stops being shown.
+struct StatusMessage {
+    text: String,
+    expires_at: Instant,
+}
 
 /// How the caller should follow up after feeding a key to the active overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +103,10 @@ pub struct WindowManager {
     /// The pane a pane-rename overlay targets, captured when the overlay opens
     /// so a focus change cannot retarget it.
     rename_pane_target: Option<PaneId>,
+    /// A transient status-line message (command-prompt feedback), or `None`.
+    /// Painted on the bottom content row when no overlay is open; cleared lazily
+    /// once expired (see `take_active_message`).
+    status_message: Option<StatusMessage>,
 }
 
 impl WindowManager {
@@ -134,6 +148,7 @@ impl WindowManager {
             last_active_window: None,
             overlay: None,
             rename_pane_target: None,
+            status_message: None,
         })
     }
 
@@ -155,6 +170,28 @@ impl WindowManager {
     /// connection layer to decide whether to capture keys.
     pub fn overlay(&self) -> Option<&Overlay> {
         self.overlay.as_ref()
+    }
+
+    /// Set the transient status-line message, expiring `STATUS_TTL` from now.
+    /// Replaces any prior message.
+    pub fn set_status_message(&mut self, text: String) {
+        self.status_message = Some(StatusMessage {
+            text,
+            expires_at: Instant::now() + STATUS_TTL,
+        });
+    }
+
+    /// The active (unexpired) status-line text, clearing it in place if it has
+    /// expired. Called by the render coordinator each frame.
+    pub fn take_active_message(&mut self) -> Option<&str> {
+        let expired = self
+            .status_message
+            .as_ref()
+            .is_some_and(|m| Instant::now() >= m.expires_at);
+        if expired {
+            self.status_message = None;
+        }
+        self.status_message.as_ref().map(|m| m.text.as_str())
     }
 
     /// Open a rename prompt seeded with the active window's current name.
@@ -1150,6 +1187,30 @@ mod tests {
         .unwrap();
         assert_eq!(m.windows().len(), 1);
         assert_eq!(m.active_window().active(), PaneId(0));
+    }
+
+    #[tokio::test]
+    async fn status_message_set_and_lazy_expire() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        assert_eq!(m.take_active_message(), None);
+        m.set_status_message("no session: foo".into());
+        assert_eq!(m.take_active_message(), Some("no session: foo"));
+        // Force expiry and confirm it clears in place on the next read.
+        m.status_message.as_mut().unwrap().expires_at = Instant::now() - Duration::from_secs(1);
+        assert_eq!(m.take_active_message(), None);
+        assert!(m.status_message.is_none(), "expired message cleared in place");
+        // A newer message replaces the prior one.
+        m.set_status_message("first".into());
+        m.set_status_message("second".into());
+        assert_eq!(m.take_active_message(), Some("second"));
     }
 
     #[tokio::test]
