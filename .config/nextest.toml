@@ -1,30 +1,44 @@
 # nextest configuration.
 #
-# nextest runs each test in its own process, so *most* of the suite
-# already parallelizes freely (mux, emulator, status, config, keys,
-# protocol, client, and the daemon unit tests below). Two test groups
-# are capped:
+# Most of the suite runs at full parallelism (nextest runs each test in its
+# own process, so a `static Mutex` never serializes across tests). Two
+# groups are capped, for two different reasons:
 #
-#  1. PTY budget: every PTY counts against the OS-wide table (macOS
-#     `kern.tty.ptmx_max` is only 511; exhaustion shows as
-#     "openpty: ... Unknown error: -6"). An e2e test uses about 2-4 PTYs.
-#  2. Timing sensitivity (the binding constraint for e2e): the e2e tests
-#     drive a real daemon + shell over a PTY, step by step, with fixed
-#     `sleep`s between steps and a single-use `read_until` (its reader
-#     keeps draining the PTY after it returns, so it can't be called
-#     twice in one test). Under CPU contention the sleeps are too short
-#     and the asserts flake. Measured: the suite is reliable only at
-#     `e2e = 1`; it flakes at 2+ (e.g. a rename's keystrokes leak to the
-#     shell before the overlay opens, so the rename is lost). Reliably
-#     parallelizing e2e needs a harness rework, a *persistent* PTY
-#     reader that accumulates all output, so multi-step waits poll a
-#     shared buffer instead of sleeping. Until then e2e runs serially.
+# `pty` (daemon unit tests): each spawns a pane or two. Capped to 4 to
+# bound the OS-wide PTY table (macOS `kern.tty.ptmx_max` is only 511).
+# Reliable at 4.
+#
+# `e2e`: each test runs a whole client + daemon + shell + several PTYs and
+# drives it step-by-step. The `TestSession` persistent-reader harness
+# (tests/e2e.rs) made these *timing*-robust: it polls a shared output
+# buffer instead of sleeping, so they no longer flake on fixed delays, and
+# the e2e binary is about 2x faster on its own. But raising the
+# concurrency cap is blocked by two daemon-side issues, NOT by test
+# timing:
+#   1. At cap >= 4 the concurrent daemons saturate CPU + the PTY table and
+#      the daemon's first render lags past the readiness wait ("daemon
+#      never rendered") across many tests.
+#   2. At cap 2, exactly one test fails deterministically:
+#      `rename_window_via_overlay_updates_status_bar`. Under *any*
+#      concurrency the window-rename OVERLAY COMMIT is lost: the typed
+#      name renders in the frame (so the screen looks right) but the
+#      commit never marks the session dirty, so nothing is ever
+#      persisted. This is not a timeout (a 30s persist poll still finds
+#      an empty file); split-based persists land fine at cap 2, so it is
+#      specific to the overlay commit path. A real concurrency defect in
+#      the daemon worth fixing on its own; once fixed, cap 2 should be
+#      reliable.
+# Until (2) is fixed, `e2e` stays at 1 so the suite is 100% reliable.
+#
+# (`TestSession::start` also retries `openpty` on transient exhaustion,
+# and each test kills its daemon on teardown, so PTYs are freed
+# promptly.)
 
 [test-groups]
-# e2e tests are heavyweight (daemon + shell + PTYs) and timing-sensitive;
-# see the note above before raising this, it reintroduces flakiness.
+# Heavyweight: each test is client + daemon + shell + PTYs. See header note
+# (2): raise to 2 only after the overlay-commit-under-load defect is fixed.
 e2e = { max-threads = 1 }
-# Daemon unit tests spawn a pane or two each (proven stable at this cap).
+# Daemon unit tests spawn a pane or two each.
 pty = { max-threads = 4 }
 
 [[profile.default.overrides]]

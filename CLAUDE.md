@@ -101,12 +101,22 @@ only for ASCII.
 - Each e2e test spawns a client that auto-spawns a *daemon*; the `TestEnv` guard
   returned by `isolate_dirs` kills that daemon on drop (`plexy-glass kill` in the
   test's isolated env). Don't bypass it, or daemons orphan and hold PTYs open.
-- The `e2e` nextest group is capped to **1** in `.config/nextest.toml` on
-  purpose: the e2e tests interact step-by-step with a live daemon over a PTY
-  using fixed `sleep`s and a single-use `read_until`, so they flake under
-  parallelism (measured: reliable at 1, flaky at 2+). Parallelizing them needs a
-  persistent-reader harness (poll a shared output buffer instead of sleeping) —
-  see the comment in `.config/nextest.toml`. Don't just raise the cap.
+- The e2e tests use a `TestSession` persistent-reader harness: one reader thread
+  per PTY accumulates all output into a shared buffer, and every step polls it
+  (`wait_for` / `wait_ready` / `snapshot`) instead of sleeping a fixed delay.
+  This removed the fixed-`sleep` timing-flake class and made the e2e binary ~2x
+  faster. Use it for any new e2e test; don't reintroduce `sleep`-then-`read`.
+- Despite that, the `e2e` nextest group is still capped to **1** in
+  `.config/nextest.toml` — for two *daemon-side* reasons, not timing: (1) at cap
+  ≥4 the concurrent daemons saturate CPU + the PTY table and the first render
+  lags past the readiness wait across many tests; (2) at cap 2 exactly one test,
+  `rename_window_via_overlay_updates_status_bar`, fails deterministically because
+  under *any* concurrency the window-rename **overlay commit is lost** — the
+  typed name renders in the frame but never marks the session dirty, so it is
+  never persisted (a 30s persist poll still finds an empty file, while
+  split-based persists land fine at cap 2). That is a real concurrency defect in
+  the daemon's overlay-commit path; fix it, then raise `e2e` to 2. Until then,
+  don't raise the cap — the suite stays 100% reliable. See `.config/nextest.toml`.
 
 ## Dependencies — always pin to the current latest
 
