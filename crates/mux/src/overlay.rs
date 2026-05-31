@@ -15,6 +15,34 @@ pub enum RenameTarget {
     Pane,
 }
 
+/// One row in the session picker. `name` is the switch target and the filter
+/// key; `label` is the display string (e.g. "work — 2 win, 3 panes"); and
+/// `is_current` marks the session this client is attached to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerEntry {
+    pub name: String,
+    pub label: String,
+    pub is_current: bool,
+}
+
+/// Indices into `entries` whose `name` matches `filter`, via a case-insensitive
+/// substring test (`to_lowercase().contains`, correct for multi-codepoint
+/// lowercase expansions). An empty filter yields every index in order; because
+/// `entries` are pre-sorted ascending by name at open time, the result preserves
+/// that a–z order. Shared by the picker key handler and the compositor.
+pub fn picker_filtered_indices(entries: &[PickerEntry], filter: &str) -> Vec<usize> {
+    if filter.is_empty() {
+        return (0..entries.len()).collect();
+    }
+    let needle = filter.to_lowercase();
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.name.to_lowercase().contains(&needle))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// An active overlay. `None` (on the holder) means no overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlay {
@@ -396,6 +424,37 @@ mod tests {
             OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o),
             OverlayAction::None
         );
+    }
+
+    fn entry(name: &str) -> PickerEntry {
+        PickerEntry { name: name.into(), label: name.into(), is_current: false }
+    }
+
+    #[test]
+    fn picker_filter_empty_returns_all_in_order() {
+        let es = vec![entry("alpha"), entry("beta"), entry("gamma")];
+        assert_eq!(picker_filtered_indices(&es, ""), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn picker_filter_case_insensitive_substring() {
+        let es = vec![entry("Work"), entry("web"), entry("personal")];
+        // "we" matches "web" only; "e" matches Work? no, it's a substring of name.
+        assert_eq!(picker_filtered_indices(&es, "we"), vec![1]);
+        assert_eq!(picker_filtered_indices(&es, "W"), vec![0, 1]); // Work, web (case-insensitive)
+        assert_eq!(picker_filtered_indices(&es, "PERSON"), vec![2]);
+    }
+
+    #[test]
+    fn picker_filter_no_match_is_empty() {
+        let es = vec![entry("alpha"), entry("beta")];
+        assert!(picker_filtered_indices(&es, "zzz").is_empty());
+    }
+
+    #[test]
+    fn picker_filter_non_ascii() {
+        let es = vec![entry("café"), entry("CAFÉ-2"), entry("tea")];
+        assert_eq!(picker_filtered_indices(&es, "café"), vec![0, 1]);
     }
 
     fn rename() -> Overlay {

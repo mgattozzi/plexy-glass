@@ -31,7 +31,9 @@ pub use key::{Key, KeyEvent, Modifiers};
 pub use keymap::{Chord, Command, Keymap, KeymapAction};
 pub use layout::{BorderHit, BorderSide, CloseOutcome, LayoutError, LayoutTree, SplitPosition};
 pub use mouse::{encode_for_child, MouseButton, MouseEncoding, MouseEvent, MouseKind, MouseModifiers, MouseParseAction, MouseParser};
-pub use overlay::{Overlay, OverlayAction, OverlayHandler, RenameTarget};
+pub use overlay::{
+    Overlay, OverlayAction, OverlayHandler, PickerEntry, RenameTarget, picker_filtered_indices,
+};
 pub use pane_id::{PaneId, WindowId};
 pub use rect::Rect;
 pub use selection::{Selection, SelectionKind, extract_text, line_at, word_at};
