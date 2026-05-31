@@ -16,6 +16,7 @@ pub mod modes;
 pub mod reflow;
 pub mod scrollback;
 pub mod tabs;
+pub mod width;
 
 // These land in later tasks; declared here as placeholders so downstream
 // modules can `use` them the moment they exist.
@@ -35,3 +36,6 @@ pub use modes::Modes;
 pub use screen::{ColorQuery, PromptMark, PromptMarkKind, Screen};
 pub use scrollback::{Scrollback, DEFAULT_SCROLLBACK_LINES};
 pub use tabs::TabStops;
+pub use width::{
+    char_width, display_width, grapheme_advance, graphemes_with_width, truncate_to_width,
+};
