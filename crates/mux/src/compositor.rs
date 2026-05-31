@@ -626,6 +626,10 @@ fn put_str(
     c
 }
 
+/// One painted status-bar cell: a grapheme cluster, its display-column advance
+/// (1 or 2), and its style.
+type StatusCell = (smol_str::SmolStr, u16, plexy_glass_status::ResolvedStyle);
+
 fn paint_status_row(
     screen: &mut VirtualScreen,
     status: &StatusLine,
@@ -634,59 +638,77 @@ fn paint_status_row(
 ) {
     let cols_us = cols as usize;
 
-    let mut left_cells = collect_cells(&status.left);
-    let middle_cells = collect_cells(&status.middle);
-    let right_cells = collect_cells(&status.right);
+    // Left takes priority and is clipped to the bar width.
+    let left_cells = truncate_cells(collect_cells(&status.left), cols_us);
+    let left_w = cells_width(&left_cells);
 
-    // Truncate left if it overflows.
-    if left_cells.len() > cols_us {
-        left_cells.truncate(cols_us);
-    }
-    let left_w = left_cells.len();
+    // Right is pinned to the edge; clip it to whatever width remains.
+    let right_cells = truncate_cells(collect_cells(&status.right), cols_us.saturating_sub(left_w));
+    let right_w = cells_width(&right_cells);
 
-    // Reserve the right side, and truncate if it would overflow.
-    let mut right_w = right_cells.len();
-    if left_w + right_w > cols_us {
-        right_w = cols_us.saturating_sub(left_w);
-    }
-    let right_cells: Vec<_> = right_cells.into_iter().take(right_w).collect();
-
-    // Middle fills the gap; ellipsize if needed.
+    // Middle fills the gap; ellipsize (with a 1-column "…") if it overflows.
     let middle_budget = cols_us.saturating_sub(left_w + right_w);
-    let middle_cells = if middle_cells.len() <= middle_budget {
-        middle_cells
+    let middle_all = collect_cells(&status.middle);
+    let middle_cells = if cells_width(&middle_all) <= middle_budget {
+        middle_all
     } else if middle_budget == 0 {
         Vec::new()
     } else {
-        let mut truncated: Vec<_> = middle_cells.into_iter().take(middle_budget - 1).collect();
-        truncated.push((smol_str::SmolStr::new("…"), plexy_glass_status::ResolvedStyle::default()));
+        let mut truncated = truncate_cells(middle_all, middle_budget - 1);
+        truncated.push((
+            smol_str::SmolStr::new("…"),
+            1,
+            plexy_glass_status::ResolvedStyle::default(),
+        ));
         truncated
     };
 
-    // Paint left starting at col 0.
-    for (i, (g, style)) in left_cells.iter().enumerate() {
-        screen.put(row, i as u16, cell_for(g, style));
+    paint_cells(screen, row, 0, &left_cells);
+    paint_cells(screen, row, left_w as u16, &middle_cells);
+    paint_cells(screen, row, cols_us.saturating_sub(right_w) as u16, &right_cells);
+}
+
+/// Total display width of a run of status cells.
+fn cells_width(cells: &[StatusCell]) -> usize {
+    cells.iter().map(|(_, w, _)| *w as usize).sum()
+}
+
+/// Longest leading run of `cells` whose total display width is `<= max_w`,
+/// never splitting a wide grapheme.
+fn truncate_cells(cells: Vec<StatusCell>, max_w: usize) -> Vec<StatusCell> {
+    let mut used = 0usize;
+    let mut out = Vec::with_capacity(cells.len());
+    for (g, w, style) in cells {
+        if used + w as usize > max_w {
+            break;
+        }
+        used += w as usize;
+        out.push((g, w, style));
     }
-    // Paint middle starting after left.
-    for (i, (g, style)) in middle_cells.iter().enumerate() {
-        screen.put(row, (left_w + i) as u16, cell_for(g, style));
-    }
-    // Paint right pinned to the right edge.
-    let right_start = cols_us.saturating_sub(right_w);
-    for (i, (g, style)) in right_cells.iter().enumerate() {
-        screen.put(row, (right_start + i) as u16, cell_for(g, style));
+    out
+}
+
+/// Paint status cells left-to-right from `start`, advancing by each grapheme's
+/// display width and writing a wide spacer for 2-column graphemes.
+fn paint_cells(screen: &mut VirtualScreen, row: u16, start: u16, cells: &[StatusCell]) {
+    let mut c = start;
+    for (g, w, style) in cells {
+        if c >= screen.cols {
+            break;
+        }
+        screen.put(row, c, cell_for(g, style));
+        if *w == 2 && c + 1 < screen.cols {
+            screen.put(row, c + 1, plexy_glass_emulator::Cell::wide_spacer());
+        }
+        c = c.saturating_add(*w);
     }
 }
 
-fn collect_cells(
-    segments: &[plexy_glass_status::Segment],
-) -> Vec<(smol_str::SmolStr, plexy_glass_status::ResolvedStyle)> {
+fn collect_cells(segments: &[plexy_glass_status::Segment]) -> Vec<StatusCell> {
     let mut out = Vec::new();
     for seg in segments {
-        for ch in seg.text.chars() {
-            let mut buf = [0u8; 4];
-            let s = ch.encode_utf8(&mut buf);
-            out.push((smol_str::SmolStr::new(s), seg.style));
+        for (g, w) in plexy_glass_emulator::graphemes_with_width(&seg.text) {
+            out.push((smol_str::SmolStr::new(g), w, seg.style));
         }
     }
     out
@@ -910,6 +932,27 @@ mod tests {
             middle: vec![],
             right: vec![],
         }
+    }
+
+    #[test]
+    fn status_left_places_wide_grapheme_with_spacer() {
+        // "中B": 中 occupies cols 0-1 (cell + spacer), B lands at col 2.
+        let mut e = Emulator::new(2, 8);
+        pane(&mut e, b"X ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 2, 8),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+        };
+        let status = status_with_left("中B");
+        let vs = Compositor::compose(&[view], (3, 8), Some(&status), StatusPlacement::Bottom, None, None, None);
+        assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "中");
+        assert!(vs.cell(2, 1).unwrap().grapheme.is_empty(), "wide spacer after 中");
+        assert_eq!(vs.cell(2, 2).unwrap().grapheme.as_str(), "B");
     }
 
     #[test]
