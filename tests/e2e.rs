@@ -14,7 +14,51 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-fn isolate_dirs(tmp: &tempfile::TempDir) -> Vec<(String, String)> {
+/// The isolated environment for one e2e test: the env vars handed to every
+/// spawned `plexy-glass` process. On drop it tells this test's daemon to shut
+/// down, because the test's client auto-spawns a daemon in the isolated
+/// `XDG_RUNTIME_DIR` and `child.kill()` only reaps the client, so without this
+/// the daemon lingers as an orphan after the test ends.
+///
+/// It behaves as a drop-in for the old `Vec<(String, String)>`: `&env`
+/// iterates the pairs and `env.iter()` / slice methods work via `Deref`. Tests
+/// declare their `TempDir` first, so this guard (declared after) drops first
+/// and the daemon is gone before its socket directory is removed.
+struct TestEnv {
+    vars: Vec<(String, String)>,
+}
+
+impl std::ops::Deref for TestEnv {
+    type Target = [(String, String)];
+    fn deref(&self) -> &Self::Target {
+        &self.vars
+    }
+}
+
+impl<'a> IntoIterator for &'a TestEnv {
+    type Item = &'a (String, String);
+    type IntoIter = std::slice::Iter<'a, (String, String)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.vars.iter()
+    }
+}
+
+impl Drop for TestEnv {
+    fn drop(&mut self) {
+        // `kill` with no `-n` shuts the daemon down (not a session). Best-effort
+        // and bounded by the client's own SIGTERM/SIGKILL timeouts; if no daemon
+        // ever spawned it just prints "no daemon running".
+        if let Ok(mut cmd) = std::process::Command::cargo_bin("plexy-glass") {
+            cmd.arg("kill");
+            for (k, v) in &self.vars {
+                cmd.env(k, v);
+            }
+            let _ = cmd.output();
+        }
+    }
+}
+
+fn isolate_dirs(tmp: &tempfile::TempDir) -> TestEnv {
     let xdg = tmp.path().join("xdg");
     std::fs::create_dir_all(&xdg).unwrap();
     let state = tmp.path().join("state");
@@ -23,17 +67,19 @@ fn isolate_dirs(tmp: &tempfile::TempDir) -> Vec<(String, String)> {
     std::fs::create_dir_all(&home).unwrap();
     let xdg_config = tmp.path().join("xdg-config");
     std::fs::create_dir_all(&xdg_config).unwrap();
-    vec![
-        ("XDG_RUNTIME_DIR".into(), xdg.to_string_lossy().into_owned()),
-        ("XDG_STATE_HOME".into(), state.to_string_lossy().into_owned()),
-        ("HOME".into(), home.to_string_lossy().into_owned()),
-        ("TMPDIR".into(), tmp.path().to_string_lossy().into_owned()),
-        // Keep the child shell deterministic.
-        ("SHELL".into(), "/bin/sh".into()),
-        // XDG_CONFIG_HOME is used by the directories crate on Linux; on macOS
-        // the crate uses $HOME/Library/Application Support instead.
-        ("XDG_CONFIG_HOME".into(), xdg_config.to_string_lossy().into_owned()),
-    ]
+    TestEnv {
+        vars: vec![
+            ("XDG_RUNTIME_DIR".into(), xdg.to_string_lossy().into_owned()),
+            ("XDG_STATE_HOME".into(), state.to_string_lossy().into_owned()),
+            ("HOME".into(), home.to_string_lossy().into_owned()),
+            ("TMPDIR".into(), tmp.path().to_string_lossy().into_owned()),
+            // Keep the child shell deterministic.
+            ("SHELL".into(), "/bin/sh".into()),
+            // XDG_CONFIG_HOME is used by the directories crate on Linux; on macOS
+            // the crate uses $HOME/Library/Application Support instead.
+            ("XDG_CONFIG_HOME".into(), xdg_config.to_string_lossy().into_owned()),
+        ],
+    }
 }
 
 /// Reads from the master PTY on a background thread (so we don't block past
@@ -1317,20 +1363,24 @@ fn attach_split_detach_restart_restores_layout() {
     let tmp = tempfile::tempdir().unwrap();
     // Same `XDG_STATE_HOME` across both runs (so the saved file is shared).
     // A different `XDG_RUNTIME_DIR` forces a fresh daemon for the second run.
-    let mut env_run1 = isolate_dirs(&tmp);
+    let env_run1 = isolate_dirs(&tmp);
     let xdg2 = tmp.path().join("xdg2");
     std::fs::create_dir_all(&xdg2).unwrap();
-    let env_run2: Vec<(String, String)> = env_run1
-        .iter()
-        .map(|(k, v)| {
-            if k == "XDG_RUNTIME_DIR" {
-                ("XDG_RUNTIME_DIR".to_string(), xdg2.to_string_lossy().into_owned())
-            } else {
-                (k.clone(), v.clone())
-            }
-        })
-        .collect();
-    let _ = env_run1.iter_mut();
+    // Run 2 reuses the same XDG_STATE_HOME but a fresh XDG_RUNTIME_DIR, so it
+    // spawns a *second* daemon. Wrap it in its own TestEnv guard too, so both
+    // daemons are killed when the test ends.
+    let env_run2 = TestEnv {
+        vars: env_run1
+            .iter()
+            .map(|(k, v)| {
+                if k == "XDG_RUNTIME_DIR" {
+                    ("XDG_RUNTIME_DIR".to_string(), xdg2.to_string_lossy().into_owned())
+                } else {
+                    (k.clone(), v.clone())
+                }
+            })
+            .collect(),
+    };
 
     let pty_system = native_pty_system();
 
