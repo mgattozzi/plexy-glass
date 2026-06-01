@@ -6,6 +6,7 @@ pub struct Config {
     pub palette: PaletteConfig,
     pub status: StatusConfig,
     pub keymap: KeymapConfig,
+    pub sessions: Vec<SessionTemplate>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -165,4 +166,44 @@ pub enum WidgetSpec {
         timeout: Duration,
         style: StyleConfig,
     },
+}
+
+/// A declarative default session (Feature B): built fresh at daemon boot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionTemplate {
+    pub name: String,
+    pub cwd: Option<String>,
+    pub windows: Vec<WindowTemplate>, // invariant: non-empty (enforced by the decoder)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowTemplate {
+    pub name: String,
+    pub layout: PaneNode,
+}
+
+/// A window's layout: a single pane, or a split of >= 2 child layouts.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaneNode {
+    Leaf(PaneTemplate),
+    Split {
+        dir: SplitDirection,
+        children: Vec<PaneNode>, // invariant: len() >= 2 (enforced by the decoder)
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaneTemplate {
+    /// Shell command string (run via the default shell `-c`); None = interactive shell.
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub name: Option<String>,
+}
+
+/// Orientation of a config split. `Vertical` = side-by-side; `Horizontal` =
+/// stacked (matches the engine's `SplitDir` and the `split_v`/`split_h` keys).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitDirection {
+    Vertical,
+    Horizontal,
 }

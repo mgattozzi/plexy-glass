@@ -40,6 +40,9 @@ pub fn built_in_default() -> Config {
     Config {
         palette: kanagawa_dragon_palette(),
         keymap: built_in_keymap(),
+        // The built-in default declares no sessions (Feature B); declared
+        // sessions are opt-in via `session` nodes in the user's config.
+        sessions: Vec::new(),
         status: StatusConfig {
             position: Position::Bottom,
             refresh: Duration::from_secs(5),

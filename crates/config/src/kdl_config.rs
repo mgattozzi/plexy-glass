@@ -3,8 +3,9 @@
 //! every downstream consumer are unchanged.
 
 use crate::{
-    Config, ConfigError, KeymapBinding, KeymapConfig, Padding, PaletteConfig, Position,
-    StatusConfig, StyleConfig, WidgetSpec,
+    Config, ConfigError, KeymapBinding, KeymapConfig, Padding, PaletteConfig, PaneNode,
+    PaneTemplate, Position, SessionTemplate, SplitDirection, StatusConfig, StyleConfig, WidgetSpec,
+    WindowTemplate,
 };
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use std::time::Duration;
@@ -33,6 +34,13 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
                 dup_check(seen_keymap, "keymap", node, src)?;
                 seen_keymap = true;
                 config.keymap = decode_keymap(node, src)?;
+            }
+            "session" => {
+                let template = decode_session(node, src)?;
+                if config.sessions.iter().any(|s| s.name == template.name) {
+                    return Err(decode_err(src, node, &format!("duplicate session `{}`", template.name)));
+                }
+                config.sessions.push(template);
             }
             other => {
                 return Err(decode_err(src, node, &format!("unknown top-level node `{other}`")));
@@ -152,6 +160,88 @@ fn decode_keymap(node: &KdlNode, src: &str) -> Result<KeymapConfig, ConfigError>
         }
     }
     Ok(km)
+}
+
+// --- sessions (declarative defaults, Feature B) ---
+
+fn decode_session(node: &KdlNode, src: &str) -> Result<SessionTemplate, ConfigError> {
+    let name = string_arg(node, 0, src, "session name")?.to_string();
+    ensure_only_props(node, &["cwd"], src)?;
+    let cwd = prop_str(node, "cwd").map(str::to_string);
+    let mut windows = Vec::new();
+    if let Some(doc) = node.children() {
+        for child in doc.nodes() {
+            match child.name().value() {
+                "window" => windows.push(decode_window(child, src)?),
+                other => {
+                    return Err(decode_err(
+                        src,
+                        child,
+                        &format!("unknown session node `{other}` (expected `window`)"),
+                    ));
+                }
+            }
+        }
+    }
+    if windows.is_empty() {
+        return Err(decode_err(src, node, &format!("session `{name}` has no windows")));
+    }
+    Ok(SessionTemplate { name, cwd, windows })
+}
+
+fn decode_window(node: &KdlNode, src: &str) -> Result<WindowTemplate, ConfigError> {
+    let name = string_arg(node, 0, src, "window name")?.to_string();
+    ensure_only_props(node, &[], src)?;
+    let nodes: Vec<&KdlNode> = node.children().map(|d| d.nodes().iter().collect()).unwrap_or_default();
+    let layout = match nodes.as_slice() {
+        [single] => decode_layout_node(single, src)?,
+        [] => {
+            return Err(decode_err(src, node, &format!("window `{name}` has no layout (expected one `pane` or `split`)")));
+        }
+        _ => {
+            return Err(decode_err(src, node, &format!("window `{name}` must contain exactly one layout node; wrap multiple panes in a `split`")));
+        }
+    };
+    Ok(WindowTemplate { name, layout })
+}
+
+fn decode_layout_node(node: &KdlNode, src: &str) -> Result<PaneNode, ConfigError> {
+    match node.name().value() {
+        "pane" => Ok(PaneNode::Leaf(decode_pane(node, src)?)),
+        "split" => decode_split(node, src),
+        other => Err(decode_err(src, node, &format!("expected `pane` or `split`, got `{other}`"))),
+    }
+}
+
+fn decode_pane(node: &KdlNode, src: &str) -> Result<PaneTemplate, ConfigError> {
+    ensure_only_props(node, &["command", "cwd", "name"], src)?;
+    ensure_only_children(node, &[], src)?;
+    Ok(PaneTemplate {
+        command: prop_str(node, "command").map(str::to_string),
+        cwd: prop_str(node, "cwd").map(str::to_string),
+        name: prop_str(node, "name").map(str::to_string),
+    })
+}
+
+fn decode_split(node: &KdlNode, src: &str) -> Result<PaneNode, ConfigError> {
+    let dir = match string_arg(node, 0, src, "split direction")? {
+        "vertical" => SplitDirection::Vertical,
+        "horizontal" => SplitDirection::Horizontal,
+        other => {
+            return Err(decode_err(src, node, &format!("split direction must be `vertical` or `horizontal`, got `{other}`")));
+        }
+    };
+    ensure_only_props(node, &[], src)?;
+    let mut children = Vec::new();
+    if let Some(doc) = node.children() {
+        for child in doc.nodes() {
+            children.push(decode_layout_node(child, src)?);
+        }
+    }
+    if children.len() < 2 {
+        return Err(decode_err(src, node, "`split` needs at least two child layout nodes"));
+    }
+    Ok(PaneNode::Split { dir, children })
 }
 
 // --- property access (widgets) ---
@@ -837,5 +927,96 @@ keymap {
         assert!(matches!(cfg.status.left[0], WidgetSpec::Hostname { .. }));
         assert!(matches!(cfg.status.left[1], WidgetSpec::GitBranch { .. }));
         assert!(matches!(cfg.status.left[2], WidgetSpec::Memory { .. }));
+    }
+
+    // --- sessions (Feature B) ---
+
+    #[test]
+    fn decodes_single_pane_session() {
+        let cfg = parse_config(r##"session "dev" { window "main" { pane command="htop" } }"##).unwrap();
+        assert_eq!(cfg.sessions.len(), 1);
+        let s = &cfg.sessions[0];
+        assert_eq!(s.name, "dev");
+        assert_eq!(s.windows.len(), 1);
+        assert_eq!(s.windows[0].name, "main");
+        match &s.windows[0].layout {
+            PaneNode::Leaf(p) => assert_eq!(p.command.as_deref(), Some("htop")),
+            other => panic!("expected Leaf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_session_cwd_and_pane_overrides() {
+        let cfg = parse_config(
+            r##"session "x" cwd="~/p" { window "w" { pane cwd="~/p/sub" name="left" } }"##,
+        )
+        .unwrap();
+        assert_eq!(cfg.sessions[0].cwd.as_deref(), Some("~/p"));
+        match &cfg.sessions[0].windows[0].layout {
+            PaneNode::Leaf(p) => {
+                assert_eq!(p.cwd.as_deref(), Some("~/p/sub"));
+                assert_eq!(p.name.as_deref(), Some("left"));
+            }
+            other => panic!("expected Leaf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_split_two_and_three_children() {
+        let cfg = parse_config(
+            r##"session "s" { window "w" { split vertical { pane; pane command="a"; pane } } }"##,
+        )
+        .unwrap();
+        match &cfg.sessions[0].windows[0].layout {
+            PaneNode::Split { dir, children } => {
+                assert_eq!(*dir, SplitDirection::Vertical);
+                assert_eq!(children.len(), 3);
+            }
+            other => panic!("expected Split, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_nested_split() {
+        let cfg = parse_config(
+            r##"session "s" { window "w" { split vertical { pane; split horizontal { pane; pane } } } }"##,
+        )
+        .unwrap();
+        match &cfg.sessions[0].windows[0].layout {
+            PaneNode::Split { children, .. } => match &children[1] {
+                PaneNode::Split { dir, children } => {
+                    assert_eq!(*dir, SplitDirection::Horizontal);
+                    assert_eq!(children.len(), 2);
+                }
+                other => panic!("expected nested Split, got {other:?}"),
+            },
+            other => panic!("expected Split, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_errors() {
+        // no name
+        assert!(parse_config(r##"session { window "w" { pane } }"##).is_err());
+        // no windows
+        assert!(parse_config(r##"session "s" { }"##).is_err());
+        // window with zero layout nodes
+        assert!(parse_config(r##"session "s" { window "w" { } }"##).is_err());
+        // window with two layout nodes (must wrap in a split)
+        assert!(parse_config(r##"session "s" { window "w" { pane; pane } }"##).is_err());
+        // split with one child
+        assert!(parse_config(r##"session "s" { window "w" { split vertical { pane } } }"##).is_err());
+        // bad split direction
+        assert!(parse_config(r##"session "s" { window "w" { split sideways { pane; pane } } }"##).is_err());
+        // unknown pane property
+        assert!(parse_config(r##"session "s" { window "w" { pane bogus="x" } }"##).is_err());
+        // duplicate session name
+        assert!(parse_config(r##"session "s" { window "w" { pane } } session "s" { window "w" { pane } }"##).is_err());
+    }
+
+    #[test]
+    fn no_sessions_by_default() {
+        assert!(parse_config("").unwrap().sessions.is_empty());
+        assert!(parse_config(r##"palette { bg "#000000" }"##).unwrap().sessions.is_empty());
     }
 }
