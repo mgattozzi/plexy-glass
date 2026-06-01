@@ -35,6 +35,8 @@ bytes = { version = "1.11", features = ["serde"] }
 thiserror = "2.0"
 toml = "1.1.2"
 humantime-serde = "1.1.1"
+kdl = "6.7.1"
+humantime = "2.3.0"
 anyhow = "1.0.102"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

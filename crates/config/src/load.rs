@@ -7,6 +7,8 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("toml parse: {0}")]
     Toml(#[from] toml::de::Error),
+    #[error("config parse: {0}")]
+    Kdl(String),
     #[error("XDG config home not found")]
     NoHome,
 }

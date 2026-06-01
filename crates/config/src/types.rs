@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Config {
     #[serde(default)]
     pub palette: PaletteConfig,
@@ -12,7 +12,7 @@ pub struct Config {
     pub keymap: KeymapConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct KeymapConfig {
     #[serde(default = "default_prefix")]
     pub prefix: String,
@@ -32,7 +32,7 @@ impl Default for KeymapConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct KeymapBinding {
     pub keys: String,
     pub command: String,
@@ -45,7 +45,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct PaletteConfig {
     #[serde(flatten)]
     pub entries: HashMap<String, String>,
@@ -59,7 +59,7 @@ pub enum Position {
     Top,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StatusConfig {
     #[serde(default)]
     pub position: Position,
@@ -89,7 +89,7 @@ fn default_refresh() -> Duration {
     Duration::from_secs(5)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct StyleConfig {
     #[serde(default)]
     pub fg: Option<String>,
@@ -120,7 +120,7 @@ impl StyleConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
 #[serde(from = "[u8; 2]", into = "[u8; 2]")]
 pub struct Padding {
     pub left: u8,
@@ -145,7 +145,7 @@ impl From<(u8, u8)> for Padding {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WidgetSpec {
     Session {
