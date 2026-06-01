@@ -98,6 +98,14 @@ only for ASCII.
 - Don't launch multiple `cargo` / `nextest` invocations at once — they serialize
   on the target-dir lock and look like a hang. Run one at a time (the suite is
   ~1 minute).
+- **In-process `connection.rs` tests share the real `$XDG_STATE_HOME` persist
+  dir** (unlike the e2e binary, which `isolate_dirs`). `attach_or_create` restores
+  a saved session by name, so a test that creates session `"main"` (or mutates
+  layout and lets the debounced persist land) can restore stale on-disk state on a
+  later run and break window/pane-count assertions. New connection tests should
+  use a **unique session name** and `let _ = crate::persist::delete_session(name);`
+  at the top (all attaches precede the debounced persist). A proper fix would set
+  a per-test `XDG_STATE_HOME` tempdir like `persist.rs`'s tests do.
 - Each e2e test spawns a client that auto-spawns a *daemon*; the `TestEnv` guard
   returned by `isolate_dirs` kills that daemon on drop (`plexy-glass kill` in the
   test's isolated env). Don't bypass it, or daemons orphan and hold PTYs open.
@@ -155,20 +163,34 @@ paste; sync-panes; a configurable status bar with live reload; deep OSC handling
 (8 hyperlinks, 52 clipboard, 133 prompt marks, 10/11/12 colors, 0/1/2 titles);
 keyboard passthrough; interactive overlays (window/pane rename, help); a
 `Ctrl+a :` **command prompt** with in-place **session switching**
-(`switch_session`); and a `Ctrl+a w` **visual session picker**. Each has a spec
-in `docs/superpowers/specs/`.
+(`switch_session`); a `Ctrl+a w` **visual session picker**; a `Ctrl+a W`
+**choose-tree** (session→window→pane drill-down with switch/kill/rename across
+sessions); **pane mobility** — break (`Ctrl+a !`), a marked pane (`Ctrl+a m`),
+join (`:join-pane`), and swap (`Ctrl+a {`/`}`, `:swap-pane`); **paste buffers** —
+copy-mode yanks push a bounded named-buffer stack, `Ctrl+a ]` pastes the newest,
+`Ctrl+a =` opens a choose-buffer overlay; and per-window **activity/bell
+monitoring** (`Ctrl+a M` / `:monitor-activity` / `:monitor-bell`) surfaced as
+`#`/`!` flags in the status window-list. Each has a spec in
+`docs/superpowers/specs/`.
 
 The overlay subsystem is the substrate for modal UI: add `Overlay` +
 `OverlayView` variants (mux), an `OverlayHandler` arm, `WindowManager::open_*`
 and an `OverlayKeyResult`, and dispatch at the connection layer (overlays that
 need the registry/session list, like the command prompt and picker, are opened
-there, not in `WindowManager::handle_command`).
+there, not in `WindowManager::handle_command`). Overlays whose actions are
+cross-session or need the registry (choose-tree, choose-buffer) carry their own
+pure handler (`tree.rs`/`buffer.rs`) returning a crate-local outcome enum that
+the daemon adapts to `OverlayKeyResult`, instead of routing through
+`OverlayHandler::handle`.
 
 Established feature workflow (it has paid off — keep using it): brainstorm →
 write a spec → adversarial self-review of the spec → implement one task per
 `jj commit` (each green under the gates above) → adversarial review of the
 implementation. Workflows (`Workflow` tool) drive the review fan-outs.
 
-Not yet built (future work): `choose-tree` drill-down + kill/rename from the
-picker, declarative session/layout templates, break/join/swap panes, paste
-buffers, capture-pane / pipe-pane, and activity/bell monitoring.
+Not yet built (future work): declarative session/layout templates; capture-pane /
+pipe-pane; cross-window **swap**-pane and the choose-tree filter/collapse +
+session rename (deferred in their specs); silence monitoring + bell/activity
+alert messages; set/save/load paste buffers. (choose-tree, break/join/swap +
+marked pane, paste buffers, and activity/bell monitoring all shipped — see the
+2026-05-31 specs/plans.)
