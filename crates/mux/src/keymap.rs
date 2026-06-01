@@ -34,6 +34,10 @@ pub enum Command {
     JoinPane(SplitDir),
     /// Swap the active pane with the marked pane (same window only in v1).
     SwapMarkedPane,
+    /// Toggle monitor-activity on the active window.
+    ToggleMonitorActivity,
+    /// Toggle monitor-bell on the active window.
+    ToggleMonitorBell,
     RenameWindow,
     RenamePane,
     ShowHelp,

@@ -23,6 +23,15 @@ pub struct Window {
     layout: LayoutTree,
     active: PaneId,
     focus_history: VecDeque<PaneId>,
+    /// Monitor options (tmux's `monitor-activity` / `monitor-bell`). When on, a
+    /// background occurrence sets the corresponding sticky flag below.
+    monitor_activity: bool,
+    monitor_bell: bool,
+    /// Sticky alert flags: set by `WindowManager::update_monitor_flags` when this
+    /// (non-current) window had activity / a bell; cleared when it becomes the
+    /// current window. Surfaced as `#`/`!` in the status window-list.
+    activity: bool,
+    bell: bool,
 }
 
 impl Window {
@@ -57,6 +66,10 @@ impl Window {
             layout: LayoutTree::single(first_pane_id),
             active: first_pane_id,
             focus_history: VecDeque::new(),
+            monitor_activity: false,
+            monitor_bell: true,
+            activity: false,
+            bell: false,
         })
     }
 
@@ -272,7 +285,68 @@ impl Window {
             layout: LayoutTree::single(pid),
             active: pid,
             focus_history: VecDeque::new(),
+            monitor_activity: false,
+            monitor_bell: true,
+            activity: false,
+            bell: false,
         }
+    }
+
+    /// Toggle monitor-activity; returns the new state.
+    pub fn toggle_monitor_activity(&mut self) -> bool {
+        self.monitor_activity = !self.monitor_activity;
+        self.monitor_activity
+    }
+
+    /// Toggle monitor-bell; returns the new state.
+    pub fn toggle_monitor_bell(&mut self) -> bool {
+        self.monitor_bell = !self.monitor_bell;
+        self.monitor_bell
+    }
+
+    pub fn monitor_activity(&self) -> bool {
+        self.monitor_activity
+    }
+
+    pub fn monitor_bell(&self) -> bool {
+        self.monitor_bell
+    }
+
+    pub fn activity_flag(&self) -> bool {
+        self.activity
+    }
+
+    pub fn bell_flag(&self) -> bool {
+        self.bell
+    }
+
+    /// Clear the sticky alert flags (the window became current).
+    pub fn clear_alerts(&mut self) {
+        self.activity = false;
+        self.bell = false;
+    }
+
+    /// Set the sticky alert flags (called by the manager for a background window
+    /// with the matching monitor option on).
+    pub fn set_activity(&mut self) {
+        self.activity = true;
+    }
+
+    pub fn set_bell(&mut self) {
+        self.bell = true;
+    }
+
+    /// Read-and-clear every pane's activity/bell signal, OR-ing the results.
+    /// Always drains (so signals never backlog), regardless of monitor options.
+    pub fn drain_pane_alerts(&mut self) -> (bool, bool) {
+        let (mut acted, mut belled) = (false, false);
+        for id in self.layout.panes() {
+            if let Some(p) = self.panes.get(&id) {
+                acted |= p.take_activity();
+                belled |= p.take_bell();
+            }
+        }
+        (acted, belled)
     }
 
     /// The active pane's DFS-leaf neighbor (wrapping): the next leaf if `next`,

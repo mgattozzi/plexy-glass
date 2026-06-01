@@ -450,6 +450,29 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Drain every pane's activity/bell signal and fold it into the per-window
+    /// sticky alert flags. This is the sole drainer of the pane atomics, called
+    /// once per frame by the render coordinator (the status tick task only
+    /// *reads* the flags). The current window's alerts are cleared (you're
+    /// watching it); a background window with the matching monitor option on
+    /// gets its sticky flag set.
+    pub fn update_monitor_flags(&mut self) {
+        let active = self.active;
+        for (i, w) in self.windows.iter_mut().enumerate() {
+            let (acted, belled) = w.drain_pane_alerts();
+            if i == active {
+                w.clear_alerts();
+            } else {
+                if acted && w.monitor_activity() {
+                    w.set_activity();
+                }
+                if belled && w.monitor_bell() {
+                    w.set_bell();
+                }
+            }
+        }
+    }
+
     pub fn host_size(&self) -> PtySize {
         self.host_size
     }
@@ -864,6 +887,16 @@ impl WindowManager {
                 } else {
                     self.set_status_message("no marked pane".into());
                 }
+            }
+            Command::ToggleMonitorActivity => {
+                let on = self.active_window_mut().toggle_monitor_activity();
+                self.set_status_message(
+                    format!("monitor-activity {}", if on { "on" } else { "off" }),
+                );
+            }
+            Command::ToggleMonitorBell => {
+                let on = self.active_window_mut().toggle_monitor_bell();
+                self.set_status_message(format!("monitor-bell {}", if on { "on" } else { "off" }));
             }
             Command::ResizePane(dir) => {
                 let active = self.active_window().active();
@@ -2707,5 +2740,66 @@ mod tests {
             "got {r:?}"
         );
         assert!(m.overlay().is_none(), "paste closes the overlay");
+    }
+
+    // ----- activity / bell monitoring -----
+
+    #[tokio::test]
+    async fn toggle_monitor_commands_flip_and_message() {
+        let mut m = mk_mgr();
+        // Defaults: `monitor_activity` off, `monitor_bell` on.
+        assert!(!m.active_window().monitor_activity());
+        assert!(m.active_window().monitor_bell());
+        m.handle_command(Command::ToggleMonitorActivity).unwrap();
+        assert_eq!(m.take_active_message(), Some("monitor-activity on"));
+        assert!(m.active_window().monitor_activity());
+        m.handle_command(Command::ToggleMonitorActivity).unwrap();
+        assert_eq!(m.take_active_message(), Some("monitor-activity off"));
+        m.handle_command(Command::ToggleMonitorBell).unwrap();
+        assert_eq!(m.take_active_message(), Some("monitor-bell off"));
+        assert!(!m.active_window().monitor_bell());
+    }
+
+    #[tokio::test]
+    async fn update_monitor_flags_clears_active_window_alerts() {
+        let mut m = mk_mgr();
+        m.active_window_mut().set_bell(); // a stale alert on the (current) window
+        m.active_window_mut().set_activity();
+        m.update_monitor_flags();
+        assert!(!m.active_window().bell_flag(), "current window's bell cleared");
+        assert!(!m.active_window().activity_flag(), "current window's activity cleared");
+    }
+
+    #[tokio::test]
+    async fn update_monitor_flags_sets_background_activity_then_clears_on_switch() {
+        let mut m = mk_mgr(); // window 0
+        m.handle_command(Command::NewWindow).unwrap(); // window 1 (active)
+        m.handle_command(Command::ToggleMonitorActivity).unwrap(); // monitor on for window 1
+        m.handle_command(Command::SelectWindow(0)).unwrap(); // window 0 active; window 1 background
+        // Generate output in the background window's pane (cat echoes it).
+        let pid = m.windows()[1].layout().panes()[0];
+        m.windows()[1]
+            .pane(pid)
+            .unwrap()
+            .send_input(bytes::Bytes::from_static(b"x\n"))
+            .await
+            .unwrap();
+        // Drain into the sticky flag (the coordinator's per-frame step).
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            m.update_monitor_flags();
+            if m.windows()[1].activity_flag() {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("background activity never flagged");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!m.active_window().activity_flag(), "the current window is never flagged");
+        // Switching to the flagged window clears it on the next update.
+        m.handle_command(Command::SelectWindow(1)).unwrap();
+        m.update_monitor_flags();
+        assert!(!m.windows()[1].activity_flag(), "flag cleared once the window is current");
     }
 }
