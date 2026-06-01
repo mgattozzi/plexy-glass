@@ -1,7 +1,7 @@
 //! A named session: a WindowManager + attached clients + broadcasting renderer.
 
 use crate::{error::DaemonError, window_manager::WindowManager};
-use plexy_glass_mux::{PaneId, VirtualScreen};
+use plexy_glass_mux::{PaneId, VirtualScreen, WindowId};
 use plexy_glass_protocol::{ProtocolError, PtySize, SessionEntry, SpawnSpec};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -203,6 +203,9 @@ async fn render_coordinator(
                         filter,
                         selected: *selected,
                     })
+                }
+                Some(plexy_glass_mux::Overlay::Tree(state)) => {
+                    Some(plexy_glass_mux::OverlayView::Tree { state })
                 }
                 None => None,
             };
@@ -746,6 +749,23 @@ fn count_leaves(node: &crate::persist::LayoutStateV1) -> u32 {
     }
 }
 
+/// A point-in-time snapshot of one session's windows/panes, used to build the
+/// choose-tree node list at the connection layer.
+pub struct SessionTree {
+    pub name: String,
+    pub active_window: usize,
+    pub total_panes: usize,
+    pub windows: Vec<WindowTree>,
+}
+
+/// One window within a [`SessionTree`]. `panes` is in stable DFS-leaf order.
+pub struct WindowTree {
+    pub id: WindowId,
+    pub name: String,
+    pub active_pane: PaneId,
+    pub panes: Vec<(PaneId, Option<String>)>,
+}
+
 impl Session {
     pub fn list_entry(&self) -> SessionEntry {
         let m = self.window_manager.blocking_lock();
@@ -763,6 +783,31 @@ impl Session {
             clients,
             created: self.created,
         }
+    }
+
+    /// Snapshot this session's windows/panes for the choose-tree overlay. Async
+    /// because it locks the WindowManager via `.lock().await` (NEVER
+    /// `blocking_lock`: the connection task runs on a runtime worker thread,
+    /// where `blocking_lock` panics). Pane order comes from
+    /// `layout().dfs_leaves()` (stable).
+    pub async fn tree_snapshot(&self) -> SessionTree {
+        let m = self.window_manager.lock().await;
+        let active_window = m.active_idx();
+        let mut total_panes = 0;
+        let windows = m
+            .windows()
+            .iter()
+            .map(|w| {
+                let ids = w.layout().dfs_leaves();
+                total_panes += ids.len();
+                let panes = ids
+                    .iter()
+                    .map(|id| (*id, w.pane(*id).and_then(|p| p.name())))
+                    .collect();
+                WindowTree { id: w.id, name: w.name.clone(), active_pane: w.active(), panes }
+            })
+            .collect();
+        SessionTree { name: self.name.clone(), active_window, total_panes, windows }
     }
 
     pub fn register_client(self: &Arc<Self>, size: PtySize) -> Result<ClientHandle, DaemonError> {
@@ -1332,6 +1377,25 @@ mod tests {
         assert_eq!(entry.windows, 1);
         assert_eq!(entry.panes, 1);
         assert_eq!(entry.clients, 0);
+    }
+
+    #[tokio::test]
+    async fn tree_snapshot_reports_windows_and_panes() {
+        let s = Session::new("snap".into(), spec(), size(), cfg()).unwrap();
+        {
+            // Split the first window so it has two panes, then add a window.
+            let mut m = s.window_manager.lock().await;
+            m.handle_command(plexy_glass_mux::Command::SplitV).unwrap();
+            m.handle_command(plexy_glass_mux::Command::NewWindow).unwrap();
+        }
+        let st = s.tree_snapshot().await;
+        assert_eq!(st.name, "snap");
+        assert_eq!(st.windows.len(), 2);
+        assert_eq!(st.total_panes, 3, "two panes in window 0, one in window 1");
+        assert_eq!(st.windows[0].panes.len(), 2);
+        assert_eq!(st.windows[1].panes.len(), 1);
+        // NewWindow made window index 1 active.
+        assert_eq!(st.active_window, 1);
     }
 
     #[tokio::test]

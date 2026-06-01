@@ -51,6 +51,11 @@ pub enum OverlayView<'a> {
         filter: &'a str,
         selected: usize,
     },
+    /// A fully-expanded session → window → pane tree (`choose-tree`): a centered
+    /// box with depth-indented rows, the current-path nodes marked, the selected
+    /// row highlighted, and a mode-dependent footer (navigate / confirm-kill /
+    /// rename).
+    Tree { state: &'a crate::tree::TreeState },
 }
 
 pub struct Compositor;
@@ -358,6 +363,10 @@ fn paint_overlay(
             );
             screen.cursor_visible = false;
         }
+        OverlayView::Tree { state } => {
+            paint_tree(screen, state, pane_row_offset, pane_area_rows, cols);
+            screen.cursor_visible = false;
+        }
         OverlayView::Command { buf } => {
             // A full-width REVERSE bar on the bottom row of the pane band,
             // ":<buf>" with a block cursor just past the text.
@@ -533,6 +542,112 @@ fn paint_session_picker(
             }
             put_str(screen, r, inner_left, &rows[row_idx], row_attrs, inner_right);
         }
+    }
+}
+
+/// Draw the centered choose-tree box: depth-indented rows (session → window →
+/// pane), the current-path nodes marked `*`, the selected row REVERSE, scrolled
+/// to keep the selection visible, with a mode-dependent footer.
+fn paint_tree(
+    screen: &mut VirtualScreen,
+    state: &crate::tree::TreeState,
+    pane_row_offset: u16,
+    pane_area_rows: u16,
+    cols: u16,
+) {
+    use crate::tree::{TreeKind, TreeMode};
+    let title = " Tree ";
+    let footer: String = match &state.mode {
+        TreeMode::Navigate => {
+            let session_selected = state
+                .nodes
+                .get(state.selected)
+                .map(|n| n.kind() == TreeKind::Session)
+                .unwrap_or(false);
+            if session_selected {
+                " \u{2191}/\u{2193} move \u{b7} enter switch \u{b7} x kill \u{b7} esc close ".into()
+            } else {
+                " \u{2191}/\u{2193} move \u{b7} enter switch \u{b7} x kill \u{b7} r rename \u{b7} esc close ".into()
+            }
+        }
+        TreeMode::ConfirmKill => match state.nodes.get(state.selected) {
+            Some(n) => {
+                let kind = match n.kind() {
+                    TreeKind::Session => "session",
+                    TreeKind::Window => "window",
+                    TreeKind::Pane => "pane",
+                };
+                format!(" Kill {kind} '{}'?  y / n ", n.name)
+            }
+            None => " Kill?  y / n ".into(),
+        },
+        TreeMode::Rename { buf } => format!(" rename: {buf}\u{2588}  enter ok \u{b7} esc cancel "),
+    };
+
+    let rows: Vec<String> = state
+        .nodes
+        .iter()
+        .map(|n| {
+            let indent = " ".repeat((n.depth as usize) * 2);
+            let marker = if n.is_current { '*' } else { ' ' };
+            format!("{indent}{marker} {}", n.label)
+        })
+        .collect();
+
+    let dw = |s: &str| display_width(s) as usize;
+    let max_visible = (pane_area_rows.saturating_sub(2)).max(1) as usize;
+    let row_count = rows.len().max(1);
+    let visible = row_count.min(max_visible);
+
+    let content_w = rows
+        .iter()
+        .map(|s| dw(s))
+        .chain([dw(title), dw(&footer)])
+        .max()
+        .unwrap_or(0);
+    let inner_w = (content_w + 2).min(cols.saturating_sub(2) as usize);
+    let box_w = (inner_w + 2) as u16;
+    let box_h = (visible as u16) + 2; // top border + rows + bottom border (footer)
+    if box_w < 3 || box_h < 3 || box_w > cols || box_h > pane_area_rows {
+        return;
+    }
+
+    let sel = state.selected.min(rows.len().saturating_sub(1));
+    let top = if sel >= visible { sel - visible + 1 } else { 0 };
+
+    let row0 = pane_row_offset + (pane_area_rows.saturating_sub(box_h)) / 2;
+    let col0 = (cols.saturating_sub(box_w)) / 2;
+    let plain = plexy_glass_emulator::Attrs::empty();
+    let rev = plexy_glass_emulator::Attrs::REVERSE;
+
+    for r in 0..box_h {
+        for c in 0..box_w {
+            put_char(screen, row0 + r, col0 + c, border_glyph(r, c, box_h, box_w), plain);
+        }
+    }
+    let tcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(title)) / 2) as u16;
+    put_str(screen, row0, tcol, title, plain, col0 + box_w - 1);
+    let fcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(&footer)) / 2) as u16;
+    put_str(screen, row0 + box_h - 1, fcol, &footer, plain, col0 + box_w - 1);
+
+    let inner_left = col0 + 1;
+    let inner_right = col0 + box_w - 1; // exclusive max_col for put_str
+
+    // Empty tree (last session just killed): blank interior for the one frame
+    // before the client tears down.
+    if rows.is_empty() {
+        return;
+    }
+    let end = (top + visible).min(rows.len());
+    for (vis_i, row_idx) in (top..end).enumerate() {
+        let r = row0 + 1 + vis_i as u16;
+        let row_attrs = if row_idx == sel { rev } else { plain };
+        if row_idx == sel {
+            for c in inner_left..inner_right {
+                put_char(screen, r, c, ' ', row_attrs);
+            }
+        }
+        put_str(screen, r, inner_left, &rows[row_idx], row_attrs, inner_right);
     }
 }
 
@@ -1293,5 +1408,122 @@ mod tests {
             }
         }
         assert!(!found_corner, "help box must be suppressed when it would overflow the band");
+    }
+
+    fn tree_node(
+        session: &str,
+        window: Option<u32>,
+        pane: Option<u32>,
+        depth: u8,
+        label: &str,
+        is_current: bool,
+    ) -> crate::tree::TreeNode {
+        crate::tree::TreeNode {
+            session: session.into(),
+            window: window.map(crate::WindowId),
+            pane: pane.map(crate::PaneId),
+            depth,
+            label: label.into(),
+            name: label.into(),
+            index: 1,
+            is_current,
+        }
+    }
+
+    #[test]
+    fn tree_overlay_renders_box_marker_indent_and_selection() {
+        use plexy_glass_emulator::Attrs;
+        let mut e = Emulator::new(12, 50);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 12, 50),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+        };
+        let state = crate::tree::TreeState {
+            nodes: vec![
+                tree_node("main", None, None, 0, "main — 1 win, 2 panes", true),
+                tree_node("main", Some(0), None, 1, "1: shell", true),
+                tree_node("main", Some(0), Some(0), 2, "pane 1", false),
+                tree_node("main", Some(0), Some(1), 2, "pane 2", false),
+            ],
+            selected: 1,
+            mode: crate::tree::TreeMode::Navigate,
+        };
+        let ov = OverlayView::Tree { state: &state };
+        let vs = Compositor::compose(&[view], (12, 50), None, StatusPlacement::Bottom, None, Some(&ov), None);
+
+        let mut found_corner = false;
+        let mut found_marker = false;
+        let mut selected_reverse = false;
+        // Reconstruct each row's text to check depth indentation.
+        let mut session_row: Option<String> = None;
+        let mut pane_row: Option<String> = None;
+        for r in 0..12 {
+            let mut line = String::new();
+            for c in 0..50 {
+                let cell = vs.cell(r, c).unwrap();
+                line.push_str(cell.grapheme.as_str());
+                match cell.grapheme.as_str() {
+                    "\u{250c}" => found_corner = true,
+                    "*" => found_marker = true,
+                    // selected row is "1: shell" (REVERSE); 's' of shell qualifies.
+                    "s" if cell.attrs.contains(Attrs::REVERSE) => selected_reverse = true,
+                    _ => {}
+                }
+            }
+            if line.contains("1 win") {
+                session_row = Some(line.clone());
+            }
+            if line.contains("pane 2") {
+                pane_row = Some(line.clone());
+            }
+        }
+        assert!(found_corner, "tree box border drawn");
+        assert!(found_marker, "current-path node marked *");
+        assert!(selected_reverse, "selected row painted REVERSE");
+        assert!(!vs.cursor_visible, "tree hides the pane cursor");
+        // Depth-2 pane row is indented further than the depth-0 session row.
+        // Both rows share the same box-border prefix, so the in-line offset of
+        // the content reflects the interior indent.
+        let sr = session_row.expect("session row rendered");
+        let pr = pane_row.expect("pane row rendered");
+        assert!(
+            pr.find("pane 2").unwrap() > sr.find("main").unwrap(),
+            "deeper node is indented more"
+        );
+    }
+
+    #[test]
+    fn tree_overlay_confirm_kill_footer() {
+        let mut e = Emulator::new(12, 60);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 12, 60),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+        };
+        let state = crate::tree::TreeState {
+            nodes: vec![tree_node("main", Some(0), None, 1, "1: shell", false)],
+            selected: 0,
+            mode: crate::tree::TreeMode::ConfirmKill,
+        };
+        let ov = OverlayView::Tree { state: &state };
+        let vs = Compositor::compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let mut text = String::new();
+        for r in 0..12 {
+            for c in 0..60 {
+                text.push_str(vs.cell(r, c).unwrap().grapheme.as_str());
+            }
+        }
+        assert!(text.contains("Kill window"), "confirm-kill footer shown: {text}");
     }
 }

@@ -70,6 +70,11 @@ pub enum Overlay {
         filter: String,
         selected: usize,
     },
+    /// A fully-expanded session → window → pane tree (`choose-tree`). The daemon
+    /// drives it via `crate::tree::handle_tree` directly (not through
+    /// `OverlayHandler::handle`), because its actions are cross-session and need
+    /// the registry; the state lives here so the compositor can render it.
+    Tree(crate::tree::TreeState),
 }
 
 /// The caller's follow-up after feeding a key to an overlay.
@@ -104,6 +109,10 @@ impl OverlayHandler {
             Overlay::SessionPicker { entries, filter, selected } => {
                 handle_session_picker(event, entries, filter, selected)
             }
+            // Tree overlays are handled by the daemon via `crate::tree::handle_tree`
+            // (cross-session actions need the registry); this arm only keeps the
+            // match exhaustive and is never reached.
+            Overlay::Tree(_) => OverlayAction::None,
         }
     }
 }

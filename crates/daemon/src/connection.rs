@@ -287,6 +287,17 @@ where
                                         )
                                         .await;
                                     }
+                                    crate::window_manager::OverlayKeyResult::Tree(action) => {
+                                        dispatch_tree_action(
+                                            &mut session,
+                                            &mut client_id,
+                                            size,
+                                            &registry,
+                                            &switch_tx,
+                                            action,
+                                        )
+                                        .await;
+                                    }
                                     crate::window_manager::OverlayKeyResult::Command(line) => {
                                         match plexy_glass_mux::command_prompt::parse(&line) {
                                             Err(e) => {
@@ -319,6 +330,9 @@ where
                                             Ok(PromptCommand::ChooseSession) => {
                                                 open_session_picker_overlay(&session, &registry)
                                                     .await;
+                                            }
+                                            Ok(PromptCommand::ChooseTree) => {
+                                                open_tree_overlay(&session, &registry).await;
                                             }
                                             Ok(other) => {
                                                 match session
@@ -442,6 +456,9 @@ where
                                     }
                                     Command::ChooseSession => {
                                         open_session_picker_overlay(&session, &registry).await;
+                                    }
+                                    Command::ChooseTree => {
+                                        open_tree_overlay(&session, &registry).await;
                                     }
                                     other => {
                                         let _ = session.handle_command(other).await;
@@ -583,6 +600,159 @@ async fn open_session_picker_overlay(session: &Arc<Session>, registry: &Arc<Sess
         m.open_session_picker(entries);
     }
     session.notify.notify_one();
+}
+
+/// Snapshot every live session's windows/panes and open the choose-tree overlay.
+/// Shared by the `Ctrl+a W` keymap arm and the `:tree` verb. Each session's
+/// snapshot is taken via the async `tree_snapshot` (never `blocking_lock` from
+/// this runtime task).
+async fn open_tree_overlay(session: &Arc<Session>, registry: &Arc<SessionRegistry>) {
+    use plexy_glass_mux::{TreeNode, pane_label, window_label};
+    let current = session.name.clone();
+    let mut nodes: Vec<TreeNode> = Vec::new();
+    for entry in registry.list().await {
+        let Some(s) = registry.get(&entry.name).await else {
+            continue;
+        };
+        let st = s.tree_snapshot().await;
+        let is_cur = st.name == current;
+        nodes.push(TreeNode {
+            session: st.name.clone(),
+            window: None,
+            pane: None,
+            depth: 0,
+            label: format!(
+                "{} \u{2014} {} win, {} panes",
+                st.name,
+                st.windows.len(),
+                st.total_panes
+            ),
+            name: st.name.clone(),
+            index: 0,
+            is_current: is_cur,
+        });
+        for (wi, w) in st.windows.iter().enumerate() {
+            let widx = (wi as u32) + 1;
+            nodes.push(TreeNode {
+                session: st.name.clone(),
+                window: Some(w.id),
+                pane: None,
+                depth: 1,
+                label: window_label(widx, &w.name),
+                name: w.name.clone(),
+                index: widx,
+                is_current: is_cur && wi == st.active_window,
+            });
+            for (pi, (pid, pname)) in w.panes.iter().enumerate() {
+                let pidx = (pi as u32) + 1;
+                let nm = pname.clone().unwrap_or_default();
+                nodes.push(TreeNode {
+                    session: st.name.clone(),
+                    window: Some(w.id),
+                    pane: Some(*pid),
+                    depth: 2,
+                    label: pane_label(pidx, &nm),
+                    name: nm,
+                    index: pidx,
+                    is_current: is_cur && wi == st.active_window && *pid == w.active_pane,
+                });
+            }
+        }
+    }
+    {
+        let mut m = session.window_manager.lock().await;
+        m.open_tree(nodes);
+    }
+    session.notify.notify_one();
+}
+
+/// Perform a choose-tree action. `Switch` re-points this client (and focuses the
+/// chosen window/pane); the `Kill*`/`Rename*` actions reach into the target
+/// session via the registry. The current session is always notified afterward so
+/// its still-open overlay repaints the optimistic model update.
+async fn dispatch_tree_action(
+    session: &mut Arc<Session>,
+    client_id: &mut u64,
+    size: PtySize,
+    registry: &Arc<SessionRegistry>,
+    switch_tx: &mpsc::UnboundedSender<watch::Receiver<Arc<VirtualScreen>>>,
+    action: plexy_glass_mux::TreeAction,
+) {
+    use plexy_glass_mux::TreeAction;
+    match action {
+        TreeAction::Switch { session: tgt, window, pane } => {
+            if tgt != session.name {
+                switch_session(session, client_id, size, registry, switch_tx, tgt).await;
+            }
+            {
+                let mut m = session.window_manager.lock().await;
+                if let Some(w) = window {
+                    m.select_window_by_id(w);
+                }
+                if let Some(p) = pane {
+                    m.focus_pane_by_id(p);
+                }
+            }
+            session.notify.notify_one();
+        }
+        TreeAction::KillSession(name) => {
+            match registry.kill(&name).await {
+                Ok(()) => session.set_status_message(format!("killed {name}")).await,
+                Err(e) => session.set_status_message(e.to_string()).await,
+            }
+            session.notify.notify_one();
+        }
+        TreeAction::KillWindow { session: tgt, window } => {
+            if let Some(t) = registry.get(&tgt).await {
+                {
+                    let mut m = t.window_manager.lock().await;
+                    m.kill_window_panes(window);
+                }
+                t.notify.notify_one();
+            } else {
+                session.set_status_message(format!("no session: {tgt}")).await;
+            }
+            session.notify.notify_one();
+        }
+        TreeAction::KillPane { session: tgt, pane } => {
+            if let Some(t) = registry.get(&tgt).await {
+                {
+                    let mut m = t.window_manager.lock().await;
+                    m.kill_pane_child(pane);
+                }
+                t.notify.notify_one();
+            } else {
+                session.set_status_message(format!("no session: {tgt}")).await;
+            }
+            session.notify.notify_one();
+        }
+        TreeAction::RenameWindow { session: tgt, window, name } => {
+            if let Some(t) = registry.get(&tgt).await {
+                {
+                    let mut m = t.window_manager.lock().await;
+                    m.rename_window_by_id(window, name);
+                }
+                t.mark_dirty();
+                t.notify.notify_one();
+            } else {
+                session.set_status_message(format!("no session: {tgt}")).await;
+            }
+            session.notify.notify_one();
+        }
+        TreeAction::RenamePane { session: tgt, pane, name } => {
+            if let Some(t) = registry.get(&tgt).await {
+                {
+                    let mut m = t.window_manager.lock().await;
+                    m.rename_pane_by_id(pane, name);
+                }
+                t.mark_dirty();
+                t.notify.notify_one();
+            } else {
+                session.set_status_message(format!("no session: {tgt}")).await;
+            }
+            session.notify.notify_one();
+        }
+    }
 }
 
 fn wrap_paste(inner: &[u8]) -> Vec<u8> {
@@ -843,6 +1013,87 @@ mod tests {
 
         // Ctrl+a w (0x01 'w') opens the picker; "b" filters to "beta"; Enter (0x0d).
         let input = ClientMsg::Input(bytes::Bytes::from_static(b"\x01wb\r"));
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&input).unwrap())
+            .await
+            .unwrap();
+
+        wait_until(0, 1).await;
+        server.abort();
+    }
+
+    // `Ctrl+a W` opens the choose-tree; the tree lists every session
+    // (sorted: alpha then beta, each session+window+pane = 3 rows). Three `j`
+    // moves the selection to the "beta" session node; Enter switches there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn choose_tree_switches_sessions() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        registry
+            .attach_or_create("beta".into(), cat(), size, Arc::clone(&cfg))
+            .await
+            .unwrap();
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        let attach = ClientMsg::AttachOrCreate {
+            name: Some("alpha".into()),
+            create_if_missing: true,
+            cmd: Some(cat()),
+            size,
+        };
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&attach).unwrap())
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while cr.read(&mut buf).await.unwrap_or(0) > 0 {}
+        });
+
+        let clients_of = |entries: &[plexy_glass_protocol::SessionEntry], name: &str| {
+            entries.iter().find(|e| e.name == name).map(|e| e.clients)
+        };
+        let wait_until = |want_alpha: u8, want_beta: u8| {
+            let registry = Arc::clone(&registry);
+            async move {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let entries = registry.list().await;
+                    if clients_of(&entries, "alpha") == Some(want_alpha)
+                        && clients_of(&entries, "beta") == Some(want_beta)
+                    {
+                        return;
+                    }
+                    if Instant::now() > deadline {
+                        panic!(
+                            "timed out: alpha={:?} beta={:?}",
+                            clients_of(&entries, "alpha"),
+                            clients_of(&entries, "beta")
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+        wait_until(1, 0).await;
+
+        // Ctrl+a W opens the tree; jjj selects the "beta" session node; Enter switches.
+        let input = ClientMsg::Input(bytes::Bytes::from_static(b"\x01Wjjj\r"));
         Codec::write_frame(&mut cw, &postcard::to_allocvec(&input).unwrap())
             .await
             .unwrap();

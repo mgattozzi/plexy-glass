@@ -4,7 +4,8 @@ use crate::{error::DaemonError, window::Window};
 use plexy_glass_mux::{
     BorderHit, BorderSide, Command, KeyEvent, MouseButton, MouseEncoding, MouseEvent, MouseKind,
     Overlay, OverlayAction, OverlayHandler, PaneId, PickerEntry, Rect, RenameTarget, Selection,
-    SelectionKind, SplitDir, WindowId, encode_for_child, extract_text,
+    SelectionKind, SplitDir, TreeAction, TreeMode, TreeNode, TreeOutcome, TreeState, WindowId,
+    encode_for_child, extract_text, handle_tree,
 };
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
@@ -37,6 +38,9 @@ pub enum OverlayKeyResult {
     /// A session was chosen in the picker. The connection layer switches this
     /// client to the named session (via the same path as `switch <name>`).
     SwitchSession(String),
+    /// A choose-tree action. The connection layer performs it against the
+    /// registry (cross-session kill/rename) or re-points this client (switch).
+    Tree(TreeAction),
 }
 
 /// Active border drag-resize. Cleared on Release. While `Some`, all mouse
@@ -258,6 +262,19 @@ impl WindowManager {
         self.rename_pane_target = None;
     }
 
+    /// Open the choose-tree overlay over a pre-built node snapshot (assembled by
+    /// the connection layer from every live session). Navigation/actions are
+    /// driven by `tree::handle_tree`; cross-session effects are dispatched at the
+    /// connection layer.
+    pub fn open_tree(&mut self, nodes: Vec<TreeNode>) {
+        self.overlay = Some(Overlay::Tree(TreeState {
+            nodes,
+            selected: 0,
+            mode: TreeMode::Navigate,
+        }));
+        self.rename_pane_target = None;
+    }
+
     fn close_overlay(&mut self) {
         self.overlay = None;
         self.rename_pane_target = None;
@@ -269,6 +286,25 @@ impl WindowManager {
     /// (nothing), `Redraw` (recompose only), or `Committed` (recompose AND
     /// persist, a name actually changed).
     pub fn handle_overlay_key(&mut self, event: &KeyEvent) -> OverlayKeyResult {
+        // The tree overlay is driven by the pure `handle_tree`; its actions are
+        // cross-session and dispatched at the connection layer. `Switch` and
+        // `Cancel` close the overlay here; `Kill*`/`Rename*` keep it open (the
+        // handler already updated the in-memory model optimistically).
+        if let Some(Overlay::Tree(state)) = self.overlay.as_mut() {
+            return match handle_tree(event, state) {
+                TreeOutcome::None => OverlayKeyResult::Ignored,
+                TreeOutcome::Redraw => OverlayKeyResult::Redraw,
+                TreeOutcome::Cancel => {
+                    self.close_overlay();
+                    OverlayKeyResult::Redraw
+                }
+                TreeOutcome::Act(action @ TreeAction::Switch { .. }) => {
+                    self.close_overlay();
+                    OverlayKeyResult::Tree(action)
+                }
+                TreeOutcome::Act(action) => OverlayKeyResult::Tree(action),
+            };
+        }
         let (action, target, is_command, is_picker) = {
             let Some(overlay) = self.overlay.as_mut() else {
                 return OverlayKeyResult::Ignored;
@@ -473,6 +509,83 @@ impl WindowManager {
         if let Some(p) = self.active_window().pane(pid) {
             p.set_name(Some(name));
         }
+    }
+
+    // ----- choose-tree by-id actions (used by the connection against any
+    // session's WM; each scans `windows` for the id, there is no id-keyed API).
+
+    /// Make the window with `id` active. Clears any zoom first (matching the
+    /// keyboard window-switch commands). `false` if no such window.
+    pub fn select_window_by_id(&mut self, id: WindowId) -> bool {
+        let Some(idx) = self.windows.iter().position(|w| w.id == id) else {
+            return false;
+        };
+        let _ = self.clear_zoom_restore();
+        self.set_active_window(idx);
+        true
+    }
+
+    /// Focus the pane with `id`: make its window active, clear that window's
+    /// zoom so the pane is visible, focus it, and resize. `false` if not found.
+    pub fn focus_pane_by_id(&mut self, pane: PaneId) -> bool {
+        let Some(idx) = self.windows.iter().position(|w| w.pane(pane).is_some()) else {
+            return false;
+        };
+        let viewport = self.viewport();
+        self.set_active_window(idx);
+        let w = &mut self.windows[idx];
+        w.clear_zoom();
+        w.focus(pane);
+        let _ = w.resize(viewport);
+        true
+    }
+
+    /// Rename the window with `id`. `false` if not found.
+    pub fn rename_window_by_id(&mut self, id: WindowId, name: String) -> bool {
+        let Some(w) = self.windows.iter_mut().find(|w| w.id == id) else {
+            return false;
+        };
+        w.name = name;
+        true
+    }
+
+    /// Rename the pane with `id` (stores the exact string; trimming already
+    /// happened in `handle_tree`). `false` if not found.
+    pub fn rename_pane_by_id(&mut self, pane: PaneId, name: String) -> bool {
+        for w in self.windows.iter() {
+            if let Some(p) = w.pane(pane) {
+                p.set_name(Some(name));
+                return true;
+            }
+        }
+        false
+    }
+
+    /// SIGHUP every pane child in the window with `id`; the per-session death
+    /// channel performs the structural close (and ends the session if this was
+    /// its last window). `false` if not found.
+    pub fn kill_window_panes(&mut self, id: WindowId) -> bool {
+        let Some(w) = self.windows.iter().find(|w| w.id == id) else {
+            return false;
+        };
+        for pid in w.layout().panes() {
+            if let Some(p) = w.pane(pid) {
+                p.kill_child();
+            }
+        }
+        true
+    }
+
+    /// SIGHUP the pane child with `id`; the death channel closes it. `false` if
+    /// not found.
+    pub fn kill_pane_child(&mut self, pane: PaneId) -> bool {
+        for w in self.windows.iter() {
+            if let Some(p) = w.pane(pane) {
+                p.kill_child();
+                return true;
+            }
+        }
+        false
     }
 
     pub fn windows(&self) -> &[Window] {
@@ -2057,5 +2170,89 @@ mod tests {
         // index 1 so the toggle still reaches it.
         m.handle_command(Command::SelectLastWindow).unwrap();
         assert_eq!(m.windows()[m.active_idx()].id, w2_id, "toggle lands on the original W2");
+    }
+
+    // ----- choose-tree -----
+
+    fn mk_mgr() -> WindowManager {
+        WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .unwrap()
+    }
+
+    fn tnode(session: &str, window: Option<u32>, pane: Option<u32>, depth: u8) -> TreeNode {
+        TreeNode {
+            session: session.into(),
+            window: window.map(WindowId),
+            pane: pane.map(PaneId),
+            depth,
+            label: String::new(),
+            name: String::new(),
+            index: 0,
+            is_current: false,
+        }
+    }
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(plexy_glass_mux::Key::Char(c), plexy_glass_mux::Modifiers::empty())
+    }
+
+    #[tokio::test]
+    async fn open_tree_then_enter_switches_and_closes() {
+        let mut m = mk_mgr();
+        m.open_tree(vec![tnode("work", None, None, 0), tnode("work", Some(0), None, 1)]);
+        assert!(matches!(m.overlay(), Some(Overlay::Tree(_))));
+        let r = m
+            .handle_overlay_key(&KeyEvent::new(plexy_glass_mux::Key::Enter, plexy_glass_mux::Modifiers::empty()));
+        assert!(matches!(r, OverlayKeyResult::Tree(TreeAction::Switch { .. })));
+        assert!(m.overlay().is_none(), "switch closes the overlay");
+    }
+
+    #[tokio::test]
+    async fn tree_kill_keeps_overlay_open() {
+        let mut m = mk_mgr();
+        m.open_tree(vec![
+            tnode("work", None, None, 0),
+            tnode("work", Some(0), None, 1),
+            tnode("work", Some(0), Some(5), 2),
+        ]);
+        m.handle_overlay_key(&key('j'));
+        m.handle_overlay_key(&key('j')); // select the pane node
+        assert!(matches!(m.handle_overlay_key(&key('x')), OverlayKeyResult::Redraw));
+        let r = m.handle_overlay_key(&key('y'));
+        assert!(matches!(
+            r,
+            OverlayKeyResult::Tree(TreeAction::KillPane { pane: PaneId(5), .. })
+        ));
+        assert!(m.overlay().is_some(), "kill keeps the overlay open");
+    }
+
+    #[tokio::test]
+    async fn by_id_helpers_hit_and_miss() {
+        let mut m = mk_mgr();
+        m.handle_command(Command::NewWindow).unwrap(); // second window, now active
+        assert!(m.select_window_by_id(WindowId(0)));
+        assert_eq!(m.active_idx(), 0);
+        assert!(!m.select_window_by_id(WindowId(99)));
+
+        assert!(m.rename_window_by_id(WindowId(0), "renamed".into()));
+        assert_eq!(m.windows()[0].name, "renamed");
+        assert!(!m.rename_window_by_id(WindowId(99), "x".into()));
+
+        assert!(m.focus_pane_by_id(PaneId(0)));
+        assert_eq!(m.active_idx(), 0);
+        assert!(!m.focus_pane_by_id(PaneId(999)));
+
+        assert!(m.rename_pane_by_id(PaneId(0), "p".into()));
+        assert!(!m.rename_pane_by_id(PaneId(999), "p".into()));
+
+        assert!(m.kill_window_panes(WindowId(1)));
+        assert!(!m.kill_window_panes(WindowId(99)));
+        assert!(!m.kill_pane_child(PaneId(999)));
     }
 }
