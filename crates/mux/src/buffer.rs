@@ -40,14 +40,18 @@ pub enum BufferOutcome {
     Act(BufferAction),
 }
 
-/// Apply one key. Pure; every key is a no-op when `entries` is empty.
+/// Apply one key. `Esc` always closes (even an empty chooser, which, unlike the
+/// transient empty tree, is a state the user can dwell in and must escape from).
+/// Every other key is a no-op when `entries` is empty.
 pub fn handle_buffers(event: &KeyEvent, state: &mut BufferPickerState) -> BufferOutcome {
+    if event.mods.is_empty() && event.key == Key::Escape {
+        return BufferOutcome::Cancel;
+    }
     if state.entries.is_empty() {
         return BufferOutcome::None;
     }
     let last = state.entries.len() - 1;
     match (event.mods, event.key) {
-        (m, Key::Escape) if m.is_empty() => BufferOutcome::Cancel,
         (m, Key::Arrow(Direction::Up)) if m.is_empty() => move_sel(state, false),
         (m, Key::Char('k')) if m.is_empty() => move_sel(state, false),
         (m, Key::Char('p')) if m == Modifiers::CTRL => move_sel(state, false),
@@ -163,11 +167,16 @@ mod tests {
     }
 
     #[test]
-    fn empty_list_ignores_all_keys() {
+    fn empty_list_ignores_keys_but_escape_closes() {
         let mut s = BufferPickerState { entries: vec![], selected: 0 };
         for key in [Key::Char('j'), Key::Char('G'), Key::Enter, Key::Char('d')] {
             assert_eq!(handle_buffers(&ev(Modifiers::empty(), key), &mut s), BufferOutcome::None);
         }
+        // Esc must still close an empty chooser (not a no-op trap).
+        assert_eq!(
+            handle_buffers(&ev(Modifiers::empty(), Key::Escape), &mut s),
+            BufferOutcome::Cancel
+        );
     }
 
     #[test]

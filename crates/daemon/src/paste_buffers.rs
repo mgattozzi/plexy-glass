@@ -69,10 +69,12 @@ impl PasteBufferStore {
 /// mapped to spaces, then truncated to `PREVIEW_WIDTH` display columns. Control
 /// stripping precedes truncation because `grapheme_advance` floors a control char
 /// to one column, so an un-stripped control would consume a truncation column.
+/// Splits on the newline BYTE first so only one line is decoded/allocated (a
+/// yanked buffer can be many KB, and this runs under the paste-buffers lock).
 fn preview(content: &[u8]) -> String {
-    let s = String::from_utf8_lossy(content);
-    let first = s.split('\n').next().unwrap_or("");
-    let cleaned: String = first.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let first_line = content.split(|&b| b == b'\n').next().unwrap_or(&[]);
+    let s = String::from_utf8_lossy(first_line);
+    let cleaned: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
     truncate_to_width(&cleaned, PREVIEW_WIDTH).to_string()
 }
 

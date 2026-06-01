@@ -306,6 +306,10 @@ where
                                                     registry.paste_buffer_get(&name).await
                                                 {
                                                     paste_bytes(&session, content).await;
+                                                } else {
+                                                    // The overlay closed; repaint
+                                                    // it away even on a get() miss.
+                                                    session.notify.notify_one();
                                                 }
                                             }
                                             BufferAction::Delete(name) => {
@@ -1559,6 +1563,77 @@ mod tests {
             }
             if Instant::now() > deadline {
                 panic!("chooser delete did not drop the buffer count");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        server.abort();
+    }
+
+    // The feature's primary entry point: a copy-mode yank pushes a paste buffer.
+    // Drives the real key path (Ctrl+a [ to enter copy mode, `v` to start a
+    // selection, `y` to yank) so the yank→push wiring is protected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn copy_mode_yank_pushes_a_paste_buffer() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        let attach = ClientMsg::AttachOrCreate {
+            name: Some("main".into()),
+            create_if_missing: true,
+            cmd: Some(cat()),
+            size,
+        };
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&attach).unwrap())
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let mut b = [0u8; 4096];
+            while cr.read(&mut b).await.unwrap_or(0) > 0 {}
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while registry.get("main").await.is_none() {
+            if Instant::now() > deadline {
+                panic!("session never created");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Ctrl+a [ enters copy mode; `v` starts a selection; `y` yanks → push.
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01[vy")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !registry.list_paste_buffers().await.is_empty() {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("copy-mode yank did not push a paste buffer");
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
