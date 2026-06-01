@@ -537,6 +537,13 @@ async fn cleanup_and_exit(
 /// unattached, hands the renderer the target's frame stream (forcing a full
 /// repaint), then swaps the loop's `session`/`client_id`. All failure paths land
 /// on the transient status line and leave the client on the source session.
+///
+/// Returns `true` iff the client actually moved to a different session. Callers
+/// that follow a switch with target-scoped work (e.g. focusing a window/pane by
+/// id) MUST gate that work on `true`, because on failure `session` still points
+/// at the source, and because pane/window ids are not unique across sessions,
+/// applying the target's ids to the source would silently mutate the wrong
+/// session.
 async fn switch_session(
     session: &mut Arc<Session>,
     client_id: &mut u64,
@@ -544,14 +551,14 @@ async fn switch_session(
     registry: &Arc<SessionRegistry>,
     switch_tx: &mpsc::UnboundedSender<watch::Receiver<Arc<VirtualScreen>>>,
     name: String,
-) {
+) -> bool {
     let Some(target) = registry.get(&name).await else {
         session.set_status_message(format!("no session: {name}")).await;
-        return;
+        return false;
     };
     if target.name == session.name {
         session.set_status_message(format!("already on {name}")).await;
-        return;
+        return false;
     }
     // `register_client` takes a `blocking_lock` internally, so keep it off the runtime.
     let target_for_register = Arc::clone(&target);
@@ -565,7 +572,7 @@ async fn switch_session(
             session
                 .set_status_message(format!("cannot switch to {name}"))
                 .await;
-            return;
+            return false;
         }
     };
     // Re-point the renderer (rebind + invalidate + full repaint).
@@ -574,6 +581,7 @@ async fn switch_session(
     let old_id = std::mem::replace(client_id, new_handle.client_id);
     let _ = tokio::task::spawn_blocking(move || old.deregister_client(old_id)).await;
     session.set_status_message(format!("switched to {name}")).await;
+    true
 }
 
 /// Snapshot the live sessions (sorted by name, current one marked) and open the
@@ -607,14 +615,33 @@ async fn open_session_picker_overlay(session: &Arc<Session>, registry: &Arc<Sess
 /// snapshot is taken via the async `tree_snapshot` (never `blocking_lock` from
 /// this runtime task).
 async fn open_tree_overlay(session: &Arc<Session>, registry: &Arc<SessionRegistry>) {
-    use plexy_glass_mux::{TreeNode, pane_label, window_label};
     let current = session.name.clone();
-    let mut nodes: Vec<TreeNode> = Vec::new();
+    let mut snaps: Vec<crate::session::SessionTree> = Vec::new();
     for entry in registry.list().await {
         let Some(s) = registry.get(&entry.name).await else {
             continue;
         };
-        let st = s.tree_snapshot().await;
+        snaps.push(s.tree_snapshot().await);
+    }
+    let nodes = build_tree_nodes(&snaps, &current);
+    {
+        let mut m = session.window_manager.lock().await;
+        m.open_tree(nodes);
+    }
+    session.notify.notify_one();
+}
+
+/// Assemble the flat `TreeNode` list (pre-order DFS: session → windows → panes)
+/// from per-session snapshots. Pure so the `is_current`/label/index logic is
+/// unit-testable. Only the current session's path is marked `is_current`: the
+/// session itself, its active window, and that window's active pane.
+fn build_tree_nodes(
+    snaps: &[crate::session::SessionTree],
+    current: &str,
+) -> Vec<plexy_glass_mux::TreeNode> {
+    use plexy_glass_mux::{TreeNode, pane_label, window_label};
+    let mut nodes: Vec<TreeNode> = Vec::new();
+    for st in snaps {
         let is_cur = st.name == current;
         nodes.push(TreeNode {
             session: st.name.clone(),
@@ -659,11 +686,7 @@ async fn open_tree_overlay(session: &Arc<Session>, registry: &Arc<SessionRegistr
             }
         }
     }
-    {
-        let mut m = session.window_manager.lock().await;
-        m.open_tree(nodes);
-    }
-    session.notify.notify_one();
+    nodes
 }
 
 /// Perform a choose-tree action. `Switch` re-points this client (and focuses the
@@ -681,10 +704,17 @@ async fn dispatch_tree_action(
     use plexy_glass_mux::TreeAction;
     match action {
         TreeAction::Switch { session: tgt, window, pane } => {
-            if tgt != session.name {
-                switch_session(session, client_id, size, registry, switch_tx, tgt).await;
-            }
-            {
+            // Only focus the chosen window/pane when the client is actually on
+            // the target session: either it was already there, or the switch
+            // succeeded. On a failed switch the client stays on the SOURCE, and
+            // because ids are not unique across sessions, applying the target's
+            // ids here would mutate the wrong session.
+            let on_target = if tgt == session.name {
+                true
+            } else {
+                switch_session(session, client_id, size, registry, switch_tx, tgt).await
+            };
+            if on_target {
                 let mut m = session.window_manager.lock().await;
                 if let Some(w) = window {
                     m.select_window_by_id(w);
@@ -1099,6 +1129,146 @@ mod tests {
             .unwrap();
 
         wait_until(0, 1).await;
+        server.abort();
+    }
+
+    #[test]
+    fn build_tree_nodes_marks_only_current_path() {
+        use crate::session::{SessionTree, WindowTree};
+        use plexy_glass_mux::{PaneId, WindowId};
+        let snaps = vec![
+            SessionTree {
+                name: "cur".into(),
+                active_window: 1,
+                total_panes: 3,
+                windows: vec![
+                    WindowTree {
+                        id: WindowId(0),
+                        name: "w0".into(),
+                        active_pane: PaneId(0),
+                        panes: vec![(PaneId(0), None)],
+                    },
+                    WindowTree {
+                        id: WindowId(1),
+                        name: "w1".into(),
+                        active_pane: PaneId(2),
+                        panes: vec![(PaneId(1), None), (PaneId(2), Some("p".into()))],
+                    },
+                ],
+            },
+            SessionTree {
+                name: "other".into(),
+                active_window: 0,
+                total_panes: 1,
+                windows: vec![WindowTree {
+                    id: WindowId(0),
+                    name: "w0".into(),
+                    active_pane: PaneId(0),
+                    panes: vec![(PaneId(0), None)],
+                }],
+            },
+        ];
+        let nodes = build_tree_nodes(&snaps, "cur");
+        let find = |pred: &dyn Fn(&plexy_glass_mux::TreeNode) -> bool| {
+            nodes.iter().find(|n| pred(n)).expect("node present")
+        };
+        // Current session node + its active window (index 1 → WindowId(1)) + that
+        // window's active pane (PaneId(2)) are the only marked nodes in "cur".
+        assert!(find(&|n| n.session == "cur" && n.window.is_none()).is_current);
+        assert!(find(&|n| n.session == "cur" && n.window == Some(WindowId(1)) && n.pane.is_none()).is_current);
+        assert!(!find(&|n| n.session == "cur" && n.window == Some(WindowId(0)) && n.pane.is_none()).is_current);
+        assert!(find(&|n| n.pane == Some(PaneId(2))).is_current);
+        assert!(!find(&|n| n.session == "cur" && n.pane == Some(PaneId(1))).is_current);
+        // Label formats.
+        assert_eq!(find(&|n| n.pane == Some(PaneId(2))).label, "pane 2: p");
+        assert_eq!(find(&|n| n.session == "cur" && n.window == Some(WindowId(1)) && n.pane.is_none()).label, "2: w1");
+        // The other (non-current) session's whole subtree is unmarked.
+        assert!(nodes.iter().filter(|n| n.session == "other").all(|n| !n.is_current));
+    }
+
+    // `Ctrl+a W` then navigate to the *beta* window node and rename it, a
+    // cross-session rename (the client is attached to alpha). Asserts the rename
+    // landed on beta's `WindowManager` via a fresh `tree_snapshot` of beta.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn choose_tree_renames_window_in_other_session() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        registry
+            .attach_or_create("beta".into(), cat(), size, Arc::clone(&cfg))
+            .await
+            .unwrap();
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        let attach = ClientMsg::AttachOrCreate {
+            name: Some("alpha".into()),
+            create_if_missing: true,
+            cmd: Some(cat()),
+            size,
+        };
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&attach).unwrap())
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while cr.read(&mut buf).await.unwrap_or(0) > 0 {}
+        });
+
+        // Wait for the attach to register on alpha.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let entries = registry.list().await;
+            if entries.iter().find(|e| e.name == "alpha").map(|e| e.clients) == Some(1) {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("alpha never registered a client");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Tree nodes (sorted): alpha(0), alpha-win(1), alpha-pane(2), beta(3),
+        // beta-win(4), .. so 4 `j` lands on beta's window node. `r` seeds the
+        // rename buffer with "shell"; "ed" + Enter commits "shelled".
+        let input = ClientMsg::Input(bytes::Bytes::from_static(b"\x01Wjjjjred\r"));
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&input).unwrap())
+            .await
+            .unwrap();
+
+        // Beta's first window name must become "shelled".
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(b) = registry.get("beta").await {
+                let st = b.tree_snapshot().await;
+                if st.windows[0].name == "shelled" {
+                    break;
+                }
+            }
+            if Instant::now() > deadline {
+                let name = match registry.get("beta").await {
+                    Some(b) => b.tree_snapshot().await.windows[0].name.clone(),
+                    None => "<gone>".into(),
+                };
+                panic!("beta window not renamed; got {name:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         server.abort();
     }
 }

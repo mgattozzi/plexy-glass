@@ -2235,24 +2235,50 @@ mod tests {
     #[tokio::test]
     async fn by_id_helpers_hit_and_miss() {
         let mut m = mk_mgr();
-        m.handle_command(Command::NewWindow).unwrap(); // second window, now active
-        assert!(m.select_window_by_id(WindowId(0)));
-        assert_eq!(m.active_idx(), 0);
+        m.handle_command(Command::SplitV).unwrap(); // window 0: panes {0,1}, active 1
+        m.handle_command(Command::NewWindow).unwrap(); // window 1 (pane 2), active window 1
+
+        // Real cross-window focus: from window 1, focus pane 0 (in window 0).
+        assert!(m.focus_pane_by_id(PaneId(0)));
+        assert_eq!(m.active_idx(), 0, "focus switched to pane 0's window");
+        assert_eq!(m.windows()[0].active(), PaneId(0), "pane 0 became its window's active pane");
+        assert!(!m.focus_pane_by_id(PaneId(999)));
+
+        assert!(m.select_window_by_id(WindowId(1)));
+        assert_eq!(m.active_idx(), 1);
         assert!(!m.select_window_by_id(WindowId(99)));
 
         assert!(m.rename_window_by_id(WindowId(0), "renamed".into()));
         assert_eq!(m.windows()[0].name, "renamed");
         assert!(!m.rename_window_by_id(WindowId(99), "x".into()));
 
-        assert!(m.focus_pane_by_id(PaneId(0)));
-        assert_eq!(m.active_idx(), 0);
-        assert!(!m.focus_pane_by_id(PaneId(999)));
-
+        // Rename a pane and read the stored name back.
         assert!(m.rename_pane_by_id(PaneId(0), "p".into()));
+        assert_eq!(m.windows()[0].pane(PaneId(0)).unwrap().name(), Some("p".to_string()));
         assert!(!m.rename_pane_by_id(PaneId(999), "p".into()));
 
         assert!(m.kill_window_panes(WindowId(1)));
         assert!(!m.kill_window_panes(WindowId(99)));
         assert!(!m.kill_pane_child(PaneId(999)));
+    }
+
+    #[tokio::test]
+    async fn by_id_helpers_clear_zoom() {
+        let mut m = mk_mgr();
+        m.handle_command(Command::SplitV).unwrap(); // window 0: panes {0,1}, active 1
+
+        // `focus_pane_by_id` clears the TARGET window's zoom so the pane is visible.
+        m.handle_command(Command::ZoomToggle).unwrap();
+        assert!(m.windows()[0].is_zoomed());
+        assert!(m.focus_pane_by_id(PaneId(0)));
+        assert!(!m.windows()[0].is_zoomed(), "focus_pane_by_id unzooms the target window");
+
+        // `select_window_by_id` clears the leaving window's zoom before switching.
+        m.handle_command(Command::NewWindow).unwrap(); // window 1 active
+        m.select_window_by_id(WindowId(0)); // back to window 0
+        m.handle_command(Command::ZoomToggle).unwrap();
+        assert!(m.windows()[0].is_zoomed());
+        m.select_window_by_id(WindowId(1));
+        assert!(!m.windows()[0].is_zoomed(), "select_window_by_id unzooms before switching");
     }
 }

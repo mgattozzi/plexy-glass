@@ -1396,6 +1396,12 @@ mod tests {
         assert_eq!(st.windows[1].panes.len(), 1);
         // NewWindow made window index 1 active.
         assert_eq!(st.active_window, 1);
+        // Pane ids in DFS-leaf order; SplitV makes the new pane (1) active in w0.
+        assert_eq!(st.windows[0].panes[0].0, PaneId(0));
+        assert_eq!(st.windows[0].panes[1].0, PaneId(1));
+        assert_eq!(st.windows[0].active_pane, PaneId(1));
+        assert_eq!(st.windows[1].panes[0].0, PaneId(2));
+        assert_eq!(st.windows[1].active_pane, PaneId(2));
     }
 
     #[tokio::test]
