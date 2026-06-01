@@ -2802,4 +2802,34 @@ mod tests {
         m.update_monitor_flags();
         assert!(!m.windows()[1].activity_flag(), "flag cleared once the window is current");
     }
+
+    #[tokio::test]
+    async fn update_monitor_flags_sets_background_bell_from_a_real_bel() {
+        // Exercises the full emulator-BEL → pane-bell → window-flag chain with a
+        // real BEL (not a faked atomic). monitor_bell is on by default.
+        let mut m = mk_mgr(); // window 0
+        m.handle_command(Command::NewWindow).unwrap(); // window 1 (active)
+        m.handle_command(Command::SelectWindow(0)).unwrap(); // window 0 active; window 1 background
+        let pid = m.windows()[1].layout().panes()[0];
+        // The trailing newline flushes cat's line so it OUTPUTS the raw BEL (the
+        // line-discipline echo may render the input as "^G").
+        m.windows()[1]
+            .pane(pid)
+            .unwrap()
+            .send_input(bytes::Bytes::from_static(b"\x07\n"))
+            .await
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            m.update_monitor_flags();
+            if m.windows()[1].bell_flag() {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("background bell never flagged window 1");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!m.active_window().bell_flag(), "the current window is never bell-flagged");
+    }
 }

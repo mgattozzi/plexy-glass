@@ -1361,6 +1361,9 @@ mod tests {
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
+        // Tests share the real persist dir; drop any saved "main" so this test
+        // attaches a FRESH session rather than restoring accumulated state.
+        let _ = crate::persist::delete_session("main");
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
         let cat = || SpawnSpec {
@@ -1462,6 +1465,7 @@ mod tests {
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
+        let _ = crate::persist::delete_session("main"); // attach fresh, not restored
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
         let cat = || SpawnSpec {
@@ -1579,6 +1583,7 @@ mod tests {
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
+        let _ = crate::persist::delete_session("main"); // attach fresh, not restored
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
         let cat = || SpawnSpec {
