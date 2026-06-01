@@ -1,18 +1,56 @@
 //! Daemon-wide registry of named sessions.
 
+use crate::paste_buffers::PasteBufferStore;
 use crate::{error::DaemonError, session::Session};
+use plexy_glass_mux::BufferEntry;
 use plexy_glass_protocol::{ProtocolError, PtySize, SessionEntry, SpawnSpec};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Maximum retained paste buffers (tmux-style; oldest evicted past this).
+const PASTE_BUFFER_CAP: usize = 50;
+
 pub struct SessionRegistry {
     inner: Mutex<HashMap<String, Arc<Session>>>,
+    /// Daemon-global paste buffers.
+    ///
+    /// Independent of `inner` and never locked while `inner` is held (the
+    /// delegates touch only this lock).
+    paste_buffers: Mutex<PasteBufferStore>,
 }
 
 impl SessionRegistry {
     pub fn new() -> Self {
-        Self { inner: Mutex::new(HashMap::new()) }
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            paste_buffers: Mutex::new(PasteBufferStore::new(PASTE_BUFFER_CAP)),
+        }
+    }
+
+    /// Push a new newest paste buffer (copy-mode yank).
+    pub async fn push_paste_buffer(&self, content: Vec<u8>) {
+        self.paste_buffers.lock().await.push(content);
+    }
+
+    /// Clone out the most-recent buffer's content, if any.
+    pub async fn paste_buffer_top(&self) -> Option<Vec<u8>> {
+        self.paste_buffers.lock().await.top().map(|b| b.content.clone())
+    }
+
+    /// Clone out a named buffer's content, if present.
+    pub async fn paste_buffer_get(&self, name: &str) -> Option<Vec<u8>> {
+        self.paste_buffers.lock().await.get(name).map(|b| b.content.clone())
+    }
+
+    /// Delete a named buffer; returns whether one was removed.
+    pub async fn delete_paste_buffer(&self, name: &str) -> bool {
+        self.paste_buffers.lock().await.delete(name)
+    }
+
+    /// Newest-first `(name, preview)` rows for the choose-buffer overlay.
+    pub async fn list_paste_buffers(&self) -> Vec<BufferEntry> {
+        self.paste_buffers.lock().await.entries()
     }
 
     pub async fn list(&self) -> Vec<SessionEntry> {

@@ -16,6 +16,7 @@ pub mod input_router;
 pub mod listener;
 pub mod osc_actions;
 pub mod pane;
+pub mod paste_buffers;
 pub mod paths;
 pub mod persist;
 pub mod registry;
