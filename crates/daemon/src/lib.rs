@@ -11,6 +11,7 @@ pub(crate) static STATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new((
 
 pub mod args;
 pub mod connection;
+pub mod declared;
 pub mod error;
 pub mod input_router;
 pub mod listener;

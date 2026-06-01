@@ -699,6 +699,73 @@ impl Session {
         session.mark_dirty();
         Ok(session)
     }
+
+    /// Build a Session fresh from a config-declared template (Feature B).
+    /// Unlike `restore_from`, this never reads disk, the template is the
+    /// source of truth. Each pane runs its declared `command` via the default
+    /// shell (or an interactive shell when no command), with cwd resolved from
+    /// the pane/session template. Split ratios are 50/50 (same v1 limitation as
+    /// restore).
+    pub async fn build_from_template(
+        template: &plexy_glass_config::SessionTemplate,
+        size: PtySize,
+        config: Arc<plexy_glass_config::Config>,
+    ) -> Result<Arc<Self>, DaemonError> {
+        let first_window = template.windows.first().ok_or_else(|| {
+            DaemonError::Io(std::io::Error::other("declared session has zero windows"))
+        })?;
+        let bin0 = crate::declared::to_binary(&first_window.layout);
+        let leaves0 = crate::declared::bin_leaves(&bin0);
+        // invariant: a PaneNode always has >= 1 leaf, so leaves0[0] exists.
+        let first_spec = crate::declared::pane_spec(leaves0[0], &template.cwd);
+
+        let session = Self::new(template.name.clone(), first_spec, size, Arc::clone(&config))?;
+        {
+            let mut wm = session.window_manager.lock().await;
+            wm.set_window_name(0, first_window.name.clone());
+            build_window_from_bin(&mut wm, 0, &bin0, &leaves0, &template.cwd)?;
+            for (wi, w) in template.windows.iter().enumerate().skip(1) {
+                let bin = crate::declared::to_binary(&w.layout);
+                let leaves = crate::declared::bin_leaves(&bin);
+                let first = crate::declared::pane_spec(leaves[0], &template.cwd);
+                wm.new_window_with_spec(first, w.name.clone())?;
+                build_window_from_bin(&mut wm, wi, &bin, &leaves, &template.cwd)?;
+            }
+            wm.set_active_window(0);
+        }
+        // Persist the built shape (harmless; declared names are never restored).
+        session.mark_dirty();
+        Ok(session)
+    }
+}
+
+/// Build `window_idx`'s panes from a binary layout, using each leaf's declared
+/// `SpawnSpec`. The window's first pane already exists; we replay split ops in
+/// pre-order (same accounting as `collect_replay_ops`), then apply pane names.
+fn build_window_from_bin(
+    wm: &mut WindowManager,
+    window_idx: usize,
+    bin: &crate::declared::BinLayout,
+    leaves: &[&plexy_glass_config::PaneTemplate],
+    session_cwd: &Option<String>,
+) -> Result<(), DaemonError> {
+    for op in crate::declared::collect_ops(bin) {
+        // invariant: new_pane_dfs_idx < leaves.len() (collect_ops indexes the
+        // same DFS order bin_leaves produced).
+        let spec = crate::declared::pane_spec(leaves[op.new_pane_dfs_idx as usize], session_cwd);
+        wm.split_window_at_dfs(window_idx, op.target_dfs_idx, op.dir, spec)?;
+    }
+    if let Some(win) = wm.windows_mut().get_mut(window_idx) {
+        let pane_ids = win.layout().dfs_leaves();
+        for (i, pid) in pane_ids.iter().enumerate() {
+            if let Some(pt) = leaves.get(i)
+                && let Some(p) = win.pane(*pid)
+            {
+                p.set_name(pt.name.clone());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Replay a saved layout for `window_idx`. The window's first pane is
@@ -1659,6 +1726,67 @@ mod tests {
         let wm = restored.window_manager.lock().await;
         assert_eq!(wm.windows().len(), 1);
         assert_eq!(wm.windows()[0].layout().panes().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_from_template_single_pane() {
+        use plexy_glass_config::{PaneNode, PaneTemplate, SessionTemplate, WindowTemplate};
+        let _g = test_isolate_state_dir();
+        let tmpl = SessionTemplate {
+            name: "dev".into(),
+            cwd: None,
+            windows: vec![WindowTemplate {
+                name: "main".into(),
+                layout: PaneNode::Leaf(PaneTemplate {
+                    command: None,
+                    cwd: None,
+                    name: Some("editor".into()),
+                }),
+            }],
+        };
+        let s = Session::build_from_template(&tmpl, size(), cfg()).await.unwrap();
+        {
+            let wm = s.window_manager.lock().await;
+            assert_eq!(wm.windows().len(), 1);
+            assert_eq!(wm.windows()[0].name, "main");
+            assert_eq!(wm.windows()[0].layout().panes().len(), 1);
+        }
+        // Deterministic teardown so the spawned shell doesn't outlive the test.
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_from_template_split_and_multiwindow() {
+        use plexy_glass_config::{PaneNode, PaneTemplate, SessionTemplate, SplitDirection, WindowTemplate};
+        let _g = test_isolate_state_dir();
+        let pane = |c: Option<&str>| {
+            PaneNode::Leaf(PaneTemplate { command: c.map(str::to_string), cwd: None, name: None })
+        };
+        let tmpl = SessionTemplate {
+            name: "dev".into(),
+            cwd: None,
+            windows: vec![
+                WindowTemplate {
+                    name: "split".into(),
+                    layout: PaneNode::Split {
+                        dir: SplitDirection::Vertical,
+                        children: vec![pane(None), pane(None), pane(None)],
+                    },
+                },
+                WindowTemplate { name: "solo".into(), layout: pane(None) },
+            ],
+        };
+        let s = Session::build_from_template(&tmpl, size(), cfg()).await.unwrap();
+        {
+            let wm = s.window_manager.lock().await;
+            assert_eq!(wm.windows().len(), 2);
+            assert_eq!(wm.windows()[0].name, "split");
+            assert_eq!(wm.windows()[0].layout().panes().len(), 3);
+            assert_eq!(wm.windows()[1].name, "solo");
+            assert_eq!(wm.windows()[1].layout().panes().len(), 1);
+        }
+        // Deterministic teardown so the spawned shells don't outlive the test.
+        s.terminate_panes().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
