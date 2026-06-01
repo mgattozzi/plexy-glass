@@ -103,12 +103,6 @@ pub struct Padding {
     pub right: u8,
 }
 
-impl From<(u8, u8)> for Padding {
-    fn from((left, right): (u8, u8)) -> Self {
-        Self { left, right }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum WidgetSpec {
     Session {

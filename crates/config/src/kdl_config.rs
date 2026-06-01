@@ -736,7 +736,7 @@ keymap {
 
     #[test]
     fn window_list_requires_both_styles() {
-        // Missing inactive-style is a decode error (no `#[serde(default)]` on it).
+        // Missing inactive-style is a decode error (window-list requires both styles).
         assert!(parse_config(r##"status { middle { window-list { active-style fg="fg" } } }"##).is_err());
     }
 
@@ -777,5 +777,65 @@ keymap {
     #[test]
     fn bad_duration_errors() {
         assert!(parse_config(r##"status { refresh "not-a-duration" }"##).is_err());
+    }
+
+    #[test]
+    fn prefix_indicator_requires_content_and_style() {
+        // Both fields are required (no defaults).
+        assert!(parse_config(r##"status { left { prefix-indicator { style fg="fg" } } }"##).is_err());
+        assert!(parse_config(r##"status { left { prefix-indicator content=" PFX " } }"##).is_err());
+    }
+
+    #[test]
+    fn attached_clients_requires_style() {
+        // Missing `style` child is a decode error (attached-clients requires it).
+        assert!(parse_config(r##"status { right { attached-clients min-count=2 } }"##).is_err());
+    }
+
+    #[test]
+    fn duplicate_status_node_errors() {
+        assert!(parse_config("status { } status { }").is_err());
+    }
+
+    #[test]
+    fn duplicate_keymap_node_errors() {
+        assert!(parse_config("keymap { } keymap { }").is_err());
+    }
+
+    #[test]
+    fn unknown_child_node_on_widget_errors() {
+        assert!(parse_config(r##"status { left { session { bad-child { } } } }"##).is_err());
+    }
+
+    #[test]
+    fn padding_out_of_range_or_malformed_errors() {
+        assert!(parse_config(r##"status { left { session { padding 256 1 } } }"##).is_err());
+        assert!(parse_config(r##"status { left { session { padding -1 1 } } }"##).is_err());
+        assert!(parse_config(r##"status { left { session { padding 1 } } }"##).is_err());
+    }
+
+    #[test]
+    fn cwd_max_components_optional() {
+        let with = parse_config(r##"status { left { cwd max-components=2 } }"##).unwrap();
+        match &with.status.left[0] {
+            WidgetSpec::Cwd { max_components, .. } => assert_eq!(*max_components, Some(2)),
+            other => panic!("expected Cwd, got {other:?}"),
+        }
+        let without = parse_config(r##"status { left { cwd } }"##).unwrap();
+        match &without.status.left[0] {
+            WidgetSpec::Cwd { max_components, .. } => assert_eq!(*max_components, None),
+            other => panic!("expected Cwd, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hostname_git_branch_memory_decode() {
+        let cfg = parse_config(
+            r##"status { left { hostname interval="30s"; git-branch; memory interval="2s" } }"##,
+        )
+        .unwrap();
+        assert!(matches!(cfg.status.left[0], WidgetSpec::Hostname { .. }));
+        assert!(matches!(cfg.status.left[1], WidgetSpec::GitBranch { .. }));
+        assert!(matches!(cfg.status.left[2], WidgetSpec::Memory { .. }));
     }
 }
