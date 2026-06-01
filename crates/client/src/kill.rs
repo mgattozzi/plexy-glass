@@ -1,11 +1,15 @@
-//! `plexy-glass kill`: stop every plexy-glass daemon process belonging to
-//! the current user.
+//! `plexy-glass kill`: stop the daemon for the current runtime dir, or (with
+//! `--all`) every plexy-glass daemon belonging to the current user.
 //!
-//! Sweeps `pgrep -u $UID -f 'plexy-glass daemon'` so orphaned daemons left
-//! behind by a stale build, a crashed kill, or an aborted `plexy-glass
-//! daemon --foreground` all get cleaned up in one shot. Sends SIGTERM,
-//! polls briefly for graceful exit, then SIGKILLs anything still alive.
-//! Finally removes the socket and pidfile.
+//! The default [`kill`] targets only the daemon whose pidfile lives in *this*
+//! runtime dir (`RuntimePaths::for_current_user`), so it never disturbs a
+//! second daemon the same user is running under a different `XDG_RUNTIME_DIR`
+//! / `TMPDIR`. [`kill_all`] keeps the old sweep (`pgrep -u $UID -f
+//! 'plexy-glass daemon'`) for cleaning up orphans left by a stale build, a
+//! crashed kill, or an aborted `plexy-glass daemon --foreground`.
+//!
+//! Both send SIGTERM, poll briefly for graceful exit, then SIGKILL anything
+//! still alive, and finally remove the socket and pidfile.
 
 use crate::error::ClientError;
 use plexy_glass_daemon::RuntimePaths;
@@ -28,13 +32,41 @@ pub enum KillOutcome {
     ForceKilled { count: usize },
 }
 
+/// Stop the daemon for the *current* runtime dir only. Identified by the
+/// pidfile in this runtime dir, then confirmed against the live set of
+/// plexy-glass daemons so a stale pidfile whose PID has been reused by an
+/// unrelated process is ignored. Does not touch daemons under a different
+/// `XDG_RUNTIME_DIR` / `TMPDIR`.
 pub async fn kill() -> Result<KillOutcome, ClientError> {
     let paths = RuntimePaths::for_current_user().map_err(ClientError::Io)?;
 
-    let pids = find_all_daemons()?;
+    // Scope: only the PID recorded in this runtime dir's pidfile, and only if
+    // it is actually one of our live daemons (guards against PID reuse).
+    let target = read_pidfile(&paths.pidfile);
+    let live = find_all_daemons()?;
+    let pids: Vec<i32> = match target {
+        Some(p) if live.contains(&p) => vec![p],
+        _ => Vec::new(),
+    };
 
+    terminate(pids, &paths).await
+}
+
+/// Stop *every* plexy-glass daemon owned by the current user, regardless of
+/// runtime dir. The pre-scoping behavior, kept for orphan cleanup (`kill
+/// --all`).
+pub async fn kill_all() -> Result<KillOutcome, ClientError> {
+    let paths = RuntimePaths::for_current_user().map_err(ClientError::Io)?;
+    let pids = find_all_daemons()?;
+    terminate(pids, &paths).await
+}
+
+/// SIGTERM the given PIDs, poll for graceful exit, SIGKILL stragglers, then
+/// clean up this runtime dir's socket/pidfile. An empty `pids` means nothing
+/// to stop (still scrubs a stray socket).
+async fn terminate(pids: Vec<i32>, paths: &RuntimePaths) -> Result<KillOutcome, ClientError> {
     if pids.is_empty() {
-        cleanup_socket_only(&paths);
+        cleanup_socket_only(paths);
         return Ok(KillOutcome::NoDaemon);
     }
 
@@ -72,12 +104,22 @@ pub async fn kill() -> Result<KillOutcome, ClientError> {
         }
     }
 
-    cleanup(&paths);
+    cleanup(paths);
     if force_killed {
         Ok(KillOutcome::ForceKilled { count: total })
     } else {
         Ok(KillOutcome::Stopped { count: total })
     }
+}
+
+/// Read a daemon PID from `pidfile`. Returns `None` if the file is missing or
+/// unparseable (the daemon writes `"{pid}\n"` after binding).
+fn read_pidfile(pidfile: &std::path::Path) -> Option<i32> {
+    let me = std::process::id() as i32;
+    std::fs::read_to_string(pidfile)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .filter(|&p| p != me)
 }
 
 /// Return the PIDs of every plexy-glass daemon process owned by the current

@@ -80,6 +80,18 @@ fn isolate_dirs(tmp: &tempfile::TempDir) -> TestEnv {
             // XDG_CONFIG_HOME is used by the directories crate on Linux; on macOS
             // the crate uses $HOME/Library/Application Support instead.
             ("XDG_CONFIG_HOME".into(), xdg_config.to_string_lossy().into_owned()),
+            // Cap the tokio runtime of every spawned plexy-glass process. The
+            // binary uses `#[tokio::main]` (multi-thread flavor), which defaults
+            // to one worker per core (18 here), so each test's client + its
+            // auto-spawned daemon would start ~36 worker threads. Running many
+            // e2e tests at once then oversubscribes the CPU and the daemon's
+            // first render lags past the readiness wait. `TOKIO_WORKER_THREADS`
+            // is read by tokio's runtime builder; `std::process::Command`
+            // inherits this env, so the value flows to the auto-spawned daemon
+            // too. This is TEST-ONLY, production sets nothing and keeps full
+            // per-core parallelism. The flavor stays multi-thread, so the
+            // daemon's `block_in_place` calls remain valid at a low worker count.
+            ("TOKIO_WORKER_THREADS".into(), "2".into()),
         ],
     }
 }
@@ -710,6 +722,54 @@ fn kill_session_removes_it_from_list() {
     assert!(
         !list_stdout.contains("doomed"),
         "doomed still in list: {list_stdout}"
+    );
+}
+
+/// Regression: `plexy-glass kill` (no -n) must stop ONLY the daemon for the
+/// current runtime dir, not every daemon owned by the user. Two daemons in
+/// separate runtime dirs: killing the first must leave the second's session
+/// alive and listable. (Before the pidfile-scoping fix, `kill` swept
+/// `pgrep -f 'plexy-glass daemon'` and took down every concurrent daemon,
+/// which is also what made the e2e suite flake under parallelism.)
+#[test]
+fn kill_is_scoped_to_current_runtime_dir() {
+    use std::process::Stdio;
+    let tmp_a = tempfile::tempdir().unwrap();
+    let tmp_b = tempfile::tempdir().unwrap();
+    let env_a = isolate_dirs(&tmp_a);
+    let env_b = isolate_dirs(&tmp_b);
+
+    // Two independent daemons (distinct TMPDIR/XDG → distinct sockets+pidfiles).
+    let mut sess_a = TestSession::builder(&env_a).args(&["attach", "-n", "aaa"]).start();
+    assert!(sess_a.wait_ready("aaa", Duration::from_secs(6)), "session aaa never rendered");
+    let mut sess_b = TestSession::builder(&env_b).args(&["attach", "-n", "bbb"]).start();
+    assert!(sess_b.wait_ready("bbb", Duration::from_secs(6)), "session bbb never rendered");
+    sess_a.send_prefix(b'd');
+    sess_b.send_prefix(b'd');
+    drop(sess_a);
+    drop(sess_b);
+
+    // Kill A's daemon only.
+    let _ = std::process::Command::cargo_bin("plexy-glass")
+        .unwrap()
+        .arg("kill")
+        .envs(env_a.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdout(Stdio::piped())
+        .output()
+        .expect("kill a");
+
+    // B's daemon must still be alive: its session lists.
+    let list_b = std::process::Command::cargo_bin("plexy-glass")
+        .unwrap()
+        .arg("list")
+        .envs(env_b.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdout(Stdio::piped())
+        .output()
+        .expect("list b");
+    let list_b_out = String::from_utf8_lossy(&list_b.stdout);
+    assert!(
+        list_b_out.contains("bbb"),
+        "killing A's daemon must not stop B's. B list: {list_b_out}"
     );
 }
 

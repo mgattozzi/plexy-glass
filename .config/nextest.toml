@@ -2,42 +2,43 @@
 #
 # Most of the suite runs at full parallelism (nextest runs each test in its
 # own process, so a `static Mutex` never serializes across tests). Two
-# groups are capped, for two different reasons:
+# groups carry light caps:
 #
 # `pty` (daemon unit tests): each spawns a pane or two. Capped to 4 to
-# bound the OS-wide PTY table (macOS `kern.tty.ptmx_max` is only 511).
-# Reliable at 4.
+# bound the OS-wide PTY table (macOS `kern.tty.ptmx_max` is only 511, hard
+# max 999). Measured peak PTY usage stays far under that, so 4 is
+# conservative headroom.
 #
 # `e2e`: each test runs a whole client + daemon + shell + several PTYs and
-# drives it step-by-step. The `TestSession` persistent-reader harness
-# (tests/e2e.rs) made these *timing*-robust: it polls a shared output
-# buffer instead of sleeping, so they no longer flake on fixed delays, and
-# the e2e binary is about 2x faster on its own. But raising the
-# concurrency cap is blocked by two daemon-side issues, NOT by test
-# timing:
-#   1. At cap >= 4 the concurrent daemons saturate CPU + the PTY table and
-#      the daemon's first render lags past the readiness wait ("daemon
-#      never rendered") across many tests.
-#   2. At cap 2, exactly one test fails deterministically:
-#      `rename_window_via_overlay_updates_status_bar`. Under *any*
-#      concurrency the window-rename OVERLAY COMMIT is lost: the typed
-#      name renders in the frame (so the screen looks right) but the
-#      commit never marks the session dirty, so nothing is ever
-#      persisted. This is not a timeout (a 30s persist poll still finds
-#      an empty file); split-based persists land fine at cap 2, so it is
-#      specific to the overlay commit path. A real concurrency defect in
-#      the daemon worth fixing on its own; once fixed, cap 2 should be
-#      reliable.
-# Until (2) is fixed, `e2e` stays at 1 so the suite is 100% reliable.
+# drives it step-by-step. Two things make these safe to run wide:
+#   - The `TestSession` persistent-reader harness (tests/e2e.rs) polls a
+#     shared output buffer instead of sleeping fixed delays, so steps
+#     are timing-robust under CPU contention.
+#   - `isolate_dirs` sets `TOKIO_WORKER_THREADS=2` in each spawned
+#     process's env (inherited by the auto-spawned daemon), so a test's
+#     client+daemon start about 4 worker threads instead of ~ncpu each,
+#     which keeps the thread count sane when many run at once.
+#     Production sets nothing and keeps full per-core threads.
+#
+# The cap below is measured: with the runtime-dir-scoped `kill` fix (see
+# crates/client/src/kill.rs), the full --workspace suite was clean over 9
+# consecutive runs at e2e = 4, 8, 12, and 18 (= num-cpus) on an 18-core
+# machine, finishing in about 6.5s. Before that fix the suite flaked
+# badly above cap 1, NOT from resources, but because `TestEnv::drop` ran
+# `plexy-glass kill`, which swept *every* daemon for the user
+# (`pgrep -f 'plexy-glass daemon'`) and so killed sibling tests' daemons
+# mid-run. `kill` now targets only the current runtime dir's daemon, so
+# the tests are isolated.
 #
 # (`TestSession::start` also retries `openpty` on transient exhaustion,
-# and each test kills its daemon on teardown, so PTYs are freed
+# and each test kills its own daemon on teardown, so PTYs are freed
 # promptly.)
 
 [test-groups]
-# Heavyweight: each test is client + daemon + shell + PTYs. See header note
-# (2): raise to 2 only after the overlay-commit-under-load defect is fixed.
-e2e = { max-threads = 1 }
+# Heavyweight: each test is client + daemon + shell + PTYs. `num-cpus` (a
+# nextest special value) fans them out to the host's logical-CPU count, so
+# it's portable across machines; measured clean at 18 on an 18-core host.
+e2e = { max-threads = "num-cpus" }
 # Daemon unit tests spawn a pane or two each.
 pty = { max-threads = 4 }
 

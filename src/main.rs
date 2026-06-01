@@ -19,11 +19,16 @@ enum Cmd {
     List,
     /// List sessions saved on disk (running or not).
     ListSaved,
-    /// Kill a single session by name, or the daemon if no -n is given.
+    /// Kill a single session by name, or this runtime dir's daemon if no -n is
+    /// given. With --all, stop every plexy-glass daemon for the current user.
     Kill {
         /// Session name to kill. If omitted, kills the daemon.
         #[arg(short = 'n', long = "name")]
         name: Option<String>,
+        /// Stop every `plexy-glass` daemon owned by the current user, across all
+        /// runtime dirs (orphan cleanup). Ignored when `-n` is given.
+        #[arg(long = "all", conflicts_with = "name")]
+        all: bool,
     },
     /// Reload the daemon's config from ~/.config/plexy-glass/config.toml.
     Reload,
@@ -52,13 +57,19 @@ async fn main() -> anyhow::Result<()> {
         Cmd::ListSaved => {
             plexy_glass_client::client_list_saved().await?;
         }
-        Cmd::Kill { name } => match name {
+        Cmd::Kill { name, all } => match name {
             Some(session_name) => {
                 plexy_glass_client::client_kill_session(session_name).await?;
             }
             None => {
-                // Existing behaviour: kill the daemon.
-                match plexy_glass_client::kill().await? {
+                // No `-n`: stop the daemon. Default scopes to this runtime dir's
+                // daemon; `--all` sweeps every daemon for the user.
+                let outcome = if all {
+                    plexy_glass_client::kill_all().await?
+                } else {
+                    plexy_glass_client::kill().await?
+                };
+                match outcome {
                     plexy_glass_client::KillOutcome::NoDaemon => println!("no daemon running"),
                     plexy_glass_client::KillOutcome::Stopped { count } => {
                         let plural = if count == 1 { "" } else { "s" };

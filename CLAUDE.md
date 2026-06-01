@@ -101,22 +101,24 @@ only for ASCII.
 - Each e2e test spawns a client that auto-spawns a *daemon*; the `TestEnv` guard
   returned by `isolate_dirs` kills that daemon on drop (`plexy-glass kill` in the
   test's isolated env). Don't bypass it, or daemons orphan and hold PTYs open.
+  `kill` (no `-n`) is scoped to the **current runtime dir's** daemon (via its
+  pidfile) — `kill --all` is the UID-wide sweep. This scoping is what lets the
+  e2e tests run concurrently without one test's teardown killing another's
+  daemon; don't make the default `kill` UID-wide again.
 - The e2e tests use a `TestSession` persistent-reader harness: one reader thread
   per PTY accumulates all output into a shared buffer, and every step polls it
   (`wait_for` / `wait_ready` / `snapshot`) instead of sleeping a fixed delay.
   This removed the fixed-`sleep` timing-flake class and made the e2e binary ~2x
   faster. Use it for any new e2e test; don't reintroduce `sleep`-then-`read`.
-- Despite that, the `e2e` nextest group is still capped to **1** in
-  `.config/nextest.toml` — for two *daemon-side* reasons, not timing: (1) at cap
-  ≥4 the concurrent daemons saturate CPU + the PTY table and the first render
-  lags past the readiness wait across many tests; (2) at cap 2 exactly one test,
-  `rename_window_via_overlay_updates_status_bar`, fails deterministically because
-  under *any* concurrency the window-rename **overlay commit is lost** — the
-  typed name renders in the frame but never marks the session dirty, so it is
-  never persisted (a 30s persist poll still finds an empty file, while
-  split-based persists land fine at cap 2). That is a real concurrency defect in
-  the daemon's overlay-commit path; fix it, then raise `e2e` to 2. Until then,
-  don't raise the cap — the suite stays 100% reliable. See `.config/nextest.toml`.
+- The `e2e` nextest group runs at **`num-cpus`** (full parallelism); `isolate_dirs`
+  sets `TOKIO_WORKER_THREADS=2` in each spawned process so a test's client+daemon
+  use ~4 threads instead of ~ncpu each (production is unaffected). Measured clean
+  over 9 consecutive full-`--workspace` runs at caps 4/8/12/18 on an 18-core host
+  (~6.5s/run). Historical note: the suite used to be capped to 1 because
+  `plexy-glass kill` swept *every* daemon for the user and killed sibling tests'
+  daemons mid-run — that was a real `kill`-scoping bug (now fixed), not a timing
+  or resource limit. If the suite ever flakes wide again, suspect a teardown that
+  kills daemons it shouldn't, not the cap. See `.config/nextest.toml`.
 
 ## Dependencies — always pin to the current latest
 
