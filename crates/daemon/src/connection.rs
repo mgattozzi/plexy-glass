@@ -1448,4 +1448,121 @@ mod tests {
 
         server.abort();
     }
+
+    // Push a paste buffer, then `Ctrl+a ]`: the bytes reach the active pane
+    // (a `/bin/cat` pane echoes them, so they appear on its screen). And
+    // `Ctrl+a =` + `d` deletes a buffer (the registry count drops).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn paste_buffer_reaches_pane_and_chooser_deletes() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        let attach = ClientMsg::AttachOrCreate {
+            name: Some("main".into()),
+            create_if_missing: true,
+            cmd: Some(cat()),
+            size,
+        };
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&attach).unwrap())
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let mut b = [0u8; 4096];
+            while cr.read(&mut b).await.unwrap_or(0) > 0 {}
+        });
+
+        // Wait for the session to exist.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while registry.get("main").await.is_none() {
+            if Instant::now() > deadline {
+                panic!("session never created");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Inject a buffer (deterministic, so we avoid driving a live copy-mode yank).
+        registry.push_paste_buffer(b"echoed-paste\n".to_vec()).await;
+        // Ctrl+a ] pastes the newest buffer into the cat pane.
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01]")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // `cat` echoes it → the pane screen shows it.
+        let screen_has = |needle: &'static str| {
+            let registry = Arc::clone(&registry);
+            async move {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    if let Some(s) = registry.get("main").await {
+                        let m = s.window_manager.lock().await;
+                        let hit = m.active_window().active_pane().map(|p| {
+                            p.with_screen(|sc| {
+                                let mut t = String::new();
+                                for row in &sc.active.rows {
+                                    for cell in &row.cells {
+                                        t.push_str(cell.grapheme.as_str());
+                                    }
+                                }
+                                t.contains(needle)
+                            })
+                        });
+                        if hit == Some(true) {
+                            return;
+                        }
+                    }
+                    if Instant::now() > deadline {
+                        panic!("pane never showed {needle:?}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+        screen_has("echoed-paste").await;
+
+        // Add a second buffer; the chooser then deletes one.
+        registry.push_paste_buffer(b"second\n".to_vec()).await;
+        assert_eq!(registry.list_paste_buffers().await.len(), 2);
+        // Ctrl+a = opens the chooser; `d` deletes the selected (newest) buffer.
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01=d")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if registry.list_paste_buffers().await.len() == 1 {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("chooser delete did not drop the buffer count");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        server.abort();
+    }
 }
