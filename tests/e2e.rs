@@ -809,14 +809,14 @@ fn custom_config_file_overrides_default() {
 
     let marker = "HELLO_FROM_CONFIG";
 
-    let toml_body = format!(
+    let kdl_body = format!(
         r##"
-[status]
-refresh = "5s"
-
-[[status.right]]
-type = "text"
-value = "{marker}"
+status {{
+    refresh "5s"
+    right {{
+        text value="{marker}"
+    }}
+}}
 "##
     );
 
@@ -824,7 +824,7 @@ value = "{marker}"
     if let Some((_, xdg)) = env.iter().find(|(k, _)| k == "XDG_CONFIG_HOME") {
         let cfg_dir = std::path::PathBuf::from(xdg).join("plexy-glass");
         std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(cfg_dir.join("config.toml"), &toml_body).unwrap();
+        std::fs::write(cfg_dir.join("config.kdl"), &kdl_body).unwrap();
     }
     // Also write to the macOS path ($HOME/Library/Application Support/plexy-glass).
     // The `directories` crate on macOS ignores XDG_CONFIG_HOME and derives
@@ -833,7 +833,7 @@ value = "{marker}"
         let cfg_dir = std::path::PathBuf::from(home)
             .join("Library/Application Support/plexy-glass");
         std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(cfg_dir.join("config.toml"), &toml_body).unwrap();
+        std::fs::write(cfg_dir.join("config.kdl"), &kdl_body).unwrap();
     }
 
     let sess = TestSession::spawn(&env);
@@ -946,21 +946,22 @@ fn reload_config_picks_up_custom_text_widget() {
 
     // Write a custom config that adds a recognizable text widget.
     let body = r##"
-[status]
-[[status.right]]
-type = "text"
-value = "RELOADED_TAG"
+status {
+    right {
+        text value="RELOADED_TAG"
+    }
+}
 "##;
     if let Some((_, xdg)) = env.iter().find(|(k, _)| k == "XDG_CONFIG_HOME") {
         let cfg_dir = std::path::PathBuf::from(xdg).join("plexy-glass");
         std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(cfg_dir.join("config.toml"), body).unwrap();
+        std::fs::write(cfg_dir.join("config.kdl"), body).unwrap();
     }
     if let Some((_, home)) = env.iter().find(|(k, _)| k == "HOME") {
         let mac_cfg =
             std::path::PathBuf::from(home).join("Library/Application Support/plexy-glass");
         std::fs::create_dir_all(&mac_cfg).unwrap();
-        std::fs::write(mac_cfg.join("config.toml"), body).unwrap();
+        std::fs::write(mac_cfg.join("config.kdl"), body).unwrap();
     }
 
     // Issue `plexy-glass reload` from a second process.
