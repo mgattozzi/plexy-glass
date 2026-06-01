@@ -159,7 +159,13 @@ Implemented and on `main`: the daemon + client foundation; a full VT emulator
 (grid, scrollback, reflow, wide-char/grapheme correctness); windows, panes,
 H/V splits, zoom, resize; detach/reattach with on-disk session
 persistence/restore; multi-client; copy mode with search; full mouse; bracketed
-paste; sync-panes; a configurable status bar with live reload; deep OSC handling
+paste; sync-panes; a configurable status bar with live reload; **KDL v2 config**
+(`config.kdl` — a hard cutover from the old TOML; the decoder is
+`crates/config/src/kdl_config.rs`, the in-memory `Config` model is unchanged);
+**declarative default sessions** (recursive `session → window → split/pane`
+layouts with per-pane shell commands, built fresh at daemon boot; config wins for
+declared names over saved on-disk state — `crates/daemon/src/declared.rs` +
+`Session::build_from_template`); deep OSC handling
 (8 hyperlinks, 52 clipboard, 133 prompt marks, 10/11/12 colors, 0/1/2 titles);
 keyboard passthrough; interactive overlays (window/pane rename, help); a
 `Ctrl+a :` **command prompt** with in-place **session switching**
@@ -188,9 +194,13 @@ write a spec → adversarial self-review of the spec → implement one task per
 `jj commit` (each green under the gates above) → adversarial review of the
 implementation. Workflows (`Workflow` tool) drive the review fan-outs.
 
-Not yet built (future work): declarative session/layout templates; capture-pane /
-pipe-pane; cross-window **swap**-pane and the choose-tree filter/collapse +
-session rename (deferred in their specs); silence monitoring + bell/activity
-alert messages; set/save/load paste buffers. (choose-tree, break/join/swap +
-marked pane, paste buffers, and activity/bell monitoring all shipped — see the
-2026-05-31 specs/plans.)
+Not yet built (future work): capture-pane / pipe-pane; cross-window **swap**-pane
+and the choose-tree filter/collapse + session rename (deferred in their specs);
+silence monitoring + bell/activity alert messages; set/save/load paste buffers.
+Declarative-session v1 boundaries left for later: split ratios + active
+window/pane selection in the template, per-pane env maps, re-reading templates on
+`Ctrl+a R` reload, and `switch_session` auto-creating a not-yet-running declared
+session (see the 2026-06-01 declarative-sessions spec's non-goals). (choose-tree,
+break/join/swap + marked pane, paste buffers, and activity/bell monitoring shipped
+— 2026-05-31 specs/plans; the KDL config migration + declarative sessions shipped
+— 2026-06-01 specs/plans.)
