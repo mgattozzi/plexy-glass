@@ -121,6 +121,10 @@ pub struct WindowManager {
     /// Durable command-prompt history (newest last, capped). Cloned into the
     /// command overlay at open time for Up/Down recall; appended on commit.
     command_history: Vec<String>,
+    /// The session-wide marked pane (tmux's `select-pane -m`), or `None`. The
+    /// target of `join-pane`/`swap-pane`. Runtime-only (not persisted); cleared
+    /// when its pane dies (`handle_pane_death`) or is joined.
+    marked_pane: Option<PaneId>,
 }
 
 /// Maximum retained command-prompt history entries.
@@ -167,7 +171,14 @@ impl WindowManager {
             rename_pane_target: None,
             status_message: None,
             command_history: Vec::new(),
+            marked_pane: None,
         })
+    }
+
+    /// The session-wide marked pane, if any. Read by the frame build to draw the
+    /// marked indicator.
+    pub fn marked_pane(&self) -> Option<PaneId> {
+        self.marked_pane
     }
 
     /// Record the physical status-bar row (or `None` to disable status-bar
@@ -403,6 +414,10 @@ impl WindowManager {
                 self.active = self.windows.len() - 1;
             }
             self.fixup_last_active_after_removal(idx);
+        }
+        // A dead pane can no longer be a join/swap target.
+        if self.marked_pane == Some(pane_id) {
+            self.marked_pane = None;
         }
         self.notify.notify_one();
         Ok(())
@@ -723,6 +738,96 @@ impl WindowManager {
             Command::SelectLastPane => {
                 if let Some(p) = self.active_window().last_pane() {
                     self.active_window_mut().focus(p);
+                }
+            }
+            Command::MarkPane => {
+                let a = self.active_window().active();
+                self.marked_pane = if self.marked_pane == Some(a) { None } else { Some(a) };
+            }
+            Command::BreakPane => {
+                if self.active_window().layout().panes().len() < 2 {
+                    self.set_status_message("only pane in window".into());
+                } else {
+                    let active = self.active_window().active();
+                    // invariant: the active pane is always in its window.
+                    let pane = self
+                        .active_window_mut()
+                        .detach_pane(active)
+                        .expect("active pane present");
+                    self.active_window_mut().resize(viewport)?; // surviving source
+                    let name =
+                        pane.name().unwrap_or_else(|| format!("shell{}", self.next_window_id));
+                    let id = WindowId(self.next_window_id);
+                    self.next_window_id += 1;
+                    let mut w = Window::from_pane(id, name, pane);
+                    w.resize(viewport)?;
+                    self.windows.push(w);
+                    self.last_active_window = Some(self.active);
+                    self.active = self.windows.len() - 1;
+                }
+            }
+            Command::SwapPane(next) => {
+                let active = self.active_window().active();
+                if let Some(other) = self.active_window().neighbor_leaf(next) {
+                    let w = self.active_window_mut();
+                    w.layout_mut().swap_panes(active, other);
+                    w.resize(viewport)?;
+                }
+            }
+            Command::JoinPane(dir) => {
+                if let Some(marked) = self.marked_pane {
+                    let act_idx = self.active;
+                    let act_pane = self.windows[act_idx].active();
+                    if marked == act_pane {
+                        self.set_status_message("marked pane is the active pane".into());
+                    } else if let Some(src_idx) =
+                        self.windows.iter().position(|w| w.pane(marked).is_some())
+                    {
+                        let act_wid = self.windows[act_idx].id;
+                        if let Some(pane) = self.windows[src_idx].detach_pane(marked) {
+                            if self.windows[src_idx].is_layout_empty() {
+                                // src is never the active window (marked != act_pane,
+                                // so the active window keeps act_pane and stays alive).
+                                self.windows.remove(src_idx);
+                                self.active = self
+                                    .windows
+                                    .iter()
+                                    .position(|w| w.id == act_wid)
+                                    .expect("active window survives a join");
+                                self.fixup_last_active_after_removal(src_idx);
+                            } else {
+                                // Source survives with a promoted layout, so resize it.
+                                self.windows[src_idx].resize(viewport)?;
+                            }
+                            let act_idx = self.active;
+                            let act_pane = self.windows[act_idx].active();
+                            self.windows[act_idx]
+                                .adopt_split(act_pane, dir, pane, viewport)?;
+                            self.marked_pane = None;
+                        }
+                    } else {
+                        self.marked_pane = None; // marked pane vanished
+                    }
+                } else {
+                    self.set_status_message("no marked pane".into());
+                }
+            }
+            Command::SwapMarkedPane => {
+                if let Some(marked) = self.marked_pane {
+                    let a = self.active_window().active();
+                    if marked != a {
+                        if self.active_window().pane(marked).is_some() {
+                            let w = self.active_window_mut();
+                            w.layout_mut().swap_panes(a, marked);
+                            w.resize(viewport)?;
+                        } else {
+                            self.set_status_message(
+                                "marked pane is in another window — use join".into(),
+                            );
+                        }
+                    }
+                } else {
+                    self.set_status_message("no marked pane".into());
                 }
             }
             Command::ResizePane(dir) => {
@@ -1330,6 +1435,10 @@ fn command_clears_zoom(cmd: &Command) -> bool {
             | Command::ResizePane(_)
             | Command::SelectLastWindow
             | Command::SelectLastPane
+            | Command::BreakPane
+            | Command::JoinPane(_)
+            | Command::SwapPane(_)
+            | Command::SwapMarkedPane
     )
 }
 
@@ -2280,5 +2389,126 @@ mod tests {
         assert!(m.windows()[0].is_zoomed());
         m.select_window_by_id(WindowId(1));
         assert!(!m.windows()[0].is_zoomed(), "select_window_by_id unzooms before switching");
+    }
+
+    // ----- break / join / swap -----
+
+    #[tokio::test]
+    async fn mark_pane_toggles_and_death_clears() {
+        let mut m = mk_mgr();
+        m.handle_command(Command::SplitV).unwrap(); // panes 0,1; active 1
+        assert_eq!(m.marked_pane(), None);
+        m.handle_command(Command::MarkPane).unwrap();
+        assert_eq!(m.marked_pane(), Some(PaneId(1)));
+        m.handle_command(Command::MarkPane).unwrap();
+        assert_eq!(m.marked_pane(), None, "re-marking the active pane toggles off");
+        m.handle_command(Command::MarkPane).unwrap();
+        assert_eq!(m.marked_pane(), Some(PaneId(1)));
+        m.handle_pane_death(PaneId(1)).unwrap();
+        assert_eq!(m.marked_pane(), None, "a dead pane is unmarked");
+    }
+
+    #[tokio::test]
+    async fn break_pane_moves_active_into_new_window() {
+        let mut m = mk_mgr();
+        m.handle_command(Command::SplitV).unwrap(); // window 0: panes 0,1; active 1
+        m.handle_command(Command::BreakPane).unwrap();
+        assert_eq!(m.windows().len(), 2);
+        assert_eq!(m.windows()[0].layout().panes(), vec![PaneId(0)]);
+        assert_eq!(m.active_idx(), 1);
+        assert_eq!(m.active_window().active(), PaneId(1));
+        assert_eq!(m.last_active_window, Some(0));
+    }
+
+    #[tokio::test]
+    async fn break_pane_single_pane_is_noop_with_status() {
+        let mut m = mk_mgr();
+        m.handle_command(Command::BreakPane).unwrap();
+        assert_eq!(m.windows().len(), 1, "single pane is not broken out");
+        assert_eq!(m.take_active_message(), Some("only pane in window"));
+    }
+
+    #[tokio::test]
+    async fn swap_pane_exchanges_with_neighbor() {
+        let mut m = mk_mgr();
+        m.handle_command(Command::SplitV).unwrap(); // panes 0,1; active 1
+        let vp = m.viewport();
+        let before = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
+        m.handle_command(Command::SwapPane(false)).unwrap(); // swap with previous (pane 0)
+        assert_eq!(m.active_window().active(), PaneId(1), "active id unchanged");
+        let after = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
+        assert_ne!(before, after, "active pane's content moved to the other slot");
+    }
+
+    #[tokio::test]
+    async fn join_pane_moves_marked_and_removes_empty_source() {
+        let mut m = mk_mgr(); // W0 (WindowId 0), pane 0
+        m.handle_command(Command::NewWindow).unwrap(); // W1 (WindowId 1), pane 1, active
+        m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0
+        m.handle_command(Command::MarkPane).unwrap(); // marked = pane 0
+        m.handle_command(Command::SelectWindow(1)).unwrap(); // active W1
+        m.handle_command(Command::JoinPane(SplitDir::Vertical)).unwrap();
+        assert_eq!(m.windows().len(), 1, "emptied source window removed");
+        let panes = m.active_window().layout().panes();
+        assert!(panes.contains(&PaneId(0)) && panes.contains(&PaneId(1)));
+        assert_eq!(m.active_window().active(), PaneId(0), "joined pane is active");
+        assert_eq!(m.marked_pane(), None, "mark cleared after join");
+    }
+
+    #[tokio::test]
+    async fn join_pane_fixes_active_and_last_active_after_source_removal() {
+        let mut m = mk_mgr(); // W0 idx0
+        m.handle_command(Command::NewWindow).unwrap(); // W1 idx1
+        m.handle_command(Command::NewWindow).unwrap(); // W2 idx2, active
+        m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0
+        m.handle_command(Command::MarkPane).unwrap(); // marked = pane 0 (W0, a lower index)
+        m.handle_command(Command::SelectWindow(1)).unwrap(); // active W1
+        m.handle_command(Command::SelectWindow(2)).unwrap(); // active W2, last = W1
+        let w2_id = m.windows()[m.active_idx()].id;
+        let w1_id = m.windows()[1].id;
+        m.handle_command(Command::JoinPane(SplitDir::Vertical)).unwrap(); // W0 empties → removed
+        assert_eq!(m.windows()[m.active_idx()].id, w2_id, "active stays W2 across removal");
+        m.handle_command(Command::SelectLastWindow).unwrap();
+        assert_eq!(m.windows()[m.active_idx()].id, w1_id, "last-active follows W1 across removal");
+    }
+
+    #[tokio::test]
+    async fn join_pane_source_survives_when_multipane() {
+        let mut m = mk_mgr(); // W0 idx0 pane0
+        m.handle_command(Command::NewWindow).unwrap(); // W1 idx1 pane1, active
+        m.handle_command(Command::SplitV).unwrap(); // W1 panes {1,2}, active 2
+        let half = m.windows()[1].pane(PaneId(1)).unwrap().with_screen(|s| s.active.num_cols());
+        m.handle_command(Command::MarkPane).unwrap(); // marked = pane 2 (W1)
+        m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0
+        m.handle_command(Command::JoinPane(SplitDir::Vertical)).unwrap();
+        assert_eq!(m.windows().len(), 2, "multi-pane source survives");
+        let active_panes = m.active_window().layout().panes();
+        assert!(active_panes.contains(&PaneId(0)) && active_panes.contains(&PaneId(2)));
+        assert_eq!(m.windows()[1].layout().panes(), vec![PaneId(1)], "source keeps its other pane");
+        let full = m.windows()[1].pane(PaneId(1)).unwrap().with_screen(|s| s.active.num_cols());
+        assert!(full > half, "surviving source pane was resized wider ({half} -> {full})");
+        assert_eq!(m.marked_pane(), None);
+    }
+
+    #[tokio::test]
+    async fn swap_marked_pane_same_window_then_cross_window_status() {
+        let mut m = mk_mgr();
+        m.handle_command(Command::SplitV).unwrap(); // W0 panes 0,1; active 1
+        let vp = m.viewport();
+        m.handle_command(Command::MarkPane).unwrap(); // marked = 1
+        m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Left)).unwrap(); // active 0
+        let before = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
+        m.handle_command(Command::SwapMarkedPane).unwrap();
+        let after = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
+        assert_ne!(before, after, "same-window swap exchanged slots");
+        assert_eq!(m.marked_pane(), Some(PaneId(1)), "mark preserved across swap");
+
+        // Cross-window: marked stays in W0; move active to a new window → status.
+        m.handle_command(Command::NewWindow).unwrap();
+        m.handle_command(Command::SwapMarkedPane).unwrap();
+        assert_eq!(
+            m.take_active_message(),
+            Some("marked pane is in another window — use join")
+        );
     }
 }

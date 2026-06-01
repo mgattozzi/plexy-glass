@@ -1,6 +1,6 @@
 //! Parsers for the `keys` and `command` strings in `[[keymap.bindings]]`.
 
-use plexy_glass_mux::{Command, Direction, Key, Modifiers};
+use plexy_glass_mux::{Command, Direction, Key, Modifiers, SplitDir};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum KeyParseError {
@@ -129,6 +129,12 @@ pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
         "command_prompt" => Command::CommandPrompt,
         "choose_session" => Command::ChooseSession,
         "choose_tree" => Command::ChooseTree,
+        "mark_pane" => Command::MarkPane,
+        "break_pane" => Command::BreakPane,
+        "swap_pane_next" => Command::SwapPane(true),
+        "swap_pane_prev" => Command::SwapPane(false),
+        "join_pane" => Command::JoinPane(SplitDir::Vertical),
+        "swap_marked_pane" => Command::SwapMarkedPane,
         "select_window" => {
             let arg_str = arg.ok_or_else(|| KeyParseError::MissingArg {
                 command: name.to_string(),

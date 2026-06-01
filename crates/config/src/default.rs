@@ -146,6 +146,10 @@ pub fn built_in_keymap() -> KeymapConfig {
             binding("Ctrl+a :", "command_prompt"),
             binding("Ctrl+a w", "choose_session"),
             binding("Ctrl+a W", "choose_tree"),
+            binding("Ctrl+a m", "mark_pane"),
+            binding("Ctrl+a !", "break_pane"),
+            binding("Ctrl+a {", "swap_pane_prev"),
+            binding("Ctrl+a }", "swap_pane_next"),
         ],
     }
 }

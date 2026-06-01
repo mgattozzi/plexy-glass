@@ -23,7 +23,7 @@ pub mod status;
 pub mod tree;
 pub mod virtual_screen;
 
-pub use command_prompt::{Completion, FocusTarget, ParseError, PromptCommand};
+pub use command_prompt::{Completion, FocusTarget, ParseError, PromptCommand, SwapTarget};
 pub use compositor::{Compositor, OverlayView, PaneView, StatusPlacement};
 pub use copy_mode::{CopyMode, CopyModeAction, CopyModeHandler, MatchSpan, SearchState};
 pub use diff::DiffRenderer;

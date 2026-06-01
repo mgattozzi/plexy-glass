@@ -297,6 +297,12 @@ fn command_label(command: &str) -> String {
         "command_prompt" => "Command prompt",
         "choose_session" => "Choose session",
         "choose_tree" => "Choose tree",
+        "mark_pane" => "Mark pane",
+        "break_pane" => "Break pane",
+        "swap_pane_next" => "Swap pane next",
+        "swap_pane_prev" => "Swap pane prev",
+        "join_pane" => "Join pane",
+        "swap_marked_pane" => "Swap marked pane",
         other => {
             if let Some(n) = other
                 .strip_prefix("select_window:")
@@ -922,6 +928,13 @@ impl Session {
             PromptCommand::CopyMode => Command::EnterCopyMode,
             PromptCommand::ToggleSync => Command::ToggleSyncPanes,
             PromptCommand::Help => Command::ShowHelp,
+            PromptCommand::MarkPane => Command::MarkPane,
+            PromptCommand::BreakPane => Command::BreakPane,
+            PromptCommand::JoinPane(dir) => Command::JoinPane(dir),
+            PromptCommand::SwapPane(t) => {
+                Command::SwapPane(matches!(t, plexy_glass_mux::SwapTarget::Next))
+            }
+            PromptCommand::SwapMarked => Command::SwapMarkedPane,
             PromptCommand::Focus(ft) => match ft {
                 FocusTarget::Dir(d) => Command::SelectPane(d),
                 FocusTarget::Next => Command::SelectNextPane,

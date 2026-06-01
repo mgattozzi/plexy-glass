@@ -1,7 +1,7 @@
 //! Keymap: a chord trie that consumes typed `KeyEvent`s and emits `Command`
 //! or `PassThrough`.
 
-use crate::{Direction, Key, KeyEvent, Modifiers};
+use crate::{Direction, Key, KeyEvent, Modifiers, SplitDir};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,18 @@ pub enum Command {
     ResizePane(Direction),
     SelectLastWindow,
     SelectLastPane,
+    /// Toggle the session-wide marked pane (set to the active pane, or clear it).
+    MarkPane,
+    /// Move the active pane into a new window of its own.
+    BreakPane,
+    /// Swap the active pane with its next (`true`) or previous (`false`) DFS
+    /// neighbor in the same window.
+    SwapPane(bool),
+    /// Join the marked pane into the active window, splitting the active pane in
+    /// the given direction.
+    JoinPane(SplitDir),
+    /// Swap the active pane with the marked pane (same window only in v1).
+    SwapMarkedPane,
     RenameWindow,
     RenamePane,
     ShowHelp,

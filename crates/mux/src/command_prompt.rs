@@ -5,7 +5,7 @@
 //! `Session::handle_prompt_command` and the connection-level `switch_session`).
 //! Also provides verb-name completion used by the command overlay.
 
-use crate::Direction;
+use crate::{Direction, SplitDir};
 
 /// Which pane `focus` targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +14,13 @@ pub enum FocusTarget {
     Next,
     Prev,
     Last,
+}
+
+/// Which neighbor a same-window `swap` targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwapTarget {
+    Prev,
+    Next,
 }
 
 /// A parsed, validated command-prompt command.
@@ -43,6 +50,11 @@ pub enum PromptCommand {
     Switch(String),
     ChooseSession,
     ChooseTree,
+    MarkPane,
+    BreakPane,
+    JoinPane(SplitDir),
+    SwapPane(SwapTarget),
+    SwapMarked,
 }
 
 /// A human-readable parse failure.
@@ -61,9 +73,9 @@ impl std::error::Error for ParseError {}
 
 /// Static verb names, sorted, for Tab-completion of the first token.
 pub const VERBS: &[&str] = &[
-    "copy", "detach", "focus", "help", "kill", "last", "new", "next", "prev",
-    "reload", "rename", "rename-pane", "resize", "sessions", "split", "switch",
-    "sync", "tree", "win", "zoom",
+    "break", "copy", "detach", "focus", "help", "join", "kill", "last", "mark",
+    "new", "next", "prev", "reload", "rename", "rename-pane", "resize", "sessions",
+    "split", "swap", "switch", "sync", "tree", "win", "zoom",
 ];
 
 fn err(msg: impl Into<String>) -> ParseError {
@@ -116,6 +128,19 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
         "help" => no_args(PromptCommand::Help),
         "sessions" => no_args(PromptCommand::ChooseSession),
         "tree" => no_args(PromptCommand::ChooseTree),
+        "mark" => no_args(PromptCommand::MarkPane),
+        "break" => no_args(PromptCommand::BreakPane),
+        "join" | "join-pane" => match args.as_slice() {
+            [] | ["v"] => Ok(PromptCommand::JoinPane(SplitDir::Vertical)),
+            ["h"] => Ok(PromptCommand::JoinPane(SplitDir::Horizontal)),
+            _ => Err(err("join: expected h or v")),
+        },
+        "swap" | "swap-pane" => match args.as_slice() {
+            [] => Ok(PromptCommand::SwapMarked),
+            ["next"] => Ok(PromptCommand::SwapPane(SwapTarget::Next)),
+            ["prev"] => Ok(PromptCommand::SwapPane(SwapTarget::Prev)),
+            _ => Err(err("swap: expected prev, next, or no argument")),
+        },
         "win" => {
             let [n] = args.as_slice() else {
                 return Err(err("win: expected a window number"));
@@ -371,6 +396,22 @@ mod tests {
     fn tree_verb() {
         assert_eq!(p("tree").unwrap(), PromptCommand::ChooseTree);
         assert_eq!(p("tree x").unwrap_err().to_string(), "tree: takes no arguments");
+    }
+
+    #[test]
+    fn pane_mobility_verbs() {
+        assert_eq!(p("mark").unwrap(), PromptCommand::MarkPane);
+        assert_eq!(p("break").unwrap(), PromptCommand::BreakPane);
+        assert_eq!(p("join").unwrap(), PromptCommand::JoinPane(SplitDir::Vertical));
+        assert_eq!(p("join v").unwrap(), PromptCommand::JoinPane(SplitDir::Vertical));
+        assert_eq!(p("join h").unwrap(), PromptCommand::JoinPane(SplitDir::Horizontal));
+        assert_eq!(p("join-pane h").unwrap(), PromptCommand::JoinPane(SplitDir::Horizontal));
+        assert!(p("join x").is_err());
+        assert_eq!(p("swap").unwrap(), PromptCommand::SwapMarked);
+        assert_eq!(p("swap next").unwrap(), PromptCommand::SwapPane(SwapTarget::Next));
+        assert_eq!(p("swap prev").unwrap(), PromptCommand::SwapPane(SwapTarget::Prev));
+        assert_eq!(p("swap-pane next").unwrap(), PromptCommand::SwapPane(SwapTarget::Next));
+        assert!(p("swap sideways").is_err());
     }
 
     #[test]
