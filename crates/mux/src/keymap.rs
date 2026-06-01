@@ -40,6 +40,10 @@ pub enum Command {
     CommandPrompt,
     ChooseSession,
     ChooseTree,
+    /// Paste the most-recent paste buffer into the active pane.
+    PasteBuffer,
+    /// Open the choose-buffer overlay.
+    ChooseBuffer,
     Detach,
     Cancel,
     EnterCopyMode,

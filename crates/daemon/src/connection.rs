@@ -334,6 +334,9 @@ where
                                             Ok(PromptCommand::ChooseTree) => {
                                                 open_tree_overlay(&session, &registry).await;
                                             }
+                                            Ok(PromptCommand::PasteBuffer) => {
+                                                paste_top_buffer(&session, &registry).await;
+                                            }
                                             Ok(other) => {
                                                 match session
                                                     .handle_prompt_command(other)
@@ -409,6 +412,12 @@ where
                                                     text.as_bytes(),
                                                 )
                                                 .await;
+                                                // Also push a paste buffer (before
+                                                // re-taking the WM lock, so the
+                                                // registry await isn't held under it).
+                                                registry
+                                                    .push_paste_buffer(text.into_bytes())
+                                                    .await;
                                                 let m = session.window_manager.lock().await;
                                                 if let Some(p) = m.active_window().active_pane() {
                                                     p.exit_copy_mode();
@@ -459,6 +468,9 @@ where
                                     }
                                     Command::ChooseTree => {
                                         open_tree_overlay(&session, &registry).await;
+                                    }
+                                    Command::PasteBuffer => {
+                                        paste_top_buffer(&session, &registry).await;
                                     }
                                     other => {
                                         let _ = session.handle_command(other).await;
@@ -783,6 +795,34 @@ async fn dispatch_tree_action(
             session.notify.notify_one();
         }
     }
+}
+
+/// Paste the most-recent paste buffer into the active pane (bracketed if the
+/// pane requests it), or set a status when there is none. Shared by `Ctrl+a ]`
+/// and the `:paste` verb.
+async fn paste_top_buffer(session: &Arc<Session>, registry: &Arc<SessionRegistry>) {
+    match registry.paste_buffer_top().await {
+        Some(content) => paste_bytes(session, content).await,
+        None => session.set_status_message("no paste buffer".into()).await,
+    }
+}
+
+/// Send `content` to the active pane, wrapping in bracketed-paste markers when
+/// the pane has that mode on (mirrors `InputEvent::Paste`). Also used by the
+/// choose-buffer overlay's paste action.
+async fn paste_bytes(session: &Arc<Session>, content: Vec<u8>) {
+    let want_bracketed = {
+        let manager = session.window_manager.lock().await;
+        manager
+            .active_window()
+            .active_pane()
+            .map(|p| {
+                p.with_screen(|s| s.modes.contains(plexy_glass_emulator::Modes::BRACKETED_PASTE))
+            })
+            .unwrap_or(false)
+    };
+    let payload = if want_bracketed { wrap_paste(&content) } else { content };
+    let _ = session.handle_input_bytes(&payload).await;
 }
 
 fn wrap_paste(inner: &[u8]) -> Vec<u8> {

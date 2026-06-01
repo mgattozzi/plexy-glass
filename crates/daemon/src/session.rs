@@ -305,6 +305,8 @@ fn command_label(command: &str) -> String {
         "swap_pane_prev" => "Swap pane prev",
         "join_pane" => "Join pane",
         "swap_marked_pane" => "Swap marked pane",
+        "paste_buffer" => "Paste buffer",
+        "choose_buffer" => "Choose buffer",
         other => {
             if let Some(n) = other
                 .strip_prefix("select_window:")
@@ -977,7 +979,9 @@ impl Session {
             | PromptCommand::Reload
             | PromptCommand::Switch(_)
             | PromptCommand::ChooseSession
-            | PromptCommand::ChooseTree => {
+            | PromptCommand::ChooseTree
+            | PromptCommand::PasteBuffer
+            | PromptCommand::ChooseBuffer => {
                 return Ok(None);
             }
         };

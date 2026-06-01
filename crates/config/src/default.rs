@@ -150,6 +150,8 @@ pub fn built_in_keymap() -> KeymapConfig {
             binding("Ctrl+a !", "break_pane"),
             binding("Ctrl+a {", "swap_pane_prev"),
             binding("Ctrl+a }", "swap_pane_next"),
+            binding("Ctrl+a ]", "paste_buffer"),
+            binding("Ctrl+a =", "choose_buffer"),
         ],
     }
 }

@@ -55,6 +55,8 @@ pub enum PromptCommand {
     JoinPane(SplitDir),
     SwapPane(SwapTarget),
     SwapMarked,
+    PasteBuffer,
+    ChooseBuffer,
 }
 
 /// A human-readable parse failure.
@@ -73,9 +75,9 @@ impl std::error::Error for ParseError {}
 
 /// Static verb names, sorted, for Tab-completion of the first token.
 pub const VERBS: &[&str] = &[
-    "break", "copy", "detach", "focus", "help", "join", "kill", "last", "mark",
-    "new", "next", "prev", "reload", "rename", "rename-pane", "resize", "sessions",
-    "split", "swap", "switch", "sync", "tree", "win", "zoom",
+    "break", "buffers", "copy", "detach", "focus", "help", "join", "kill", "last",
+    "mark", "new", "next", "paste", "prev", "reload", "rename", "rename-pane",
+    "resize", "sessions", "split", "swap", "switch", "sync", "tree", "win", "zoom",
 ];
 
 fn err(msg: impl Into<String>) -> ParseError {
@@ -130,6 +132,8 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
         "tree" => no_args(PromptCommand::ChooseTree),
         "mark" => no_args(PromptCommand::MarkPane),
         "break" => no_args(PromptCommand::BreakPane),
+        "paste" => no_args(PromptCommand::PasteBuffer),
+        "buffers" => no_args(PromptCommand::ChooseBuffer),
         "join" | "join-pane" => match args.as_slice() {
             [] | ["v"] => Ok(PromptCommand::JoinPane(SplitDir::Vertical)),
             ["h"] => Ok(PromptCommand::JoinPane(SplitDir::Horizontal)),
@@ -412,6 +416,14 @@ mod tests {
         assert_eq!(p("swap prev").unwrap(), PromptCommand::SwapPane(SwapTarget::Prev));
         assert_eq!(p("swap-pane next").unwrap(), PromptCommand::SwapPane(SwapTarget::Next));
         assert!(p("swap sideways").is_err());
+    }
+
+    #[test]
+    fn paste_buffer_verbs() {
+        assert_eq!(p("paste").unwrap(), PromptCommand::PasteBuffer);
+        assert_eq!(p("buffers").unwrap(), PromptCommand::ChooseBuffer);
+        assert!(p("paste x").is_err());
+        assert!(p("buffers x").is_err());
     }
 
     #[test]

@@ -135,6 +135,8 @@ pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
         "swap_pane_prev" => Command::SwapPane(false),
         "join_pane" => Command::JoinPane(SplitDir::Vertical),
         "swap_marked_pane" => Command::SwapMarkedPane,
+        "paste_buffer" => Command::PasteBuffer,
+        "choose_buffer" => Command::ChooseBuffer,
         "select_window" => {
             let arg_str = arg.ok_or_else(|| KeyParseError::MissingArg {
                 command: name.to_string(),
