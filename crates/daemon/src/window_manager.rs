@@ -653,6 +653,10 @@ impl WindowManager {
                 // Opened at the connection layer (needs the live session list);
                 // see `Connection::serve_attach`.
             }
+            Command::ChooseTree => {
+                // Opened at the connection layer (needs the live session list);
+                // see `Connection::serve_attach`.
+            }
             Command::EnterCopyMode => {
                 if let Some(pane) = self.active_window().active_pane() {
                     let (total_lines, pane_rows, start_line, start_col) = pane.with_screen(|s| {

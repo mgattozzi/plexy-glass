@@ -293,6 +293,7 @@ fn command_label(command: &str) -> String {
         "show_help" => "Help",
         "command_prompt" => "Command prompt",
         "choose_session" => "Choose session",
+        "choose_tree" => "Choose tree",
         other => {
             if let Some(n) = other
                 .strip_prefix("select_window:")
@@ -915,7 +916,8 @@ impl Session {
             PromptCommand::Detach
             | PromptCommand::Reload
             | PromptCommand::Switch(_)
-            | PromptCommand::ChooseSession => {
+            | PromptCommand::ChooseSession
+            | PromptCommand::ChooseTree => {
                 return Ok(None);
             }
         };

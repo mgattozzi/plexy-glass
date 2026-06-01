@@ -42,6 +42,7 @@ pub enum PromptCommand {
     Help,
     Switch(String),
     ChooseSession,
+    ChooseTree,
 }
 
 /// A human-readable parse failure.
@@ -62,7 +63,7 @@ impl std::error::Error for ParseError {}
 pub const VERBS: &[&str] = &[
     "copy", "detach", "focus", "help", "kill", "last", "new", "next", "prev",
     "reload", "rename", "rename-pane", "resize", "sessions", "split", "switch",
-    "sync", "win", "zoom",
+    "sync", "tree", "win", "zoom",
 ];
 
 fn err(msg: impl Into<String>) -> ParseError {
@@ -114,6 +115,7 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
         "detach" => no_args(PromptCommand::Detach),
         "help" => no_args(PromptCommand::Help),
         "sessions" => no_args(PromptCommand::ChooseSession),
+        "tree" => no_args(PromptCommand::ChooseTree),
         "win" => {
             let [n] = args.as_slice() else {
                 return Err(err("win: expected a window number"));
@@ -363,6 +365,12 @@ mod tests {
     fn sessions_verb() {
         assert_eq!(p("sessions").unwrap(), PromptCommand::ChooseSession);
         assert_eq!(p("sessions x").unwrap_err().to_string(), "sessions: takes no arguments");
+    }
+
+    #[test]
+    fn tree_verb() {
+        assert_eq!(p("tree").unwrap(), PromptCommand::ChooseTree);
+        assert_eq!(p("tree x").unwrap_err().to_string(), "tree: takes no arguments");
     }
 
     #[test]

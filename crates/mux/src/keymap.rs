@@ -27,6 +27,7 @@ pub enum Command {
     ShowHelp,
     CommandPrompt,
     ChooseSession,
+    ChooseTree,
     Detach,
     Cancel,
     EnterCopyMode,
