@@ -1405,6 +1405,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_snapshot_ctx_surfaces_window_alert_flags() {
+        let s = Session::new("snapalert".into(), spec(), size(), cfg()).unwrap();
+        {
+            // Add a second window and flag it (the WindowManager's sticky flags
+            // are what build_snapshot_ctx reads into the status WindowSummary).
+            let mut m = s.window_manager.lock().await;
+            m.handle_command(plexy_glass_mux::Command::NewWindow).unwrap();
+            m.windows_mut()[0].set_bell();
+            m.windows_mut()[0].set_activity();
+        }
+        let ctx = build_snapshot_ctx(&s).await;
+        assert_eq!(ctx.windows.len(), 2);
+        assert!(ctx.windows[0].bell, "snapshot surfaces the window's bell flag");
+        assert!(ctx.windows[0].activity, "snapshot surfaces the window's activity flag");
+        assert!(!ctx.windows[1].bell && !ctx.windows[1].activity, "unflagged window is clean");
+    }
+
+    #[tokio::test]
     async fn list_entry_reports_one_window_one_pane_zero_clients() {
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         let entry = tokio::task::spawn_blocking(move || s.list_entry()).await.unwrap();

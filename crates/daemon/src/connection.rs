@@ -1645,4 +1645,130 @@ mod tests {
 
         server.abort();
     }
+
+    // End-to-end through the production render coordinator (the sole caller of
+    // update_monitor_flags): a BEL in a BACKGROUND window flags that window
+    // (monitor-bell on by default), and switching to it clears the flag. Uses a
+    // unique session name + delete-at-start for isolation from the shared persist
+    // dir.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_bell_flags_window_via_coordinator() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let _ = crate::persist::delete_session("bellmon");
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::AttachOrCreate {
+                name: Some("bellmon".into()),
+                create_if_missing: true,
+                cmd: Some(cat()),
+                size,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::spawn(async move {
+            let mut b = [0u8; 4096];
+            while cr.read(&mut b).await.unwrap_or(0) > 0 {}
+        });
+
+        // Ctrl+a c → window 1 (active); Ctrl+a p → back to window 0 (window 1 now
+        // background). Poll until established.
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01c\x01p")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(s) = registry.get("bellmon").await {
+                let m = s.window_manager.lock().await;
+                if m.windows().len() == 2 && m.active_idx() == 0 {
+                    break;
+                }
+            }
+            if Instant::now() > deadline {
+                panic!("two windows with window 0 active never established");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Emit a real BEL in the BACKGROUND window's pane (cat outputs the \x07
+        // once the newline flushes its line); the reader wakes the coordinator,
+        // which is the sole caller of update_monitor_flags.
+        {
+            let s = registry.get("bellmon").await.unwrap();
+            let m = s.window_manager.lock().await;
+            let pid = m.windows()[1].layout().panes()[0];
+            m.windows()[1]
+                .pane(pid)
+                .unwrap()
+                .send_input(bytes::Bytes::from_static(b"\x07\n"))
+                .await
+                .unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let flagged = {
+                let s = registry.get("bellmon").await.unwrap();
+                let m = s.window_manager.lock().await;
+                m.windows()[1].bell_flag()
+            };
+            if flagged {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("the coordinator never flagged the background window's bell");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Switching to window 1 (Ctrl+a n) clears its flag.
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01n")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let cleared = {
+                let s = registry.get("bellmon").await.unwrap();
+                let m = s.window_manager.lock().await;
+                m.active_idx() == 1 && !m.windows()[1].bell_flag()
+            };
+            if cleared {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("bell flag did not clear after switching to the window");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        server.abort();
+    }
 }
