@@ -12,7 +12,9 @@ pub enum Direction {
 /// Orientation of a split. `Horizontal` means the split bar lies horizontally,
 /// so children stack top/bottom. `Vertical` means the split bar is vertical,
 /// so children sit side by side. (tmux convention.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `Hash` so `SplitDir` can be a payload of `Command` (which derives `Hash` as a
+// chord-trie terminal); `Command::JoinPane(SplitDir)` needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SplitDir {
     Horizontal,
     Vertical,

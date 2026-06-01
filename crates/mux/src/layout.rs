@@ -201,6 +201,26 @@ impl LayoutTree {
         self.root = Some(new_root);
     }
 
+    /// Swap the slots of two existing leaves: pane `a` ends up where `b` was and
+    /// vice-versa. All-or-nothing: if either id is absent (or `a == b`), the tree
+    /// is left **unchanged** and `false` is returned (so a partial swap can never
+    /// rename a live leaf to a non-existent id). When both are present, a single
+    /// atomic walk rewrites leaf `a`→`b` and leaf `b`→`a` in one pass (a naive
+    /// replace-then-replace would double-apply).
+    pub fn swap_panes(&mut self, a: PaneId, b: PaneId) -> bool {
+        let panes = self.panes();
+        if a == b || !panes.contains(&a) || !panes.contains(&b) {
+            return false;
+        }
+        let Some(root) = self.root.as_mut() else {
+            return false;
+        };
+        let mut found_a = false;
+        let mut found_b = false;
+        swap_in(root, a, b, &mut found_a, &mut found_b);
+        found_a && found_b
+    }
+
     /// DFS-order list of pane IDs. Used by callers building on-disk pane
     /// indices (persistence), and the order is stable for a given tree.
     pub fn dfs_leaves(&self) -> Vec<PaneId> {
@@ -347,6 +367,26 @@ fn adjust_split_recurse(
         return from_first;
     }
     adjust_split_recurse(second, b, adjacent_pane, side, delta)
+}
+
+fn swap_in(node: &mut LayoutNode, a: PaneId, b: PaneId, found_a: &mut bool, found_b: &mut bool) {
+    match node {
+        LayoutNode::Leaf(p) => {
+            // `else if` so a single leaf is never swapped twice; with `a != b` the
+            // two arms touch distinct leaves.
+            if *p == a {
+                *p = b;
+                *found_a = true;
+            } else if *p == b {
+                *p = a;
+                *found_b = true;
+            }
+        }
+        LayoutNode::Split { first, second, .. } => {
+            swap_in(first, a, b, found_a, found_b);
+            swap_in(second, a, b, found_a, found_b);
+        }
+    }
 }
 
 fn dfs_collect(node: &LayoutNode, out: &mut Vec<PaneId>) {
@@ -810,6 +850,46 @@ mod tests {
         // First pane started at ~10 cols and can shrink to 4, so delta no smaller than -6.
         assert!(applied >= -6, "should clamp at MIN_PANE_CELLS; got {applied}");
         assert!(applied < 0, "should still apply something");
+    }
+
+    #[test]
+    fn swap_panes_exchanges_two_leaf_rects() {
+        let mut t = build_two_pane_vertical(); // PaneId(0) left, PaneId(1) right
+        let vp = Rect::new(0, 0, 24, 21);
+        let r0 = t.rect_of(PaneId(0), vp).unwrap();
+        let r1 = t.rect_of(PaneId(1), vp).unwrap();
+        assert!(t.swap_panes(PaneId(0), PaneId(1)));
+        // After the swap, pane 0 occupies the old right rect and pane 1 the left.
+        assert_eq!(t.rect_of(PaneId(0), vp).unwrap(), r1);
+        assert_eq!(t.rect_of(PaneId(1), vp).unwrap(), r0);
+        // Same set of panes.
+        let mut panes = t.panes();
+        panes.sort();
+        assert_eq!(panes, vec![PaneId(0), PaneId(1)]);
+    }
+
+    #[test]
+    fn swap_panes_in_nested_tree_leaves_third_put() {
+        // L | (TR / BR): vertical split, then horizontal split on the right.
+        let mut t = LayoutTree::single(PaneId(0));
+        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After).unwrap();
+        t.split(PaneId(1), SplitDir::Horizontal, PaneId(2), SplitPosition::After).unwrap();
+        let vp = Rect::new(0, 0, 24, 80);
+        let r0 = t.rect_of(PaneId(0), vp).unwrap();
+        let r1 = t.rect_of(PaneId(1), vp).unwrap();
+        let r2 = t.rect_of(PaneId(2), vp).unwrap();
+        assert!(t.swap_panes(PaneId(1), PaneId(2)));
+        assert_eq!(t.rect_of(PaneId(1), vp).unwrap(), r2);
+        assert_eq!(t.rect_of(PaneId(2), vp).unwrap(), r1);
+        assert_eq!(t.rect_of(PaneId(0), vp).unwrap(), r0, "untouched leaf keeps its rect");
+    }
+
+    #[test]
+    fn swap_panes_missing_id_returns_false() {
+        let mut t = build_two_pane_vertical();
+        let before = t.panes();
+        assert!(!t.swap_panes(PaneId(0), PaneId(99)));
+        assert_eq!(t.panes(), before, "tree unchanged on a missing id");
     }
 
     #[test]
