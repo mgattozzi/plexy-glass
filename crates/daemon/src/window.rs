@@ -207,6 +207,91 @@ impl Window {
         self.close_pane(self.active)
     }
 
+    /// Remove `id` from the layout and the pane map and RETURN the live `Pane`
+    /// (it is NOT killed, the caller adopts it into another window). Mirrors
+    /// `close_pane`'s sibling-promotion / active-fixup / focus-history retain /
+    /// dangling-zoom clear, but hands the pane back. Returns `None` if `id` is not
+    /// in this window. Does not resize (the caller resizes the surviving window,
+    /// as every `close_pane` caller does).
+    pub fn detach_pane(&mut self, id: PaneId) -> Option<Pane> {
+        let pane = self.panes.remove(&id)?;
+        self.layout.close(id);
+        if self.zoomed == Some(id) {
+            self.zoomed = None;
+        }
+        if id == self.active {
+            let alive_history: Vec<PaneId> = self
+                .focus_history
+                .iter()
+                .rev()
+                .filter(|p| self.panes.contains_key(p))
+                .copied()
+                .collect();
+            self.active = alive_history
+                .first()
+                .copied()
+                .or_else(|| self.layout.panes().into_iter().next())
+                .unwrap_or(PaneId(0));
+        }
+        self.focus_history.retain(|p| self.panes.contains_key(p));
+        Some(pane)
+    }
+
+    /// Split `target` in `dir` and place an EXISTING `pane` (keeping its id) in
+    /// the new slot; insert it, make it active, and resize. Errors if `target`
+    /// is not in the layout.
+    pub fn adopt_split(
+        &mut self,
+        target: PaneId,
+        dir: SplitDir,
+        pane: Pane,
+        viewport: Rect,
+    ) -> Result<(), DaemonError> {
+        let id = pane.id();
+        self.layout
+            .split(target, dir, id, SplitPosition::After)
+            .map_err(|e| DaemonError::Io(std::io::Error::other(format!("layout: {e}"))))?;
+        self.panes.insert(id, pane);
+        self.focus_history.push_back(self.active);
+        self.active = id;
+        self.resize(viewport)?;
+        Ok(())
+    }
+
+    /// Build a new window whose single pane is an existing `pane` (break-pane).
+    pub fn from_pane(id: WindowId, name: String, pane: Pane) -> Self {
+        let pid = pane.id();
+        let mut panes = HashMap::new();
+        panes.insert(pid, pane);
+        Self {
+            id,
+            name,
+            sync_input: false,
+            zoomed: None,
+            panes,
+            layout: LayoutTree::single(pid),
+            active: pid,
+            focus_history: VecDeque::new(),
+        }
+    }
+
+    /// The active pane's DFS-leaf neighbor (wrapping): the next leaf if `next`,
+    /// else the previous. `None` when there is only one pane.
+    pub fn neighbor_leaf(&self, next: bool) -> Option<PaneId> {
+        let leaves = self.layout.dfs_leaves();
+        if leaves.len() < 2 {
+            return None;
+        }
+        let i = leaves.iter().position(|p| *p == self.active)?;
+        let n = leaves.len();
+        let j = if next { (i + 1) % n } else { (i + n - 1) % n };
+        Some(leaves[j])
+    }
+
+    pub fn is_layout_empty(&self) -> bool {
+        self.layout.is_empty()
+    }
+
     pub fn select_next(&mut self) {
         let panes = self.layout.panes();
         let Some(idx) = panes.iter().position(|p| *p == self.active) else {
@@ -410,5 +495,108 @@ mod tests {
         let outcome = w.close_pane(PaneId(1)).unwrap();
         assert_eq!(outcome, CloseOutcome::SiblingPromoted);
         assert!(!w.is_zoomed(), "zoom must clear when its target pane is closed");
+    }
+
+    fn two_pane_window() -> Window {
+        let viewport = Rect::new(0, 0, 24, 80);
+        let mut w = Window::spawn_first(
+            WindowId(0),
+            "w0".into(),
+            PaneId(0),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+        )
+        .unwrap();
+        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
+            .unwrap(); // active = PaneId(1); leaves [0, 1]
+        w
+    }
+
+    #[tokio::test]
+    async fn detach_pane_returns_live_pane_and_promotes_sibling() {
+        let mut w = two_pane_window();
+        let pane = w.detach_pane(PaneId(0)).expect("pane present");
+        assert_eq!(pane.id(), PaneId(0), "returns the live (un-killed) pane");
+        assert!(!w.is_layout_empty());
+        assert_eq!(w.layout().panes(), vec![PaneId(1)]);
+        assert_eq!(w.active(), PaneId(1));
+        assert!(w.detach_pane(PaneId(99)).is_none(), "absent pane → None");
+        pane.kill_child(); // tidy the moved-out child
+    }
+
+    #[tokio::test]
+    async fn detach_last_pane_empties_layout() {
+        let viewport = Rect::new(0, 0, 24, 80);
+        let mut w = Window::spawn_first(
+            WindowId(0),
+            "w0".into(),
+            PaneId(0),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+        )
+        .unwrap();
+        let pane = w.detach_pane(PaneId(0)).expect("present");
+        assert!(w.is_layout_empty());
+        pane.kill_child();
+    }
+
+    #[tokio::test]
+    async fn adopt_split_inserts_existing_pane_and_activates() {
+        let viewport = Rect::new(0, 0, 24, 80);
+        let mut src = two_pane_window();
+        let moved = src.detach_pane(PaneId(1)).expect("present"); // PaneId(1)
+        let mut dst = Window::spawn_first(
+            WindowId(1),
+            "dst".into(),
+            PaneId(2),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+        )
+        .unwrap();
+        dst.adopt_split(PaneId(2), SplitDir::Vertical, moved, viewport).unwrap();
+        assert_eq!(dst.active(), PaneId(1), "adopted pane becomes active");
+        assert!(dst.layout().panes().contains(&PaneId(1)));
+        assert!(dst.layout().panes().contains(&PaneId(2)));
+    }
+
+    #[tokio::test]
+    async fn from_pane_builds_single_pane_window() {
+        let mut src = two_pane_window();
+        let moved = src.detach_pane(PaneId(1)).expect("present");
+        let w = Window::from_pane(WindowId(5), "broken".into(), moved);
+        assert_eq!(w.id, WindowId(5));
+        assert_eq!(w.name, "broken");
+        assert_eq!(w.active(), PaneId(1));
+        assert_eq!(w.layout().panes(), vec![PaneId(1)]);
+    }
+
+    #[tokio::test]
+    async fn neighbor_leaf_wraps_and_handles_single_pane() {
+        let viewport = Rect::new(0, 0, 24, 80);
+        let mut w = Window::spawn_first(
+            WindowId(0),
+            "w0".into(),
+            PaneId(0),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+        )
+        .unwrap();
+        assert_eq!(w.neighbor_leaf(true), None, "single pane has no neighbor");
+        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
+            .unwrap(); // active = PaneId(1), leaves [0, 1]
+        assert_eq!(w.neighbor_leaf(true), Some(PaneId(0)));
+        assert_eq!(w.neighbor_leaf(false), Some(PaneId(0)));
     }
 }
