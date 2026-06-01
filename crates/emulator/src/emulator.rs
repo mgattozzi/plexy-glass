@@ -80,6 +80,13 @@ impl Emulator {
     pub fn take_color_queries(&mut self) -> Vec<crate::screen::ColorQuery> {
         self.screen.take_color_queries()
     }
+
+    /// Drain the standalone-BEL flag (set when the child emitted `0x07`). The
+    /// daemon calls this from the PTY reader thread for per-window bell
+    /// monitoring.
+    pub fn take_bell(&mut self) -> bool {
+        self.screen.take_bell()
+    }
 }
 
 #[cfg(test)]

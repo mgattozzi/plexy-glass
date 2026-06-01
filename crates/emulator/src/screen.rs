@@ -73,6 +73,11 @@ pub struct Screen {
     /// OSC 10/11/12 color queries from the child. Drained by
     /// `take_color_queries` and answered by the daemon with palette colors.
     pub color_queries: Vec<ColorQuery>,
+    /// Set when the child emits a standalone BEL (`0x07`); drained by
+    /// `take_bell`. (A BEL that terminates an OSC string is routed to
+    /// `osc_dispatch`, not here, so this flags only genuine bells.) Used by the
+    /// daemon for per-window bell monitoring.
+    pub bell_pending: bool,
 }
 
 impl Screen {
@@ -94,6 +99,7 @@ impl Screen {
             prompt_marks: Vec::new(),
             clipboard_writes: Vec::new(),
             color_queries: Vec::new(),
+            bell_pending: false,
         }
     }
 
@@ -114,6 +120,12 @@ impl Screen {
     /// child's stdin.
     pub fn take_color_queries(&mut self) -> Vec<ColorQuery> {
         std::mem::take(&mut self.color_queries)
+    }
+
+    /// Drain the standalone-BEL flag. The daemon calls this after
+    /// `Emulator::advance` to detect a bell for per-window monitoring.
+    pub fn take_bell(&mut self) -> bool {
+        std::mem::take(&mut self.bell_pending)
     }
 
     pub fn rows(&self) -> u16 {
@@ -239,7 +251,7 @@ impl Screen {
     /// Handle C0 control characters: BEL, BS, HT, LF, VT, FF, CR.
     pub fn execute_c0(&mut self, byte: u8) {
         match byte {
-            0x07 => { /* BEL: no audible bell in Phase 2 */ }
+            0x07 => self.bell_pending = true, // BEL → flag for per-window monitoring
             0x08 => {
                 // Backspace
                 self.cursor.col = self.cursor.col.saturating_sub(1);
@@ -1162,5 +1174,22 @@ mod tests {
         let drained = s.take_color_queries();
         assert_eq!(drained, vec![ColorQuery::Background, ColorQuery::Foreground]);
         assert!(s.color_queries.is_empty());
+    }
+
+    #[test]
+    fn standalone_bel_sets_bell_pending() {
+        assert!(parse(b"\x07").bell_pending, "a lone BEL sets the flag");
+        assert!(!parse(b"hi ").bell_pending, "ordinary output does not");
+        // A BEL terminating an OSC string is routed to osc_dispatch, not
+        // execute_c0, so it must NOT register as a standalone bell.
+        assert!(!parse(b"\x1b]0;title\x07").bell_pending, "OSC-terminating BEL is not a bell");
+    }
+
+    #[test]
+    fn take_bell_drains() {
+        let mut s = Screen::new(8, 24);
+        s.bell_pending = true;
+        assert!(s.take_bell());
+        assert!(!s.take_bell(), "second take is false");
     }
 }
