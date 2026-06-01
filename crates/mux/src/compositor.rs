@@ -24,6 +24,9 @@ pub struct PaneView<'a> {
     /// User-assigned pane name, painted on the pane's top border. `None` hides
     /// the title (plain border).
     pub title: Option<&'a str>,
+    /// Whether this pane is the session's marked pane (drawn with a distinct
+    /// border color).
+    pub marked: bool,
 }
 
 /// Where the status bar sits relative to the pane area.
@@ -239,7 +242,7 @@ impl Compositor {
             .map(|v| {
                 let mut r = v.rect;
                 r.row = r.row.saturating_add(pane_row_offset);
-                borders::PaneFrame { rect: r, active: v.is_active, title: v.title }
+                borders::PaneFrame { rect: r, active: v.is_active, marked: v.marked, title: v.title }
             })
             .collect();
         borders::draw(&frames, band, &mut screen);
@@ -885,6 +888,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
@@ -905,6 +909,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let mut sel = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
         sel.extend(0, 4, Rect::new(0, 0, 4, 6));
@@ -936,6 +941,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let rv = PaneView {
             id: PaneId(1),
@@ -945,6 +951,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let vs = Compositor::compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "L");
@@ -974,6 +981,7 @@ mod tests {
             scroll_offset: 1,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let vs = Compositor::compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None, None);
         // Row 0 should be the last scrollback row (BBBB), not CCCC.
@@ -1006,6 +1014,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: Some(&cm),
             title: None,
+            marked: false,
         };
         let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None);
         assert_eq!(vs.cursor, Some((3, 7)));
@@ -1033,6 +1042,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: Some(&cm),
             title: None,
+            marked: false,
         };
         let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None);
         for c in 0..=4 {
@@ -1085,6 +1095,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let status = status_with_left("中B");
         let vs = Compositor::compose(&[view], (3, 8), Some(&status), StatusPlacement::Bottom, None, None, None);
@@ -1107,6 +1118,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let status = status_with_left("AB");
         let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None, None);
@@ -1128,6 +1140,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let status = status_with_left("AB");
         let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None, None);
@@ -1148,6 +1161,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let ov = OverlayView::RenamePrompt { label: "rename window", buf: "hi" };
         let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None);
@@ -1170,6 +1184,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let ov = OverlayView::Command { buf: "spl" };
         let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None);
@@ -1192,6 +1207,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let vs = Compositor::compose(
             &[view],
@@ -1221,6 +1237,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let ov = OverlayView::RenamePrompt { label: "rename window", buf: "hi" };
         let vs = Compositor::compose(
@@ -1250,6 +1267,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
@@ -1292,6 +1310,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let entries = vec![
             picker_view("main", "main - 1 win", true),
@@ -1332,6 +1351,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         // A CJK session name must be sized and placed as one cell + a spacer.
         let entries = vec![picker_view("中文", "中文", false)];
@@ -1365,6 +1385,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let entries = vec![picker_view("main", "main", true)];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "zzz", selected: 0 };
@@ -1393,6 +1414,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
@@ -1443,6 +1465,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let state = crate::tree::TreeState {
             nodes: vec![
@@ -1499,6 +1522,34 @@ mod tests {
     }
 
     #[test]
+    fn marked_paneview_renders_magenta_border() {
+        use plexy_glass_emulator::Color;
+        let mut e = Emulator::new(1, 6);
+        pane(&mut e, b"x ");
+        // Inset the pane so a border ring exists around it within the band.
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(1, 1, 1, 6),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+            marked: true,
+        };
+        let vs = Compositor::compose(&[view], (3, 8), None, StatusPlacement::Bottom, None, None, None);
+        let mut magenta = false;
+        for r in 0..3 {
+            for c in 0..8 {
+                if vs.cell(r, c).unwrap().fg == Color::Indexed(13) {
+                    magenta = true;
+                }
+            }
+        }
+        assert!(magenta, "marked PaneView renders a magenta border via compose");
+    }
+
+    #[test]
     fn tree_overlay_confirm_kill_footer() {
         let mut e = Emulator::new(12, 60);
         pane(&mut e, b"x ");
@@ -1510,6 +1561,7 @@ mod tests {
             scroll_offset: 0,
             copy_mode: None,
             title: None,
+            marked: false,
         };
         let state = crate::tree::TreeState {
             nodes: vec![tree_node("main", Some(0), None, 1, "1: shell", false)],

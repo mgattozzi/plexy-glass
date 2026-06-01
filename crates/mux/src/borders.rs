@@ -18,6 +18,10 @@ use smol_str::SmolStr;
 pub struct PaneFrame<'a> {
     pub rect: Rect,
     pub active: bool,
+    /// The session's marked pane (join/swap target). Its border ring is colored
+    /// distinctly (bright magenta), independent of `active` and of whether the
+    /// pane has a `title`, so an unnamed marked pane is still clearly indicated.
+    pub marked: bool,
     pub title: Option<&'a str>,
 }
 
@@ -27,6 +31,7 @@ pub struct PaneFrame<'a> {
 pub fn draw(frames: &[PaneFrame<'_>], band: Rect, screen: &mut VirtualScreen) {
     let rects: Vec<Rect> = frames.iter().map(|f| f.rect).collect();
     let active_rect = frames.iter().find(|f| f.active).map(|f| f.rect);
+    let marked_rect = frames.iter().find(|f| f.marked).map(|f| f.rect);
 
     for r in band.row..=band.bottom_edge_row() {
         for c in band.col..=band.right_edge_col() {
@@ -39,7 +44,14 @@ pub fn draw(frames: &[PaneFrame<'_>], band: Rect, screen: &mut VirtualScreen) {
             let e = c < band.right_edge_col() && is_border(r, c + 1, band, &rects);
             let glyph = box_glyph(n, s, e, w);
             let mut cell = Cell { grapheme: SmolStr::new(glyph), ..Cell::default() };
-            if let Some(ar) = active_rect
+            // Marked takes precedence over active so a marked pane always reads as
+            // marked (a shared separator cell may touch both rings).
+            if let Some(mr) = marked_rect
+                && touches(r, c, mr)
+            {
+                cell.attrs = Attrs::BOLD;
+                cell.fg = Color::Indexed(13); // bright magenta
+            } else if let Some(ar) = active_rect
                 && touches(r, c, ar)
             {
                 cell.attrs = Attrs::BOLD;
@@ -143,7 +155,11 @@ mod tests {
     use super::*;
 
     fn frame(rect: Rect, active: bool, title: Option<&str>) -> PaneFrame<'_> {
-        PaneFrame { rect, active, title }
+        PaneFrame { rect, active, marked: false, title }
+    }
+
+    fn marked_frame(rect: Rect, active: bool, title: Option<&str>) -> PaneFrame<'_> {
+        PaneFrame { rect, active, marked: true, title }
     }
 
     #[test]
@@ -201,6 +217,25 @@ mod tests {
                 screen.cell(r, c).unwrap().attrs.contains(Attrs::BOLD),
                 "active frame corner ({r},{c}) should be bold"
             );
+        }
+    }
+
+    #[test]
+    fn marked_unnamed_pane_gets_a_magenta_ring_with_intact_glyphs() {
+        use plexy_glass_emulator::{Attrs, Color};
+        // No title, so the marked indicator must be the border color, not a glyph.
+        let band = Rect::new(0, 0, 5, 7);
+        let pane = Rect::new(1, 1, 3, 5);
+        let mut screen = VirtualScreen::blank(5, 7);
+        draw(&[marked_frame(pane, false, None)], band, &mut screen);
+        // Corners are still correct box glyphs...
+        assert_eq!(screen.cell(0, 0).unwrap().grapheme.as_str(), "\u{250c}");
+        assert_eq!(screen.cell(4, 6).unwrap().grapheme.as_str(), "\u{2518}");
+        // ...and the ring is bright magenta + bold.
+        for (r, c) in [(0u16, 0u16), (0, 6), (4, 0), (4, 6), (2, 0)] {
+            let cell = screen.cell(r, c).unwrap();
+            assert_eq!(cell.fg, Color::Indexed(13), "marked ring at ({r},{c}) is magenta");
+            assert!(cell.attrs.contains(Attrs::BOLD));
         }
     }
 

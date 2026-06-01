@@ -62,6 +62,7 @@ async fn render_coordinator(
             let win = m.active_window();
             let layout = win.layout();
             let active_id = win.active();
+            let marked_pane = m.marked_pane();
             // Ignore a zoom that points at a pane that no longer exists, so a
             // momentarily-stale overlay falls back to rendering all panes
             // instead of a blank viewport.
@@ -105,6 +106,7 @@ async fn render_coordinator(
                     scroll_offset: p.scroll,
                     copy_mode: p.copy_mode.as_ref(),
                     title: p.name.as_deref(),
+                    marked: marked_pane == Some(p.id),
                 })
                 .collect();
 
