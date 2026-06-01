@@ -98,6 +98,29 @@ impl SessionRegistry {
         Ok(session)
     }
 
+    /// Build a config-declared session from its template and register it.
+    ///
+    /// Mirrors `create`'s locking (holds `inner` across construction; the
+    /// session's own `window_manager` is a different mutex, so no deadlock). If
+    /// the name is already live (a concurrent attach), returns the existing one.
+    pub async fn create_declared(
+        &self,
+        template: &plexy_glass_config::SessionTemplate,
+        config: Arc<plexy_glass_config::Config>,
+        size: PtySize,
+    ) -> Result<Arc<Session>, DaemonError> {
+        validate_name(&template.name)?;
+        let mut map = self.inner.lock().await;
+        if let Some(s) = map.get(&template.name)
+            && !s.closing.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(Arc::clone(s));
+        }
+        let session = Session::build_from_template(template, size, config).await?;
+        map.insert(template.name.clone(), Arc::clone(&session));
+        Ok(session)
+    }
+
     /// Attach-or-create with restore.
     ///
     /// An existing in-memory session wins; else try the saved file; else fresh
@@ -119,6 +142,13 @@ impl SessionRegistry {
             {
                 return Ok(Arc::clone(s));
             }
+        }
+        // Config wins: a declared session name is (re)built from its template,
+        // never restored from disk. (The client `cmd` is intentionally unused
+        // here: declared panes come from the template + the daemon default
+        // shell, so a session is identical whether built at boot or on attach.)
+        if let Some(template) = config.sessions.iter().find(|t| t.name == name) {
+            return self.create_declared(template, Arc::clone(&config), size).await;
         }
         // Try restore.
         match crate::persist::load_session(&name) {
@@ -378,6 +408,52 @@ mod tests {
         assert!(crate::persist::load_session("kill-me").unwrap().is_some());
         r.kill("kill-me").await.unwrap();
         assert!(crate::persist::load_session("kill-me").unwrap().is_none());
+    }
+
+    fn cfg_with_session(kdl: &str) -> Arc<plexy_glass_config::Config> {
+        Arc::new(plexy_glass_config::parse_config(kdl).expect("declared-session config"))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_declared_builds_template() {
+        let _g = reg_isolate_state_dir();
+        let r = SessionRegistry::new();
+        let cfg = cfg_with_session(r##"session "dev" { window "w" { pane } }"##);
+        let s = r.create_declared(&cfg.sessions[0], Arc::clone(&cfg), size()).await.unwrap();
+        assert_eq!(s.name, "dev");
+        assert!(r.get("dev").await.is_some());
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attach_or_create_routes_declared_name_to_template() {
+        let _g = reg_isolate_state_dir();
+        let r = SessionRegistry::new();
+        let cfg = cfg_with_session(r##"session "dev" { window "w" { split vertical { pane; pane } } }"##);
+        // No saved file, no live session: attach must build the 2-pane template,
+        // not a 1-pane fresh `create`.
+        let s = r.attach_or_create("dev".into(), spec(), size(), Arc::clone(&cfg)).await.unwrap();
+        {
+            let wm = s.window_manager.lock().await;
+            assert_eq!(wm.windows()[0].layout().panes().len(), 2);
+        }
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_declared_name_unaffected_by_routing() {
+        let _g = reg_isolate_state_dir();
+        let r = SessionRegistry::new();
+        let cfg = cfg_with_session(r##"session "dev" { window "w" { pane } }"##);
+        // "other" isn't declared, so this is a normal fresh create (1 pane from
+        // `spec()`).
+        let s = r.attach_or_create("other".into(), spec(), size(), Arc::clone(&cfg)).await.unwrap();
+        {
+            let wm = s.window_manager.lock().await;
+            assert_eq!(wm.windows().len(), 1);
+            assert_eq!(wm.windows()[0].layout().panes().len(), 1);
+        }
+        s.terminate_panes().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
