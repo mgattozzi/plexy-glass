@@ -1271,4 +1271,96 @@ mod tests {
         }
         server.abort();
     }
+
+    // Drive break-pane and join-pane through the full key/verb path and assert
+    // the window/pane structure via `tree_snapshot` (the screen-scrape e2e harness
+    // has no count API). split → break grows to 2 windows; mark + select + join
+    // moves the pane back into window 0 and removes the emptied source window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn break_and_join_panes_via_keys() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        let attach = ClientMsg::AttachOrCreate {
+            name: Some("main".into()),
+            create_if_missing: true,
+            cmd: Some(cat()),
+            size,
+        };
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&attach).unwrap())
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let mut b = [0u8; 4096];
+            while cr.read(&mut b).await.unwrap_or(0) > 0 {}
+        });
+
+        let poll = |want_windows: usize, want_panes: usize| {
+            let registry = Arc::clone(&registry);
+            async move {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    if let Some(s) = registry.get("main").await {
+                        let st = s.tree_snapshot().await;
+                        if st.windows.len() == want_windows && st.total_panes == want_panes {
+                            return;
+                        }
+                    }
+                    if Instant::now() > deadline {
+                        let (w, p) = match registry.get("main").await {
+                            Some(s) => {
+                                let st = s.tree_snapshot().await;
+                                (st.windows.len(), st.total_panes)
+                            }
+                            None => (0, 0),
+                        };
+                        panic!("timed out: windows={w} panes={p} (want w={want_windows} p={want_panes})");
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+
+        poll(1, 1).await; // attach settled
+        // Ctrl+a v (split) then Ctrl+a ! (break) → 2 windows, 2 panes.
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01v\x01!")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        poll(2, 2).await;
+        // Ctrl+a m (mark) · Ctrl+a 1 (select window 0) · :join-pane → 1 window, 2 panes.
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(
+                b"\x01m\x011\x01:join-pane\r",
+            )))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        poll(1, 2).await;
+
+        server.abort();
+    }
 }
