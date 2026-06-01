@@ -1361,6 +1361,16 @@ mod tests {
         .unwrap();
         poll(1, 2).await;
 
+        // Identity, not just cardinality: the surviving window holds both panes
+        // and the joined pane (PaneId 1, the one that was broken out) is active.
+        let st = registry.get("main").await.unwrap().tree_snapshot().await;
+        let ids: Vec<_> = st.windows[0].panes.iter().map(|(id, _)| *id).collect();
+        assert!(
+            ids.contains(&plexy_glass_mux::PaneId(0)) && ids.contains(&plexy_glass_mux::PaneId(1)),
+            "both panes back in one window: {ids:?}"
+        );
+        assert_eq!(st.windows[0].active_pane, plexy_glass_mux::PaneId(1), "joined pane is active");
+
         server.abort();
     }
 }
