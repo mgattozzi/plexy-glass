@@ -298,6 +298,23 @@ where
                                         )
                                         .await;
                                     }
+                                    crate::window_manager::OverlayKeyResult::Buffer(action) => {
+                                        use plexy_glass_mux::BufferAction;
+                                        match action {
+                                            BufferAction::Paste(name) => {
+                                                if let Some(content) =
+                                                    registry.paste_buffer_get(&name).await
+                                                {
+                                                    paste_bytes(&session, content).await;
+                                                }
+                                            }
+                                            BufferAction::Delete(name) => {
+                                                registry.delete_paste_buffer(&name).await;
+                                                // Repaint the still-open overlay.
+                                                session.notify.notify_one();
+                                            }
+                                        }
+                                    }
                                     crate::window_manager::OverlayKeyResult::Command(line) => {
                                         match plexy_glass_mux::command_prompt::parse(&line) {
                                             Err(e) => {
@@ -336,6 +353,10 @@ where
                                             }
                                             Ok(PromptCommand::PasteBuffer) => {
                                                 paste_top_buffer(&session, &registry).await;
+                                            }
+                                            Ok(PromptCommand::ChooseBuffer) => {
+                                                open_buffer_picker_overlay(&session, &registry)
+                                                    .await;
                                             }
                                             Ok(other) => {
                                                 match session
@@ -471,6 +492,9 @@ where
                                     }
                                     Command::PasteBuffer => {
                                         paste_top_buffer(&session, &registry).await;
+                                    }
+                                    Command::ChooseBuffer => {
+                                        open_buffer_picker_overlay(&session, &registry).await;
                                     }
                                     other => {
                                         let _ = session.handle_command(other).await;
@@ -795,6 +819,17 @@ async fn dispatch_tree_action(
             session.notify.notify_one();
         }
     }
+}
+
+/// Snapshot the paste buffers (newest-first) and open the choose-buffer overlay.
+/// Shared by `Ctrl+a =` and the `:buffers` verb.
+async fn open_buffer_picker_overlay(session: &Arc<Session>, registry: &Arc<SessionRegistry>) {
+    let entries = registry.list_paste_buffers().await;
+    {
+        let mut m = session.window_manager.lock().await;
+        m.open_buffer_picker(entries);
+    }
+    session.notify.notify_one();
 }
 
 /// Paste the most-recent paste buffer into the active pane (bracketed if the

@@ -59,6 +59,9 @@ pub enum OverlayView<'a> {
     /// row highlighted, and a mode-dependent footer (navigate / confirm-kill /
     /// rename).
     Tree { state: &'a crate::tree::TreeState },
+    /// The choose-buffer overlay: a centered box listing paste buffers
+    /// (`name: preview`), the selected one highlighted.
+    Buffer { state: &'a crate::buffer::BufferPickerState },
 }
 
 pub struct Compositor;
@@ -370,6 +373,10 @@ fn paint_overlay(
             paint_tree(screen, state, pane_row_offset, pane_area_rows, cols);
             screen.cursor_visible = false;
         }
+        OverlayView::Buffer { state } => {
+            paint_buffers(screen, state, pane_row_offset, pane_area_rows, cols);
+            screen.cursor_visible = false;
+        }
         OverlayView::Command { buf } => {
             // A full-width REVERSE bar on the bottom row of the pane band,
             // ":<buf>" with a block cursor just past the text.
@@ -639,6 +646,80 @@ fn paint_tree(
     // Empty tree (last session just killed): blank interior for the one frame
     // before the client tears down.
     if rows.is_empty() {
+        return;
+    }
+    let end = (top + visible).min(rows.len());
+    for (vis_i, row_idx) in (top..end).enumerate() {
+        let r = row0 + 1 + vis_i as u16;
+        let row_attrs = if row_idx == sel { rev } else { plain };
+        if row_idx == sel {
+            for c in inner_left..inner_right {
+                put_char(screen, r, c, ' ', row_attrs);
+            }
+        }
+        put_str(screen, r, inner_left, &rows[row_idx], row_attrs, inner_right);
+    }
+}
+
+/// Draw the centered choose-buffer box: one `name: preview` row per buffer, the
+/// selected row REVERSE, scrolled to keep the selection visible.
+fn paint_buffers(
+    screen: &mut VirtualScreen,
+    state: &crate::buffer::BufferPickerState,
+    pane_row_offset: u16,
+    pane_area_rows: u16,
+    cols: u16,
+) {
+    let title = " Paste buffers ";
+    let footer = " \u{2191}/\u{2193} move \u{b7} enter paste \u{b7} d delete \u{b7} esc close ";
+    let empty_msg = "(no paste buffers)";
+    let rows: Vec<String> = state
+        .entries
+        .iter()
+        .map(|e| format!("{}: {}", e.name, e.preview))
+        .collect();
+
+    let dw = |s: &str| display_width(s) as usize;
+    let max_visible = (pane_area_rows.saturating_sub(2)).max(1) as usize;
+    let row_count = rows.len().max(1);
+    let visible = row_count.min(max_visible);
+
+    let content_w = rows
+        .iter()
+        .map(|s| dw(s))
+        .chain([dw(title), dw(footer), if rows.is_empty() { dw(empty_msg) } else { 0 }])
+        .max()
+        .unwrap_or(0);
+    let inner_w = (content_w + 2).min(cols.saturating_sub(2) as usize);
+    let box_w = (inner_w + 2) as u16;
+    let box_h = (visible as u16) + 2;
+    if box_w < 3 || box_h < 3 || box_w > cols || box_h > pane_area_rows {
+        return;
+    }
+
+    let sel = state.selected.min(rows.len().saturating_sub(1));
+    let top = if sel >= visible { sel - visible + 1 } else { 0 };
+
+    let row0 = pane_row_offset + (pane_area_rows.saturating_sub(box_h)) / 2;
+    let col0 = (cols.saturating_sub(box_w)) / 2;
+    let plain = plexy_glass_emulator::Attrs::empty();
+    let rev = plexy_glass_emulator::Attrs::REVERSE;
+
+    for r in 0..box_h {
+        for c in 0..box_w {
+            put_char(screen, row0 + r, col0 + c, border_glyph(r, c, box_h, box_w), plain);
+        }
+    }
+    let tcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(title)) / 2) as u16;
+    put_str(screen, row0, tcol, title, plain, col0 + box_w - 1);
+    let fcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(footer)) / 2) as u16;
+    put_str(screen, row0 + box_h - 1, fcol, footer, plain, col0 + box_w - 1);
+
+    let inner_left = col0 + 1;
+    let inner_right = col0 + box_w - 1;
+
+    if rows.is_empty() {
+        put_str(screen, row0 + 1, inner_left, empty_msg, plain, inner_right);
         return;
     }
     let end = (top + visible).min(rows.len());
@@ -1519,6 +1600,73 @@ mod tests {
             pr.find("pane 2").unwrap() > sr.find("main").unwrap(),
             "deeper node is indented more"
         );
+    }
+
+    #[test]
+    fn buffer_overlay_renders_box_rows_and_selection() {
+        use plexy_glass_emulator::Attrs;
+        let mut e = Emulator::new(10, 50);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 10, 50),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+            marked: false,
+        };
+        let state = crate::buffer::BufferPickerState {
+            entries: vec![
+                crate::buffer::BufferEntry { name: "buffer1".into(), preview: "hello".into() },
+                crate::buffer::BufferEntry { name: "buffer0".into(), preview: "world".into() },
+            ],
+            selected: 1,
+        };
+        let ov = OverlayView::Buffer { state: &state };
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let mut text = String::new();
+        let mut selected_reverse = false;
+        for r in 0..10 {
+            for c in 0..50 {
+                let cell = vs.cell(r, c).unwrap();
+                text.push_str(cell.grapheme.as_str());
+                if cell.grapheme.as_str() == "w" && cell.attrs.contains(Attrs::REVERSE) {
+                    selected_reverse = true; // 'w' of the selected "world" row
+                }
+            }
+        }
+        assert!(text.contains("buffer1: hello"));
+        assert!(text.contains("buffer0: world"));
+        assert!(selected_reverse, "selected row painted REVERSE");
+        assert!(!vs.cursor_visible);
+    }
+
+    #[test]
+    fn buffer_overlay_empty_shows_message() {
+        let mut e = Emulator::new(10, 50);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 10, 50),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+            marked: false,
+        };
+        let state = crate::buffer::BufferPickerState { entries: vec![], selected: 0 };
+        let ov = OverlayView::Buffer { state: &state };
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let mut text = String::new();
+        for r in 0..10 {
+            for c in 0..50 {
+                text.push_str(vs.cell(r, c).unwrap().grapheme.as_str());
+            }
+        }
+        assert!(text.contains("no paste buffers"));
     }
 
     #[test]

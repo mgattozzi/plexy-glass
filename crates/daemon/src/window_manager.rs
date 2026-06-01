@@ -2,10 +2,11 @@
 
 use crate::{error::DaemonError, window::Window};
 use plexy_glass_mux::{
-    BorderHit, BorderSide, Command, KeyEvent, MouseButton, MouseEncoding, MouseEvent, MouseKind,
-    Overlay, OverlayAction, OverlayHandler, PaneId, PickerEntry, Rect, RenameTarget, Selection,
-    SelectionKind, SplitDir, TreeAction, TreeMode, TreeNode, TreeOutcome, TreeState, WindowId,
-    encode_for_child, extract_text, handle_tree,
+    BorderHit, BorderSide, BufferAction, BufferEntry, BufferOutcome, BufferPickerState, Command,
+    KeyEvent, MouseButton, MouseEncoding, MouseEvent, MouseKind, Overlay, OverlayAction,
+    OverlayHandler, PaneId, PickerEntry, Rect, RenameTarget, Selection, SelectionKind, SplitDir,
+    TreeAction, TreeMode, TreeNode, TreeOutcome, TreeState, WindowId, encode_for_child,
+    extract_text, handle_buffers, handle_tree,
 };
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
@@ -41,6 +42,9 @@ pub enum OverlayKeyResult {
     /// A choose-tree action. The connection layer performs it against the
     /// registry (cross-session kill/rename) or re-points this client (switch).
     Tree(TreeAction),
+    /// A choose-buffer action. The connection layer pastes the named buffer into
+    /// the active pane or deletes it from the registry's paste buffers.
+    Buffer(BufferAction),
 }
 
 /// Active border drag-resize. Cleared on Release. While `Some`, all mouse
@@ -286,6 +290,12 @@ impl WindowManager {
         self.rename_pane_target = None;
     }
 
+    /// Open the choose-buffer overlay over a snapshot of the paste buffers.
+    pub fn open_buffer_picker(&mut self, entries: Vec<BufferEntry>) {
+        self.overlay = Some(Overlay::BufferPicker(BufferPickerState { entries, selected: 0 }));
+        self.rename_pane_target = None;
+    }
+
     fn close_overlay(&mut self) {
         self.overlay = None;
         self.rename_pane_target = None;
@@ -314,6 +324,23 @@ impl WindowManager {
                     OverlayKeyResult::Tree(action)
                 }
                 TreeOutcome::Act(action) => OverlayKeyResult::Tree(action),
+            };
+        }
+        // Choose-buffer: Paste/Cancel close; Delete keeps the overlay open (the
+        // handler already pruned the row).
+        if let Some(Overlay::BufferPicker(state)) = self.overlay.as_mut() {
+            return match handle_buffers(event, state) {
+                BufferOutcome::None => OverlayKeyResult::Ignored,
+                BufferOutcome::Redraw => OverlayKeyResult::Redraw,
+                BufferOutcome::Cancel => {
+                    self.close_overlay();
+                    OverlayKeyResult::Redraw
+                }
+                BufferOutcome::Act(action @ BufferAction::Paste(_)) => {
+                    self.close_overlay();
+                    OverlayKeyResult::Buffer(action)
+                }
+                BufferOutcome::Act(action) => OverlayKeyResult::Buffer(action),
             };
         }
         let (action, target, is_command, is_picker) = {
@@ -2653,5 +2680,32 @@ mod tests {
             m.take_active_message(),
             Some("marked pane is in another window — use join")
         );
+    }
+
+    #[tokio::test]
+    async fn buffer_picker_paste_closes_delete_stays_open() {
+        let mut m = mk_mgr();
+        m.open_buffer_picker(vec![
+            plexy_glass_mux::BufferEntry { name: "buffer1".into(), preview: "a".into() },
+            plexy_glass_mux::BufferEntry { name: "buffer0".into(), preview: "b".into() },
+        ]);
+        assert!(matches!(m.overlay(), Some(Overlay::BufferPicker(_))));
+        // `d` deletes the selected buffer and keeps the overlay open.
+        let r = m.handle_overlay_key(&key('d'));
+        assert!(
+            matches!(&r, OverlayKeyResult::Buffer(plexy_glass_mux::BufferAction::Delete(n)) if n == "buffer1"),
+            "got {r:?}"
+        );
+        assert!(m.overlay().is_some(), "delete keeps the overlay open");
+        // Enter pastes the now-selected buffer and closes.
+        let r = m.handle_overlay_key(&KeyEvent::new(
+            plexy_glass_mux::Key::Enter,
+            plexy_glass_mux::Modifiers::empty(),
+        ));
+        assert!(
+            matches!(&r, OverlayKeyResult::Buffer(plexy_glass_mux::BufferAction::Paste(n)) if n == "buffer0"),
+            "got {r:?}"
+        );
+        assert!(m.overlay().is_none(), "paste closes the overlay");
     }
 }

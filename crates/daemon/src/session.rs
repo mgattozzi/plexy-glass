@@ -209,6 +209,9 @@ async fn render_coordinator(
                 Some(plexy_glass_mux::Overlay::Tree(state)) => {
                     Some(plexy_glass_mux::OverlayView::Tree { state })
                 }
+                Some(plexy_glass_mux::Overlay::BufferPicker(state)) => {
+                    Some(plexy_glass_mux::OverlayView::Buffer { state })
+                }
                 None => None,
             };
 
