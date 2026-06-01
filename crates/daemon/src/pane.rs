@@ -12,7 +12,7 @@ use plexy_glass_mux::PaneId;
 use plexy_glass_protocol::{ExitStatus, PtySize, SpawnSpec};
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize as PortablePtySize};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 use tracing::{debug, error};
@@ -45,6 +45,11 @@ struct Inner {
     /// Wrapped in Arc so the reader thread can clone a handle without
     /// borrowing self.
     config: Arc<Mutex<Arc<Config>>>,
+    /// Set by the reader on any output; drained by the daemon for per-window
+    /// activity monitoring. `Arc` so the reader thread holds a handle.
+    activity: Arc<AtomicBool>,
+    /// Set by the reader when the emulator saw a BEL; drained for bell monitoring.
+    bell: Arc<AtomicBool>,
 }
 
 impl Pane {
@@ -118,6 +123,13 @@ impl Pane {
         let emulator = Arc::new(Mutex::new(Emulator::new(size.rows, size.cols)));
         let config_slot: Arc<Mutex<Arc<Config>>> = Arc::new(Mutex::new(config));
 
+        // Per-pane monitoring signals: set by the reader on output / bell, drained
+        // by the daemon's per-frame `update_monitor_flags`.
+        let activity = Arc::new(AtomicBool::new(false));
+        let bell = Arc::new(AtomicBool::new(false));
+        let activity_for_reader = Arc::clone(&activity);
+        let bell_for_reader = Arc::clone(&bell);
+
         let output_tx_clone = output_tx.clone();
         let emulator_for_reader = Arc::clone(&emulator);
         let notify_for_reader = Arc::clone(&output_notify);
@@ -147,7 +159,7 @@ impl Pane {
                         return;
                     }
                     Ok(n) => {
-                        let (replies, clip_writes, color_queries) = {
+                        let (replies, clip_writes, color_queries, belled) = {
                             // invariant: emulator mutex held briefly to advance + drain.
                             let mut e = emulator_for_reader
                                 .lock()
@@ -157,10 +169,18 @@ impl Pane {
                                 e.take_replies(),
                                 e.take_clipboard_writes(),
                                 e.take_color_queries(),
+                                e.take_bell(),
                             )
                         };
                         let chunk = Bytes::copy_from_slice(&buf[..n]);
                         let _ = output_tx_clone.send(chunk);
+                        // Set the monitoring signals BEFORE notify so the very next
+                        // coordinator frame (woken by this notify) drains them. A
+                        // one-shot bell would otherwise wait for an unrelated wake.
+                        activity_for_reader.store(true, Ordering::Relaxed);
+                        if belled {
+                            bell_for_reader.store(true, Ordering::Relaxed);
+                        }
                         notify_for_reader.notify_one();
                         for reply in replies {
                             if let Err(err) = reply_tx.blocking_send(Bytes::from(reply)) {
@@ -239,6 +259,8 @@ impl Pane {
                 copy_mode: Mutex::new(None),
                 name: Mutex::new(None),
                 config: config_slot,
+                activity,
+                bell,
             }),
         })
     }
@@ -271,6 +293,16 @@ impl Pane {
 
     pub fn id(&self) -> PaneId {
         self.inner.id
+    }
+
+    /// Read-and-clear whether this pane produced output since the last call.
+    pub fn take_activity(&self) -> bool {
+        self.inner.activity.swap(false, Ordering::Relaxed)
+    }
+
+    /// Read-and-clear whether this pane emitted a BEL since the last call.
+    pub fn take_bell(&self) -> bool {
+        self.inner.bell.swap(false, Ordering::Relaxed)
     }
 
     /// The user-assigned pane name, if any (cloned out from under the lock).
@@ -641,6 +673,36 @@ mod tests {
             .await
             .unwrap();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
+    }
+
+    #[tokio::test]
+    async fn take_activity_and_bell_report_output() {
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg())
+            .expect("spawn");
+        assert!(!p.take_activity(), "no activity before any output");
+        assert!(!p.take_bell(), "no bell before any output");
+        // cat echoes its input; the BEL byte makes the emulator flag a bell.
+        p.send_input(Bytes::from_static(b"hi\x07\n")).await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut saw_activity = false;
+        let mut saw_bell = false;
+        while tokio::time::Instant::now() < deadline && !(saw_activity && saw_bell) {
+            saw_activity |= p.take_activity();
+            saw_bell |= p.take_bell();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(saw_activity, "output set the activity signal");
+        assert!(saw_bell, "the echoed BEL set the bell signal");
+
+        p.send_input(Bytes::from_static(&[0x04])).await.unwrap(); // Ctrl-D → exit
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), p.wait()).await;
     }
 
     #[tokio::test]
