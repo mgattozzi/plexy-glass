@@ -96,6 +96,13 @@ impl Pane {
             }
         }
         cmd.env("PLEXY_GLASS", "1");
+        // We deliberately do NOT force TERM: panes inherit the host terminal's
+        // TERM (passthrough), so programs target the real outer terminal (e.g.
+        // ghostty's `xterm-ghostty`) and plexy's emulator handles what they
+        // emit. Callers who want a different value per multiplexer can set it
+        // from their shell using the `PLEXY_GLASS` env var we export above.
+        // (Styled underlines etc. are handled correctly by the emulator's SGR
+        // decoder regardless of TERM, see emulator::screen::handle_sgr.)
 
         let mut child = pair
             .slave

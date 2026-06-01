@@ -521,7 +521,25 @@ impl Screen {
     }
 
     fn handle_sgr(&mut self, params: &vte::Params) {
-        let codes: Vec<u16> = params.iter().flat_map(|p| p.iter().copied()).collect();
+        // Normalize colon-subparameter groups before flattening. vte groups
+        // colon-separated subparams into one param: `4:3` -> [4, 3] (curly
+        // underline), `4:0` -> [4, 0] (styled underline OFF), `38:2:r:g:b` ->
+        // [38, 2, r, g, b] (truecolor). Blindly flattening would turn `4:3`
+        // into "underline; italic" and `4:0` into "underline; full-reset", so
+        // styled underlines (which tmux-256color advertises and TUIs emit)
+        // render wrong. Collapse styled underline to plain 4 / 24, drop the
+        // unsupported underline-color (58:), and flatten the rest, including
+        // colon-form 38:/48:, which the extended-color path already consumes.
+        // (Semicolon forms like `4;3` arrive as separate single-element groups
+        // and are intentionally left as "underline; italic".)
+        let mut codes: Vec<u16> = Vec::new();
+        for g in params.iter() {
+            match g {
+                [4, style, ..] => codes.push(if *style == 0 { 24 } else { 4 }),
+                [58, ..] => { /* set/reset underline color: unsupported, so drop it */ }
+                other => codes.extend_from_slice(other),
+            }
+        }
         let mut i = 0;
         while i < codes.len() {
             let n = codes[i];
@@ -933,6 +951,36 @@ mod tests {
         let c2 = s.active.get_cell(0, 2).unwrap();
         assert!(!c2.attrs.contains(Attrs::BOLD));
         assert_eq!(c2.fg, Color::Default);
+    }
+
+    #[test]
+    fn bare_reset_clears_underline() {
+        use crate::attrs::Attrs;
+        // \e[m (no params) must behave as \e[0m (reset). If it doesn't, an underline
+        // started with \e[4m sticks on everything after, which is the reported bug.
+        let s = parse(b"\x1b[4mX\x1b[mY");
+        assert!(s.active.get_cell(0, 0).unwrap().attrs.contains(Attrs::UNDERLINE), "X underlined");
+        assert!(
+            !s.active.get_cell(0, 1).unwrap().attrs.contains(Attrs::UNDERLINE),
+            "Y must NOT be underlined after a bare \\e[m reset"
+        );
+    }
+
+    #[test]
+    fn styled_underline_colon_subparams() {
+        use crate::attrs::Attrs;
+        // \e[4:3m = curly underline ON; \e[4:0m = underline OFF (styled forms that
+        // tmux-256color advertises and TUIs like claude-code emit).
+        let s = parse(b"\x1b[4:3mX\x1b[4:0mY");
+        assert!(s.active.get_cell(0, 0).unwrap().attrs.contains(Attrs::UNDERLINE), "X underlined (curly)");
+        assert!(
+            !s.active.get_cell(0, 0).unwrap().attrs.contains(Attrs::ITALIC),
+            "X must NOT be italic — 4:3 is a curly-underline style, not SGR 3"
+        );
+        assert!(
+            !s.active.get_cell(0, 1).unwrap().attrs.contains(Attrs::UNDERLINE),
+            "Y must NOT be underlined after \\e[4:0m"
+        );
     }
 
     #[test]
