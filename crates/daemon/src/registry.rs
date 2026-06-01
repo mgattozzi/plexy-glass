@@ -176,7 +176,7 @@ impl SessionRegistry {
 
     /// Re-read config from disk and apply to every session.
     ///
-    /// The TOML loader (`plexy_glass_config::load_or_default`) returns
+    /// The KDL loader (`plexy_glass_config::load_or_default`) returns
     /// `(Config, Option<ConfigError>)`: even on a parse error we still get
     /// the built-in default. This method propagates that default to every
     /// live session (so the daemon prefers a known-good config to running

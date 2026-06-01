@@ -1,17 +1,6 @@
 use super::*;
 
 #[test]
-fn built_in_default_parses_back_to_same_shape() {
-    let original = built_in_default();
-    let serialized = toml::to_string(&original).expect("serialize");
-    let round: Config = toml::from_str(&serialized).expect("parse back");
-    assert_eq!(round.status.position, original.status.position);
-    assert_eq!(round.status.left.len(), original.status.left.len());
-    assert_eq!(round.status.right.len(), original.status.right.len());
-    assert!(round.palette.entries.contains_key("accent"));
-}
-
-#[test]
 fn built_in_default_has_expected_shape() {
     let cfg = built_in_default();
     assert_eq!(cfg.status.position, Position::Bottom);
@@ -21,22 +10,19 @@ fn built_in_default_has_expected_shape() {
 }
 
 #[test]
-fn load_from_path_with_minimal_toml() {
+fn load_from_path_with_minimal_kdl() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
+    let path = dir.path().join("config.kdl");
     std::fs::write(
         &path,
         r##"
-[palette]
-fg = "#ffffff"
-bg = "#000000"
-
-[status]
-refresh = "10s"
-
-[[status.right]]
-type = "text"
-value = "hello"
+palette { fg "#ffffff"; bg "#000000" }
+status {
+    refresh "10s"
+    right {
+        text value="hello"
+    }
+}
 "##,
     )
     .unwrap();
@@ -52,11 +38,7 @@ value = "hello"
 
 #[test]
 fn invalid_widget_type_is_a_parse_error() {
-    let toml_src = r#"
-[[status.left]]
-type = "not_a_widget"
-"#;
-    let result: Result<Config, _> = toml::from_str(toml_src);
+    let result = crate::parse_config(r##"status { left { not-a-widget } }"##);
     assert!(result.is_err());
 }
 
@@ -70,7 +52,7 @@ fn kanagawa_dragon_palette_has_expected_keys() {
 
 #[test]
 fn load_from_nonexistent_path_returns_error() {
-    let result = crate::load::load_from_path(std::path::Path::new("/nonexistent/x.toml"));
+    let result = crate::load::load_from_path(std::path::Path::new("/nonexistent/x.kdl"));
     assert!(result.is_err());
 }
 

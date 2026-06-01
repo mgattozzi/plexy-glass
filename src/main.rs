@@ -30,7 +30,7 @@ enum Cmd {
         #[arg(long = "all", conflicts_with = "name")]
         all: bool,
     },
-    /// Reload the daemon's config from ~/.config/plexy-glass/config.toml.
+    /// Reload the daemon's config from ~/.config/plexy-glass/config.kdl.
     Reload,
     /// Start the daemon (used internally by auto-spawn; `--foreground` for dev).
     Daemon(plexy_glass_daemon::DaemonArgs),

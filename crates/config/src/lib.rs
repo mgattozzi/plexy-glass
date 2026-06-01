@@ -1,4 +1,4 @@
-//! plexy-glass configuration types and TOML loader.
+//! plexy-glass configuration types and KDL loader.
 
 mod default;
 mod kdl_config;

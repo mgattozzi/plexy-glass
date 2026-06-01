@@ -6,9 +6,6 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-serde = { workspace = true }
-toml = { workspace = true }
-humantime-serde = { workspace = true }
 kdl = { workspace = true }
 humantime = { workspace = true }
 directories = { workspace = true }
