@@ -441,6 +441,44 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn declared_session_wins_over_saved_disk_state() {
+        let _g = reg_isolate_state_dir();
+        // A saved file for "dev" with a DIFFERENT (1-pane, name "stale") shape
+        // than the declared template, so the test distinguishes "config wins"
+        // from "no file present".
+        let saved = crate::persist::SessionStateV1 {
+            schema: crate::persist::SCHEMA_VERSION,
+            name: "dev".into(),
+            created: chrono::Utc::now(),
+            active_window: 0,
+            windows: vec![crate::persist::WindowStateV1 {
+                name: "stale".into(),
+                sync_input: false,
+                active_pane: 0,
+                panes: vec![crate::persist::PaneStateV1 { cwd: None, name: None }],
+                layout: crate::persist::LayoutStateV1::Leaf(0),
+            }],
+        };
+        crate::persist::save_session(&saved).unwrap();
+        assert!(crate::persist::load_session("dev").unwrap().is_some(), "precondition: saved file exists");
+
+        // Config declares "dev" as a 2-pane split; it must win over the file.
+        let cfg = cfg_with_session(r##"session "dev" { window "w" { split vertical { pane; pane } } }"##);
+        let r = SessionRegistry::new();
+        let s = r.attach_or_create("dev".into(), spec(), size(), Arc::clone(&cfg)).await.unwrap();
+        {
+            let wm = s.window_manager.lock().await;
+            assert_eq!(
+                wm.windows()[0].layout().panes().len(),
+                2,
+                "config template (2 panes) must win over the 1-pane saved file"
+            );
+            assert_eq!(wm.windows()[0].name, "w", "window name comes from the template, not the saved 'stale'");
+        }
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn non_declared_name_unaffected_by_routing() {
         let _g = reg_isolate_state_dir();
         let r = SessionRegistry::new();
