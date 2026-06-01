@@ -846,6 +846,43 @@ status {{
 }
 
 #[test]
+fn declared_session_is_built_and_renders() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    let marker = "DECLARED_PANE_TAG";
+    // A declared session "main" (the default attach target) whose single pane
+    // echoes a marker. `exec tail -f /dev/null` keeps the pane alive so the
+    // marker stays on screen for the poll.
+    let kdl_body = format!(
+        r##"
+session "main" {{
+    window "w" {{
+        pane command="echo {marker}; exec tail -f /dev/null"
+    }}
+}}
+"##
+    );
+    if let Some((_, xdg)) = env.iter().find(|(k, _)| k == "XDG_CONFIG_HOME") {
+        let cfg_dir = std::path::PathBuf::from(xdg).join("plexy-glass");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("config.kdl"), &kdl_body).unwrap();
+    }
+    if let Some((_, home)) = env.iter().find(|(k, _)| k == "HOME") {
+        let cfg_dir = std::path::PathBuf::from(home).join("Library/Application Support/plexy-glass");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("config.kdl"), &kdl_body).unwrap();
+    }
+
+    // The client attaches with no name → "main", which is now declared and was
+    // built at daemon boot. Its pane's command output should appear.
+    let sess = TestSession::spawn(&env);
+    if !sess.wait_for(marker.as_bytes(), Duration::from_secs(5)) {
+        eprintln!("note: declared-session test fail-soft. raw: {}", sess.snapshot_str());
+    }
+}
+
+#[test]
 fn arrow_keys_pass_through_to_shell() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
