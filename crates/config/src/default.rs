@@ -152,6 +152,7 @@ pub fn built_in_keymap() -> KeymapConfig {
             binding("Ctrl+a }", "swap_pane_next"),
             binding("Ctrl+a ]", "paste_buffer"),
             binding("Ctrl+a =", "choose_buffer"),
+            binding("Ctrl+a M", "toggle_monitor_activity"),
         ],
     }
 }

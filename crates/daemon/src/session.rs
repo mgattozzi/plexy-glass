@@ -57,6 +57,9 @@ async fn render_coordinator(
                 let _ = frame_tx.send(Arc::new(virt));
                 break;
             }
+            // Sole drainer of the per-pane activity/bell signals into the per-window
+            // sticky flags. Must run before any immutable borrow of `m` below.
+            m.update_monitor_flags();
             let host = m.host_size();
             let viewport = m.viewport();
             let win = m.active_window();
@@ -120,6 +123,8 @@ async fn render_coordinator(
                 .map(|(i, w)| plexy_glass_status::WindowSummary {
                     name: w.name.clone(),
                     active: i == m.active_idx(),
+                    activity: w.activity_flag(),
+                    bell: w.bell_flag(),
                 })
                 .collect();
             let active_pane_cwd = m
@@ -310,6 +315,8 @@ fn command_label(command: &str) -> String {
         "swap_marked_pane" => "Swap marked pane",
         "paste_buffer" => "Paste buffer",
         "choose_buffer" => "Choose buffer",
+        "toggle_monitor_activity" => "Monitor activity",
+        "toggle_monitor_bell" => "Monitor bell",
         other => {
             if let Some(n) = other
                 .strip_prefix("select_window:")
@@ -937,6 +944,8 @@ impl Session {
             PromptCommand::Help => Command::ShowHelp,
             PromptCommand::MarkPane => Command::MarkPane,
             PromptCommand::BreakPane => Command::BreakPane,
+            PromptCommand::ToggleMonitorActivity => Command::ToggleMonitorActivity,
+            PromptCommand::ToggleMonitorBell => Command::ToggleMonitorBell,
             PromptCommand::JoinPane(dir) => Command::JoinPane(dir),
             PromptCommand::SwapPane(t) => {
                 Command::SwapPane(matches!(t, plexy_glass_mux::SwapTarget::Next))
@@ -1276,6 +1285,10 @@ async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::Snaps
         .map(|(i, w)| plexy_glass_status::WindowSummary {
             name: w.name.clone(),
             active: i == active_idx,
+            // Read the sticky flags maintained by the coordinator's
+            // update_monitor_flags; the tick task is not the drainer.
+            activity: w.activity_flag(),
+            bell: w.bell_flag(),
         })
         .collect();
     let active_pane_cwd = manager

@@ -15,6 +15,11 @@ use tokio::sync::Mutex;
 pub struct WindowSummary {
     pub name: String,
     pub active: bool,
+    /// Sticky monitor flags (tmux's `#`/`!`): set when a background window had
+    /// activity / a bell. The current window's flags are always cleared upstream,
+    /// so a marker never shows on it.
+    pub activity: bool,
+    pub bell: bool,
 }
 
 pub struct EvalContext<'a> {
@@ -415,7 +420,7 @@ mod tests {
         let inner = engine.inner();
         let ctx = EvalContext {
             session_name: "demo",
-            windows: &[WindowSummary { name: "shell0".into(), active: true }],
+            windows: &[WindowSummary { name: "shell0".into(), active: true, activity: false, bell: false }],
             active_window: 0,
             attached_clients: 1,
             prefix_active: false,
