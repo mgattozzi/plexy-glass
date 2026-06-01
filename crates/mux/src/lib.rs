@@ -20,6 +20,7 @@ pub mod pane_id;
 pub mod rect;
 pub mod selection;
 pub mod status;
+pub mod tree;
 pub mod virtual_screen;
 
 pub use command_prompt::{Completion, FocusTarget, ParseError, PromptCommand};
@@ -38,4 +39,8 @@ pub use pane_id::{PaneId, WindowId};
 pub use rect::Rect;
 pub use selection::{Selection, SelectionKind, extract_text, line_at, word_at};
 pub use status::StatusLine;
+pub use tree::{
+    TreeAction, TreeKind, TreeMode, TreeNode, TreeOutcome, TreeState, handle_tree, pane_label,
+    window_label,
+};
 pub use virtual_screen::VirtualScreen;
