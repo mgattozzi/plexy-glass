@@ -14,7 +14,11 @@ use std::time::Duration;
 /// surface as `ConfigError::Kdl` with a message; this never panics.
 pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
     let doc = KdlDocument::parse(src).map_err(|e| ConfigError::Kdl(e.to_string()))?;
-    let mut config = Config::default();
+    // Start from the built-in default and treat the document as overrides: a
+    // section the user omits keeps its default (so a config with only a
+    // `session` still gets the default palette, status bar, and keymap, not
+    // empty ones).
+    let mut config = crate::built_in_default();
     let mut seen_palette = false;
     let mut seen_status = false;
     let mut seen_keymap = false;
@@ -125,7 +129,9 @@ fn ensure_no_props(node: &KdlNode, src: &str) -> Result<(), ConfigError> {
 
 fn decode_palette(node: &KdlNode, src: &str) -> Result<PaletteConfig, ConfigError> {
     ensure_no_props(node, src)?;
-    let mut entries = std::collections::HashMap::new();
+    // Merge onto the default palette: a present `palette` node overrides the
+    // named entries it lists and keeps the rest of the built-in colors.
+    let mut entries = crate::built_in_default().palette.entries;
     if let Some(doc) = node.children() {
         for child in doc.nodes() {
             let key = child.name().value().to_string();
@@ -441,8 +447,10 @@ fn opt_padding(node: &KdlNode, src: &str) -> Result<Padding, ConfigError> {
 
 fn decode_status(node: &KdlNode, src: &str) -> Result<StatusConfig, ConfigError> {
     ensure_no_props(node, src)?;
-    // Start from defaults (position Bottom, refresh 5s, empty zones) and override.
-    let mut status = StatusConfig::default();
+    // Start from the built-in default bar and override only the fields/zones the
+    // node specifies, so e.g. `status { position "top" }` keeps the default
+    // widgets but moves the bar to the top.
+    let mut status = crate::built_in_default().status;
     if let Some(doc) = node.children() {
         for child in doc.nodes() {
             match child.name().value() {
@@ -634,11 +642,37 @@ mod tests {
     use crate::built_in_keymap;
 
     #[test]
-    fn decodes_palette_entries() {
-        let cfg = parse_config(r##"palette { bg "#1D1C19"; fg "#c8c093" }"##).unwrap();
-        assert_eq!(cfg.palette.entries.get("bg").map(String::as_str), Some("#1D1C19"));
-        assert_eq!(cfg.palette.entries.get("fg").map(String::as_str), Some("#c8c093"));
-        assert_eq!(cfg.palette.entries.len(), 2);
+    fn palette_merges_onto_defaults() {
+        // A present `palette` node overrides the entries it lists and keeps the
+        // rest of the 11 built-in colors (config = overrides on defaults).
+        let cfg = parse_config(r##"palette { accent "#ff0000" }"##).unwrap();
+        assert_eq!(cfg.palette.entries.get("accent").map(String::as_str), Some("#ff0000"), "override applied");
+        assert_eq!(cfg.palette.entries.get("bg").map(String::as_str), Some("#1D1C19"), "default bg retained");
+        assert_eq!(cfg.palette.entries.len(), 11, "merged with the built-in palette");
+    }
+
+    #[test]
+    fn omitted_sections_fall_back_to_built_in_defaults() {
+        // A config with only a session must still get the default palette,
+        // status bar, and keymap, not empty ones. (Regression: `parse_config`
+        // used to start from `Config::default()`, yielding an empty status bar.)
+        let cfg = parse_config(r##"session "dev" { window "w" { pane } }"##).unwrap();
+        let d = built_in_default();
+        assert_eq!(cfg.palette, d.palette, "omitted palette → default palette");
+        assert_eq!(cfg.status, d.status, "omitted status → default status bar");
+        assert_eq!(cfg.keymap, d.keymap, "omitted keymap → default keymap");
+        assert_eq!(cfg.sessions.len(), 1);
+    }
+
+    #[test]
+    fn partial_status_keeps_default_zones() {
+        // Overriding one field keeps the rest of the default bar.
+        let cfg = parse_config(r##"status { position "top" }"##).unwrap();
+        let d = built_in_default();
+        assert_eq!(cfg.status.position, Position::Top);
+        assert_eq!(cfg.status.left.len(), d.status.left.len(), "omitted zones keep defaults");
+        assert_eq!(cfg.status.middle.len(), d.status.middle.len());
+        assert_eq!(cfg.status.right.len(), d.status.right.len());
     }
 
     #[test]
@@ -658,12 +692,11 @@ mod tests {
 
     #[test]
     fn keymap_defaults_when_node_absent() {
-        // An empty document yields `Config::default()`; keymap mirrors built-in
-        // *shape* defaults (prefix + inherit), with no inherited binds yet.
+        // An empty document yields the built-in default config, so the keymap is
+        // the full built-in keymap (config = overrides on defaults; an omitted
+        // `keymap` node keeps every default binding).
         let cfg = parse_config("").unwrap();
-        assert_eq!(cfg.keymap.prefix, built_in_keymap().prefix);
-        assert!(cfg.keymap.inherit_defaults);
-        assert!(cfg.keymap.bindings.is_empty());
+        assert_eq!(cfg.keymap, built_in_keymap());
     }
 
     #[test]
