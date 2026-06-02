@@ -976,6 +976,65 @@ impl Session {
         Ok(())
     }
 
+    /// Queue a focus-event sequence (`\e[I` in / `\e[O` out) to the active pane,
+    /// but only if that pane enabled focus reporting (?1004). No-op otherwise.
+    pub async fn focus_active_pane(&self, focused: bool) {
+        let manager = self.window_manager.lock().await;
+        if let Some(pane) = manager.active_window().active_pane() {
+            let wants =
+                pane.with_screen(|s| s.modes.contains(plexy_glass_emulator::Modes::FOCUS_EVENTS));
+            if wants {
+                let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                pane.send_input(bytes::Bytes::from_static(seq)).await.ok();
+            }
+        }
+    }
+
+    /// Forward a color-scheme report (`\e[?997;1n` dark / `;2n` light) to EVERY
+    /// pane in EVERY window that subscribed via ?2031.
+    pub async fn forward_color_scheme(&self, dark: bool) {
+        let seq: &[u8] = if dark { b"\x1b[?997;1n" } else { b"\x1b[?997;2n" };
+        let manager = self.window_manager.lock().await;
+        for win in manager.windows() {
+            for (_id, pane) in win.panes() {
+                let wants = pane.with_screen(|s| {
+                    s.modes.contains(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES)
+                });
+                if wants {
+                    pane.send_input(bytes::Bytes::from_static(seq)).await.ok();
+                }
+            }
+        }
+    }
+
+    /// The active pane of the active window. Used by the connection input loop
+    /// to snapshot the focused pane before/after an input batch so a pane switch
+    /// (select-pane, click, choose-tree, ...) can synthesize focus-out/in.
+    pub async fn active_pane_id(&self) -> Option<PaneId> {
+        let manager = self.window_manager.lock().await;
+        Some(manager.active_window().active())
+    }
+
+    /// Synthesize a focus transition between two panes after the active pane
+    /// changed: queue `\e[O` (focus-out) to `old` and `\e[I` (focus-in) to
+    /// `new`, each gated independently on that pane's ?1004 (`FOCUS_EVENTS`)
+    /// mode. Panes are looked up in the active window; a pane that no longer
+    /// exists (e.g. the old one was just killed) is skipped.
+    pub async fn synthesize_focus_transition(&self, old: PaneId, new: PaneId) {
+        let manager = self.window_manager.lock().await;
+        let win = manager.active_window();
+        if let Some(p) = win.pane(old)
+            && p.with_screen(|s| s.modes.contains(plexy_glass_emulator::Modes::FOCUS_EVENTS))
+        {
+            p.send_input(bytes::Bytes::from_static(b"\x1b[O")).await.ok();
+        }
+        if let Some(p) = win.pane(new)
+            && p.with_screen(|s| s.modes.contains(plexy_glass_emulator::Modes::FOCUS_EVENTS))
+        {
+            p.send_input(bytes::Bytes::from_static(b"\x1b[I")).await.ok();
+        }
+    }
+
     /// Re-encode a canonical key event into the active pane's negotiated
     /// keyboard protocol and write the result. Falls back to legacy passthrough
     /// of `raw_bytes` for panes that negotiated nothing.

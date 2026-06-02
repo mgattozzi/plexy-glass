@@ -250,6 +250,11 @@ where
             ClientMsg::Input(bytes) => {
                 let events = router.classify(bytes.as_ref());
                 let mut detach_requested = false;
+                // Snapshot the focused pane before the whole batch; if any event
+                // in it switched the active pane (select-pane, a click,
+                // choose-tree, …), synthesize focus-out(old)/focus-in(new) for
+                // ?1004 subscribers after the batch.
+                let focus_before = session.active_pane_id().await;
                 for event in events {
                     match event {
                         InputEvent::Mouse(me) => {
@@ -550,6 +555,12 @@ where
                         }
                     }
                 }
+                if let (Some(before), Some(after)) =
+                    (focus_before, session.active_pane_id().await)
+                    && before != after
+                {
+                    session.synthesize_focus_transition(before, after).await;
+                }
                 if detach_requested {
                     break;
                 }
@@ -567,10 +578,24 @@ where
             }
             ClientMsg::Detach => break,
             ClientMsg::Shutdown => break,
-            // Outer-terminal focus + color-scheme events. Decoded now; routing to
-            // the focused/subscribing panes is wired in Task 15. Explicit arms (vs
-            // the `_` catch-all) so that work has a marked starting point.
-            ClientMsg::FocusIn | ClientMsg::FocusOut | ClientMsg::ColorScheme(_) => {}
+            ClientMsg::FocusIn => {
+                // Multi-client rule: a pane is focused if ANY client has it
+                // active+focused. With a single attached client this is the
+                // direct transition; the per-pane ?1004 gate lives in
+                // `focus_active_pane`.
+                session.focus_active_pane(true).await;
+            }
+            ClientMsg::FocusOut => {
+                // Focus-out only when all subscribers lose it; with one client
+                // here that is exactly this transition.
+                session.focus_active_pane(false).await;
+            }
+            ClientMsg::ColorScheme(scheme) => {
+                // Most-recently-active client's preference wins; forward to all
+                // ?2031 subscribers.
+                let dark = matches!(scheme, plexy_glass_protocol::ColorScheme::Dark);
+                session.forward_color_scheme(dark).await;
+            }
             _ => {}
         }
     }
@@ -1787,6 +1812,303 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+
+        server.abort();
+    }
+
+    // A ClientMsg::FocusIn queues `\e[I` to the active pane ONLY if that pane
+    // enabled focus reporting (?1004h). A pane that never enabled it gets
+    // nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn focus_in_reaches_only_a_subscribing_pane() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let _ = crate::persist::delete_session("focusrt");
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::AttachOrCreate {
+                name: Some("focusrt".into()),
+                create_if_missing: true,
+                cmd: Some(cat()),
+                size,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::spawn(async move {
+            let mut b = [0u8; 4096];
+            while cr.read(&mut b).await.unwrap_or(0) > 0 {}
+        });
+
+        // Wait for the pane to exist, then turn ON `?1004` in its emulator
+        // directly (simulating the child having enabled focus reporting).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(s) = registry.get("focusrt").await {
+                let m = s.window_manager.lock().await;
+                if let Some(p) = m.active_window().active_pane() {
+                    p.with_screen_mut(|sc| {
+                        sc.modes.insert(plexy_glass_emulator::Modes::FOCUS_EVENTS)
+                    });
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "pane never appeared");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // The daemon queues `\e[I` to the child PTY. We observe it via the
+        // cooked PTY's input echo: the line discipline renders the ESC control
+        // byte in caret notation, so `\x1b[I` comes back on the pane's output as
+        // the four printable bytes `^[[I` (b"^[[I"). Subscribe BEFORE sending so
+        // we don't miss the echo.
+        const ECHOED_FOCUS_IN: &[u8] = b"^[[I"; // canonical-mode echo of \x1b[I
+        let got_focus_in = {
+            let s = registry.get("focusrt").await.unwrap();
+            let mut rx = {
+                let m = s.window_manager.lock().await;
+                m.active_window().active_pane().unwrap().subscribe_output()
+            };
+            // Send FocusIn now that we're subscribed so the echo is deterministic.
+            Codec::write_frame(&mut cw, &postcard::to_allocvec(&ClientMsg::FocusIn).unwrap())
+                .await
+                .unwrap();
+            // Accumulate across chunks: the 4-byte echo can split across PTY
+            // reads, so scan a growing buffer (a per-chunk scan misses an echo
+            // that straddles two PTY reads).
+            let mut acc: Vec<u8> = Vec::new();
+            let mut seen = false;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if let Ok(Ok(b)) =
+                    tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+                {
+                    acc.extend_from_slice(&b);
+                    if acc.windows(ECHOED_FOCUS_IN.len()).any(|w| w == ECHOED_FOCUS_IN) {
+                        seen = true;
+                        break;
+                    }
+                }
+            }
+            seen
+        };
+        assert!(got_focus_in, "subscribing pane never received \\e[I (as ^[[I)");
+
+        server.abort();
+    }
+
+    // A pane WITHOUT ?1004 receives no focus-in bytes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn focus_in_is_dropped_for_non_subscriber() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let _ = crate::persist::delete_session("nofocus");
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::AttachOrCreate {
+                name: Some("nofocus".into()),
+                create_if_missing: true,
+                cmd: Some(cat()),
+                size,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::spawn(async move {
+            let mut b = [0u8; 4096];
+            while cr.read(&mut b).await.unwrap_or(0) > 0 {}
+        });
+
+        // Wait for the pane (focus reporting left OFF).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut rx = loop {
+            if let Some(s) = registry.get("nofocus").await {
+                let m = s.window_manager.lock().await;
+                if let Some(p) = m.active_window().active_pane() {
+                    break p.subscribe_output();
+                }
+            }
+            assert!(Instant::now() < deadline, "pane never appeared");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&ClientMsg::FocusIn).unwrap())
+            .await
+            .unwrap();
+
+        // No focus-in should ever reach a non-subscriber; give it a generous
+        // window. The echo form is `^[[I` (see the sibling test for why).
+        const ECHOED_FOCUS_IN: &[u8] = b"^[[I"; // canonical-mode echo of \x1b[I
+        let leaked = {
+            let mut acc: Vec<u8> = Vec::new();
+            let mut leaked = false;
+            let deadline = Instant::now() + Duration::from_millis(600);
+            while Instant::now() < deadline {
+                if let Ok(Ok(b)) =
+                    tokio::time::timeout(Duration::from_millis(150), rx.recv()).await
+                {
+                    acc.extend_from_slice(&b);
+                    if acc.windows(ECHOED_FOCUS_IN.len()).any(|w| w == ECHOED_FOCUS_IN) {
+                        leaked = true;
+                        break;
+                    }
+                }
+            }
+            leaked
+        };
+        assert!(!leaked, "non-subscriber must not receive \\e[I");
+
+        server.abort();
+    }
+
+    // A pane SWITCH between two ?1004 subscribers synthesizes a focus
+    // transition: the pane we move TO receives `\e[I`. This exercises the
+    // batch-level snapshot in the input loop via `select_last_pane`
+    // (`Ctrl+a ;`), which routes through `handle_command` and never touched
+    // the old per-call-site machinery, the exact gap the refactor closes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pane_switch_synthesizes_focus_in_to_destination() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let _ = crate::persist::delete_session("focusswap");
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::AttachOrCreate {
+                name: Some("focusswap".into()),
+                create_if_missing: true,
+                cmd: Some(cat()),
+                size,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::spawn(async move {
+            let mut b = [0u8; 4096];
+            while cr.read(&mut b).await.unwrap_or(0) > 0 {}
+        });
+
+        // Wait for the first pane to exist.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(s) = registry.get("focusswap").await {
+                let m = s.window_manager.lock().await;
+                if m.active_window().active_pane().is_some() {
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "first pane never appeared");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Ctrl+a v → split into two panes (the new pane becomes active).
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01v"))).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // Wait for the second pane, then enable `?1004` (`FOCUS_EVENTS`) on BOTH.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let s = registry.get("focusswap").await.unwrap();
+            let st = s.tree_snapshot().await;
+            if st.total_panes == 2 {
+                let m = s.window_manager.lock().await;
+                for (_id, p) in m.active_window().panes() {
+                    p.with_screen_mut(|sc| {
+                        sc.modes.insert(plexy_glass_emulator::Modes::FOCUS_EVENTS)
+                    });
+                }
+                break;
+            }
+            assert!(Instant::now() < deadline, "split never produced 2 panes");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Subscribe to PaneId(0) (the pane we will switch BACK to) BEFORE the
+        // switch so the echo isn't missed. The new (active) pane is PaneId(1).
+        const ECHOED_FOCUS_IN: &[u8] = b"^[[I"; // canonical-mode echo of \x1b[I
+        let got_focus_in = {
+            let s = registry.get("focusswap").await.unwrap();
+            let mut rx = {
+                let m = s.window_manager.lock().await;
+                m.active_window().pane(plexy_glass_mux::PaneId(0)).unwrap().subscribe_output()
+            };
+            // Ctrl+a ; → select_last_pane, switching the active pane from
+            // PaneId(1) back to PaneId(0); the batch snapshot then synthesizes
+            // focus-out(1)/focus-in(0).
+            Codec::write_frame(
+                &mut cw,
+                &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01;")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            // Accumulate across chunks: the 4-byte echo can straddle two PTY
+            // reads, so scan a growing buffer.
+            let mut acc: Vec<u8> = Vec::new();
+            let mut seen = false;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if let Ok(Ok(b)) =
+                    tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+                {
+                    acc.extend_from_slice(&b);
+                    if acc.windows(ECHOED_FOCUS_IN.len()).any(|w| w == ECHOED_FOCUS_IN) {
+                        seen = true;
+                        break;
+                    }
+                }
+            }
+            seen
+        };
+        assert!(got_focus_in, "switched-to pane never received \\e[I (as ^[[I)");
 
         server.abort();
     }
