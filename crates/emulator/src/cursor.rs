@@ -17,6 +17,8 @@ pub struct Cursor {
     pub attrs: Attrs,
     pub fg: Color,
     pub bg: Color,
+    /// Underline color pen (SGR 58/59). `Color::Default` = follow text fg.
+    pub underline_color: Color,
     pub hyperlink_id: Option<u16>,
     /// True when the next character should wrap to the next row. Set when the
     /// cursor advances past the last column with autowrap on.
@@ -33,6 +35,7 @@ impl Default for Cursor {
             attrs: Attrs::empty(),
             fg: Color::Default,
             bg: Color::Default,
+            underline_color: Color::Default,
             hyperlink_id: None,
             pending_wrap: false,
             visible: true,

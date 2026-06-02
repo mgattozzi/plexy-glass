@@ -172,6 +172,7 @@ impl Screen {
             grapheme: cluster.into(),
             fg: self.cursor.fg,
             bg: self.cursor.bg,
+            underline_color: self.cursor.underline_color,
             attrs: self.cursor.attrs,
             hyperlink_id: self.cursor.hyperlink_id,
         };
@@ -550,16 +551,40 @@ impl Screen {
         // [38, 2, r, g, b] (truecolor). Blindly flattening would turn `4:3`
         // into "underline; italic" and `4:0` into "underline; full-reset", so
         // styled underlines (which tmux-256color advertises and TUIs emit)
-        // render wrong. Collapse styled underline to plain 4 / 24, drop the
-        // unsupported underline-color (58:), and flatten the rest, including
-        // colon-form 38:/48:, which the extended-color path already consumes.
+        // render wrong. Collapse styled underline to plain 4 / 24, canonicalize
+        // the extended-color colon groups (38:/48:/58:) by dropping the ISO
+        // colorspace-id slot, and flatten the rest. Semicolon forms like
+        // `38;2;r;g;b` arrive as separate single-element groups and flow through
+        // unchanged; colon forms are canonicalized here so parse_extended_color
+        // (shared with the semicolon path) sees an unambiguous element count.
         // (Semicolon forms like `4;3` arrive as separate single-element groups
         // and are intentionally left as "underline; italic".)
         let mut codes: Vec<u16> = Vec::new();
         for g in params.iter() {
             match g {
+                // Styled underline `4:x` -> plain 4 / 24.
                 [4, style, ..] => codes.push(if *style == 0 { 24 } else { 4 }),
-                [58, ..] => { /* set/reset underline color: unsupported, so drop it */ }
+                // Colon-form RGB extended color (38:2:.. / 48:2:.. / 58:2:..):
+                // canonicalize to [sel, 2, r, g, b] by dropping the optional ISO
+                // colorspace-id slot, so the linear parse_extended_color (shared
+                // with the semicolon form) reads an unambiguous element count.
+                [sel @ (38 | 48 | 58), 2, rest @ ..] => {
+                    codes.push(*sel);
+                    codes.push(2);
+                    match rest {
+                        [r, g, b] => codes.extend_from_slice(&[*r, *g, *b]), // kitty form
+                        [_cs, r, g, b] => codes.extend_from_slice(&[*r, *g, *b]), // ISO: drop cs
+                        _ => codes.extend_from_slice(rest), // malformed -> parser Nones it
+                    }
+                }
+                // Colon-form indexed extended color (38:5:n / 48:5:n / 58:5:n).
+                [sel @ (38 | 48 | 58), 5, rest @ ..] => {
+                    codes.push(*sel);
+                    codes.push(5);
+                    codes.extend_from_slice(rest);
+                }
+                // Semicolon forms arrive as single-element groups and flow through
+                // unchanged; colon 38:/48:/58: are canonicalized above.
                 other => codes.extend_from_slice(other),
             }
         }
@@ -571,6 +596,7 @@ impl Screen {
                     self.cursor.attrs = crate::attrs::Attrs::empty();
                     self.cursor.fg = crate::color::Color::Default;
                     self.cursor.bg = crate::color::Color::Default;
+                    self.cursor.underline_color = crate::color::Color::Default;
                 }
                 1 => self.cursor.attrs.insert(crate::attrs::Attrs::BOLD),
                 2 => self.cursor.attrs.insert(crate::attrs::Attrs::DIM),
@@ -608,6 +634,14 @@ impl Screen {
                     i += consumed;
                 }
                 49 => self.cursor.bg = crate::color::Color::Default,
+                58 => {
+                    let (color, consumed) = parse_extended_color(&codes[i + 1..]);
+                    if let Some(c) = color {
+                        self.cursor.underline_color = c;
+                    }
+                    i += consumed;
+                }
+                59 => self.cursor.underline_color = crate::color::Color::Default,
                 90..=97 => self.cursor.fg = crate::color::Color::from_ansi_bright((n - 90) as u8),
                 100..=107 => {
                     self.cursor.bg = crate::color::Color::from_ansi_bright((n - 100) as u8)
@@ -1301,5 +1335,66 @@ mod tests {
         let z = s.active.get_cell(0, 2).unwrap();
         assert_eq!(z.grapheme.as_str(), "z");
         assert!(!z.attrs.contains(Attrs::UNDERLINE), "'z' must not be underlined");
+    }
+
+    #[test]
+    fn sgr_58_colon_indexed_sets_underline_color() {
+        use crate::color::Color;
+        let s = parse(b"\x1b[58:5:9mX");
+        assert_eq!(s.active.get_cell(0, 0).unwrap().underline_color, Color::Indexed(9));
+    }
+    #[test]
+    fn sgr_58_colon_rgb_kitty_form_sets_underline_color() {
+        use crate::color::Color;
+        let s = parse(b"\x1b[58:2:10:20:30mX");
+        assert_eq!(s.active.get_cell(0, 0).unwrap().underline_color, Color::Rgb(10, 20, 30));
+    }
+    #[test]
+    fn sgr_58_colon_rgb_iso_form_with_colorspace_slot() {
+        use crate::color::Color;
+        // 58:2::r:g:b is the ISO form with an empty colorspace slot (vte yields 0
+        // for empty).
+        let s = parse(b"\x1b[58:2::10:20:30mX");
+        assert_eq!(s.active.get_cell(0, 0).unwrap().underline_color, Color::Rgb(10, 20, 30));
+    }
+    #[test]
+    fn sgr_58_semicolon_form_sets_underline_color() {
+        use crate::color::Color;
+        let s = parse(b"\x1b[58;2;10;20;30mX");
+        assert_eq!(s.active.get_cell(0, 0).unwrap().underline_color, Color::Rgb(10, 20, 30));
+    }
+    #[test]
+    fn sgr_59_resets_underline_color() {
+        use crate::color::Color;
+        let s = parse(b"\x1b[58:5:9m\x1b[59mX");
+        assert_eq!(s.active.get_cell(0, 0).unwrap().underline_color, Color::Default);
+    }
+    #[test]
+    fn sgr_0_resets_underline_color() {
+        use crate::color::Color;
+        let s = parse(b"\x1b[58:5:9m\x1b[0mX");
+        assert_eq!(s.active.get_cell(0, 0).unwrap().underline_color, Color::Default);
+    }
+    #[test]
+    fn parse_extended_color_iso_colorspace_slot_consumes_exact_count() {
+        use crate::attrs::Attrs;
+        // 38:2::1:2:3 (ISO, colorspace slot) must consume all its elements so the
+        // following \e[4m underlines Y, not leak a stray param onto X.
+        let s = parse(b"\x1b[38:2::1:2:3mX\x1b[4mY");
+        let x = s.active.get_cell(0, 0).unwrap();
+        assert!(!x.attrs.contains(Attrs::UNDERLINE), "X must NOT be underlined");
+        assert_eq!(x.fg, crate::color::Color::Rgb(1, 2, 3));
+        let y = s.active.get_cell(0, 1).unwrap();
+        assert!(y.attrs.contains(Attrs::UNDERLINE), "Y SHOULD be underlined (the \\e[4m)");
+    }
+    #[test]
+    fn sgr_combined_semicolon_truecolor_fg_and_bg() {
+        use crate::color::Color;
+        // fg + bg truecolor in ONE semicolon SGR. fg must consume exactly 4 params
+        // and leave 48 for bg, since a 5-element RGB arm would corrupt the second color.
+        let s = parse(b"\x1b[38;2;1;2;3;48;2;4;5;6mX");
+        let c0 = s.active.get_cell(0, 0).unwrap();
+        assert_eq!(c0.fg, Color::Rgb(1, 2, 3));
+        assert_eq!(c0.bg, Color::Rgb(4, 5, 6));
     }
 }

@@ -15,6 +15,9 @@ pub struct Cell {
     pub grapheme: SmolStr,
     pub fg: Color,
     pub bg: Color,
+    /// Underline color (SGR 58/59). `Color::Default` = follow text fg.
+    /// Independent of whether `Attrs::UNDERLINE` is set.
+    pub underline_color: Color,
     pub attrs: Attrs,
     /// Index into the screen's `HyperlinkTable`, if this cell is part of a
     /// hyperlinked region (OSC 8).
@@ -27,6 +30,7 @@ impl Default for Cell {
             grapheme: SmolStr::new(" "),
             fg: Color::Default,
             bg: Color::Default,
+            underline_color: Color::Default,
             attrs: Attrs::empty(),
             hyperlink_id: None,
         }
@@ -45,6 +49,7 @@ impl Cell {
             grapheme: SmolStr::default(),
             fg: Color::Default,
             bg: Color::Default,
+            underline_color: Color::Default,
             attrs: Attrs::empty(),
             hyperlink_id: None,
         }
@@ -58,6 +63,7 @@ impl Cell {
         self.grapheme.as_str() == " "
             && self.fg == Color::Default
             && self.bg == Color::Default
+            && self.underline_color == Color::Default
             && self.attrs.is_empty()
             && self.hyperlink_id.is_none()
     }
