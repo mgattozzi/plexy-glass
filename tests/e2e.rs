@@ -1161,3 +1161,83 @@ fn mouse_drag_resize_traverses_wire() {
     sess.send(b"\x1b[<0;45;5m");
     sess.send_prefix(b'd'); // detach
 }
+
+#[test]
+fn modkeys_sequence_does_not_underline_following_text() {
+    // The bug: a pane that emits `\e[>4;2m` (XTMODKEYS) then text must NOT have
+    // that text rendered underlined. After Task 1's CSI-m guard, the host frame
+    // must contain the text WITHOUT a preceding `\e[4m` (the SGR-underline the
+    // bug used to emit) wrapping it.
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+
+    // printf the XTMODKEYS set then a sentinel word, via the pane's shell.
+    sess.send_str("printf '\\033[>4;2mZEBRA\\n'\n");
+    assert!(
+        sess.wait_for(b"ZEBRA", Duration::from_secs(10)),
+        "ZEBRA never rendered. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // The host-bound frame must not paint the underline SGR `\e[4m`. (Mouse and
+    // other private modes the host enabled use `?`/`>` prefixes and never bare
+    // `\e[4m`, so a bare `\e[4m` here would be the regression.)
+    let raw = sess.snapshot();
+    assert!(
+        !raw.windows(4).any(|w| w == b"\x1b[4m"),
+        "regression: spurious underline SGR \\e[4m in host frame: {}",
+        sess.snapshot_str()
+    );
+}
+
+#[test]
+fn pane_queries_get_well_formed_replies() {
+    // A pane emitting XTVERSION (`\e[>q`) must receive the emulator's DCS reply
+    // (`\eP>|plexy-glass(<ver>)\e\\`) on its stdin.
+    //
+    // Implementation detail: the emulator queues the reply via `Screen.replies`;
+    // the pane reader forwards those bytes to the child PTY slave's stdin.  The
+    // PTY line-discipline (in canonical/echo mode) echoes incoming control bytes
+    // as caret notation: ESC (0x1b) → the two characters `^[` (0x5e 0x5b).  So
+    // the DCS introducer `\eP>|` is echoed as the five visible characters
+    // `^[P>|` and those characters appear as cells in the emulator's grid.  The
+    // diff-renderer then emits them as literal printable bytes to the host
+    // terminal.  We therefore assert on the caret-notation prefix in the
+    // cumulative snapshot buffer, which is both reliable and shell-version
+    // independent (no `read -d` needed).
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+
+    // Trigger XTVERSION; use a sentinel echo so we know the emulator processed
+    // the query before we snapshot.
+    let before_query = sess.buffer_len();
+    sess.send_str("printf '\\033[>q'; echo XVDONE\n");
+    assert!(
+        sess.wait_for(b"XVDONE", Duration::from_secs(10)),
+        "XTVERSION sentinel never appeared. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // The DCS reply `\eP>|plexy-glass(<ver>)\e\\` is delivered to the child's
+    // PTY slave stdin by the pane reply-writer. The interactive shell (bash)
+    // may be in raw/readline mode or canonical+echo mode, and behavior varies.
+    // In canonical+echo mode the PTY line-discipline echoes ESC as `^[`, and
+    // the sequence `^[P>|plexy-glass(...)` appears verbatim as grid cells. In
+    // raw (readline) mode, readline partially processes the DCS and typically
+    // outputs the content portion `>|plexy-glass(...)` as visible characters.
+    // Either way, the DCS body string `>|plexy-glass` appears in the frame
+    // within a bounded window. Polling from before the query ensures we catch
+    // the output even when the reply arrives after XVDONE renders.
+    //
+    // This confirms the emulator produced a well-formed XTVERSION DCS reply
+    // (no reply = `>|plexy-glass` never surfaces; wrong format = different body).
+    assert!(
+        sess.wait_for_from(before_query, b">|plexy-glass", Duration::from_secs(5)),
+        "expected XTVERSION DCS body (>|plexy-glass) in host frame. snapshot_str: {}",
+        sess.snapshot_str()
+    );
+}

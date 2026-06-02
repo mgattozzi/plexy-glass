@@ -176,7 +176,18 @@ join (`:join-pane`), and swap (`Ctrl+a {`/`}`, `:swap-pane`); **paste buffers** 
 copy-mode yanks push a bounded named-buffer stack, `Ctrl+a ]` pastes the newest,
 `Ctrl+a =` opens a choose-buffer overlay; and per-window **activity/bell
 monitoring** (`Ctrl+a M` / `:monitor-activity` / `:monitor-bell`) surfaced as
-`#`/`!` flags in the status window-list. Each has a spec in
+`#`/`!` flags in the status window-list; and **keyboard-protocol negotiation** —
+the emulator is a correct negotiating terminal (guarded CSI-`m` dispatch so
+`CSI > 4 ; 2 m` is XTMODKEYS not SGR; per-pane modifyOtherKeys level + Kitty
+keyboard flags stacks; XTVERSION `CSI >q`, DECRQM `$p`, XTGETTCAP `DCS +q`
+with an honest capability table; `?1004` focus and `?2031` color-scheme modes),
+a canonical lossless `KeyEvent` model (press/repeat/release, associated text,
+shifted/base-layout alternates, super/hyper/meta/lock modifiers aligned to the
+wire `1+bitset`), a per-pane key **re-encode** stage (legacy / modifyOtherKeys
+27-form / Kitty CSI-u with down-conversion), client probe→negotiate→graceful-
+fallback→precise-teardown of the outer terminal, focus/color-scheme routed
+end-to-end, and **colored underlines** (SGR `58`/`59`, per-cell
+`underline_color`, advertised as `Setulc`). Each has a spec in
 `docs/superpowers/specs/`.
 
 The overlay subsystem is the substrate for modal UI: add `Overlay` +
@@ -203,4 +214,5 @@ window/pane selection in the template, per-pane env maps, re-reading templates o
 session (see the 2026-06-01 declarative-sessions spec's non-goals). (choose-tree,
 break/join/swap + marked pane, paste buffers, and activity/bell monitoring shipped
 — 2026-05-31 specs/plans; the KDL config migration + declarative sessions shipped
-— 2026-06-01 specs/plans.)
+— 2026-06-01 specs/plans; keyboard-protocol negotiation + colored underlines
+shipped — 2026-06-01 specs/plans.)
