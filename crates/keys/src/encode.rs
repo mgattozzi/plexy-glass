@@ -95,20 +95,8 @@ fn f1_to_f4(n: u8, mods: Modifiers) -> Vec<u8> {
 }
 
 fn encode_xterm_mods(mods: Modifiers) -> u32 {
-    let mut bits = 0u32;
-    if mods.contains(Modifiers::SHIFT) {
-        bits |= 0b0001;
-    }
-    if mods.contains(Modifiers::ALT) {
-        bits |= 0b0010;
-    }
-    if mods.contains(Modifiers::CTRL) {
-        bits |= 0b0100;
-    }
-    if mods.contains(Modifiers::SUPER) {
-        bits |= 0b1000;
-    }
-    bits + 1
+    // Inverse of `parser::decode_xterm_mods`: param = 1 + (bits & 0xFF).
+    1 + u32::from(mods.bits())
 }
 
 #[cfg(test)]
@@ -142,7 +130,7 @@ mod tests {
     #[test]
     fn round_trip_ctrl_left() {
         let original = KeyEvent::new(Key::Arrow(Direction::Left), Modifiers::CTRL);
-        let bytes = legacy_bytes(original);
+        let bytes = legacy_bytes(original.clone());
         let parsed = parse_first_event(&bytes);
         assert_eq!(parsed, original);
     }
@@ -150,7 +138,7 @@ mod tests {
     #[test]
     fn round_trip_f5() {
         let original = KeyEvent::plain(Key::Function(5));
-        let bytes = legacy_bytes(original);
+        let bytes = legacy_bytes(original.clone());
         let parsed = parse_first_event(&bytes);
         assert_eq!(parsed, original);
     }

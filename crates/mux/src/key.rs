@@ -4,13 +4,19 @@ use crate::Direction;
 use bitflags::bitflags;
 
 bitflags! {
+    /// Keyboard modifiers, aligned to the wire convention so that
+    /// `1 + (mods.bits() & 0xFF)` is the protocol modifier byte (kitty /
+    /// modifyOtherKeys / xterm CSI-u share this).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
     pub struct Modifiers: u8 {
-        const SHIFT = 1 << 0;
-        const CTRL  = 1 << 1;
-        const ALT   = 1 << 2;
-        const SUPER = 1 << 3;
-        const HYPER = 1 << 4;
+        const SHIFT     = 1 << 0;
+        const ALT       = 1 << 1;
+        const CTRL      = 1 << 2;
+        const SUPER     = 1 << 3;
+        const HYPER     = 1 << 4;
+        const META      = 1 << 5;
+        const CAPS_LOCK = 1 << 6;
+        const NUM_LOCK  = 1 << 7;
     }
 }
 
@@ -48,19 +54,44 @@ pub enum Key {
     KeypadEnter,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Press / autorepeat / release. Decoded from the Kitty `:event` subparam;
+/// legacy and modifyOtherKeys input is always `Press`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum KeyEventKind {
+    #[default]
+    Press,
+    Repeat,
+    Release,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeyEvent {
     pub key: Key,
     pub mods: Modifiers,
+    /// Press / Repeat / Release (Kitty `report_event_types`).
+    pub kind: KeyEventKind,
+    /// Associated text (Kitty `report_associated_text`); carried, not composed.
+    pub text: Option<smol_str::SmolStr>,
+    /// Shifted alternate codepoint (Kitty `report_alternate_keys`).
+    pub shifted: Option<char>,
+    /// Base-layout alternate codepoint (Kitty `report_alternate_keys`).
+    pub base_layout: Option<char>,
 }
 
 impl KeyEvent {
     pub fn new(key: Key, mods: Modifiers) -> Self {
-        Self { key, mods }
+        Self {
+            key,
+            mods,
+            kind: KeyEventKind::Press,
+            text: None,
+            shifted: None,
+            base_layout: None,
+        }
     }
 
     pub fn plain(key: Key) -> Self {
-        Self { key, mods: Modifiers::empty() }
+        Self::new(key, Modifiers::empty())
     }
 }
 
@@ -81,5 +112,46 @@ mod tests {
         let e = KeyEvent::plain(Key::Tab);
         assert_eq!(e.key, Key::Tab);
         assert!(e.mods.is_empty());
+    }
+
+    #[test]
+    fn modifier_bits_align_to_wire_convention() {
+        // Wire modifier param is `1 + bitset`: shift=1, alt=2, ctrl=4, super=8,
+        // hyper=16, meta=32, caps_lock=64, num_lock=128.
+        assert_eq!(Modifiers::SHIFT.bits(), 1 << 0);
+        assert_eq!(Modifiers::ALT.bits(), 1 << 1);
+        assert_eq!(Modifiers::CTRL.bits(), 1 << 2);
+        assert_eq!(Modifiers::SUPER.bits(), 1 << 3);
+        assert_eq!(Modifiers::HYPER.bits(), 1 << 4);
+        assert_eq!(Modifiers::META.bits(), 1 << 5);
+        assert_eq!(Modifiers::CAPS_LOCK.bits(), 1 << 6);
+        assert_eq!(Modifiers::NUM_LOCK.bits(), 1 << 7);
+        let m = Modifiers::CTRL | Modifiers::SHIFT;
+        // `bits()` is already a u8, so `& 0xFF` is a no-op here; the wire byte
+        // is simply `1 + bits`.
+        assert_eq!(1 + u32::from(m.bits()), 6); // ctrl+shift -> param 6
+    }
+
+    #[test]
+    fn alias_meta_still_maps_to_alt_for_keybindings() {
+        // User-facing "Meta" alias maps to ALT (keybinding ergonomics); the
+        // distinct META bit is set only from Kitty wire meta.
+        assert_eq!(Modifiers::alias_meta_as_alt("Meta"), Some(Modifiers::ALT));
+        assert_ne!(Modifiers::ALT, Modifiers::META);
+    }
+
+    #[test]
+    fn new_and_plain_default_kind_press_and_none_fields() {
+        let e = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
+        assert_eq!(e.kind, KeyEventKind::Press);
+        assert!(e.text.is_none());
+        assert!(e.shifted.is_none());
+        assert!(e.base_layout.is_none());
+        assert_eq!(KeyEvent::plain(Key::Tab).kind, KeyEventKind::Press);
+    }
+
+    #[test]
+    fn key_event_kind_default_is_press() {
+        assert_eq!(KeyEventKind::default(), KeyEventKind::Press);
     }
 }

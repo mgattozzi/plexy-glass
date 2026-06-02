@@ -1,7 +1,7 @@
 //! Keymap: a chord trie that consumes typed `KeyEvent`s and emits `Command`
 //! or `PassThrough`.
 
-use crate::{Direction, Key, KeyEvent, Modifiers, SplitDir};
+use crate::{Direction, Key, KeyEvent, KeyEventKind, Modifiers, SplitDir};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -120,7 +120,19 @@ impl Keymap {
             self.cancel();
         }
 
-        let chord = (event.mods, event.key);
+        // Release/Repeat events never trigger bindings, they flow straight to
+        // the re-encode stage. Only Press is matched.
+        if event.kind != KeyEventKind::Press {
+            if self.pending.is_empty() {
+                return KeymapAction::PassThrough(event, bytes);
+            }
+            self.cancel();
+            return KeymapAction::Cancel;
+        }
+        // Lock modifiers (CapsLock/NumLock) are not part of any binding, so mask
+        // them before lookup and a binding matches regardless of lock state.
+        let lookup_mods = event.mods.difference(Modifiers::CAPS_LOCK | Modifiers::NUM_LOCK);
+        let chord = (lookup_mods, event.key);
         let node = self.descend();
         if let Some(child) = node.children.get(&chord) {
             if !child.children.is_empty() {
@@ -219,6 +231,70 @@ mod tests {
         let (e, b) = ev(Modifiers::ALT, Key::Arrow(Direction::Right), b"\x1b[1;3C");
         let action = k.consume(e, b);
         assert!(matches!(action, KeymapAction::Command(Command::SelectPane(Direction::Right))));
+    }
+
+    #[test]
+    fn binding_matches_with_lock_modifiers_set() {
+        // CAPS_LOCK / NUM_LOCK are masked before trie lookup, so a Ctrl+a chord
+        // still fires when CapsLock happens to be on.
+        let mut k = Keymap::new();
+        k.bind(
+            &[chord(Modifiers::CTRL, Key::Char('a')), chord(Modifiers::empty(), Key::Char('c'))],
+            Command::NewWindow,
+        );
+        let mut e1 = KeyEvent::new(Key::Char('a'), Modifiers::CTRL | Modifiers::CAPS_LOCK);
+        e1.kind = KeyEventKind::Press;
+        assert!(matches!(k.consume(e1, vec![0x01]), KeymapAction::Pending));
+        let mut e2 = KeyEvent::new(Key::Char('c'), Modifiers::NUM_LOCK);
+        e2.kind = KeyEventKind::Press;
+        assert!(matches!(k.consume(e2, b"c".to_vec()), KeymapAction::Command(Command::NewWindow)));
+    }
+
+    #[test]
+    fn release_event_never_matches_a_binding() {
+        // A Release for the very same chord must NOT fire, it passes through.
+        let mut k = Keymap::new();
+        k.bind(
+            &[chord(Modifiers::ALT, Key::Arrow(Direction::Right))],
+            Command::SelectPane(Direction::Right),
+        );
+        let mut e = KeyEvent::new(Key::Arrow(Direction::Right), Modifiers::ALT);
+        e.kind = KeyEventKind::Release;
+        assert!(matches!(k.consume(e, b"\x1b[1;3C".to_vec()), KeymapAction::PassThrough(..)));
+    }
+
+    #[test]
+    fn repeat_event_never_matches_a_binding() {
+        let mut k = Keymap::new();
+        k.bind(
+            &[chord(Modifiers::ALT, Key::Arrow(Direction::Right))],
+            Command::SelectPane(Direction::Right),
+        );
+        let mut e = KeyEvent::new(Key::Arrow(Direction::Right), Modifiers::ALT);
+        e.kind = KeyEventKind::Repeat;
+        assert!(matches!(k.consume(e, b"\x1b[1;3C".to_vec()), KeymapAction::PassThrough(..)));
+    }
+
+    #[test]
+    fn release_during_pending_prefix_cancels() {
+        // A Release arriving after the prefix chord is consumed cancels the
+        // pending sequence (it can't advance the trie), rather than passing
+        // through. Covers the non-Press + pending branch.
+        let mut k = Keymap::new();
+        k.bind(
+            &[
+                chord(Modifiers::CTRL, Key::Char('a')),
+                chord(Modifiers::empty(), Key::Char('c')),
+            ],
+            Command::NewWindow,
+        );
+        let (e1, b1) = ev(Modifiers::CTRL, Key::Char('a'), &[0x01]);
+        assert!(matches!(k.consume(e1, b1), KeymapAction::Pending));
+        assert!(k.prefix_active());
+        let mut e2 = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
+        e2.kind = KeyEventKind::Release;
+        assert!(matches!(k.consume(e2, b"".to_vec()), KeymapAction::Cancel));
+        assert!(!k.prefix_active());
     }
 
     #[test]

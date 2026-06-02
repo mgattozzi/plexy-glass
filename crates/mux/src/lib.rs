@@ -30,7 +30,7 @@ pub use compositor::{Compositor, OverlayView, PaneView, StatusPlacement};
 pub use copy_mode::{CopyMode, CopyModeAction, CopyModeHandler, MatchSpan, SearchState};
 pub use diff::DiffRenderer;
 pub use direction::{Direction, SplitDir};
-pub use key::{Key, KeyEvent, Modifiers};
+pub use key::{Key, KeyEvent, KeyEventKind, Modifiers};
 pub use keymap::{Chord, Command, Keymap, KeymapAction};
 pub use layout::{BorderHit, BorderSide, CloseOutcome, LayoutError, LayoutTree, SplitPosition};
 pub use mouse::{encode_for_child, MouseButton, MouseEncoding, MouseEvent, MouseKind, MouseModifiers, MouseParseAction, MouseParser};

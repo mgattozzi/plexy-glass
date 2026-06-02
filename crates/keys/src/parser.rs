@@ -222,23 +222,10 @@ impl KeyParser {
 }
 
 fn decode_xterm_mods(raw: u32) -> Modifiers {
-    // xterm modifier param = 1 + bitmap, where the bitmap is:
-    //   bit 0 = Shift, bit 1 = Alt, bit 2 = Ctrl, bit 3 = Super
-    let bits = raw.saturating_sub(1);
-    let mut mods = Modifiers::empty();
-    if bits & 0b0001 != 0 {
-        mods |= Modifiers::SHIFT;
-    }
-    if bits & 0b0010 != 0 {
-        mods |= Modifiers::ALT;
-    }
-    if bits & 0b0100 != 0 {
-        mods |= Modifiers::CTRL;
-    }
-    if bits & 0b1000 != 0 {
-        mods |= Modifiers::SUPER;
-    }
-    mods
+    // Wire modifier param = 1 + bitset:
+    //   1=shift 2=alt 4=ctrl 8=super 16=hyper 32=meta 64=caps_lock 128=num_lock
+    let bits = (raw.saturating_sub(1) & 0xFF) as u8;
+    Modifiers::from_bits_truncate(bits)
 }
 
 fn kitty_key(code: u32, mods: Modifiers) -> Option<KeyEvent> {
