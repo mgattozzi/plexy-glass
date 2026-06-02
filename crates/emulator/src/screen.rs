@@ -361,9 +361,16 @@ impl Screen {
                 }
                 self.cursor.pending_wrap = false;
             }
-            'm' => {
-                self.handle_sgr(params);
-            }
+            'm' => match intermediates.first() {
+                // CSI > Ps m is XTMODKEYS (modifyOtherKeys), NOT SGR. Claude Code
+                // emits `\e[>4;2m` during keyboard setup, and routing it through
+                // handle_sgr misreads it as underline+dim (the whole-frame
+                // underline bug). Task 4 fills in the real level tracking.
+                Some(b'>') => self.handle_xtmodkeys(params),
+                // CSI ? Ps m is the XTQMODKEYS query. Task 4 fills in the reply.
+                Some(b'?') => self.xtqmodkeys_report(params),
+                _ => self.handle_sgr(params),
+            },
             'h' => self.set_mode(params, intermediates, true),
             'l' => self.set_mode(params, intermediates, false),
             'r' => {
@@ -439,6 +446,22 @@ impl Screen {
                 tracing::trace!(?intermediates, ?final_byte, "unhandled CSI");
             }
         }
+    }
+
+    /// XTMODKEYS (`CSI > Ps ; Pv m`): set the modifyOtherKeys level. Stubbed
+    /// no-op for now (the dispatch guard is what fixes the underline bug); Task 4
+    /// stores the level in `KeyboardState`.
+    fn handle_xtmodkeys(&mut self, params: &vte::Params) {
+        let resource = params.iter().next().and_then(|p| p.first().copied());
+        let value = params.iter().nth(1).and_then(|p| p.first().copied());
+        tracing::trace!(?resource, ?value, "XTMODKEYS (stub: ignored)");
+    }
+
+    /// XTQMODKEYS query (`CSI ? Ps m`): report the modifyOtherKeys level.
+    /// Stubbed no-op for now; Task 4 pushes `\e[>4;<level>m` onto `replies`.
+    fn xtqmodkeys_report(&mut self, params: &vte::Params) {
+        let resource = params.iter().next().and_then(|p| p.first().copied());
+        tracing::trace!(?resource, "XTQMODKEYS query (stub: no reply)");
     }
 
     fn set_mode(&mut self, params: &vte::Params, intermediates: &[u8], on: bool) {
@@ -1239,5 +1262,44 @@ mod tests {
         s.bell_pending = true;
         assert!(s.take_bell());
         assert!(!s.take_bell(), "second take is false");
+    }
+
+    #[test]
+    fn xtmodkeys_csi_gt_4_2_m_is_not_sgr() {
+        use crate::attrs::Attrs;
+        // \e[>4;2m is XTMODKEYS (modifyOtherKeys level 2), NOT SGR 4;2. Claude
+        // Code emits it during keyboard-protocol setup; the '>' intermediate must
+        // route it away from `handle_sgr` so 'X' is not painted underline+dim.
+        let s = drive(b"\x1b[>4;2mX");
+        let c0 = s.active.get_cell(0, 0).unwrap();
+        assert_eq!(c0.grapheme.as_str(), "X");
+        assert!(
+            !c0.attrs.contains(Attrs::UNDERLINE),
+            "CSI >4;2m must not set UNDERLINE on following text"
+        );
+        assert!(
+            !c0.attrs.contains(Attrs::DIM),
+            "CSI >4;2m must not set DIM on following text"
+        );
+    }
+
+    #[test]
+    fn xtmodkeys_then_claude_reset_pattern_no_spurious_underline() {
+        use crate::attrs::Attrs;
+        // The realistic Claude Code shape: XTMODKEYS, then a 256-color run that
+        // resets with 39/22 (never 24/0). If >4;2m had leaked as SGR 4;2 the
+        // underline would never clear and bleed onto 'z'.
+        let s = drive(b"\x1b[>4;2m\x1b[38;5;174mhi\x1b[39m\x1b[22m\x1b[0mz");
+        for (col, want) in [(0u16, 'h'), (1, 'i')] {
+            let c = s.active.get_cell(0, col).unwrap();
+            assert_eq!(c.grapheme.chars().next(), Some(want));
+            assert!(
+                !c.attrs.contains(Attrs::UNDERLINE),
+                "col {col} ({want}) must not be underlined"
+            );
+        }
+        let z = s.active.get_cell(0, 2).unwrap();
+        assert_eq!(z.grapheme.as_str(), "z");
+        assert!(!z.attrs.contains(Attrs::UNDERLINE), "'z' must not be underlined");
     }
 }
