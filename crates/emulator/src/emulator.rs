@@ -148,7 +148,9 @@ mod tests {
         let mut e = Emulator::new(4, 8);
         e.advance(b"\x1b[>c");
         let replies = e.take_replies();
-        assert_eq!(replies, vec![b"\x1b[>0;1;0c".to_vec()]);
+        // DA2 now packs the crate version (0.1.0 -> 100) instead of a literal 1.
+        let ver = crate::screen::pack_da2_version();
+        assert_eq!(replies, vec![format!("\x1b[>0;{ver};0c").into_bytes()]);
     }
 
     #[test]

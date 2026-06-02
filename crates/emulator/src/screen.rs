@@ -441,11 +441,21 @@ impl Screen {
                 // advanced video (the xterm-compatible answer most consumers expect).
                 let is_secondary = intermediates.first() == Some(&b'>');
                 if is_secondary {
-                    // DA2: terminal id, firmware version, hardware. xterm answers
-                    // `ESC [ > 0 ; 95 ; 0 c`; we mirror with a recognisable id.
-                    self.replies.push(b"\x1b[>0;1;0c".to_vec());
+                    // DA2: terminal id, firmware version (packed crate version),
+                    // hardware id. xterm answers `ESC [ > 0 ; 95 ; 0 c`.
+                    let ver = pack_da2_version();
+                    self.replies.push(format!("\x1b[>0;{ver};0c").into_bytes());
                 } else {
                     self.replies.push(b"\x1b[?1;2c".to_vec());
+                }
+            }
+            'q' => {
+                // \e[>q (= \e[>0q) is XTVERSION. Reply with a DCS naming us.
+                if intermediates.first() == Some(&b'>') {
+                    let reply = format!("\x1bP>|plexy-glass({})\x1b\\", env!("CARGO_PKG_VERSION"));
+                    self.replies.push(reply.into_bytes());
+                } else {
+                    tracing::trace!(?intermediates, "unhandled CSI q");
                 }
             }
             'p' => {
@@ -881,6 +891,16 @@ impl Screen {
         }
         self.clipboard_writes.push(decoded);
     }
+}
+
+/// Pack `CARGO_PKG_VERSION` (major.minor.patch) into xterm's DA2 firmware-
+/// version convention: `major*10000 + minor*100 + patch`. For 0.1.0 → 100.
+pub(crate) fn pack_da2_version() -> u32 {
+    let mut parts = env!("CARGO_PKG_VERSION").split('.');
+    let major: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let patch: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    major * 10000 + minor * 100 + patch
 }
 
 fn parse_extended_color(rest: &[u16]) -> (Option<crate::color::Color>, usize) {
@@ -1550,5 +1570,19 @@ mod tests {
             crate::color::Color::Default,
             "DECSTR resets the cursor's underline color"
         );
+    }
+    #[test]
+    fn xtversion_replies_with_dcs() {
+        // \e[>q (XTVERSION) → DCS \eP>|plexy-glass(<ver>)\e\\.
+        let s = parse(b"\x1b[>qX");
+        let expected = format!("\x1bP>|plexy-glass({})\x1b\\", env!("CARGO_PKG_VERSION")).into_bytes();
+        assert_eq!(s.replies, vec![expected]);
+    }
+    #[test]
+    fn da2_still_answers_with_packed_version() {
+        let s = parse(b"\x1b[>cX");
+        let ver = pack_da2_version();
+        let expected = format!("\x1b[>0;{ver};0c").into_bytes();
+        assert_eq!(s.replies, vec![expected]);
     }
 }
