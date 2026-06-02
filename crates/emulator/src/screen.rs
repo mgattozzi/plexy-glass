@@ -448,6 +448,15 @@ impl Screen {
                     self.replies.push(b"\x1b[?1;2c".to_vec());
                 }
             }
+            'p' => {
+                if intermediates.first() == Some(&b'!') {
+                    // DECSTR: soft reset.
+                    self.handle_decstr();
+                } else {
+                    tracing::trace!(?intermediates, "unhandled CSI p");
+                }
+            }
+            'u' => self.handle_kitty_kbd(params, intermediates),
             _ => {
                 tracing::trace!(?intermediates, ?final_byte, "unhandled CSI");
             }
@@ -481,6 +490,60 @@ impl Screen {
         }
         let level = self.kbd.modify_other_keys();
         self.replies.push(format!("\x1b[>4;{level}m").into_bytes());
+    }
+
+    /// Kitty keyboard-protocol negotiation (final byte `u`), dispatched on the
+    /// intermediate prefix. Operates on the active screen's flag stack.
+    ///
+    /// `?` query → reply `\e[?<flags>u`; `=` set-in-place (mode 1/2/3);
+    /// `>` push (default 0); `<` pop (default 1, empty-stack resets to 0).
+    fn handle_kitty_kbd(&mut self, params: &vte::Params, intermediates: &[u8]) {
+        let alt = self.modes.contains(crate::modes::Modes::ALT_SCREEN);
+        fn first_param(p: &vte::Params) -> Option<u16> {
+            p.iter().next().and_then(|g| g.first().copied())
+        }
+        fn second_param(p: &vte::Params) -> Option<u16> {
+            p.iter().nth(1).and_then(|g| g.first().copied())
+        }
+        match intermediates.first() {
+            Some(b'?') => {
+                let flags = self.kbd.kitty_flags(alt);
+                self.replies.push(format!("\x1b[?{flags}u").into_bytes());
+            }
+            Some(b'=') => {
+                // invariant: Kitty flags are a 5-bit mask (max 31) and mode is
+                // 1..=3; any value >255 is malformed and truncating to the low
+                // byte still yields a valid (if unusual) flag set.
+                let flags = first_param(params).unwrap_or(0) as u8;
+                let mode = second_param(params).unwrap_or(1) as u8;
+                self.kbd.kitty_set(alt, flags, mode);
+            }
+            Some(b'>') => {
+                // invariant: see the `=` arm, flags truncate to the low byte.
+                let flags = first_param(params).unwrap_or(0) as u8;
+                self.kbd.kitty_push(alt, flags);
+            }
+            Some(b'<') => {
+                let n = first_param(params).unwrap_or(1);
+                self.kbd.kitty_pop(alt, n);
+            }
+            _ => {
+                tracing::trace!(?intermediates, "unhandled CSI u");
+            }
+        }
+    }
+
+    /// DECSTR (`\e[!p`): soft terminal reset. Clears keyboard negotiation
+    /// state (modifyOtherKeys level + Kitty stacks) along with the cursor's
+    /// rendition. Hard reset (RIS, `\ec`) is handled in `handle_esc`.
+    fn handle_decstr(&mut self) {
+        self.kbd.reset();
+        self.cursor.attrs = crate::attrs::Attrs::empty();
+        self.cursor.fg = crate::color::Color::Default;
+        self.cursor.bg = crate::color::Color::Default;
+        self.cursor.underline_color = crate::color::Color::Default;
+        self.cursor.pending_wrap = false;
+        self.saved_cursor = None;
     }
 
     fn set_mode(&mut self, params: &vte::Params, intermediates: &[u8], on: bool) {
@@ -1440,5 +1503,52 @@ mod tests {
         let c0 = s.active.get_cell(0, 0).unwrap();
         assert!(!c0.attrs.contains(Attrs::UNDERLINE), "X must not be underlined");
         assert!(!c0.attrs.contains(Attrs::DIM), "X must not be dim");
+    }
+
+    #[test]
+    fn kitty_push_then_query_reports_flags() {
+        // \e[>15u pushes flags 15; \e[?u queries → \e[?15u.
+        let s = parse(b"\x1b[>15u\x1b[?uX");
+        assert_eq!(s.kbd.kitty_flags(false), 15);
+        assert_eq!(s.replies, vec![b"\x1b[?15u".to_vec()]);
+    }
+    #[test]
+    fn kitty_set_clear_bits_mode_3() {
+        // Set flags to 15 (mode 1 set-exactly), then \e[=4;3u clears bit 4 → 11.
+        let s = parse(b"\x1b[=15;1u\x1b[=4;3uX");
+        assert_eq!(s.kbd.kitty_flags(false), 11);
+    }
+    #[test]
+    fn kitty_pop_empty_stack_resets_to_zero() {
+        let s = parse(b"\x1b[>7u\x1b[<u\x1b[<uX");
+        assert_eq!(s.kbd.kitty_flags(false), 0);
+    }
+    #[test]
+    fn kitty_stacks_are_per_screen() {
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(8, 24);
+        p.advance(&mut s, b"\x1b[>5u\x1b[?1049h\x1b[>9uX");
+        p.flush(&mut s);
+        assert_eq!(s.kbd.kitty_flags(true), 9, "alt screen flags");
+        assert_eq!(s.kbd.kitty_flags(false), 5, "main screen flags unchanged");
+    }
+    #[test]
+    fn kitty_flags_cleared_on_ris() {
+        let s = parse(b"\x1b[>15u\x1bcX");
+        assert_eq!(s.kbd.kitty_flags(false), 0, "RIS clears Kitty flags");
+        assert_eq!(s.kbd.modify_other_keys(), 0);
+    }
+    #[test]
+    fn kitty_flags_cleared_on_decstr() {
+        // Also set an underline color so DECSTR's cursor-rendition reset is
+        // covered (X is painted AFTER \e[!p, so it reflects the post-reset pen).
+        let s = parse(b"\x1b[>4;2m\x1b[>15u\x1b[58:5:9m\x1b[!pX");
+        assert_eq!(s.kbd.kitty_flags(false), 0, "DECSTR clears Kitty flags");
+        assert_eq!(s.kbd.modify_other_keys(), 0, "DECSTR clears modifyOtherKeys");
+        assert_eq!(
+            s.active.get_cell(0, 0).unwrap().underline_color,
+            crate::color::Color::Default,
+            "DECSTR resets the cursor's underline color"
+        );
     }
 }
