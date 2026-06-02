@@ -3,6 +3,7 @@
 pub mod args;
 pub mod error;
 pub mod kill;
+pub mod negotiate;
 pub mod pump;
 pub mod transport;
 pub mod tty;
@@ -14,7 +15,10 @@ pub use pump::{handshake_spawn, pump};
 pub use transport::{connect_or_spawn, default_socket_path};
 pub use tty::{HostTty, current_size};
 
-use plexy_glass_protocol::{ClientMsg, Codec, ServerMsg, SpawnSpec, client_handshake};
+use plexy_glass_protocol::{
+    ClientHello, ClientMsg, Codec, PROTOCOL_VERSION, ServerMsg, SpawnSpec, client_handshake,
+    client_handshake_with,
+};
 use std::os::fd::AsFd;
 use tokio::sync::mpsc;
 use tracing::info;
@@ -35,31 +39,44 @@ pub async fn run(
     let stream = connect_or_spawn(&socket).await?;
     let (mut reader, mut writer) = tokio::io::split(stream);
 
-    let server_hello = client_handshake(&mut reader, &mut writer).await?;
-    info!(daemon_pid = server_hello.daemon_pid, "connected to daemon");
-
     let stdin = tokio::io::stdin();
     let stdin_fd = stdin.as_fd();
     let mut tty_guard = HostTty::enter_raw(stdin_fd)?;
-    tty::install_emergency_restore(stdin_fd, tty_guard.original_termios());
-    // Enable SGR-encoded mouse coords (?1006h) and button-event tracking
-    // (?1002h, motion reported only while a button is held). ?1003h would
-    // also flood the daemon with hover motion events, and we don't use hover.
+
+    // --- Negotiation phase (runs in raw mode, before the dumb pump) ---
     use std::io::Write as _;
     let mut stdout = std::io::stdout();
-    let _ = stdout.write_all(b"\x1b[?1006h\x1b[?1002h");
+    // Probe the outer terminal for Kitty / XTVERSION support.
+    let _ = stdout.write_all(negotiate::PROBE);
     let _ = stdout.flush();
-    // Enable the kitty keyboard protocol so the daemon receives
-    // unambiguous modifier info. Terminals that don't support it
-    // silently ignore. Disabled in HostTty::restore.
-    let _ = stdout.write_all(b"\x1b[>1u");
+    // Read whatever the terminal replies within a short window. We read raw from
+    // the fd (the async stdin reader is not yet spawned), so a non-answering
+    // terminal can't hang us.
+    let probe_reply = negotiate::read_probe_reply(stdin_fd, std::time::Duration::from_millis(120));
+    let kbd = negotiate::classify(&probe_reply);
+    let caps = negotiate::EnabledCaps { kbd, focus_events: true, color_scheme: true };
+
+    // Enable SGR-encoded mouse coords (?1006h), button-event tracking (?1002h,
+    // motion only while a button is held; ?1003h would flood with hover), and
+    // bracketed paste (?2004h). These are kept OUT of `EnabledCaps` (and so out of
+    // its teardown inverse) because HostTty disables ?1006/?1002/?2004
+    // unconditionally on restore, and order relative to the kbd enables doesn't
+    // matter since DEC private modes are independent.
+    let _ = stdout.write_all(b"\x1b[?1006h\x1b[?1002h\x1b[?2004h");
+    // Enable exactly the keyboard/focus/theme caps we classified.
+    let _ = stdout.write_all(&caps.enable_bytes());
     let _ = stdout.flush();
-    // Enable bracketed paste mode so the host TTY wraps pasted bytes in
-    // \x1b[200~...\x1b[201~. The daemon's PasteParser recognizes the
-    // wrapper and forwards pastes to the active pane wrapped or stripped
-    // depending on whether that pane has its own bracketed-paste mode on.
-    let _ = stdout.write_all(b"\x1b[?2004h");
-    let _ = stdout.flush();
+
+    // Record the enabled set for both the normal and emergency teardown paths,
+    // then install the emergency restore (which reads the recorded caps).
+    tty::set_enabled_caps(caps);
+    tty::install_emergency_restore(stdin_fd, tty_guard.original_termios());
+
+    let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
+    let hello = ClientHello { version: PROTOCOL_VERSION, term, kbd };
+    let server_hello = client_handshake_with(&mut reader, &mut writer, hello).await?;
+    info!(daemon_pid = server_hello.daemon_pid, ?kbd, "connected to daemon");
+
     let initial_size = current_size(stdin_fd)?;
 
     let spec = spawn_cmd.unwrap_or_else(default_spawn_spec);

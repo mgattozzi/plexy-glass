@@ -1,10 +1,75 @@
 use crate::error::ClientError;
 use bytes::BytesMut;
-use plexy_glass_protocol::{ClientMsg, Codec, ExitStatus, PtySize, ServerMsg};
+use plexy_glass_protocol::{ClientMsg, Codec, ColorScheme, ExitStatus, PtySize, ServerMsg};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 const STDIN_CHUNK: usize = 4096;
+
+/// A control event the outer terminal sent on the input stream (focus / theme).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OuterEvent {
+    FocusIn,
+    FocusOut,
+    ColorScheme(ColorScheme),
+}
+
+/// Strip outer-terminal focus (`\e[I`/`\e[O`) and color-scheme
+/// (`\e[?997;1n`/`\e[?997;2n`) sequences from `buf` *in place*, returning them in
+/// order. Remaining bytes are ordinary input forwarded to the daemon.
+pub fn scan_outer_events(buf: &mut Vec<u8>) -> Vec<OuterEvent> {
+    let mut events = Vec::new();
+    let mut kept = Vec::with_capacity(buf.len());
+    let mut i = 0;
+    while i < buf.len() {
+        // `\e[I` / `\e[O`
+        if i + 2 < buf.len() && buf[i] == 0x1b && buf[i + 1] == b'[' {
+            if buf[i + 2] == b'I' {
+                events.push(OuterEvent::FocusIn);
+                i += 3;
+                continue;
+            }
+            if buf[i + 2] == b'O' {
+                events.push(OuterEvent::FocusOut);
+                i += 3;
+                continue;
+            }
+            // `\e[?997;Xn`
+            if let Some((scheme, len)) = parse_color_scheme(&buf[i..]) {
+                events.push(OuterEvent::ColorScheme(scheme));
+                i += len;
+                continue;
+            }
+        }
+        kept.push(buf[i]);
+        i += 1;
+    }
+    *buf = kept;
+    events
+}
+
+/// Parse a leading `\e[?997;1n` / `\e[?997;2n`. Returns `(scheme, bytes_consumed)`.
+fn parse_color_scheme(b: &[u8]) -> Option<(ColorScheme, usize)> {
+    const PREFIX: &[u8] = b"\x1b[?997;";
+    if !b.starts_with(PREFIX) {
+        return None;
+    }
+    let rest = &b[PREFIX.len()..];
+    let mut j = 0;
+    while j < rest.len() && rest[j].is_ascii_digit() {
+        j += 1;
+    }
+    if j == 0 || j >= rest.len() || rest[j] != b'n' {
+        return None;
+    }
+    let n: u32 = std::str::from_utf8(&rest[..j]).ok()?.parse().ok()?;
+    let scheme = match n {
+        1 => ColorScheme::Dark,
+        2 => ColorScheme::Light,
+        _ => return None,
+    };
+    Some((scheme, PREFIX.len() + j + 1))
+}
 
 /// Run the three concurrent pumps:
 ///   stdin  -> ClientMsg::Input(bytes)  -> daemon
@@ -67,9 +132,22 @@ where
                     // stdin closed; we keep the session alive until the child exits.
                     continue;
                 }
-                let chunk = stdin_buf.split_to(n).freeze();
-                let msg = ClientMsg::Input(chunk);
-                send_client_msg(&mut daemon_write, &msg).await?;
+                let mut chunk = stdin_buf.split_to(n).to_vec();
+                // Extract outer-terminal focus/theme events; relay them as
+                // dedicated `ClientMsg`s, forward the remaining bytes as Input.
+                let events = scan_outer_events(&mut chunk);
+                for ev in events {
+                    let msg = match ev {
+                        OuterEvent::FocusIn => ClientMsg::FocusIn,
+                        OuterEvent::FocusOut => ClientMsg::FocusOut,
+                        OuterEvent::ColorScheme(s) => ClientMsg::ColorScheme(s),
+                    };
+                    send_client_msg(&mut daemon_write, &msg).await?;
+                }
+                if !chunk.is_empty() {
+                    let msg = ClientMsg::Input(bytes::Bytes::from(chunk));
+                    send_client_msg(&mut daemon_write, &msg).await?;
+                }
             }
             // Client -> daemon (resize)
             Some(size) = resize_rx.recv() => {
@@ -168,5 +246,24 @@ mod tests {
         assert_eq!(&out, b"abc");
 
         server.await.unwrap();
+    }
+
+    #[test]
+    fn scan_outer_events_decodes_focus_and_color_scheme() {
+        // Interleaved with ordinary input; we must extract the three control
+        // messages and leave the rest as raw input bytes.
+        let mut input = b"a\x1b[Ib\x1b[O\x1b[?997;1nc\x1b[?997;2nd".to_vec();
+        let events = super::scan_outer_events(&mut input);
+        assert_eq!(
+            events,
+            vec![
+                OuterEvent::FocusIn,
+                OuterEvent::FocusOut,
+                OuterEvent::ColorScheme(plexy_glass_protocol::ColorScheme::Dark),
+                OuterEvent::ColorScheme(plexy_glass_protocol::ColorScheme::Light),
+            ]
+        );
+        // The control sequences are stripped; ordinary bytes survive in order.
+        assert_eq!(input, b"abcd");
     }
 }

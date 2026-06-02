@@ -64,10 +64,13 @@ impl HostTty {
         let fd = unsafe { BorrowedFd::borrow_raw(self.fd) };
         termios::tcsetattr(fd, SetArg::TCSANOW, &self.original)
             .map_err(|e| ClientError::Tty(e.to_string()))?;
-        // Disable bracketed paste, kitty keyboard protocol, mouse tracking,
-        // then re-enable cursor and exit alternate screen.
+        // Disable bracketed paste, mouse tracking, then re-enable cursor and
+        // exit alternate screen. The keyboard-protocol / focus / theme inverse
+        // (kitty pop, modkeys reset, ?1004l, ?2031l) is whatever negotiation
+        // actually enabled, see `negotiated_teardown_bytes`.
         let mut out = std::io::stdout();
-        let _ = out.write_all(b"\x1b[?2004l\x1b[<u\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l");
+        let _ = out.write_all(b"\x1b[?2004l\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l");
+        let _ = out.write_all(&negotiated_teardown_bytes());
         let _ = out.flush();
         self.restored = true;
         Ok(())
@@ -118,6 +121,22 @@ static EMERGENCY_FD: OnceLock<RawFd> = OnceLock::new();
 // Wrap it in a `Mutex` so the `OnceLock` is safe to share between threads.
 static EMERGENCY_TERMIOS: OnceLock<Mutex<Termios>> = OnceLock::new();
 static ARMED: AtomicBool = AtomicBool::new(false);
+static ENABLED_CAPS: OnceLock<crate::negotiate::EnabledCaps> = OnceLock::new();
+
+/// Record what the client enabled outward so both teardown paths emit the exact
+/// inverse. Call once, right after the negotiation phase.
+pub fn set_enabled_caps(caps: crate::negotiate::EnabledCaps) {
+    let _ = ENABLED_CAPS.set(caps);
+}
+
+/// The kbd/focus/theme teardown bytes (precise inverse of the enable set), or
+/// empty if negotiation never recorded caps.
+fn negotiated_teardown_bytes() -> Vec<u8> {
+    ENABLED_CAPS
+        .get()
+        .map(|c| c.teardown_bytes())
+        .unwrap_or_default()
+}
 
 /// Install a panic hook and SIGINT/SIGTERM/SIGHUP handlers that restore the
 /// host TTY before the process dies. Call this once, ideally right after
@@ -186,7 +205,8 @@ fn restore_from_static() {
     let fd = unsafe { BorrowedFd::borrow_raw(fd) };
     let _ = termios::tcsetattr(fd, SetArg::TCSANOW, &snap);
     let mut out = std::io::stdout();
-    let _ = out.write_all(b"\x1b[?2004l\x1b[<u\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l");
+    let _ = out.write_all(b"\x1b[?2004l\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l");
+    let _ = out.write_all(&negotiated_teardown_bytes());
     let _ = out.flush();
 }
 
