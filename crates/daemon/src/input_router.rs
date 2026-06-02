@@ -37,6 +37,16 @@ impl InputRouter {
         }
     }
 
+    /// Build a router whose key decode is scoped to the client's negotiated
+    /// outer-terminal protocol.
+    pub fn with_protocol(protocol: plexy_glass_keys::KeyboardProtocol) -> Self {
+        Self {
+            paste: PasteParser::new(),
+            mouse: MouseParser::new(),
+            keys: KeyParser::new().with_protocol(protocol),
+        }
+    }
+
     pub fn classify(&mut self, bytes: &[u8]) -> Vec<InputEvent> {
         let mut out = Vec::with_capacity(bytes.len());
         for &b in bytes {

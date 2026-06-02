@@ -1,16 +1,38 @@
 //! Byte stream → `KeyEvent` state machine.
 //!
 //! Recognizes the standard VT/xterm/SS3 key encodings plus kitty CSI-u
-//! sequences (added in Task 5). On bail, returns the buffered bytes
-//! verbatim so callers can pass them through to the shell.
+//! sequences (extended with colon sub-fields + protocol scoping). On bail,
+//! returns the buffered bytes verbatim so callers can pass them through to the
+//! shell.
 
-use plexy_glass_mux::{Direction, Key, KeyEvent, Modifiers};
+use plexy_glass_mux::{Direction, Key, KeyEvent, KeyEventKind, Modifiers};
 
 #[derive(Debug, Clone)]
 pub enum KeyParseOutput {
     Pending,
     Event { event: KeyEvent, bytes: Vec<u8> },
     Bytes(Vec<u8>),
+}
+
+/// Which keyboard protocol the *outer* terminal negotiated for this client.
+/// Threaded in so decode is deterministic instead of "accept all three at once".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeyboardProtocol {
+    Legacy,
+    ModifyOtherKeys,
+    Kitty,
+    /// Unknown (pre-handshake / older peer): permissive, so we accept Kitty
+    /// CSI-u *and* legacy, exactly as the parser did before this change.
+    #[default]
+    Permissive,
+}
+
+impl KeyboardProtocol {
+    /// Decode a wire modifier param (`1 + bitset`) into `Modifiers`. Shared with
+    /// the encoder (`encode::mods_param` is its inverse) so they cannot drift.
+    pub fn decode_mods_param(param: u32) -> Modifiers {
+        decode_xterm_mods(param)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,11 +44,34 @@ enum State {
     SawSs3,   // ESC O
 }
 
+/// One CSI parameter: a primary value plus its colon sub-fields.
+/// `\e[105:73;6u` parses as params `[ {sub:[105,73]}, {sub:[6]} ]`.
+#[derive(Debug, Clone, Default)]
+struct Param {
+    /// Each colon-separated field; `sub[0]` is the primary value. `None` = an
+    /// empty field (e.g. `2::5`) so callers can default it.
+    sub: Vec<Option<u32>>,
+}
+
+impl Param {
+    fn primary(&self) -> u32 {
+        self.sub.first().copied().flatten().unwrap_or(0)
+    }
+    fn sub_at(&self, i: usize) -> Option<u32> {
+        self.sub.get(i).copied().flatten()
+    }
+}
+
 pub struct KeyParser {
     state: State,
     buf: Vec<u8>,
-    params: Vec<u32>,
-    current_param: Option<u32>,
+    params: Vec<Param>,
+    /// Accumulator for the colon sub-field currently being read.
+    cur_sub: Option<u32>,
+    cur_sub_seen: bool,
+    cur_param_started: bool,
+    last_param_flushed: bool,
+    protocol: KeyboardProtocol,
 }
 
 impl Default for KeyParser {
@@ -41,8 +86,22 @@ impl KeyParser {
             state: State::Idle,
             buf: Vec::with_capacity(16),
             params: Vec::new(),
-            current_param: None,
+            cur_sub: None,
+            cur_sub_seen: false,
+            cur_param_started: false,
+            last_param_flushed: false,
+            protocol: KeyboardProtocol::Permissive,
         }
+    }
+
+    /// Build a parser whose decode is scoped to a negotiated protocol.
+    pub fn with_protocol(mut self, protocol: KeyboardProtocol) -> Self {
+        self.protocol = protocol;
+        self
+    }
+
+    pub fn set_protocol(&mut self, protocol: KeyboardProtocol) {
+        self.protocol = protocol;
     }
 
     pub fn consume(&mut self, byte: u8) -> KeyParseOutput {
@@ -117,24 +176,51 @@ impl KeyParser {
     fn step_csi(&mut self, byte: u8) -> KeyParseOutput {
         if byte.is_ascii_digit() {
             self.state = State::AccumCsi;
+            self.cur_param_started = true;
+            self.cur_sub_seen = true;
             let acc = self
-                .current_param
+                .cur_sub
                 .unwrap_or(0)
                 .saturating_mul(10)
                 .saturating_add(u32::from(byte - b'0'));
-            self.current_param = Some(acc);
+            self.cur_sub = Some(acc);
+            return KeyParseOutput::Pending;
+        }
+        if byte == b':' {
+            self.state = State::AccumCsi;
+            self.cur_param_started = true;
+            self.push_sub();
             return KeyParseOutput::Pending;
         }
         if byte == b';' {
             self.state = State::AccumCsi;
-            self.params.push(self.current_param.unwrap_or(0));
-            self.current_param = None;
+            self.flush_param();
             return KeyParseOutput::Pending;
         }
-        if let Some(p) = self.current_param.take() {
-            self.params.push(p);
+        if self.cur_param_started {
+            self.flush_param();
         }
         self.dispatch_csi(byte)
+    }
+
+    /// Close the current colon sub-field onto the current param.
+    fn push_sub(&mut self) {
+        self.cur_param_started = true;
+        if self.params.is_empty() || self.last_param_flushed {
+            self.params.push(Param::default());
+            self.last_param_flushed = false;
+        }
+        // invariant: just ensured at least one param exists above.
+        let p = self.params.last_mut().expect("param pushed above");
+        p.sub.push(if self.cur_sub_seen { self.cur_sub } else { None });
+        self.cur_sub = None;
+        self.cur_sub_seen = false;
+    }
+
+    /// Close the current param entirely (on `;` or the final byte).
+    fn flush_param(&mut self) {
+        self.push_sub();
+        self.last_param_flushed = true;
     }
 
     fn step_ss3(&mut self, byte: u8) -> KeyParseOutput {
@@ -158,38 +244,8 @@ impl KeyParser {
     }
 
     fn dispatch_csi(&mut self, byte: u8) -> KeyParseOutput {
-        let event_opt: Option<KeyEvent> = match (byte, self.params.as_slice()) {
-            (b'A', []) => Some(KeyEvent::plain(Key::Arrow(Direction::Up))),
-            (b'B', []) => Some(KeyEvent::plain(Key::Arrow(Direction::Down))),
-            (b'C', []) => Some(KeyEvent::plain(Key::Arrow(Direction::Right))),
-            (b'D', []) => Some(KeyEvent::plain(Key::Arrow(Direction::Left))),
-            (b'H', []) => Some(KeyEvent::plain(Key::Home)),
-            (b'F', []) => Some(KeyEvent::plain(Key::End)),
-            (b'~', [n]) => key_from_tilde(*n).map(KeyEvent::plain),
-            (b'Z', []) => Some(KeyEvent::new(Key::Tab, Modifiers::SHIFT)),
-            // Modified arrows / Home / End: CSI 1 ; <mods> <final>
-            (b'A', [1, m]) => Some(KeyEvent::new(Key::Arrow(Direction::Up),    decode_xterm_mods(*m))),
-            (b'B', [1, m]) => Some(KeyEvent::new(Key::Arrow(Direction::Down),  decode_xterm_mods(*m))),
-            (b'C', [1, m]) => Some(KeyEvent::new(Key::Arrow(Direction::Right), decode_xterm_mods(*m))),
-            (b'D', [1, m]) => Some(KeyEvent::new(Key::Arrow(Direction::Left),  decode_xterm_mods(*m))),
-            (b'H', [1, m]) => Some(KeyEvent::new(Key::Home, decode_xterm_mods(*m))),
-            (b'F', [1, m]) => Some(KeyEvent::new(Key::End,  decode_xterm_mods(*m))),
-            // F1-F4 with modifiers: CSI 1 ; <mods> P/Q/R/S
-            (b'P', [1, m]) => Some(KeyEvent::new(Key::Function(1), decode_xterm_mods(*m))),
-            (b'Q', [1, m]) => Some(KeyEvent::new(Key::Function(2), decode_xterm_mods(*m))),
-            (b'R', [1, m]) => Some(KeyEvent::new(Key::Function(3), decode_xterm_mods(*m))),
-            (b'S', [1, m]) => Some(KeyEvent::new(Key::Function(4), decode_xterm_mods(*m))),
-            // Modified tilde keys: CSI <n> ; <mods> ~
-            (b'~', [n, m]) => key_from_tilde(*n).map(|k| KeyEvent::new(k, decode_xterm_mods(*m))),
-            // Kitty CSI u: <codepoint> ; <mods> u  (mods optional)
-            (b'u', [code]) => kitty_key(*code, Modifiers::empty()),
-            (b'u', [code, m]) => kitty_key(*code, decode_xterm_mods(*m)),
-            // Future kitty extensions may add a third param (text-as-codepoint).
-            // We ignore params beyond the second for now.
-            (b'u', [code, m, ..]) => kitty_key(*code, decode_xterm_mods(*m)),
-            _ => None,
-        };
-        match event_opt {
+        let params = std::mem::take(&mut self.params);
+        match self.decode_csi(byte, &params) {
             Some(event) => {
                 let bytes = std::mem::take(&mut self.buf);
                 self.reset_state();
@@ -197,6 +253,75 @@ impl KeyParser {
             }
             None => self.bail(),
         }
+    }
+
+    fn decode_csi(&self, byte: u8, params: &[Param]) -> Option<KeyEvent> {
+        let p0 = params.first().map(Param::primary);
+        let p1 = params.get(1).map(Param::primary);
+        match (byte, p0, p1) {
+            (b'A', None, None) => Some(KeyEvent::plain(Key::Arrow(Direction::Up))),
+            (b'B', None, None) => Some(KeyEvent::plain(Key::Arrow(Direction::Down))),
+            (b'C', None, None) => Some(KeyEvent::plain(Key::Arrow(Direction::Right))),
+            (b'D', None, None) => Some(KeyEvent::plain(Key::Arrow(Direction::Left))),
+            (b'H', None, None) => Some(KeyEvent::plain(Key::Home)),
+            (b'F', None, None) => Some(KeyEvent::plain(Key::End)),
+            (b'~', Some(n), None) => key_from_tilde(n).map(KeyEvent::plain),
+            (b'Z', None, None) => Some(KeyEvent::new(Key::Tab, Modifiers::SHIFT)),
+            (b'A', Some(1), Some(m)) => Some(KeyEvent::new(Key::Arrow(Direction::Up),    decode_xterm_mods(m))),
+            (b'B', Some(1), Some(m)) => Some(KeyEvent::new(Key::Arrow(Direction::Down),  decode_xterm_mods(m))),
+            (b'C', Some(1), Some(m)) => Some(KeyEvent::new(Key::Arrow(Direction::Right), decode_xterm_mods(m))),
+            (b'D', Some(1), Some(m)) => Some(KeyEvent::new(Key::Arrow(Direction::Left),  decode_xterm_mods(m))),
+            (b'H', Some(1), Some(m)) => Some(KeyEvent::new(Key::Home, decode_xterm_mods(m))),
+            (b'F', Some(1), Some(m)) => Some(KeyEvent::new(Key::End,  decode_xterm_mods(m))),
+            (b'P', Some(1), Some(m)) => Some(KeyEvent::new(Key::Function(1), decode_xterm_mods(m))),
+            (b'Q', Some(1), Some(m)) => Some(KeyEvent::new(Key::Function(2), decode_xterm_mods(m))),
+            (b'R', Some(1), Some(m)) => Some(KeyEvent::new(Key::Function(3), decode_xterm_mods(m))),
+            (b'S', Some(1), Some(m)) => Some(KeyEvent::new(Key::Function(4), decode_xterm_mods(m))),
+            (b'~', Some(n), Some(m)) => key_from_tilde(n).map(|k| KeyEvent::new(k, decode_xterm_mods(m))),
+            (b'u', Some(_), _) => self.decode_kitty_u(params),
+            _ => None,
+        }
+    }
+
+    fn decode_kitty_u(&self, params: &[Param]) -> Option<KeyEvent> {
+        // CSI-u isn't the wire form for a Legacy or modifyOtherKeys client, so
+        // those strict modes ignore it (bail to raw bytes). Kitty and Permissive
+        // accept it.
+        if matches!(self.protocol, KeyboardProtocol::ModifyOtherKeys | KeyboardProtocol::Legacy) {
+            return None;
+        }
+        let key_param = params.first()?;
+        let code = key_param.primary();
+        // Alternates: code:shifted:base
+        let shifted = key_param.sub_at(1).and_then(char::from_u32);
+        let base_layout = key_param.sub_at(2).and_then(char::from_u32);
+        // Modifiers + event type live in param 2: mods[:event]. The wire mods
+        // param is 1-based; `.max(1)` only guards a malformed 0 (decode_xterm_mods
+        // already maps both 0 and 1 to "no modifiers").
+        let mods = params
+            .get(1)
+            .map(|p| decode_xterm_mods(p.primary().max(1)))
+            .unwrap_or_else(Modifiers::empty);
+        let kind = match params.get(1).and_then(|p| p.sub_at(1)).unwrap_or(1) {
+            2 => KeyEventKind::Repeat,
+            3 => KeyEventKind::Release,
+            _ => KeyEventKind::Press,
+        };
+        // Associated text: param 3, colon-separated codepoints.
+        let text = params.get(2).and_then(|p| {
+            let s: String = p
+                .sub
+                .iter()
+                .filter_map(|v| v.and_then(char::from_u32))
+                .collect();
+            (!s.is_empty()).then(|| smol_str::SmolStr::new(s))
+        });
+        let mut ev = kitty_key(code, mods)?;
+        ev.kind = kind;
+        ev.text = text;
+        ev.shifted = shifted;
+        ev.base_layout = base_layout;
+        Some(ev)
     }
 
     fn emit_simple(&mut self, key: Key, mods: Modifiers) -> KeyParseOutput {
@@ -217,7 +342,10 @@ impl KeyParser {
     fn reset_state(&mut self) {
         self.state = State::Idle;
         self.params.clear();
-        self.current_param = None;
+        self.cur_sub = None;
+        self.cur_sub_seen = false;
+        self.cur_param_started = false;
+        self.last_param_flushed = false;
     }
 }
 
@@ -504,5 +632,97 @@ mod tests {
         let e = last_event(b"\x1b[97u");
         assert_eq!(e.key, Key::Char('a'));
         assert!(e.mods.is_empty());
+    }
+
+    #[test]
+    fn kitty_event_type_release_decoded() {
+        // \e[97;5:3u -> Char('a'), Ctrl, Release (':3' = release subparam of mods)
+        let e = last_event(b"\x1b[97;5:3u");
+        assert_eq!(e.key, Key::Char('a'));
+        assert_eq!(e.mods, Modifiers::CTRL);
+        assert_eq!(e.kind, plexy_glass_mux::KeyEventKind::Release);
+    }
+
+    #[test]
+    fn kitty_event_type_repeat_decoded() {
+        assert_eq!(last_event(b"\x1b[97;5:2u").kind, plexy_glass_mux::KeyEventKind::Repeat);
+    }
+
+    #[test]
+    fn kitty_event_type_press_default() {
+        assert_eq!(last_event(b"\x1b[97;5u").kind, plexy_glass_mux::KeyEventKind::Press);
+        assert_eq!(last_event(b"\x1b[97;5:1u").kind, plexy_glass_mux::KeyEventKind::Press);
+    }
+
+    #[test]
+    fn kitty_associated_text_decoded() {
+        // \e[97;2;65u -> Char('a'), Shift, associated text "A" (param 3 = U+0041)
+        let e = last_event(b"\x1b[97;2;65u");
+        assert_eq!(e.key, Key::Char('a'));
+        assert_eq!(e.mods, Modifiers::SHIFT);
+        assert_eq!(e.text.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn kitty_associated_text_multi_codepoint() {
+        // Param 3 may carry several colon-separated codepoints.
+        let e = last_event(b"\x1b[97;2;65:66u");
+        assert_eq!(e.text.as_deref(), Some("AB"));
+    }
+
+    #[test]
+    fn kitty_alternate_keys_shifted() {
+        // \e[105:73;6u -> base i=105, shifted I=73, ctrl+shift
+        let e = last_event(b"\x1b[105:73;6u");
+        assert_eq!(e.key, Key::Char('i'));
+        assert_eq!(e.shifted, Some('I'));
+        assert_eq!(e.mods, Modifiers::CTRL | Modifiers::SHIFT);
+    }
+
+    #[test]
+    fn kitty_alternate_keys_base_layout() {
+        // code:shifted:base, the third colon field is the base-layout codepoint.
+        let e = last_event(b"\x1b[105:73:105;1u");
+        assert_eq!(e.key, Key::Char('i'));
+        assert_eq!(e.shifted, Some('I'));
+        assert_eq!(e.base_layout, Some('i'));
+    }
+
+    #[test]
+    fn kitty_meta_and_lock_modifiers_decoded() {
+        // mods 1 + (meta32 + caps64) = 97 -> META | CAPS_LOCK
+        let e = last_event(b"\x1b[97;97u");
+        assert!(e.mods.contains(Modifiers::META));
+        assert!(e.mods.contains(Modifiers::CAPS_LOCK));
+    }
+
+    #[test]
+    fn legacy_path_unaffected() {
+        let e = last_event(b"\x1b[1;5D");
+        assert_eq!(e.key, Key::Arrow(Direction::Left));
+        assert_eq!(e.mods, Modifiers::CTRL);
+        assert_eq!(e.kind, plexy_glass_mux::KeyEventKind::Press);
+    }
+
+    #[test]
+    fn legacy_protocol_rejects_csi_u() {
+        // Strict Legacy mode must NOT decode a Kitty CSI-u; it bails to the raw
+        // bytes for passthrough (the security-relevant gate).
+        let mut p = KeyParser::new().with_protocol(KeyboardProtocol::Legacy);
+        let mut last = KeyParseOutput::Pending;
+        for &b in b"\x1b[97;5u" {
+            last = p.consume(b);
+        }
+        assert!(matches!(last, KeyParseOutput::Bytes(_)));
+    }
+
+    #[test]
+    fn modify_other_keys_protocol_rejects_csi_u() {
+        let mut p = KeyParser::new().with_protocol(KeyboardProtocol::ModifyOtherKeys);
+        let mut last = KeyParseOutput::Pending;
+        for &b in b"\x1b[97;5u" {
+            last = p.consume(b);
+        }
+        assert!(matches!(last, KeyParseOutput::Bytes(_)));
     }
 }
