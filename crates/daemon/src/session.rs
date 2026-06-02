@@ -976,6 +976,32 @@ impl Session {
         Ok(())
     }
 
+    /// Re-encode a canonical key event into the active pane's negotiated
+    /// keyboard protocol and write the result. Falls back to legacy passthrough
+    /// of `raw_bytes` for panes that negotiated nothing.
+    pub async fn handle_key_event(
+        &self,
+        event: &plexy_glass_mux::KeyEvent,
+        raw_bytes: &[u8],
+    ) -> Result<(), DaemonError> {
+        let manager = self.window_manager.lock().await;
+        let win = manager.active_window();
+        if win.sync_input {
+            for id in win.layout().panes() {
+                if let Some(pane) = win.pane(id) {
+                    let bytes = encode_for_pane(pane, event, raw_bytes);
+                    pane.send_input(bytes::Bytes::from(bytes)).await.ok();
+                }
+            }
+        } else if let Some(pane) = win.active_pane() {
+            let bytes = encode_for_pane(pane, event, raw_bytes);
+            pane.send_input(bytes::Bytes::from(bytes)).await.ok();
+        }
+        drop(manager);
+        self.notify.notify_one();
+        Ok(())
+    }
+
     pub async fn handle_command(&self, cmd: plexy_glass_mux::Command) -> Result<(), DaemonError> {
         let mut manager = self.window_manager.lock().await;
         manager.handle_command(cmd)?;
@@ -1234,6 +1260,46 @@ impl Session {
                 }
             }
         }
+    }
+}
+
+/// Pick the encode target for a pane from its negotiated state. Precedence per
+/// the spec: Kitty flags > modifyOtherKeys level > Legacy.
+pub(crate) fn select_target(
+    kitty_flags: u8,
+    modify_other_keys: u8,
+) -> plexy_glass_keys::KeyboardTarget {
+    use plexy_glass_keys::KeyboardTarget;
+    if kitty_flags != 0 {
+        KeyboardTarget::Kitty(kitty_flags)
+    } else if modify_other_keys != 0 {
+        KeyboardTarget::ModifyOtherKeys(modify_other_keys)
+    } else {
+        KeyboardTarget::Legacy
+    }
+}
+
+/// Read the pane's negotiated keyboard/mode state and re-encode `event` for it.
+fn encode_for_pane(
+    pane: &crate::pane::Pane,
+    event: &plexy_glass_mux::KeyEvent,
+    raw_bytes: &[u8],
+) -> Vec<u8> {
+    let (kitty_flags, modkeys, app_cursor) = pane.with_screen(|s| {
+        let alt = s.modes.contains(plexy_glass_emulator::Modes::ALT_SCREEN);
+        (
+            s.kbd.kitty_flags(alt),
+            s.kbd.modify_other_keys(),
+            s.modes.contains(plexy_glass_emulator::Modes::APP_CURSOR_KEYS),
+        )
+    });
+    let target = select_target(kitty_flags, modkeys);
+    if matches!(target, plexy_glass_keys::KeyboardTarget::Legacy) {
+        // Legacy panes get exactly what the outer terminal sent, preserving
+        // any encoding the parser couldn't model losslessly.
+        raw_bytes.to_vec()
+    } else {
+        plexy_glass_keys::encode(event, target, app_cursor)
     }
 }
 
@@ -1991,5 +2057,23 @@ mod tests {
             }
             other => panic!("expected Split, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod reencode_tests {
+    use super::select_target;
+    use plexy_glass_keys::{encode, KeyboardTarget};
+    use plexy_glass_mux::{Key, KeyEvent, Modifiers};
+
+    #[test]
+    fn target_precedence_and_encoding() {
+        let e = KeyEvent::new(Key::Char('i'), Modifiers::CTRL | Modifiers::SHIFT);
+        // Kitty flags present -> CSI-u (wins over modkeys).
+        assert_eq!(encode(&e, select_target(1, 2), false), b"\x1b[105;6u");
+        // No Kitty, modifyOtherKeys level 2 -> 27-form.
+        assert_eq!(encode(&e, select_target(0, 2), false), b"\x1b[27;6;105~");
+        // Neither -> Legacy.
+        assert!(matches!(select_target(0, 0), KeyboardTarget::Legacy));
     }
 }

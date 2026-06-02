@@ -8,7 +8,7 @@ mod paste;
 mod spec;
 
 pub use build::build_keymap;
-pub use encode::legacy_bytes;
+pub use encode::{encode, legacy_bytes, KeyboardTarget};
 pub use parser::{KeyboardProtocol, KeyParseOutput, KeyParser};
 pub use paste::{PasteParseOutput, PasteParser};
 pub use spec::{

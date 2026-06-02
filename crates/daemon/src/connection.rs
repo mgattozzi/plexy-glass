@@ -452,7 +452,9 @@ where
                                             None => {}
                                         }
                                     } else {
-                                        let _ = session.handle_input_bytes(&bytes_back).await;
+                                        let _ = session
+                                            .handle_key_event(&event_ke, &bytes_back)
+                                            .await;
                                     }
                                 }
                                 KeymapAction::Command(cmd) => match cmd {
