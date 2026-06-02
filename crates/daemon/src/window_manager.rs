@@ -1238,8 +1238,9 @@ impl WindowManager {
         pane_id: PaneId,
         event: MouseEvent,
     ) -> Result<(), DaemonError> {
-        let bytes = encode_for_child(event, MouseEncoding::Sgr);
         if let Some(pane) = self.active_window().pane(pane_id).cloned() {
+            let encoding = pane.with_screen(|s| mouse_encoding_for(s.modes));
+            let bytes = encode_for_child(event, encoding);
             let _ = pane.send_input(bytes::Bytes::from(bytes)).await;
         }
         Ok(())
@@ -1479,6 +1480,23 @@ impl WindowManager {
 
     pub fn is_empty(&self) -> bool {
         self.windows.is_empty()
+    }
+}
+
+/// Derive the wire encoding from a pane's mouse-related modes. `?1006` (SGR)
+/// takes precedence; otherwise the most-specific legacy mode is used.
+fn mouse_encoding_for(modes: plexy_glass_emulator::Modes) -> MouseEncoding {
+    use plexy_glass_emulator::Modes;
+    if modes.contains(Modes::MOUSE_SGR) {
+        MouseEncoding::Sgr
+    } else if modes.contains(Modes::MOUSE_ANY) {
+        MouseEncoding::AnyEvent
+    } else if modes.contains(Modes::MOUSE_BTN) || modes.contains(Modes::MOUSE_BTN_EVENT) {
+        // ?1000 and ?1002 share the legacy button-event wire encoding.
+        MouseEncoding::ButtonEvent
+    } else {
+        // ?9 (X10) or no explicit mode: X10 click-only form.
+        MouseEncoding::X10
     }
 }
 

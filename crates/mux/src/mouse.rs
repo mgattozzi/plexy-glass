@@ -224,11 +224,10 @@ impl Default for MouseParser {
     }
 }
 
-/// Encode a typed `MouseEvent` as bytes to forward to a child that has
-/// requested mouse reporting. Only SGR encoding (`?1006`) is supported in
-/// Phase 4; other modes fall back to SGR (the apps we care about all
-/// support SGR).
-pub fn encode_for_child(event: MouseEvent, _mode: MouseEncoding) -> Vec<u8> {
+/// Encode a typed `MouseEvent` for forwarding to a child, in the encoding the
+/// pane negotiated. SGR (`?1006`) uses the extended `\e[<…` form; X10 / normal /
+/// any-event panes use the legacy `\e[M` form (button, col, row each +32).
+pub fn encode_for_child(event: MouseEvent, mode: MouseEncoding) -> Vec<u8> {
     let mut button_code: u32 = match event.button {
         MouseButton::Left => 0,
         MouseButton::Middle => 1,
@@ -260,10 +259,32 @@ pub fn encode_for_child(event: MouseEvent, _mode: MouseEncoding) -> Vec<u8> {
             }
         }
     }
-    let final_byte = if is_press { 'M' } else { 'm' };
     let row = event.row.saturating_add(1);
     let col = event.col.saturating_add(1);
-    format!("\x1b[<{button_code};{col};{row}{final_byte}").into_bytes()
+
+    match mode {
+        MouseEncoding::Sgr => {
+            let final_byte = if is_press { 'M' } else { 'm' };
+            format!("\x1b[<{button_code};{col};{row}{final_byte}").into_bytes()
+        }
+        MouseEncoding::X10 | MouseEncoding::ButtonEvent | MouseEncoding::AnyEvent => {
+            // Legacy X10/normal: ESC [ M Cb Cx Cy, each byte offset by 32. A
+            // release has no button identity, it is reported as code 3.
+            let cb = if is_press { button_code } else { 3 };
+            let enc = |v: u32| -> u8 {
+                let n = v.saturating_add(32).min(255);
+                // invariant: clamped to <= 255 above.
+                u8::try_from(n).unwrap_or(255)
+            };
+            vec![0x1b, b'[', b'M', enc(button_code_low(cb)), enc(u32::from(col)), enc(u32::from(row))]
+        }
+    }
+}
+
+/// Clamp the legacy button code into the single-byte (0..=223) range before the
+/// +32 offset is applied.
+fn button_code_low(cb: u32) -> u32 {
+    cb.min(223)
 }
 
 #[cfg(test)]
@@ -421,5 +442,36 @@ mod tests {
         };
         // shift (4) + alt (8) + ctrl (16) = 28.
         assert_eq!(encode_for_child(with_mods, MouseEncoding::Sgr), b"\x1b[<28;1;1M");
+    }
+
+    #[test]
+    fn encode_legacy_normal_press_uses_csi_m_form() {
+        // Under ?1000 (no ?1006) a left press emits the legacy X10/normal form:
+        // ESC [ M <b+32> <col+32> <row+32>.
+        let press = ev(MouseKind::Press, MouseButton::Left, 4, 9);
+        // button 0 -> 32 (space); col 9 -> 1-indexed 10 -> +32 = 42 ('*');
+        // row 4 -> 5 -> +32 = 37 ('%').
+        assert_eq!(encode_for_child(press, MouseEncoding::ButtonEvent), b"\x1b[M \x2a\x25");
+    }
+
+    #[test]
+    fn encode_legacy_release_is_button_3() {
+        // Legacy release has no button identity: code 3 -> +32 = '#'.
+        let rel = ev(MouseKind::Release, MouseButton::Left, 4, 9);
+        assert_eq!(encode_for_child(rel, MouseEncoding::ButtonEvent), b"\x1b[M#\x2a\x25");
+    }
+
+    #[test]
+    fn encode_legacy_wheel_up() {
+        // Wheel up legacy: code 64 -> +32 = 96 ('`'); coords 1,1 -> 33 ('!').
+        let wheel = ev(MouseKind::Wheel { delta: 3 }, MouseButton::None, 0, 0);
+        assert_eq!(encode_for_child(wheel, MouseEncoding::ButtonEvent), b"\x1b[M`\x21\x21");
+    }
+
+    #[test]
+    fn encode_sgr_still_emits_lt_form() {
+        // Under ?1006 the SGR form is unchanged.
+        let press = ev(MouseKind::Press, MouseButton::Left, 4, 9);
+        assert_eq!(encode_for_child(press, MouseEncoding::Sgr), b"\x1b[<0;10;5M");
     }
 }
