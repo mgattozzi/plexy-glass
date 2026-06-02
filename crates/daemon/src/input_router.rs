@@ -1,8 +1,22 @@
 //! Classifies raw client input bytes into typed key events, mouse events,
 //! paste blocks, or passthrough bytes.
 
-use plexy_glass_keys::{KeyParseOutput, KeyParser, PasteParseOutput, PasteParser};
+use plexy_glass_keys::{KeyParseOutput, KeyParser, KeyboardProtocol, PasteParseOutput, PasteParser};
 use plexy_glass_mux::{KeyEvent, MouseEvent, MouseParseAction, MouseParser};
+use plexy_glass_protocol::NegotiatedKbd;
+
+/// Map the client's negotiated outer-terminal protocol to the decode scope.
+/// A free fn rather than a `From` impl: the orphan rule forbids implementing a
+/// foreign trait for two foreign types from the daemon crate.
+pub fn decode_protocol(kbd: NegotiatedKbd) -> KeyboardProtocol {
+    match kbd {
+        NegotiatedKbd::Legacy => KeyboardProtocol::Legacy,
+        // The parser's mode covers both modifyOtherKeys levels and any Kitty flag
+        // set, so the negotiated level/flags are informational only here.
+        NegotiatedKbd::ModifyOtherKeys(_) => KeyboardProtocol::ModifyOtherKeys,
+        NegotiatedKbd::Kitty(_) => KeyboardProtocol::Kitty,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum InputEvent {
@@ -151,6 +165,18 @@ mod tests {
         let events = r.classify(b"\x1b[<0;10;5M");
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], InputEvent::Mouse(_)));
+    }
+
+    #[test]
+    fn decode_protocol_maps_negotiated_kbd() {
+        use plexy_glass_keys::KeyboardProtocol;
+        use plexy_glass_protocol::NegotiatedKbd;
+        assert_eq!(decode_protocol(NegotiatedKbd::Legacy), KeyboardProtocol::Legacy);
+        assert_eq!(
+            decode_protocol(NegotiatedKbd::ModifyOtherKeys(2)),
+            KeyboardProtocol::ModifyOtherKeys
+        );
+        assert_eq!(decode_protocol(NegotiatedKbd::Kitty(31)), KeyboardProtocol::Kitty);
     }
 
     #[test]

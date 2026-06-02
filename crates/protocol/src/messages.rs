@@ -55,11 +55,33 @@ pub enum ExitStatus {
 }
 
 /// Bumped any time `ClientMsg` or `ServerMsg` changes meaning.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
+/// Which keyboard protocol a client negotiated with its *outer* terminal. The
+/// daemon decodes that client's input bytes in this protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NegotiatedKbd {
+    Legacy,
+    /// modifyOtherKeys level (1 or 2).
+    ModifyOtherKeys(u8),
+    /// Kitty keyboard-protocol flags the client pushed on attach.
+    Kitty(u8),
+}
+
+/// Outer-terminal color preference relayed from the client's `\e[?997;Xn`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColorScheme {
+    Dark,
+    Light,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientHello {
     pub version: u16,
+    /// The client's `$TERM`, advertised to panes via XTGETTCAP `TN`.
+    pub term: String,
+    /// The keyboard protocol the client negotiated with its outer terminal.
+    pub kbd: NegotiatedKbd,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +107,12 @@ pub enum ClientMsg {
     Detach,
     Shutdown,
     ReloadConfig,
+    /// Outer terminal gained focus (`\e[I`).
+    FocusIn,
+    /// Outer terminal lost focus (`\e[O`).
+    FocusOut,
+    /// Outer terminal reported its color scheme (`\e[?997;Xn`).
+    ColorScheme(ColorScheme),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,7 +221,11 @@ mod tests {
 
     #[test]
     fn hello_round_trips() {
-        let client = ClientHello { version: PROTOCOL_VERSION };
+        let client = ClientHello {
+            version: PROTOCOL_VERSION,
+            term: "xterm-256color".into(),
+            kbd: NegotiatedKbd::Legacy,
+        };
         let server = ServerHello { version: PROTOCOL_VERSION, daemon_pid: 12345 };
 
         let cb = postcard::to_allocvec(&client).expect("serialize");
@@ -201,6 +233,46 @@ mod tests {
 
         assert_eq!(postcard::from_bytes::<ClientHello>(&cb).unwrap(), client);
         assert_eq!(postcard::from_bytes::<ServerHello>(&sb).unwrap(), server);
+    }
+
+    #[test]
+    fn negotiated_kbd_round_trips() {
+        for kbd in [
+            NegotiatedKbd::Legacy,
+            NegotiatedKbd::ModifyOtherKeys(2),
+            NegotiatedKbd::Kitty(31),
+        ] {
+            let bytes = postcard::to_allocvec(&kbd).expect("serialize");
+            let decoded: NegotiatedKbd = postcard::from_bytes(&bytes).expect("deserialize");
+            assert_eq!(kbd, decoded);
+        }
+    }
+
+    #[test]
+    fn client_hello_with_caps_round_trips() {
+        let hello = ClientHello {
+            version: PROTOCOL_VERSION,
+            term: "xterm-ghostty".into(),
+            kbd: NegotiatedKbd::Kitty(31),
+        };
+        let bytes = postcard::to_allocvec(&hello).expect("serialize");
+        let decoded: ClientHello = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(hello, decoded);
+    }
+
+    #[test]
+    fn focus_and_color_scheme_msgs_round_trip() {
+        let cases = vec![
+            ClientMsg::FocusIn,
+            ClientMsg::FocusOut,
+            ClientMsg::ColorScheme(ColorScheme::Dark),
+            ClientMsg::ColorScheme(ColorScheme::Light),
+        ];
+        for msg in cases {
+            let bytes = postcard::to_allocvec(&msg).expect("serialize");
+            let decoded: ClientMsg = postcard::from_bytes(&bytes).expect("deserialize");
+            assert_eq!(msg, decoded);
+        }
     }
 
     #[test]

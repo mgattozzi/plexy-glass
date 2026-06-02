@@ -1,5 +1,5 @@
 use crate::{
-    Codec, CodecError, ClientHello, PROTOCOL_VERSION, ProtocolError, ServerHello,
+    ClientHello, Codec, CodecError, NegotiatedKbd, PROTOCOL_VERSION, ProtocolError, ServerHello,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -15,18 +15,18 @@ pub enum HandshakeError {
     VersionMismatch { ours: u16, peer: u16 },
 }
 
-/// Run the client side of the handshake.
+/// Client handshake carrying the negotiated outer-terminal capabilities.
 ///
 /// Returns the server's hello once versions are confirmed compatible.
-pub async fn client_handshake<R, W>(
+pub async fn client_handshake_with<R, W>(
     reader: &mut R,
     writer: &mut W,
+    hello: ClientHello,
 ) -> Result<ServerHello, HandshakeError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let hello = ClientHello { version: PROTOCOL_VERSION };
     let bytes = postcard::to_allocvec(&hello).map_err(|e| CodecError::Encode(e.to_string()))?;
     Codec::write_frame(writer, &bytes).await?;
 
@@ -41,10 +41,32 @@ where
     Ok(server)
 }
 
-/// Run the server side.
+/// Convenience handshake for non-interactive subcommands (list/kill/reload):
+/// advertises `$TERM` and legacy keyboard.
+pub async fn client_handshake<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<ServerHello, HandshakeError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
+    let hello = ClientHello { version: PROTOCOL_VERSION, term, kbd: NegotiatedKbd::Legacy };
+    client_handshake_with(reader, writer, hello).await
+}
+
+/// Run the server side. Returns the client's hello.
 ///
-/// Returns the client's hello once versions match, otherwise sends a
-/// `ServerMsg::Error` and returns `VersionMismatch`.
+/// Version policy:
+/// - exact match → accept as sent.
+/// - older peer (peer < ours) → *if the frame still decodes into the current
+///   `ClientHello` shape* (postcard is not forward-compatible, so a genuinely
+///   older wire layout fails to decode before this check and surfaces as
+///   `HandshakeError::Codec`, a clean connection failure), force `kbd = Legacy`
+///   and proceed, so input falls back to legacy decode + raw passthrough.
+/// - newer peer (peer > ours) → we cannot have decoded the hello reliably; send
+///   a structured error and return `VersionMismatch`.
 pub async fn server_handshake<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -55,12 +77,13 @@ where
     W: AsyncWrite + Unpin,
 {
     let frame = Codec::read_frame(reader).await?.ok_or(HandshakeError::PeerClosed)?;
-    let client: ClientHello = postcard::from_bytes(&frame).map_err(CodecError::from)?;
+    let mut client: ClientHello = postcard::from_bytes(&frame).map_err(CodecError::from)?;
 
-    if client.version != PROTOCOL_VERSION {
+    if client.version > PROTOCOL_VERSION {
         // Send our hello first so the peer can decode a structured error.
         let our_hello = ServerHello { version: PROTOCOL_VERSION, daemon_pid };
-        let bytes = postcard::to_allocvec(&our_hello).map_err(|e| CodecError::Encode(e.to_string()))?;
+        let bytes =
+            postcard::to_allocvec(&our_hello).map_err(|e| CodecError::Encode(e.to_string()))?;
         Codec::write_frame(writer, &bytes).await?;
 
         // Then surface the mismatch as a wire error.
@@ -75,6 +98,13 @@ where
             ours: PROTOCOL_VERSION,
             peer: client.version,
         });
+    }
+
+    if client.version < PROTOCOL_VERSION {
+        // Graceful downgrade (only reached when the older-versioned frame still
+        // decoded into the current struct above): never trust an older peer's
+        // `kbd`; legacy decode is always safe.
+        client.kbd = NegotiatedKbd::Legacy;
     }
 
     let our_hello = ServerHello { version: PROTOCOL_VERSION, daemon_pid };
@@ -115,8 +145,9 @@ mod tests {
         let (mut a, server_side) = duplex(1024);
         let (mut sr, mut sw) = tokio::io::split(server_side);
 
-        // Write a bogus ClientHello.
-        let bogus = ClientHello { version: 999 };
+        // Write a bogus (NEWER) ClientHello: we cannot decode a newer wire
+        // safely, so the server must still reject it.
+        let bogus = ClientHello { version: 999, term: "x".into(), kbd: NegotiatedKbd::Legacy };
         let bytes = postcard::to_allocvec(&bogus).unwrap();
         Codec::write_frame(&mut a, &bytes).await.unwrap();
 
@@ -128,5 +159,26 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn older_peer_negotiates_legacy_instead_of_erroring() {
+        // Server speaks PROTOCOL_VERSION; an older client sends a down-version
+        // hello. The server must NOT error: it downgrades the recorded caps to
+        // Legacy and proceeds.
+        let (mut a, server_side) = duplex(1024);
+        let (mut sr, mut sw) = tokio::io::split(server_side);
+
+        let bogus = ClientHello {
+            version: PROTOCOL_VERSION - 1,
+            term: "vt100".into(),
+            kbd: NegotiatedKbd::Kitty(31),
+        };
+        let bytes = postcard::to_allocvec(&bogus).unwrap();
+        Codec::write_frame(&mut a, &bytes).await.unwrap();
+
+        let client = server_handshake(&mut sr, &mut sw, 1).await.unwrap();
+        assert_eq!(client.version, PROTOCOL_VERSION - 1);
+        assert_eq!(client.kbd, NegotiatedKbd::Legacy, "old peer downgraded to legacy");
     }
 }

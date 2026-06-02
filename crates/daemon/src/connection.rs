@@ -1,8 +1,8 @@
 //! One connection from a client.
 
 use crate::{
-    InputEvent, InputRouter, error::DaemonError, registry::SessionRegistry, renderer::Renderer,
-    session::Session,
+    InputEvent, InputRouter, error::DaemonError, input_router::decode_protocol,
+    registry::SessionRegistry, renderer::Renderer, session::Session,
 };
 use plexy_glass_mux::{Command, KeymapAction, PromptCommand, VirtualScreen};
 use plexy_glass_protocol::{
@@ -26,7 +26,7 @@ impl Connection {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let (mut reader, mut writer) = tokio::io::split(stream);
-        server_handshake(&mut reader, &mut writer, daemon_pid).await?;
+        let client_hello = server_handshake(&mut reader, &mut writer, daemon_pid).await?;
 
         let frame = Codec::read_frame(&mut reader).await?.ok_or_else(|| {
             DaemonError::Io(std::io::Error::other("client closed before first message"))
@@ -60,8 +60,11 @@ impl Connection {
                 Err(e) => Err(e),
             },
             ClientMsg::AttachOrCreate { name, create_if_missing, cmd, size } => {
-                serve_attach(reader, writer, registry, name, create_if_missing, cmd, size, config)
-                    .await
+                serve_attach(
+                    reader, writer, registry, name, create_if_missing, cmd, size, config,
+                    client_hello,
+                )
+                .await
             }
             ClientMsg::ReloadConfig => {
                 let error = match registry.reload_config().await {
@@ -103,11 +106,20 @@ async fn serve_attach<R, W>(
     cmd: Option<SpawnSpec>,
     mut size: PtySize,
     config: Arc<plexy_glass_config::Config>,
+    client_hello: plexy_glass_protocol::ClientHello,
 ) -> Result<(), DaemonError>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    // Per-connection decode context from the handshake. `kbd` scopes THIS
+    // client's key decode (deterministic, replacing the Permissive default).
+    // `term` is informational only: XTGETTCAP TN comes from the pane's own
+    // `$TERM` at spawn, never a per-client value (multi-client), so it stays
+    // unused here.
+    let _client_term = client_hello.term;
+    let client_kbd = client_hello.kbd;
+
     // Resolve or create the session. `session` is reassigned in place by
     // `switch_session` when the client switches to another session.
     let mut session = match name {
@@ -210,8 +222,9 @@ where
         let _ = renderer.run(frame_rx, switch_rx, writer).await;
     });
 
-    // Input loop.
-    let mut router = InputRouter::new();
+    // Input loop. Scope key decode to the client's negotiated outer-terminal
+    // protocol (older/unknown peers downgraded to Legacy upstream).
+    let mut router = InputRouter::with_protocol(decode_protocol(client_kbd));
     let mut keymap = plexy_glass_keys::build_keymap(&config.keymap);
     let prefix_active = Arc::new(AtomicBool::new(false));
 
@@ -554,6 +567,10 @@ where
             }
             ClientMsg::Detach => break,
             ClientMsg::Shutdown => break,
+            // Outer-terminal focus + color-scheme events. Decoded now; routing to
+            // the focused/subscribing panes is wired in Task 15. Explicit arms (vs
+            // the `_` catch-all) so that work has a marked starting point.
+            ClientMsg::FocusIn | ClientMsg::FocusOut | ClientMsg::ColorScheme(_) => {}
             _ => {}
         }
     }
