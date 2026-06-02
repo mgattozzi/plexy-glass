@@ -471,7 +471,7 @@ where
                                         }
                                     } else {
                                         let _ = session
-                                            .handle_key_event(&event_ke, &bytes_back)
+                                            .handle_key_event(&event_ke, &bytes_back, client_kbd)
                                             .await;
                                     }
                                 }
@@ -1987,6 +1987,184 @@ mod tests {
             leaked
         };
         assert!(!leaked, "non-subscriber must not receive \\e[I");
+
+        server.abort();
+    }
+
+    // A ClientMsg::ColorScheme(Dark) forwards `\e[?997;1n` to a pane ONLY if
+    // that pane subscribed via ?2031 (COLOR_SCHEME_UPDATES). Mirrors the
+    // focus-in test: the cooked PTY echoes the control bytes in caret notation,
+    // so `\x1b[?997;1n` comes back as `^[[?997;1n`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn color_scheme_reaches_only_a_subscribing_pane() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let _ = crate::persist::delete_session("themert");
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::AttachOrCreate {
+                name: Some("themert".into()),
+                create_if_missing: true,
+                cmd: Some(cat()),
+                size,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::spawn(async move {
+            let mut b = [0u8; 4096];
+            while cr.read(&mut b).await.unwrap_or(0) > 0 {}
+        });
+
+        // Wait for the pane, then turn ON `?2031` (`COLOR_SCHEME_UPDATES`) directly.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(s) = registry.get("themert").await {
+                let m = s.window_manager.lock().await;
+                if let Some(p) = m.active_window().active_pane() {
+                    p.with_screen_mut(|sc| {
+                        sc.modes.insert(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES)
+                    });
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "pane never appeared");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Subscribe BEFORE sending so we don't miss the echo. The cooked PTY
+        // echoes `\x1b[?997;1n` as the printable `^[[?997;1n`.
+        const ECHOED_DARK: &[u8] = b"^[[?997;1n";
+        let got = {
+            let s = registry.get("themert").await.unwrap();
+            let mut rx = {
+                let m = s.window_manager.lock().await;
+                m.active_window().active_pane().unwrap().subscribe_output()
+            };
+            Codec::write_frame(
+                &mut cw,
+                &postcard::to_allocvec(&ClientMsg::ColorScheme(
+                    plexy_glass_protocol::ColorScheme::Dark,
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            let mut acc: Vec<u8> = Vec::new();
+            let mut seen = false;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if let Ok(Ok(b)) =
+                    tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+                {
+                    acc.extend_from_slice(&b);
+                    if acc.windows(ECHOED_DARK.len()).any(|w| w == ECHOED_DARK) {
+                        seen = true;
+                        break;
+                    }
+                }
+            }
+            seen
+        };
+        assert!(got, "subscribing pane never received \\e[?997;1n (as ^[[?997;1n)");
+
+        server.abort();
+    }
+
+    // A pane WITHOUT ?2031 receives no color-scheme report.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn color_scheme_is_dropped_for_non_subscriber() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let _ = crate::persist::delete_session("notheme");
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::AttachOrCreate {
+                name: Some("notheme".into()),
+                create_if_missing: true,
+                cmd: Some(cat()),
+                size,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::spawn(async move {
+            let mut b = [0u8; 4096];
+            while cr.read(&mut b).await.unwrap_or(0) > 0 {}
+        });
+
+        // Wait for the pane (`?2031` left OFF).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut rx = loop {
+            if let Some(s) = registry.get("notheme").await {
+                let m = s.window_manager.lock().await;
+                if let Some(p) = m.active_window().active_pane() {
+                    break p.subscribe_output();
+                }
+            }
+            assert!(Instant::now() < deadline, "pane never appeared");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::ColorScheme(
+                plexy_glass_protocol::ColorScheme::Dark,
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        const ECHOED_DARK: &[u8] = b"^[[?997;1n";
+        let leaked = {
+            let mut acc: Vec<u8> = Vec::new();
+            let mut leaked = false;
+            let deadline = Instant::now() + Duration::from_millis(600);
+            while Instant::now() < deadline {
+                if let Ok(Ok(b)) =
+                    tokio::time::timeout(Duration::from_millis(150), rx.recv()).await
+                {
+                    acc.extend_from_slice(&b);
+                    if acc.windows(ECHOED_DARK.len()).any(|w| w == ECHOED_DARK) {
+                        leaked = true;
+                        break;
+                    }
+                }
+            }
+            leaked
+        };
+        assert!(!leaked, "non-subscriber must not receive \\e[?997;1n");
 
         server.abort();
     }

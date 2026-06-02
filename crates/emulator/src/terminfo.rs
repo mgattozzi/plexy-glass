@@ -19,8 +19,21 @@ pub enum Capability {
 
 /// The parameterized colored-underline setter (G9, honest because Phase 0
 /// renders it). Kitty/foot's exact `Setulc` string.
+///
+/// Underline-style honesty: we render the underline COLOR (`Setulc` / SGR 58)
+/// end-to-end, but currently FLATTEN the underline STYLE to a plain underline.
+/// `handle_sgr` maps every `4:x` sub-parameter to `4`/`24`, and the diff
+/// renderer emits only `\x1b[4m`, so `4:3` (curly) renders as a straight
+/// underline. Advertising `Smulx` is intentional: the result is a
+/// colored-but-straight underline, a graceful degradation that is strictly
+/// better than dropping `Smulx` (which would also lose the color). Modeling
+/// distinct underline styles (curly/dotted/dashed) end-to-end is a documented
+/// follow-up.
 const SETULC: &str = "\\E[58:2:%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m";
 /// Styled-underline (undercurl) selector, unlocks `4:3` undercurl in vim/nvim.
+/// Note that the STYLE is flattened to a plain underline (see `SETULC` above);
+/// only the underline color survives. We still advertise it because colored >
+/// uncolored, and distinct styles are a documented follow-up.
 const SMULX: &str = "\\E[4:%p1%dm";
 const SETRGBF: &str = "\\E[38:2:%p1%d:%p2%d:%p3%dm";
 const SETRGBB: &str = "\\E[48:2:%p1%d:%p2%d:%p3%dm";

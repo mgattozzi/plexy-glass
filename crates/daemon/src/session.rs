@@ -2,7 +2,7 @@
 
 use crate::{error::DaemonError, window_manager::WindowManager};
 use plexy_glass_mux::{PaneId, VirtualScreen, WindowId};
-use plexy_glass_protocol::{ProtocolError, PtySize, SessionEntry, SpawnSpec};
+use plexy_glass_protocol::{NegotiatedKbd, ProtocolError, PtySize, SessionEntry, SpawnSpec};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::SystemTime;
@@ -1036,24 +1036,32 @@ impl Session {
     }
 
     /// Re-encode a canonical key event into the active pane's negotiated
-    /// keyboard protocol and write the result. Falls back to legacy passthrough
-    /// of `raw_bytes` for panes that negotiated nothing.
+    /// keyboard protocol and write the result.
+    ///
+    /// Decode is per-CONNECTION (the client's outer-terminal protocol,
+    /// `client_kbd`) and encode is per-PANE (what the child negotiated); they
+    /// compose independently. For a Legacy pane, `raw_bytes` is only forwarded
+    /// verbatim when the client is ALSO Legacy. Otherwise the incoming bytes
+    /// are rich CSI-u/27-form (the client's outer terminal is Kitty/
+    /// modifyOtherKeys) and must be down-converted to legacy. See
+    /// `reencode_input`.
     pub async fn handle_key_event(
         &self,
         event: &plexy_glass_mux::KeyEvent,
         raw_bytes: &[u8],
+        client_kbd: NegotiatedKbd,
     ) -> Result<(), DaemonError> {
         let manager = self.window_manager.lock().await;
         let win = manager.active_window();
         if win.sync_input {
             for id in win.layout().panes() {
                 if let Some(pane) = win.pane(id) {
-                    let bytes = encode_for_pane(pane, event, raw_bytes);
+                    let bytes = encode_for_pane(pane, event, raw_bytes, client_kbd);
                     pane.send_input(bytes::Bytes::from(bytes)).await.ok();
                 }
             }
         } else if let Some(pane) = win.active_pane() {
-            let bytes = encode_for_pane(pane, event, raw_bytes);
+            let bytes = encode_for_pane(pane, event, raw_bytes, client_kbd);
             pane.send_input(bytes::Bytes::from(bytes)).await.ok();
         }
         drop(manager);
@@ -1338,11 +1346,52 @@ pub(crate) fn select_target(
     }
 }
 
-/// Read the pane's negotiated keyboard/mode state and re-encode `event` for it.
+/// Pure re-encode decision: given the per-connection `client_kbd` (the protocol
+/// the client's OUTER terminal speaks, in which `raw_bytes` are already encoded)
+/// and the per-pane negotiated state, produce the bytes to forward to the child.
+///
+/// Decode (connection) and encode (pane) compose independently:
+/// - pane target Kitty/modifyOtherKeys → `encode` to that protocol.
+/// - pane target Legacy:
+///   - Legacy client → `raw_bytes` verbatim. The incoming bytes are ALREADY
+///     legacy, and raw passthrough is lossless while `encode(Legacy)` is lossy
+///     for some keys (`legacy_bytes` returns empty for modified Tab/Enter/Escape
+///     and unmatched function keys), so passthrough MUST be preserved here.
+///   - non-Legacy client (Kitty/modifyOtherKeys outer terminal, so `raw_bytes`
+///     are rich CSI-u/27-form) → down-convert via `encode(.., Legacy, ..)`.
+///     Forwarding the rich bytes verbatim would break every keystroke for a
+///     child that never negotiated those protocols (plain bash/vim/less/python).
+fn reencode_input(
+    client_kbd: NegotiatedKbd,
+    pane_kitty_flags: u8,
+    pane_modkeys: u8,
+    app_cursor: bool,
+    event: &plexy_glass_mux::KeyEvent,
+    raw_bytes: &[u8],
+) -> Vec<u8> {
+    use plexy_glass_keys::KeyboardTarget;
+    let target = select_target(pane_kitty_flags, pane_modkeys);
+    match target {
+        KeyboardTarget::Legacy => {
+            if matches!(client_kbd, NegotiatedKbd::Legacy) {
+                raw_bytes.to_vec()
+            } else {
+                plexy_glass_keys::encode(event, KeyboardTarget::Legacy, app_cursor)
+            }
+        }
+        _ => plexy_glass_keys::encode(event, target, app_cursor),
+    }
+}
+
+/// Read the pane's negotiated keyboard/mode state and re-encode `event` for it,
+/// threading the per-connection `client_kbd` so a rich-protocol client into a
+/// Legacy pane is down-converted rather than forwarded verbatim. The decision
+/// itself lives in the pure `reencode_input` helper (unit-tested directly).
 fn encode_for_pane(
     pane: &crate::pane::Pane,
     event: &plexy_glass_mux::KeyEvent,
     raw_bytes: &[u8],
+    client_kbd: NegotiatedKbd,
 ) -> Vec<u8> {
     let (kitty_flags, modkeys, app_cursor) = pane.with_screen(|s| {
         let alt = s.modes.contains(plexy_glass_emulator::Modes::ALT_SCREEN);
@@ -1352,14 +1401,7 @@ fn encode_for_pane(
             s.modes.contains(plexy_glass_emulator::Modes::APP_CURSOR_KEYS),
         )
     });
-    let target = select_target(kitty_flags, modkeys);
-    if matches!(target, plexy_glass_keys::KeyboardTarget::Legacy) {
-        // Legacy panes get exactly what the outer terminal sent, preserving
-        // any encoding the parser couldn't model losslessly.
-        raw_bytes.to_vec()
-    } else {
-        plexy_glass_keys::encode(event, target, app_cursor)
-    }
+    reencode_input(client_kbd, kitty_flags, modkeys, app_cursor, event, raw_bytes)
 }
 
 impl Drop for Session {
@@ -2121,9 +2163,10 @@ mod tests {
 
 #[cfg(test)]
 mod reencode_tests {
-    use super::select_target;
+    use super::{reencode_input, select_target};
     use plexy_glass_keys::{encode, KeyboardTarget};
     use plexy_glass_mux::{Key, KeyEvent, Modifiers};
+    use plexy_glass_protocol::NegotiatedKbd;
 
     #[test]
     fn target_precedence_and_encoding() {
@@ -2134,5 +2177,59 @@ mod reencode_tests {
         assert_eq!(encode(&e, select_target(0, 2), false), b"\x1b[27;6;105~");
         // Neither -> Legacy.
         assert!(matches!(select_target(0, 0), KeyboardTarget::Legacy));
+    }
+
+    // BLOCKER regression: a Kitty-capable client's OUTER terminal emits CSI-u
+    // for every key (`a`->\e[97u, Ctrl+a->\e[97;5u). Forwarding those bytes
+    // verbatim into a default un-negotiated (Legacy) pane breaks every
+    // keystroke. The re-encode stage must DOWN-CONVERT to legacy.
+    #[test]
+    fn kitty_client_into_legacy_pane_downconverts() {
+        // Plain `a`: \e[97u -> "a".
+        let a = KeyEvent::new(Key::Char('a'), Modifiers::empty());
+        assert_eq!(
+            reencode_input(NegotiatedKbd::Kitty(31), 0, 0, false, &a, b"\x1b[97u"),
+            b"a",
+        );
+        // Ctrl+a: \e[97;5u -> 0x01 (SOH), the legacy control byte.
+        let ctrl_a = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
+        assert_eq!(
+            reencode_input(NegotiatedKbd::Kitty(31), 0, 0, false, &ctrl_a, b"\x1b[97;5u"),
+            vec![0x01],
+        );
+    }
+
+    // A genuinely Legacy client into a Legacy pane keeps lossless raw
+    // passthrough: the incoming bytes are already legacy, and passthrough
+    // preserves anything the parser couldn't model.
+    #[test]
+    fn legacy_client_into_legacy_pane_passes_raw() {
+        let a = KeyEvent::plain(Key::Char('a'));
+        assert_eq!(
+            reencode_input(NegotiatedKbd::Legacy, 0, 0, false, &a, b"a"),
+            b"a",
+        );
+        // A byte the parser couldn't model losslessly must pass through
+        // unchanged. The event here is irrelevant for a Legacy client; only the
+        // raw bytes matter.
+        let raw = b"\x1b[1;2R"; // e.g. an unmodeled DSR-ish report
+        assert_eq!(
+            reencode_input(NegotiatedKbd::Legacy, 0, 0, false, &a, raw),
+            raw,
+        );
+    }
+
+    // A Kitty client into a Kitty pane re-encodes to the pane's Kitty form
+    // (mirrors target_precedence_and_encoding's Kitty case).
+    #[test]
+    fn kitty_client_into_kitty_pane_reencodes() {
+        let e = KeyEvent::new(Key::Char('i'), Modifiers::CTRL | Modifiers::SHIFT);
+        // Non-zero pane kitty flags mean we go through
+        // `encode(.., Kitty(flags), ..)`, and `raw_bytes` are ignored on the
+        // encode path.
+        assert_eq!(
+            reencode_input(NegotiatedKbd::Kitty(31), 1, 0, false, &e, b"\x1b[105;6u"),
+            encode(&e, KeyboardTarget::Kitty(1), false),
+        );
     }
 }
