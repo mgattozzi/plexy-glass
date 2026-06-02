@@ -17,6 +17,7 @@ pub mod modes;
 pub mod reflow;
 pub mod scrollback;
 pub mod tabs;
+pub mod terminfo;
 pub mod width;
 
 // These land in later tasks; declared here as placeholders so downstream

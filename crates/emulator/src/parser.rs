@@ -10,11 +10,19 @@ pub trait ScreenOps {
     fn handle_csi(&mut self, params: &vte::Params, intermediates: &[u8], action: char);
     fn handle_osc(&mut self, params: &[&[u8]]);
     fn handle_esc(&mut self, intermediates: &[u8], byte: u8);
+    /// A complete DCS string (intermediates/action/params + payload), delivered
+    /// at `unhook`. Used for XTGETTCAP (`DCS +q …`).
+    fn handle_dcs(&mut self, intermediates: &[u8], action: u8, params: &[Vec<u16>], payload: &[u8]);
 }
 
 pub struct Parser {
     vte: vte::Parser,
     pending: String,
+    dcs_intermediates: Vec<u8>,
+    dcs_action: u8,
+    dcs_params: Vec<Vec<u16>>,
+    dcs_payload: Vec<u8>,
+    in_dcs: bool,
 }
 
 impl Parser {
@@ -22,6 +30,11 @@ impl Parser {
         Self {
             vte: vte::Parser::new(),
             pending: String::new(),
+            dcs_intermediates: Vec::new(),
+            dcs_action: 0,
+            dcs_params: Vec::new(),
+            dcs_payload: Vec::new(),
+            in_dcs: false,
         }
     }
 
@@ -29,6 +42,11 @@ impl Parser {
         let mut perf = Performer {
             screen,
             pending: &mut self.pending,
+            dcs_intermediates: &mut self.dcs_intermediates,
+            dcs_action: &mut self.dcs_action,
+            dcs_params: &mut self.dcs_params,
+            dcs_payload: &mut self.dcs_payload,
+            in_dcs: &mut self.in_dcs,
         };
         self.vte.advance(&mut perf, bytes);
         // Flush any trailing complete grapheme. The final byte may have left a
@@ -60,6 +78,11 @@ impl Default for Parser {
 struct Performer<'a, S: ScreenOps> {
     screen: &'a mut S,
     pending: &'a mut String,
+    dcs_intermediates: &'a mut Vec<u8>,
+    dcs_action: &'a mut u8,
+    dcs_params: &'a mut Vec<Vec<u16>>,
+    dcs_payload: &'a mut Vec<u8>,
+    in_dcs: &'a mut bool,
 }
 
 impl<S: ScreenOps> Performer<'_, S> {
@@ -126,14 +149,47 @@ impl<S: ScreenOps> vte::Perform for Performer<'_, S> {
         self.screen.handle_esc(intermediates, byte);
     }
 
-    fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
-    fn put(&mut self, _byte: u8) {}
-    fn unhook(&mut self) {}
+    fn hook(&mut self, params: &vte::Params, intermediates: &[u8], _ignore: bool, action: char) {
+        self.flush_all();
+        *self.in_dcs = true;
+        *self.dcs_action = action as u8;
+        self.dcs_intermediates.clear();
+        self.dcs_intermediates.extend_from_slice(intermediates);
+        self.dcs_params.clear();
+        self.dcs_params.extend(params.iter().map(|g| g.to_vec()));
+        self.dcs_payload.clear();
+    }
+
+    fn put(&mut self, byte: u8) {
+        if *self.in_dcs {
+            // Bound the payload so a child can't OOM us via a giant DCS.
+            const DCS_CAP: usize = 64 * 1024;
+            if self.dcs_payload.len() < DCS_CAP {
+                self.dcs_payload.push(byte);
+            }
+        }
+    }
+
+    fn unhook(&mut self) {
+        if *self.in_dcs {
+            *self.in_dcs = false;
+            self.screen.handle_dcs(
+                self.dcs_intermediates,
+                *self.dcs_action,
+                self.dcs_params,
+                self.dcs_payload,
+            );
+            self.dcs_payload.clear();
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A captured DCS dispatch: (intermediates, action, params, payload).
+    type DcsRecord = (Vec<u8>, u8, Vec<Vec<u16>>, Vec<u8>);
 
     #[derive(Default)]
     struct MockScreen {
@@ -142,6 +198,7 @@ mod tests {
         csi: Vec<(Vec<Vec<u16>>, Vec<u8>, char)>,
         osc: Vec<Vec<Vec<u8>>>,
         esc: Vec<(Vec<u8>, u8)>,
+        dcs: Vec<DcsRecord>,
     }
 
     impl ScreenOps for MockScreen {
@@ -160,6 +217,20 @@ mod tests {
         }
         fn handle_esc(&mut self, intermediates: &[u8], byte: u8) {
             self.esc.push((intermediates.to_vec(), byte));
+        }
+        fn handle_dcs(
+            &mut self,
+            intermediates: &[u8],
+            action: u8,
+            params: &[Vec<u16>],
+            payload: &[u8],
+        ) {
+            self.dcs.push((
+                intermediates.to_vec(),
+                action,
+                params.to_vec(),
+                payload.to_vec(),
+            ));
         }
     }
 
@@ -202,6 +273,17 @@ mod tests {
         // First param is the OSC command number "0"; second is "hello".
         assert_eq!(s.osc[0][0], b"0");
         assert_eq!(s.osc[0][1], b"hello");
+    }
+
+    #[test]
+    fn dcs_xtgettcap_accumulates_payload() {
+        // \eP+q636f6c6f7273\e\\ has the '+' intermediate, 'q' action, hex payload.
+        let s = drive(b"\x1bP+q636f6c6f7273\x1b\\");
+        assert_eq!(s.dcs.len(), 1);
+        let (ints, action, _params, payload) = &s.dcs[0];
+        assert_eq!(ints, b"+");
+        assert_eq!(*action, b'q');
+        assert_eq!(payload, b"636f6c6f7273");
     }
 
     #[test]

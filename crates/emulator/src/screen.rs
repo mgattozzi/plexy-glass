@@ -82,6 +82,11 @@ pub struct Screen {
     /// Per-pane keyboard-protocol negotiation state (modifyOtherKeys level +
     /// Kitty flag stacks). Read by the daemon's key re-encode stage.
     pub kbd: KeyboardState,
+    /// `$TERM` value advertised to children via XTGETTCAP `TN`/`name`. This must
+    /// match the `$TERM` the pane actually exports into the child's environment
+    /// (a per-PANE value set at spawn, NOT a per-client handshake value, which
+    /// would be wrong under multi-client). Defaults to a 256-color xterm.
+    pub term: String,
 }
 
 impl Screen {
@@ -105,6 +110,7 @@ impl Screen {
             color_queries: Vec::new(),
             bell_pending: false,
             kbd: KeyboardState::default(),
+            term: String::from("xterm-256color"),
         }
     }
 
@@ -586,6 +592,48 @@ impl Screen {
             .push(format!("\x1b[{prefix}{ps};{pm}$y").into_bytes());
     }
 
+    /// XTGETTCAP: handle a `+q` DCS payload (`;`-separated hex cap names).
+    /// Push one DCS reply per cap (foot model: echo name, continue past
+    /// failures), always terminated with ST (`\e\\`).
+    fn xtgettcap(&mut self, payload: &[u8]) {
+        use crate::terminfo::{Capability, hex_decode, hex_encode, lookup};
+        let payload = match std::str::from_utf8(payload) {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::trace!("XTGETTCAP payload not UTF-8; ignoring");
+                return;
+            }
+        };
+        for hexname in payload.split(';') {
+            // Skip empty segments (e.g. a trailing `;` or empty payload) so we
+            // never emit a nameless `0+r` reply.
+            if hexname.is_empty() {
+                continue;
+            }
+            let Some(name_bytes) = hex_decode(hexname) else {
+                tracing::trace!(hexname, "XTGETTCAP: bad hex name; skipping");
+                continue;
+            };
+            let Ok(name) = std::str::from_utf8(&name_bytes) else {
+                continue;
+            };
+            let name_hex = hex_encode(&name_bytes);
+            let reply = match lookup(name, &self.term) {
+                Capability::Boolean => format!("\x1bP1+r{name_hex}\x1b\\"),
+                Capability::Num(n) => {
+                    let val_hex = hex_encode(n.to_string().as_bytes());
+                    format!("\x1bP1+r{name_hex}={val_hex}\x1b\\")
+                }
+                Capability::Str(s) => {
+                    let val_hex = hex_encode(s.as_bytes());
+                    format!("\x1bP1+r{name_hex}={val_hex}\x1b\\")
+                }
+                Capability::Unsupported => format!("\x1bP0+r{name_hex}\x1b\\"),
+            };
+            self.replies.push(reply.into_bytes());
+        }
+    }
+
     fn set_mode(&mut self, params: &vte::Params, intermediates: &[u8], on: bool) {
         let private = intermediates.first() == Some(&b'?');
         for p in params.iter() {
@@ -970,6 +1018,14 @@ impl ScreenOps for Screen {
     fn handle_esc(&mut self, intermediates: &[u8], byte: u8) {
         Screen::handle_esc(self, intermediates, byte);
     }
+    fn handle_dcs(&mut self, intermediates: &[u8], action: u8, _params: &[Vec<u16>], payload: &[u8]) {
+        // XTGETTCAP: DCS + q <hexnames> ST.
+        if intermediates.first() == Some(&b'+') && action == b'q' {
+            Screen::xtgettcap(self, payload);
+        } else {
+            tracing::trace!(?intermediates, action = %(action as char), "unhandled DCS");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1080,6 +1136,82 @@ mod tests {
         p.advance(&mut s, input);
         p.flush(&mut s);
         s
+    }
+
+    #[test]
+    fn xtgettcap_numeric_cap_colors() {
+        // \eP+q636f6c6f7273\e\\ queries "colors" → \eP1+r636f6c6f7273=323536\e\\.
+        let s = parse(b"\x1bP+q636f6c6f7273\x1b\\X");
+        assert_eq!(s.replies, vec![b"\x1bP1+r636f6c6f7273=323536\x1b\\".to_vec()]);
+    }
+
+    #[test]
+    fn xtgettcap_boolean_cap_su() {
+        // "Su" (5375) is a value-less boolean → \eP1+r5375\e\\ (no =value).
+        let s = parse(b"\x1bP+q5375\x1b\\X");
+        assert_eq!(s.replies, vec![b"\x1bP1+r5375\x1b\\".to_vec()]);
+    }
+
+    #[test]
+    fn xtgettcap_unsupported_cap_echoes_name() {
+        // Unknown "Xx" (5878) → \eP0+r5878\e\\ (echo name, continue).
+        let s = parse(b"\x1bP+q5878\x1b\\X");
+        assert_eq!(s.replies, vec![b"\x1bP0+r5878\x1b\\".to_vec()]);
+    }
+
+    #[test]
+    fn xtgettcap_setulc_is_supported() {
+        // "Setulc" (536574756c63) → 1+r with the parameterized hex value.
+        let s = parse(b"\x1bP+q536574756c63\x1b\\X");
+        let val = "\\E[58:2:%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m";
+        let expected = format!(
+            "\x1bP1+r536574756c63={}\x1b\\",
+            crate::terminfo::hex_encode(val.as_bytes())
+        )
+        .into_bytes();
+        assert_eq!(s.replies, vec![expected]);
+    }
+
+    #[test]
+    fn xtgettcap_multiple_caps_one_reply_each() {
+        // \eP+q<colors>;<Su>\e\\ → two replies, in order.
+        let s = parse(b"\x1bP+q636f6c6f7273;5375\x1b\\X");
+        assert_eq!(
+            s.replies,
+            vec![
+                b"\x1bP1+r636f6c6f7273=323536".to_vec(),
+                // first reply terminated with ST, then the second:
+            ]
+            .into_iter()
+            .map(|mut v: Vec<u8>| {
+                v.extend_from_slice(b"\x1b\\");
+                v
+            })
+            .chain(std::iter::once({
+                let mut v = b"\x1bP1+r5375".to_vec();
+                v.extend_from_slice(b"\x1b\\");
+                v
+            }))
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn xtgettcap_trailing_semicolon_emits_no_empty_reply() {
+        // A trailing `;` yields an empty split segment; it must be skipped, not
+        // answered with a nameless \eP0+r\e\\.
+        let s = parse(b"\x1bP+q636f6c6f7273;\x1b\\X");
+        assert_eq!(s.replies, vec![b"\x1bP1+r636f6c6f7273=323536\x1b\\".to_vec()]);
+    }
+
+    #[test]
+    fn xtgettcap_c1_st_terminated_request_accepted() {
+        // A DCS may be terminated by the C1 ST byte (0x9C) as well as ESC '\'.
+        // (Unlike OSC, a DCS is NOT terminated by BEL. vte routes BEL into the
+        // DCS payload, matching the VT spec, and only ST/CAN/SUB/ESC end a DCS.)
+        // Our reply still terminates with \e\\.
+        let s = parse(b"\x1bP+q5375\x9cX");
+        assert_eq!(s.replies, vec![b"\x1bP1+r5375\x1b\\".to_vec()]);
     }
 
     #[test]
