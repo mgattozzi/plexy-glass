@@ -6,6 +6,7 @@ use crate::{
     cursor::Cursor,
     grid::{Grid, WrapOrigin},
     hyperlinks::HyperlinkTable,
+    keyboard::KeyboardState,
     modes::Modes,
     parser::ScreenOps,
     scrollback::Scrollback,
@@ -78,6 +79,9 @@ pub struct Screen {
     /// `osc_dispatch`, not here, so this flags only genuine bells.) Used by the
     /// daemon for per-window bell monitoring.
     pub bell_pending: bool,
+    /// Per-pane keyboard-protocol negotiation state (modifyOtherKeys level +
+    /// Kitty flag stacks). Read by the daemon's key re-encode stage.
+    pub kbd: KeyboardState,
 }
 
 impl Screen {
@@ -100,6 +104,7 @@ impl Screen {
             clipboard_writes: Vec::new(),
             color_queries: Vec::new(),
             bell_pending: false,
+            kbd: KeyboardState::default(),
         }
     }
 
@@ -366,9 +371,9 @@ impl Screen {
                 // CSI > Ps m is XTMODKEYS (modifyOtherKeys), NOT SGR. Claude Code
                 // emits `\e[>4;2m` during keyboard setup, and routing it through
                 // handle_sgr misreads it as underline+dim (the whole-frame
-                // underline bug). Task 4 fills in the real level tracking.
+                // underline bug). Sets the per-pane modifyOtherKeys level.
                 Some(b'>') => self.handle_xtmodkeys(params),
-                // CSI ? Ps m is the XTQMODKEYS query. Task 4 fills in the reply.
+                // CSI ? Ps m is the XTQMODKEYS query: we reply \e[>4;<level>m.
                 Some(b'?') => self.xtqmodkeys_report(params),
                 _ => self.handle_sgr(params),
             },
@@ -449,20 +454,33 @@ impl Screen {
         }
     }
 
-    /// XTMODKEYS (`CSI > Ps ; Pv m`): set the modifyOtherKeys level. Stubbed
-    /// no-op for now (the dispatch guard is what fixes the underline bug); Task 4
-    /// stores the level in `KeyboardState`.
+    /// XTMODKEYS (`CSI > Ps ; Pv m`). `\e[>4;<Pv>m` sets the modifyOtherKeys
+    /// level; `\e[>4m` / `\e[>4;m` (Pv omitted) resets it to 0. The leading
+    /// param must be `4`; any other resource selector is ignored (we only
+    /// implement modifyOtherKeys).
     fn handle_xtmodkeys(&mut self, params: &vte::Params) {
-        let resource = params.iter().next().and_then(|p| p.first().copied());
-        let value = params.iter().nth(1).and_then(|p| p.first().copied());
-        tracing::trace!(?resource, ?value, "XTMODKEYS (stub: ignored)");
+        let mut iter = params.iter();
+        let resource = iter.next().and_then(|p| p.first().copied());
+        if resource != Some(4) {
+            tracing::trace!(?resource, "unhandled XTMODKEYS resource");
+            return;
+        }
+        match iter.next().and_then(|p| p.first().copied()) {
+            Some(level) => self.kbd.set_modify_other_keys(level),
+            None => self.kbd.reset_modify_other_keys(),
+        }
     }
 
-    /// XTQMODKEYS query (`CSI ? Ps m`): report the modifyOtherKeys level.
-    /// Stubbed no-op for now; Task 4 pushes `\e[>4;<level>m` onto `replies`.
+    /// `\e[?4m` is XTQMODKEYS: report the current modifyOtherKeys level as
+    /// `\e[>4;<level>m`. Only resource `4` is answered.
     fn xtqmodkeys_report(&mut self, params: &vte::Params) {
         let resource = params.iter().next().and_then(|p| p.first().copied());
-        tracing::trace!(?resource, "XTQMODKEYS query (stub: no reply)");
+        if resource != Some(4) {
+            tracing::trace!(?resource, "unhandled XTQMODKEYS resource");
+            return;
+        }
+        let level = self.kbd.modify_other_keys();
+        self.replies.push(format!("\x1b[>4;{level}m").into_bytes());
     }
 
     fn set_mode(&mut self, params: &vte::Params, intermediates: &[u8], on: bool) {
@@ -1396,5 +1414,31 @@ mod tests {
         let c0 = s.active.get_cell(0, 0).unwrap();
         assert_eq!(c0.fg, Color::Rgb(1, 2, 3));
         assert_eq!(c0.bg, Color::Rgb(4, 5, 6));
+    }
+
+    #[test]
+    fn xtmodkeys_set_level_2_then_query_reports_it() {
+        // \e[>4;2m sets modifyOtherKeys level 2; \e[?4m queries it.
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(8, 24);
+        p.advance(&mut s, b"\x1b[>4;2m\x1b[?4mX");
+        p.flush(&mut s);
+        assert_eq!(s.kbd.modify_other_keys(), 2);
+        assert_eq!(s.replies, vec![b"\x1b[>4;2m".to_vec()]);
+    }
+
+    #[test]
+    fn xtmodkeys_bare_resets_to_zero() {
+        let s = parse(b"\x1b[>4;2m\x1b[>4mX");
+        assert_eq!(s.kbd.modify_other_keys(), 0);
+    }
+
+    #[test]
+    fn xtmodkeys_does_not_mutate_sgr() {
+        use crate::attrs::Attrs;
+        let s = parse(b"\x1b[>4;2mX");
+        let c0 = s.active.get_cell(0, 0).unwrap();
+        assert!(!c0.attrs.contains(Attrs::UNDERLINE), "X must not be underlined");
+        assert!(!c0.attrs.contains(Attrs::DIM), "X must not be dim");
     }
 }
