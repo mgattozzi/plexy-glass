@@ -114,6 +114,7 @@ impl Default for DiffRenderer {
 struct CellAttrs {
     fg: Color,
     bg: Color,
+    underline_color: Color,
     attrs: Attrs,
 }
 
@@ -122,6 +123,7 @@ impl CellAttrs {
         Self {
             fg: c.fg,
             bg: c.bg,
+            underline_color: c.underline_color,
             attrs: c.attrs,
         }
     }
@@ -189,6 +191,19 @@ fn apply_sgr_delta(out: &mut String, prev: &CellAttrs, cell: &Cell) {
             let _ = write!(out, "\x1b[48;2;{r};{g};{b}m");
         }
     }
+    // Underline color (SGR 58). The `\x1b[0m` prefix earlier in this function
+    // already reset it, so only a non-default value needs emitting. Use the colon
+    // form (58:5:n / 58:2:r:g:b) for widest support; the outer terminal ignores it
+    // when it draws no underline.
+    match new.underline_color {
+        Color::Default => {}
+        Color::Indexed(n) => {
+            let _ = write!(out, "\x1b[58:5:{n}m");
+        }
+        Color::Rgb(r, g, b) => {
+            let _ = write!(out, "\x1b[58:2:{r}:{g}:{b}m");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -252,5 +267,57 @@ mod tests {
         let bytes = d.render(&v2);
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.starts_with("\x1b[2J\x1b[H"));
+    }
+
+    #[test]
+    fn underline_color_rgb_emits_58_2() {
+        let mut d = DiffRenderer::new();
+        let mut v = VirtualScreen::blank(1, 2);
+        v.put(0, 0, Cell { grapheme: SmolStr::new("U"), underline_color: Color::Rgb(10, 20, 30), ..Cell::default() });
+        let bytes = d.render(&v);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("\x1b[58:2:10:20:30m"), "expected RGB underline-color SGR: {s:?}");
+    }
+
+    #[test]
+    fn underline_color_indexed_emits_58_5() {
+        let mut d = DiffRenderer::new();
+        let mut v = VirtualScreen::blank(1, 2);
+        v.put(0, 0, Cell { grapheme: SmolStr::new("U"), underline_color: Color::Indexed(9), ..Cell::default() });
+        let bytes = d.render(&v);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("\x1b[58:5:9m"), "expected indexed underline-color SGR: {s:?}");
+    }
+
+    #[test]
+    fn default_underline_color_emits_no_58() {
+        let mut d = DiffRenderer::new();
+        let v = lettered(&[(0, 0, "A")], 1, 2);
+        let bytes = d.render(&v);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(!s.contains("\x1b[58"), "default underline color must emit no 58: {s:?}");
+    }
+
+    #[test]
+    fn underline_color_change_in_diff_emits_58() {
+        // Exercise the incremental diff path (not just full repaint): a cell that
+        // gains an underline color on a later render must emit SGR 58, proving
+        // that `CellAttrs` `PartialEq` + `from_cell` track `underline_color`.
+        let mut d = DiffRenderer::new();
+        let v1 = VirtualScreen::blank(1, 2);
+        let _ = d.render(&v1);
+        let mut v2 = VirtualScreen::blank(1, 2);
+        v2.put(
+            0,
+            0,
+            Cell {
+                grapheme: SmolStr::new("U"),
+                underline_color: Color::Rgb(1, 2, 3),
+                ..Cell::default()
+            },
+        );
+        let bytes = d.render(&v2);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("\x1b[58:2:1:2:3m"), "diff path must emit 58: {s:?}");
     }
 }
