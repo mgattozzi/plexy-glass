@@ -422,18 +422,29 @@ impl Screen {
                 // DSR (Device Status Report). The child blocks waiting for
                 // our reply, so this MUST be queued to be written back.
                 let mode = first.unwrap_or(0);
-                match mode {
-                    5 => {
-                        // Status report: "ready, no malfunction".
-                        self.replies.push(b"\x1b[0n".to_vec());
+                if intermediates.first() == Some(&b'?') {
+                    // Private DSR. ?996 is the color-scheme query, answered with
+                    // \e[?997;Pm n. Pm: 1 = dark (default), 2 = light. Answered
+                    // regardless of the ?2031 subscription.
+                    if mode == 996 {
+                        self.replies.push(b"\x1b[?997;1n".to_vec());
+                    } else {
+                        tracing::trace!(mode, "unhandled private DSR");
                     }
-                    6 => {
-                        // Cursor Position Report: `ESC [ row ; col R`, 1-indexed.
-                        let r = self.cursor.row.saturating_add(1);
-                        let c = self.cursor.col.saturating_add(1);
-                        self.replies.push(format!("\x1b[{r};{c}R").into_bytes());
+                } else {
+                    match mode {
+                        5 => {
+                            // Status report: "ready, no malfunction".
+                            self.replies.push(b"\x1b[0n".to_vec());
+                        }
+                        6 => {
+                            // Cursor Position Report: `ESC [ row ; col R`, 1-indexed.
+                            let r = self.cursor.row.saturating_add(1);
+                            let c = self.cursor.col.saturating_add(1);
+                            self.replies.push(format!("\x1b[{r};{c}R").into_bytes());
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             'c' => {
@@ -459,9 +470,14 @@ impl Screen {
                 }
             }
             'p' => {
-                if intermediates.first() == Some(&b'!') {
-                    // DECSTR: soft reset.
-                    self.handle_decstr();
+                // `\e[?Ps$p` (private) and `\e[Ps$p` (ANSI) are DECRQM; `\e[!p` is
+                // DECSTR. vte places BOTH the `?` private prefix and the `$`
+                // intermediate into `intermediates`, so detect by membership.
+                if intermediates.contains(&b'$') {
+                    let private = intermediates.contains(&b'?');
+                    self.handle_decrqm(params, private); // → \e[?Ps;Pm$y (private) / \e[Ps;Pm$y (ANSI)
+                } else if intermediates.first() == Some(&b'!') {
+                    self.handle_decstr(); // \e[!p, DECSTR soft reset
                 } else {
                     tracing::trace!(?intermediates, "unhandled CSI p");
                 }
@@ -556,6 +572,20 @@ impl Screen {
         self.saved_cursor = None;
     }
 
+    /// DECRQM (`\e[?Ps$p` private / `\e[Ps$p` ANSI). Reply `\e[?Ps;Pm$y`
+    /// (private) or `\e[Ps;Pm$y` (ANSI), `Pm` from the pane's `Modes`. Unknown
+    /// modes are echoed with `Pm=0`. We only track private modes; ANSI modes
+    /// always report `Pm=0`.
+    fn handle_decrqm(&mut self, params: &vte::Params, private: bool) {
+        let Some(ps) = params.iter().next().and_then(|p| p.first().copied()) else {
+            return;
+        };
+        let pm = if private { self.modes.decrqm_state(ps) } else { 0 };
+        let prefix = if private { "?" } else { "" };
+        self.replies
+            .push(format!("\x1b[{prefix}{ps};{pm}$y").into_bytes());
+    }
+
     fn set_mode(&mut self, params: &vte::Params, intermediates: &[u8], on: bool) {
         let private = intermediates.first() == Some(&b'?');
         for p in params.iter() {
@@ -585,8 +615,11 @@ impl Screen {
             2004 => Modes::BRACKETED_PASTE,
             9 => Modes::MOUSE_X10,
             1000 => Modes::MOUSE_BTN,
+            1002 => Modes::MOUSE_BTN_EVENT,
             1003 => Modes::MOUSE_ANY,
+            1004 => Modes::FOCUS_EVENTS,
             1006 => Modes::MOUSE_SGR,
+            2031 => Modes::COLOR_SCHEME_UPDATES,
             _ => {
                 tracing::trace!(code, on, "unhandled DEC private mode");
                 return;
@@ -1584,5 +1617,39 @@ mod tests {
         let ver = pack_da2_version();
         let expected = format!("\x1b[>0;{ver};0c").into_bytes();
         assert_eq!(s.replies, vec![expected]);
+    }
+
+    #[test]
+    fn decrqm_reports_enabled_bracketed_paste() {
+        let s = parse(b"\x1b[?2004h\x1b[?2004$pX");
+        assert_eq!(s.replies, vec![b"\x1b[?2004;1$y".to_vec()]);
+    }
+    #[test]
+    fn decrqm_echoes_unknown_mode_with_pm_zero() {
+        let s = parse(b"\x1b[?9999$pX");
+        assert_eq!(s.replies, vec![b"\x1b[?9999;0$y".to_vec()]);
+    }
+    #[test]
+    fn decrqm_reports_reset_when_off() {
+        let s = parse(b"\x1b[?1004$pX");
+        assert_eq!(s.replies, vec![b"\x1b[?1004;2$y".to_vec()]);
+    }
+
+    #[test]
+    fn decrqm_ansi_mode_always_reports_pm_zero() {
+        // ANSI form (no '?'): \e[Ps$p → \e[Ps;0$y, no `?` mirrored, regardless
+        // of mode state. We only track DEC-private modes.
+        let s = parse(b"\x1b[4$pX"); // IRM, would be Pm=2 if it were private
+        assert_eq!(s.replies, vec![b"\x1b[4;0$y".to_vec()]);
+    }
+    #[test]
+    fn focus_events_mode_sets_bit() {
+        let s = parse(b"\x1b[?1004hX");
+        assert!(s.modes.contains(crate::modes::Modes::FOCUS_EVENTS));
+    }
+    #[test]
+    fn color_scheme_query_replies_dark() {
+        let s = parse(b"\x1b[?996nX");
+        assert_eq!(s.replies, vec![b"\x1b[?997;1n".to_vec()]);
     }
 }
