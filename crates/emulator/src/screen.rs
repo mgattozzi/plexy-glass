@@ -1191,6 +1191,51 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_startup_replay_has_no_spurious_underline() {
+        // Regression (spec G8): the original bug misrouted Claude Code's
+        // XTMODKEYS `\e[>4;2m` to SGR, reading it as `4;2` = underline + dim and
+        // applying that to every subsequently painted cell. On this real
+        // captured Claude Code startup stream that underlined 438/438 non-blank
+        // cells. Deleting the 7-byte `\e[>4;2m` (or, as shipped, guarding CSI-m
+        // on intermediates) fixes it. This replays the capture and asserts NO
+        // non-blank cell carries an underline.
+        //
+        // We assert on UNDERLINE only, not DIM: the capture legitimately emits
+        // `\e[2m` (and `\e[22m` to reset) for some text, so dim is ambiguous,
+        // but Claude Code emits no bare `\e[4m` at all and no `\e[24m`/`\e[0m`
+        // underline reset, so any underlined cell here is the bug's signature.
+        const STREAM: &[u8] = include_bytes!("../testdata/claude-code-startup.raw");
+        let mut p = crate::parser::Parser::new();
+        // Sized wider than the capture's furthest column move (`\e[152G`) so the
+        // splash never wraps; over-sizing only leaves extra blank cells.
+        let mut s = Screen::new(50, 200);
+        p.advance(&mut s, STREAM);
+        p.flush(&mut s);
+
+        let mut non_blank = 0usize;
+        let mut underlined = 0usize;
+        for r in 0..s.rows() {
+            for c in 0..s.cols() {
+                let Some(cell) = s.active.get_cell(r, c) else { continue };
+                if cell.is_blank() || cell.is_wide_spacer() {
+                    continue;
+                }
+                non_blank += 1;
+                if cell.attrs.contains(crate::attrs::Attrs::UNDERLINE)
+                    || cell.underline_style != crate::attrs::UnderlineStyle::None
+                {
+                    underlined += 1;
+                }
+            }
+        }
+        assert!(non_blank > 0, "fixture produced no visible cells — wrong screen size or empty capture");
+        assert_eq!(
+            underlined, 0,
+            "{underlined}/{non_blank} non-blank cells spuriously underlined (the `\\e[>4;2m`-as-SGR bug)"
+        );
+    }
+
+    #[test]
     fn xtgettcap_numeric_cap_colors() {
         // \eP+q636f6c6f7273\e\\ queries "colors" → \eP1+r636f6c6f7273=323536\e\\.
         let s = parse(b"\x1bP+q636f6c6f7273\x1b\\X");

@@ -1241,3 +1241,63 @@ fn pane_queries_get_well_formed_replies() {
         sess.snapshot_str()
     );
 }
+
+#[test]
+fn pane_xtgettcap_query_gets_capability_reply() {
+    // A pane issuing XTGETTCAP `\eP+q<hex>\e\\` must receive the emulator's DCS
+    // capability reply on its stdin. We query "colors" (hex 636f6c6f7273); the
+    // emulator answers `\eP1+r636f6c6f7273=323536\e\\` (256). Same transport as
+    // the XTVERSION test: the reply's DCS body surfaces in the host frame either
+    // as PTY caret-echo (canonical mode) or readline-inserted text (raw mode),
+    // so we assert on the printable body `1+r636f6c6f7273`.
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+
+    let before_query = sess.buffer_len();
+    // printf the DCS query (ESC P + q <hex> ESC backslash), then a sentinel.
+    sess.send_str("printf '\\033P+q636f6c6f7273\\033\\\\'; echo XTGTDONE\n");
+    assert!(
+        sess.wait_for(b"XTGTDONE", Duration::from_secs(10)),
+        "XTGETTCAP sentinel never appeared. raw: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for_from(before_query, b"1+r636f6c6f7273", Duration::from_secs(5)),
+        "expected XTGETTCAP DCS reply body (1+r636f6c6f7273) in host frame. snapshot_str: {}",
+        sess.snapshot_str()
+    );
+}
+
+#[test]
+fn pane_kitty_keyboard_query_gets_flags_reply() {
+    // A pane issuing the Kitty keyboard progressive-enhancement query `\e[?u`
+    // must receive `\e[?<flags>u` on its stdin. A freshly-spawned shell has
+    // enabled nothing, so flags are 0 → `\e[?0u`.
+    //
+    // Unlike XTVERSION/XTGETTCAP (DCS replies whose printable body surfaces via
+    // echo), this reply is a bare CSI with no printable body, and in a readline
+    // shell it would be consumed as a key sequence and never echoed. So the
+    // child reads the reply itself (bounded by `read -t`) up to the `u`
+    // terminator, strips the ESC, and prints it inside a sentinel marker. This
+    // is mode-independent: `read` consumes the reply regardless of echo state.
+    // (`read -d`/`-t` are bash builtins; the e2e shell is /bin/sh = bash here.)
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+
+    sess.send_str(
+        "printf '\\033[?u'; IFS= read -r -d u -t 2 reply; \
+         printf 'KQ:%s:DONE\\n' \"$reply\" | tr -d '\\033'\n",
+    );
+    // `\e[?0u` → read captures `\e[?0` (delimiter `u` consumed) → ESC stripped →
+    // `KQ:[?0:DONE`. The echoed command line contains `[?u` and `KQ:%s` but never
+    // the literal `KQ:[?0`, so this needle is unambiguous.
+    assert!(
+        sess.wait_for(b"KQ:[?0:DONE", Duration::from_secs(10)),
+        "expected Kitty keyboard query reply (\\e[?0u → KQ:[?0:DONE) in host frame. snapshot_str: {}",
+        sess.snapshot_str()
+    );
+}
