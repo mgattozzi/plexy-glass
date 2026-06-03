@@ -7,24 +7,62 @@ use plexy_glass_protocol::NegotiatedKbd;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::{Duration, Instant};
 
-/// The probe we write to the outer terminal: query Kitty flags (`\e[?u`), DA1
-/// (`\e[c`) as a backstop reply every terminal answers, and XTVERSION (`\e[>q`).
-pub const PROBE: &[u8] = b"\x1b[?u\x1b[c\x1b[>q";
+/// The probe we write to the outer terminal: query Kitty flags (`\e[?u`),
+/// XTVERSION (`\e[>q`), then DA1 (`\e[c`) **last** as the sentinel. Every
+/// terminal answers DA1, and replies arrive in query order, so seeing the DA1
+/// reply guarantees the Kitty and XTVERSION replies already arrived, and that
+/// lets us consume them all and never leak a late XTVERSION DCS into a pane.
+pub const PROBE: &[u8] = b"\x1b[?u\x1b[>q\x1b[c";
+
+/// Kitty flags we PUSH on a Kitty-capable outer terminal. Deliberately
+/// conservative: only `disambiguate` (0b1). We do NOT enable `report_event_types`
+/// (every key reports a release too), `report_all_keys` (every key incl. plain
+/// text + bare modifiers becomes a CSI-u event), or `report_associated_text`,
+/// since those flood the input stream with events the per-pane down-convert
+/// would have to reproduce perfectly, and any gap garbles typing (e.g. release
+/// events double every keystroke). Disambiguation (Ctrl+i ≠ Tab, Ctrl+m ≠
+/// Enter) is the high-value, low-risk subset: plain/shifted text still arrives
+/// as legacy bytes, only genuinely ambiguous combos become CSI-u. Richer
+/// fidelity for panes that negotiate full Kitty is a future opt-in once the
+/// down-convert is battle-tested.
+const OUTER_KITTY_FLAGS: u8 = 0b1;
 
 /// Classify the outer terminal from the bytes it replied to `PROBE`.
 ///
-/// - A Kitty flags report `\e[?<n>u` ⇒ Kitty (we will push flags 31).
+/// - A Kitty flags report `\e[?<n>u` ⇒ Kitty (we push `OUTER_KITTY_FLAGS`).
 /// - An XTVERSION DCS reply `\eP>|...\e\\` (and no Kitty report) ⇒
-///   modifyOtherKeys-capable ⇒ ModifyOtherKeys(2).
+///   modifyOtherKeys-capable ⇒ ModifyOtherKeys(1) (level 1 = no release/glyph
+///   reconstruction needed; conservative for the same reason as the Kitty flags).
 /// - Otherwise (only DA1, or nothing) ⇒ Legacy.
 pub fn classify(reply: &[u8]) -> NegotiatedKbd {
     if has_kitty_flags_report(reply) {
-        NegotiatedKbd::Kitty(31)
+        NegotiatedKbd::Kitty(OUTER_KITTY_FLAGS)
     } else if has_xtversion_reply(reply) {
-        NegotiatedKbd::ModifyOtherKeys(2)
+        NegotiatedKbd::ModifyOtherKeys(1)
     } else {
         NegotiatedKbd::Legacy
     }
+}
+
+/// True once `out` contains a DA1 reply, any CSI sequence ending in `c`
+/// (`\e[?...c`). DA1 is sent last in `PROBE`, so this is the sentinel that all
+/// earlier replies have arrived.
+fn da1_reply_seen(out: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 1 < out.len() {
+        if out[i] == 0x1b && out[i + 1] == b'[' {
+            let mut j = i + 2;
+            // CSI parameter + intermediate bytes (0x20..=0x3f).
+            while j < out.len() && (0x20..=0x3f).contains(&out[j]) {
+                j += 1;
+            }
+            if j < out.len() && out[j] == b'c' {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 /// True if `reply` contains a Kitty flags report `\e[?<digits>u`.
@@ -136,11 +174,11 @@ pub fn read_probe_reply(fd: BorrowedFd<'_>, budget: Duration) -> Vec<u8> {
         }
         let n = n as usize;
         out.extend_from_slice(&chunk[..n]);
-        // Heuristic stop: once we've seen the DA1 terminator `c` and a richer
-        // reply (Kitty `u` report or XTVERSION), stop early rather than waiting
-        // out the deadline. A legacy terminal sends only DA1; for it we keep
-        // reading until the deadline in case a slower reply is still coming.
-        if out.contains(&b'c') && (has_kitty_flags_report(&out) || has_xtversion_reply(&out)) {
+        // Stop as soon as the DA1 reply (the sentinel, sent last) arrives, since
+        // that guarantees the Kitty + XTVERSION replies already arrived, and
+        // reading further would only capture user type-ahead. This is what
+        // prevents a slow XTVERSION DCS from leaking past the probe into a pane.
+        if da1_reply_seen(&out) {
             break;
         }
     }
@@ -153,16 +191,29 @@ mod tests {
 
     #[test]
     fn classify_picks_kitty_from_flags_report() {
-        // `\e[?31u` is a Kitty flags report; DA1 also present.
+        // `\e[?31u` is a Kitty flags report; DA1 also present. We classify Kitty
+        // but enable only the conservative disambiguate flag (not 31).
         let reply = b"\x1b[?1;2c\x1b[?31u";
-        assert_eq!(classify(reply), NegotiatedKbd::Kitty(31));
+        assert_eq!(classify(reply), NegotiatedKbd::Kitty(OUTER_KITTY_FLAGS));
+        assert_eq!(OUTER_KITTY_FLAGS, 1, "only disambiguate — no release/all-keys flood");
     }
 
     #[test]
     fn classify_picks_modkeys_from_xtversion_only() {
-        // No Kitty report, but an XTVERSION DCS reply.
+        // No Kitty report, but an XTVERSION DCS reply, so conservative level 1.
         let reply = b"\x1b[?1;2c\x1bP>|ghostty 1.0\x1b\\";
-        assert_eq!(classify(reply), NegotiatedKbd::ModifyOtherKeys(2));
+        assert_eq!(classify(reply), NegotiatedKbd::ModifyOtherKeys(1));
+    }
+
+    #[test]
+    fn da1_sentinel_only_fires_after_the_trailing_da1() {
+        // Real Ghostty reply order: Kitty report, XTVERSION DCS, then DA1. The
+        // sentinel must NOT fire until the trailing DA1 `c` is present, so the
+        // XTVERSION DCS is fully captured (never leaked into a pane).
+        assert!(!da1_reply_seen(b"\x1b[?31u\x1bP>|ghostty 1.3.1\x1b\\"));
+        assert!(da1_reply_seen(b"\x1b[?31u\x1bP>|ghostty 1.3.1\x1b\\\x1b[?1;2c"));
+        // A bare `c` in a version string must NOT be mistaken for DA1.
+        assert!(!da1_reply_seen(b"\x1bP>|contour 1.0\x1b\\"));
     }
 
     #[test]

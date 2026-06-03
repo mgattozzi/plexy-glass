@@ -116,6 +116,16 @@ pub fn mods_param(mods: Modifiers) -> u32 {
 
 /// Re-encode a canonical key into the pane's negotiated protocol.
 pub fn encode(event: &KeyEvent, target: KeyboardTarget, app_cursor: bool) -> Vec<u8> {
+    // Drop Repeat/Release events for any target that did NOT ask for event types:
+    // legacy and modifyOtherKeys have no concept of them, and a Kitty pane only
+    // wants them when its `report_event_types` flag (0x02) is set. Without this,
+    // a release re-encodes to the same bytes as the press and DOUBLES every
+    // keystroke (the exact garble seen when an outer terminal with event-type
+    // reporting feeds a legacy pane).
+    let target_reports_events = matches!(target, KeyboardTarget::Kitty(f) if f & 0x02 != 0);
+    if event.kind != KeyEventKind::Press && !target_reports_events {
+        return Vec::new();
+    }
     match target {
         KeyboardTarget::Legacy => legacy_with_cursor(event, app_cursor),
         KeyboardTarget::ModifyOtherKeys(level) => modify_other_keys_bytes(event, level, app_cursor),
@@ -333,13 +343,26 @@ mod tests {
     }
 
     #[test]
-    fn kitty_omits_event_type_unless_bit2() {
+    fn kitty_release_dropped_unless_event_types_flag() {
         let mut e = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
         e.kind = plexy_glass_mux::KeyEventKind::Release;
-        // flags=1: no report_event_types -> event sub-param omitted.
-        assert_eq!(encode(&e, KeyboardTarget::Kitty(1), false), b"\x1b[97;5u");
-        // flags 1|2: report_event_types -> :3 present.
+        // flags=1: no report_event_types -> the release is DROPPED entirely. A
+        // pane that didn't request event types must never see a release, else the
+        // re-encode would emit a second keystroke and double the input.
+        assert!(encode(&e, KeyboardTarget::Kitty(1), false).is_empty());
+        // flags 1|2: report_event_types -> the release is forwarded with `:3`.
         assert_eq!(encode(&e, KeyboardTarget::Kitty(1 | 2), false), b"\x1b[97;5:3u");
+    }
+
+    #[test]
+    fn release_dropped_for_legacy_and_modkeys_targets() {
+        let mut e = KeyEvent::new(Key::Char('a'), Modifiers::empty());
+        e.kind = plexy_glass_mux::KeyEventKind::Release;
+        assert!(encode(&e, KeyboardTarget::Legacy, false).is_empty());
+        assert!(encode(&e, KeyboardTarget::ModifyOtherKeys(2), false).is_empty());
+        // A Press of the same key is unaffected.
+        let p = KeyEvent::new(Key::Char('a'), Modifiers::empty());
+        assert_eq!(encode(&p, KeyboardTarget::Legacy, false), b"a");
     }
 
     #[test]
