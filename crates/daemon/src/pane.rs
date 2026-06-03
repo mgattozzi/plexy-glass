@@ -127,7 +127,26 @@ impl Pane {
             .map_err(|e| DaemonError::Io(std::io::Error::other(format!("take writer: {e}"))))?;
         let master = pair.master;
 
-        let emulator = Arc::new(Mutex::new(Emulator::new(size.rows, size.cols)));
+        // XTGETTCAP `TN` must report the `$TERM` the child actually inherits.
+        // The child gets `spec.env`'s TERM if present (we `env_clear` then set
+        // spec.env), otherwise it inherits the daemon's environment (TERM
+        // passthrough), otherwise a 256-color xterm default.
+        let child_term = spec
+            .env
+            .iter()
+            .find(|(k, _)| k == "TERM")
+            .map(|(_, v)| v.clone())
+            .or_else(|| {
+                if spec.env.is_empty() {
+                    std::env::var("TERM").ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "xterm-256color".to_string());
+        let mut emu = Emulator::new(size.rows, size.cols);
+        emu.screen_mut().set_term(child_term);
+        let emulator = Arc::new(Mutex::new(emu));
         let config_slot: Arc<Mutex<Arc<Config>>> = Arc::new(Mutex::new(config));
 
         // Per-pane monitoring signals: set by the reader on output / bell, drained
@@ -597,6 +616,22 @@ mod tests {
         })
         .await;
         assert!(res.is_ok(), "child did not exit within 5s after kill_child");
+    }
+
+    #[tokio::test]
+    async fn spawn_sets_screen_term_from_env() {
+        // A pane spawned with `TERM` in `spec.env` reports it via `Screen.term` (the
+        // value XTGETTCAP `TN` answers) instead of the default.
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![("TERM".into(), "xterm-ghostty".into())],
+            cwd: None,
+        };
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg())
+            .expect("spawn");
+        assert_eq!(p.with_screen(|s| s.term.clone()), "xterm-ghostty");
+        p.kill_child();
     }
 
     #[tokio::test]

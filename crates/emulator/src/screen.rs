@@ -114,6 +114,13 @@ impl Screen {
         }
     }
 
+    /// Set the `$TERM` this pane advertises via XTGETTCAP `TN`. The daemon calls
+    /// this at spawn with the value the child actually inherits in its
+    /// environment, so `TN` fingerprinting reflects reality.
+    pub fn set_term(&mut self, term: String) {
+        self.term = term;
+    }
+
     /// Drain queued replies. The daemon calls this after `Emulator::advance`
     /// and pipes the bytes back into the child's stdin.
     pub fn take_replies(&mut self) -> Vec<Vec<u8>> {
@@ -867,8 +874,13 @@ impl Screen {
                 self.tabs.set(self.cursor.col);
             }
             b'c' => {
+                // RIS (full reset). Preserve the pane's spawn identity (`term`,
+                // for XTGETTCAP `TN`); a child's reset must not change the $TERM
+                // it was launched with for the rest of the pane's life.
                 let (rows, cols) = (self.rows(), self.cols());
+                let term = std::mem::take(&mut self.term);
                 *self = Screen::new(rows, cols);
+                self.term = term;
             }
             b'M' => {
                 let (top, _) = self.scroll_region;
@@ -1165,6 +1177,29 @@ mod tests {
         // \eP+q636f6c6f7273\e\\ queries "colors" → \eP1+r636f6c6f7273=323536\e\\.
         let s = parse(b"\x1bP+q636f6c6f7273\x1b\\X");
         assert_eq!(s.replies, vec![b"\x1bP1+r636f6c6f7273=323536\x1b\\".to_vec()]);
+    }
+
+    #[test]
+    fn set_term_then_xtgettcap_tn_reports_it() {
+        // TN (544e) reports the term we were spawned with.
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(4, 8);
+        s.set_term("xterm-ghostty".into());
+        p.advance(&mut s, b"\x1bP+q544e\x1b\\X");
+        p.flush(&mut s);
+        let hex = crate::terminfo::hex_encode(b"xterm-ghostty");
+        assert_eq!(s.replies, vec![format!("\x1bP1+r544e={hex}\x1b\\").into_bytes()]);
+    }
+
+    #[test]
+    fn ris_preserves_term() {
+        // RIS (\ec) must keep the spawn-time $TERM (pane spawn identity).
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(4, 8);
+        s.set_term("xterm-ghostty".into());
+        p.advance(&mut s, b"\x1bcX");
+        p.flush(&mut s);
+        assert_eq!(s.term, "xterm-ghostty");
     }
 
     #[test]
