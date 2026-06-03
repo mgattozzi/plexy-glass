@@ -1,6 +1,9 @@
 //! Cursor state: position, current attrs for new cells, visibility, shape.
 
-use crate::{attrs::Attrs, color::Color};
+use crate::{
+    attrs::{Attrs, UnderlineStyle},
+    color::Color,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorShape {
@@ -19,6 +22,9 @@ pub struct Cursor {
     pub bg: Color,
     /// Underline color pen (SGR 58/59). `Color::Default` = follow text fg.
     pub underline_color: Color,
+    /// Underline style pen (SGR `4:0`..`4:5`). Mirrors `Attrs::UNDERLINE` (the
+    /// any-underline boolean) with the specific kind for the diff renderer.
+    pub underline_style: UnderlineStyle,
     pub hyperlink_id: Option<u16>,
     /// True when the next character should wrap to the next row. Set when the
     /// cursor advances past the last column with autowrap on.
@@ -36,6 +42,7 @@ impl Default for Cursor {
             fg: Color::Default,
             bg: Color::Default,
             underline_color: Color::Default,
+            underline_style: UnderlineStyle::None,
             hyperlink_id: None,
             pending_wrap: false,
             visible: true,

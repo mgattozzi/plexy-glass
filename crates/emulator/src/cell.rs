@@ -1,6 +1,9 @@
 //! A single grid cell: one grapheme cluster plus its colors and attributes.
 
-use crate::{attrs::Attrs, color::Color};
+use crate::{
+    attrs::{Attrs, UnderlineStyle},
+    color::Color,
+};
 use smol_str::SmolStr;
 
 /// One screen cell.
@@ -18,6 +21,10 @@ pub struct Cell {
     /// Underline color (SGR 58/59). `Color::Default` = follow text fg.
     /// Independent of whether `Attrs::UNDERLINE` is set.
     pub underline_color: Color,
+    /// Underline style (SGR `4:0`..`4:5`). `Attrs::UNDERLINE` is the boolean
+    /// "any underline present"; this records which kind (curly/dotted/…) so the
+    /// diff renderer can re-emit `4:N` rather than flattening to plain `4`.
+    pub underline_style: UnderlineStyle,
     pub attrs: Attrs,
     /// Index into the screen's `HyperlinkTable`, if this cell is part of a
     /// hyperlinked region (OSC 8).
@@ -31,6 +38,7 @@ impl Default for Cell {
             fg: Color::Default,
             bg: Color::Default,
             underline_color: Color::Default,
+            underline_style: UnderlineStyle::None,
             attrs: Attrs::empty(),
             hyperlink_id: None,
         }
@@ -50,6 +58,7 @@ impl Cell {
             fg: Color::Default,
             bg: Color::Default,
             underline_color: Color::Default,
+            underline_style: UnderlineStyle::None,
             attrs: Attrs::empty(),
             hyperlink_id: None,
         }
@@ -64,6 +73,7 @@ impl Cell {
             && self.fg == Color::Default
             && self.bg == Color::Default
             && self.underline_color == Color::Default
+            && self.underline_style == UnderlineStyle::None
             && self.attrs.is_empty()
             && self.hyperlink_id.is_none()
     }

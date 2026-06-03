@@ -2,7 +2,7 @@
 //! previous one and emits minimal ANSI to bring the host TTY up to date.
 
 use crate::virtual_screen::VirtualScreen;
-use plexy_glass_emulator::{Attrs, Cell, Color};
+use plexy_glass_emulator::{Attrs, Cell, Color, UnderlineStyle};
 use std::fmt::Write as _;
 
 pub struct DiffRenderer {
@@ -115,6 +115,7 @@ struct CellAttrs {
     fg: Color,
     bg: Color,
     underline_color: Color,
+    underline_style: UnderlineStyle,
     attrs: Attrs,
 }
 
@@ -124,6 +125,7 @@ impl CellAttrs {
             fg: c.fg,
             bg: c.bg,
             underline_color: c.underline_color,
+            underline_style: c.underline_style,
             attrs: c.attrs,
         }
     }
@@ -147,8 +149,20 @@ fn apply_sgr_delta(out: &mut String, prev: &CellAttrs, cell: &Cell) {
     if new.attrs.contains(Attrs::ITALIC) {
         out.push_str("\x1b[3m");
     }
+    // Underline: re-emit the styled form (`4:N`) so undercurl/dotted/dashed
+    // survive to the outer terminal instead of flattening to a plain underline.
+    // `Single` uses bare `4m` for back-compat with terminals that don't grok the
+    // colon sub-parameter. `None` emits nothing, the `\x1b[0m` prefix above
+    // already reset the underline. If `UNDERLINE` is set but the style is `None`
+    // (shouldn't normally happen), fall back to a plain underline.
     if new.attrs.contains(Attrs::UNDERLINE) {
-        out.push_str("\x1b[4m");
+        match new.underline_style {
+            UnderlineStyle::None | UnderlineStyle::Single => out.push_str("\x1b[4m"),
+            UnderlineStyle::Double => out.push_str("\x1b[4:2m"),
+            UnderlineStyle::Curly => out.push_str("\x1b[4:3m"),
+            UnderlineStyle::Dotted => out.push_str("\x1b[4:4m"),
+            UnderlineStyle::Dashed => out.push_str("\x1b[4:5m"),
+        }
     }
     if new.attrs.contains(Attrs::REVERSE) {
         out.push_str("\x1b[7m");
@@ -296,6 +310,67 @@ mod tests {
         let bytes = d.render(&v);
         let s = String::from_utf8_lossy(&bytes);
         assert!(!s.contains("\x1b[58"), "default underline color must emit no 58: {s:?}");
+    }
+
+    #[test]
+    fn underline_style_curly_emits_4_3() {
+        let mut d = DiffRenderer::new();
+        let mut v = VirtualScreen::blank(1, 2);
+        v.put(0, 0, Cell {
+            grapheme: SmolStr::new("U"),
+            attrs: Attrs::UNDERLINE,
+            underline_style: UnderlineStyle::Curly,
+            ..Cell::default()
+        });
+        let bytes = d.render(&v);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("\x1b[4:3m"), "expected curly underline SGR: {s:?}");
+    }
+
+    #[test]
+    fn underline_style_single_emits_plain_4() {
+        let mut d = DiffRenderer::new();
+        let mut v = VirtualScreen::blank(1, 2);
+        v.put(0, 0, Cell {
+            grapheme: SmolStr::new("U"),
+            attrs: Attrs::UNDERLINE,
+            underline_style: UnderlineStyle::Single,
+            ..Cell::default()
+        });
+        let bytes = d.render(&v);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("\x1b[4m"), "expected plain underline SGR: {s:?}");
+        assert!(!s.contains("\x1b[4:"), "single must not emit a colon form: {s:?}");
+    }
+
+    #[test]
+    fn no_underline_emits_no_4() {
+        let mut d = DiffRenderer::new();
+        let v = lettered(&[(0, 0, "A")], 1, 2);
+        let bytes = d.render(&v);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(!s.contains("\x1b[4m"), "no-underline cell must emit no 4: {s:?}");
+        assert!(!s.contains("\x1b[4:"), "no-underline cell must emit no 4:N: {s:?}");
+    }
+
+    #[test]
+    fn underline_style_change_in_diff_emits_4_3() {
+        // Exercise the incremental diff path: a cell that gains a curly underline
+        // on a later render must emit 4:3, proving `CellAttrs` tracks
+        // `underline_style`.
+        let mut d = DiffRenderer::new();
+        let v1 = VirtualScreen::blank(1, 2);
+        let _ = d.render(&v1);
+        let mut v2 = VirtualScreen::blank(1, 2);
+        v2.put(0, 0, Cell {
+            grapheme: SmolStr::new("U"),
+            attrs: Attrs::UNDERLINE,
+            underline_style: UnderlineStyle::Curly,
+            ..Cell::default()
+        });
+        let bytes = d.render(&v2);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("\x1b[4:3m"), "diff path must emit 4:3: {s:?}");
     }
 
     #[test]

@@ -27,7 +27,7 @@ pub mod screen;
 // pub mod events;
 pub mod emulator;
 
-pub use attrs::Attrs;
+pub use attrs::{Attrs, UnderlineStyle};
 pub use cell::Cell;
 pub use color::Color;
 pub use cursor::{Cursor, CursorShape};

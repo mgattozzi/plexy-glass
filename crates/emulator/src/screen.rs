@@ -184,6 +184,7 @@ impl Screen {
             fg: self.cursor.fg,
             bg: self.cursor.bg,
             underline_color: self.cursor.underline_color,
+            underline_style: self.cursor.underline_style,
             attrs: self.cursor.attrs,
             hyperlink_id: self.cursor.hyperlink_id,
         };
@@ -574,6 +575,7 @@ impl Screen {
         self.cursor.fg = crate::color::Color::Default;
         self.cursor.bg = crate::color::Color::Default;
         self.cursor.underline_color = crate::color::Color::Default;
+        self.cursor.underline_style = crate::attrs::UnderlineStyle::None;
         self.cursor.pending_wrap = false;
         self.saved_cursor = None;
     }
@@ -723,19 +725,32 @@ impl Screen {
         // [38, 2, r, g, b] (truecolor). Blindly flattening would turn `4:3`
         // into "underline; italic" and `4:0` into "underline; full-reset", so
         // styled underlines (which tmux-256color advertises and TUIs emit)
-        // render wrong. Collapse styled underline to plain 4 / 24, canonicalize
-        // the extended-color colon groups (38:/48:/58:) by dropping the ISO
-        // colorspace-id slot, and flatten the rest. Semicolon forms like
-        // `38;2;r;g;b` arrive as separate single-element groups and flow through
-        // unchanged; colon forms are canonicalized here so parse_extended_color
-        // (shared with the semicolon path) sees an unambiguous element count.
-        // (Semicolon forms like `4;3` arrive as separate single-element groups
-        // and are intentionally left as "underline; italic".)
+        // render wrong. Resolve the styled-underline group fully in place (set
+        // the underline-style pen AND the `Attrs::UNDERLINE` boolean, pushing
+        // NOTHING to `codes`), canonicalize the extended-color colon groups
+        // (38:/48:/58:) by dropping the ISO colorspace-id slot, and flatten the
+        // rest. Semicolon forms like `38;2;r;g;b` arrive as separate
+        // single-element groups and flow through unchanged; colon forms are
+        // canonicalized here so parse_extended_color (shared with the semicolon
+        // path) sees an unambiguous element count. (Semicolon forms like `4;3`
+        // arrive as separate single-element groups and are intentionally left as
+        // "underline; italic".)
         let mut codes: Vec<u16> = Vec::new();
         for g in params.iter() {
             match g {
-                // Styled underline `4:x` -> plain 4 / 24.
-                [4, style, ..] => codes.push(if *style == 0 { 24 } else { 4 }),
+                // Styled underline `4:x`: resolve here, push nothing. style 0
+                // clears the underline; any other code sets it with the mapped
+                // style (unknown codes clamp to Single via from_sgr_subparam).
+                [4, style, ..] => {
+                    if *style == 0 {
+                        self.cursor.attrs.remove(crate::attrs::Attrs::UNDERLINE);
+                        self.cursor.underline_style = crate::attrs::UnderlineStyle::None;
+                    } else {
+                        self.cursor.attrs.insert(crate::attrs::Attrs::UNDERLINE);
+                        self.cursor.underline_style =
+                            crate::attrs::UnderlineStyle::from_sgr_subparam(*style);
+                    }
+                }
                 // Colon-form RGB extended color (38:2:.. / 48:2:.. / 58:2:..):
                 // canonicalize to [sel, 2, r, g, b] by dropping the optional ISO
                 // colorspace-id slot, so the linear parse_extended_color (shared
@@ -769,11 +784,15 @@ impl Screen {
                     self.cursor.fg = crate::color::Color::Default;
                     self.cursor.bg = crate::color::Color::Default;
                     self.cursor.underline_color = crate::color::Color::Default;
+                    self.cursor.underline_style = crate::attrs::UnderlineStyle::None;
                 }
                 1 => self.cursor.attrs.insert(crate::attrs::Attrs::BOLD),
                 2 => self.cursor.attrs.insert(crate::attrs::Attrs::DIM),
                 3 => self.cursor.attrs.insert(crate::attrs::Attrs::ITALIC),
-                4 => self.cursor.attrs.insert(crate::attrs::Attrs::UNDERLINE),
+                4 => {
+                    self.cursor.attrs.insert(crate::attrs::Attrs::UNDERLINE);
+                    self.cursor.underline_style = crate::attrs::UnderlineStyle::Single;
+                }
                 5 => self.cursor.attrs.insert(crate::attrs::Attrs::BLINK),
                 7 => self.cursor.attrs.insert(crate::attrs::Attrs::REVERSE),
                 8 => self.cursor.attrs.insert(crate::attrs::Attrs::HIDDEN),
@@ -783,7 +802,10 @@ impl Screen {
                     self.cursor.attrs.remove(crate::attrs::Attrs::DIM);
                 }
                 23 => self.cursor.attrs.remove(crate::attrs::Attrs::ITALIC),
-                24 => self.cursor.attrs.remove(crate::attrs::Attrs::UNDERLINE),
+                24 => {
+                    self.cursor.attrs.remove(crate::attrs::Attrs::UNDERLINE);
+                    self.cursor.underline_style = crate::attrs::UnderlineStyle::None;
+                }
                 25 => self.cursor.attrs.remove(crate::attrs::Attrs::BLINK),
                 27 => self.cursor.attrs.remove(crate::attrs::Attrs::REVERSE),
                 28 => self.cursor.attrs.remove(crate::attrs::Attrs::HIDDEN),
@@ -1304,6 +1326,77 @@ mod tests {
             !s.active.get_cell(0, 1).unwrap().attrs.contains(Attrs::UNDERLINE),
             "Y must NOT be underlined after \\e[4:0m"
         );
+    }
+
+    #[test]
+    fn underline_style_curly_sets_style_and_underline() {
+        use crate::attrs::{Attrs, UnderlineStyle};
+        // \e[4:3m must record Curly style AND set the UNDERLINE boolean (and must
+        // NOT set italic, cross-checking `styled_underline_colon_subparams`).
+        let s = parse(b"\x1b[4:3mX");
+        let c = s.active.get_cell(0, 0).unwrap();
+        assert_eq!(c.underline_style, UnderlineStyle::Curly, "4:3 = curly");
+        assert!(c.attrs.contains(Attrs::UNDERLINE), "UNDERLINE boolean still set");
+        assert!(!c.attrs.contains(Attrs::ITALIC), "4:3 is not SGR 3");
+    }
+
+    #[test]
+    fn underline_style_double_dotted_dashed() {
+        use crate::attrs::{Attrs, UnderlineStyle};
+        let s = parse(b"\x1b[4:2mD\x1b[4:4mO\x1b[4:5mA");
+        let d = s.active.get_cell(0, 0).unwrap();
+        assert_eq!(d.underline_style, UnderlineStyle::Double, "4:2 = double");
+        assert!(d.attrs.contains(Attrs::UNDERLINE));
+        let o = s.active.get_cell(0, 1).unwrap();
+        assert_eq!(o.underline_style, UnderlineStyle::Dotted, "4:4 = dotted");
+        let a = s.active.get_cell(0, 2).unwrap();
+        assert_eq!(a.underline_style, UnderlineStyle::Dashed, "4:5 = dashed");
+    }
+
+    #[test]
+    fn underline_style_off_clears_style_and_underline() {
+        use crate::attrs::{Attrs, UnderlineStyle};
+        // \e[4:0m turns underline OFF: style `None` and the boolean cleared.
+        let s = parse(b"\x1b[4:3mX\x1b[4:0mY");
+        let y = s.active.get_cell(0, 1).unwrap();
+        assert_eq!(y.underline_style, UnderlineStyle::None, "4:0 = none");
+        assert!(!y.attrs.contains(Attrs::UNDERLINE), "4:0 clears UNDERLINE");
+    }
+
+    #[test]
+    fn plain_underline_sets_single_style() {
+        use crate::attrs::{Attrs, UnderlineStyle};
+        // Plain \e[4m is Single + UNDERLINE; \e[24m clears to None.
+        let s = parse(b"\x1b[4mX\x1b[24mY");
+        let x = s.active.get_cell(0, 0).unwrap();
+        assert_eq!(x.underline_style, UnderlineStyle::Single, "plain 4 = single");
+        assert!(x.attrs.contains(Attrs::UNDERLINE));
+        let y = s.active.get_cell(0, 1).unwrap();
+        assert_eq!(y.underline_style, UnderlineStyle::None, "24 = none");
+        assert!(!y.attrs.contains(Attrs::UNDERLINE));
+    }
+
+    #[test]
+    fn sgr_reset_clears_underline_style() {
+        use crate::attrs::UnderlineStyle;
+        // \e[0m must reset the style pen back to `None`.
+        let s = parse(b"\x1b[4:3mX\x1b[0mY");
+        assert_eq!(
+            s.active.get_cell(0, 1).unwrap().underline_style,
+            UnderlineStyle::None,
+            "\\e[0m resets the underline style"
+        );
+    }
+
+    #[test]
+    fn underline_style_and_color_are_independent() {
+        use crate::attrs::UnderlineStyle;
+        use crate::color::Color;
+        // SGR 58 (color) and 4:3 (style) on the same cell: both survive, distinct.
+        let s = parse(b"\x1b[58:5:9m\x1b[4:3mX");
+        let c = s.active.get_cell(0, 0).unwrap();
+        assert_eq!(c.underline_style, UnderlineStyle::Curly, "style = curly");
+        assert_eq!(c.underline_color, Color::Indexed(9), "color = indexed 9");
     }
 
     #[test]

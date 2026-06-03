@@ -1,5 +1,42 @@
 //! SGR character attributes (bold, italic, …) as a bitflags struct.
 
+/// The *style* dimension of an underline (SGR `4:0`..`4:5`), independent of the
+/// underline *color* (SGR 58/59, stored separately on the cell). `Attrs::UNDERLINE`
+/// remains the "any underline present" boolean; this records which kind so the diff
+/// renderer can re-emit `4:N` to the outer terminal instead of flattening to `4`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnderlineStyle {
+    /// No underline (SGR `4:0` / `24`).
+    #[default]
+    None,
+    /// Straight single underline (SGR `4` / `4:1`).
+    Single,
+    /// Double underline (SGR `4:2`).
+    Double,
+    /// Curly / undercurl (SGR `4:3`).
+    Curly,
+    /// Dotted underline (SGR `4:4`).
+    Dotted,
+    /// Dashed underline (SGR `4:5`).
+    Dashed,
+}
+
+impl UnderlineStyle {
+    /// Map an SGR underline sub-parameter style code (`4:N`) to a style. Codes
+    /// outside `0..=5` clamp to `Single` (any underline present, unknown shape).
+    pub fn from_sgr_subparam(code: u16) -> Self {
+        match code {
+            0 => UnderlineStyle::None,
+            1 => UnderlineStyle::Single,
+            2 => UnderlineStyle::Double,
+            3 => UnderlineStyle::Curly,
+            4 => UnderlineStyle::Dotted,
+            5 => UnderlineStyle::Dashed,
+            _ => UnderlineStyle::Single,
+        }
+    }
+}
+
 bitflags::bitflags! {
     /// Per-cell character attributes from SGR.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
