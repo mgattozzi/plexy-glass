@@ -160,7 +160,17 @@ impl WindowManager {
             next_window_id: 1,
             host_size,
             notify,
-            default_spec: first_spec,
+            // New windows / splits open an interactive shell, NOT a clone of the
+            // session's first command. Cloning `first_spec` would mean a session
+            // started with (or whose first declared pane runs) e.g. `claude` would
+            // re-launch that command for every `new-window`/`split`. Inherit the
+            // session's base env, but always run the default shell.
+            default_spec: SpawnSpec {
+                program: crate::declared::default_shell(),
+                args: Vec::new(),
+                env: first_spec.env,
+                cwd: None,
+            },
             death_tx,
             selection: None,
             config,
@@ -1590,6 +1600,26 @@ mod tests {
         .unwrap();
         assert_eq!(m.windows().len(), 1);
         assert_eq!(m.active_window().active(), PaneId(0));
+    }
+
+    #[tokio::test]
+    async fn new_window_default_spec_is_shell_not_first_command() {
+        // A session whose first pane runs a non-shell command (here `/bin/cat`,
+        // standing in for `claude`) must still open the SHELL for new windows and
+        // splits, not re-run that command. Regression: `default_spec` used to be a
+        // clone of `first_spec`.
+        let notify = Arc::new(Notify::new());
+        let m = WindowManager::new(
+            spec(), // program = `/bin/cat` (a non-shell first command)
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        assert_eq!(m.default_spec.program, crate::declared::default_shell());
+        assert_ne!(m.default_spec.program, "/bin/cat");
+        assert!(m.default_spec.args.is_empty());
     }
 
     #[tokio::test]
