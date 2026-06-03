@@ -87,6 +87,10 @@ pub struct Screen {
     /// (a per-PANE value set at spawn, NOT a per-client handshake value, which
     /// would be wrong under multi-client). Defaults to a 256-color xterm.
     pub term: String,
+    /// Last known outer-terminal color scheme (true = dark), set by the daemon
+    /// from the client's `\e[?997;Xn` relay. Answered to a `\e[?996n` query so
+    /// the one-shot query agrees with the `?2031` subscription push. Default dark.
+    pub color_scheme_dark: bool,
 }
 
 impl Screen {
@@ -111,6 +115,7 @@ impl Screen {
             bell_pending: false,
             kbd: KeyboardState::default(),
             term: String::from("xterm-256color"),
+            color_scheme_dark: true,
         }
     }
 
@@ -119,6 +124,13 @@ impl Screen {
     /// environment, so `TN` fingerprinting reflects reality.
     pub fn set_term(&mut self, term: String) {
         self.term = term;
+    }
+
+    /// Record the outer-terminal color scheme (true = dark) so a `\e[?996n`
+    /// query answers the real preference. The daemon calls this when it relays a
+    /// `\e[?997;Xn` from the client.
+    pub fn set_color_scheme_dark(&mut self, dark: bool) {
+        self.color_scheme_dark = dark;
     }
 
     /// Drain queued replies. The daemon calls this after `Emulator::advance`
@@ -441,7 +453,11 @@ impl Screen {
                     // \e[?997;Pm n. Pm: 1 = dark (default), 2 = light. Answered
                     // regardless of the ?2031 subscription.
                     if mode == 996 {
-                        self.replies.push(b"\x1b[?997;1n".to_vec());
+                        // Pm: 1 = dark, 2 = light, from the daemon-tracked
+                        // preference (set via `set_color_scheme_dark`), not a
+                        // hardcoded default, so it agrees with the ?2031 push.
+                        let pm = if self.color_scheme_dark { 1 } else { 2 };
+                        self.replies.push(format!("\x1b[?997;{pm}n").into_bytes());
                     } else {
                         tracing::trace!(mode, "unhandled private DSR");
                     }
@@ -879,8 +895,10 @@ impl Screen {
                 // it was launched with for the rest of the pane's life.
                 let (rows, cols) = (self.rows(), self.cols());
                 let term = std::mem::take(&mut self.term);
+                let scheme_dark = self.color_scheme_dark;
                 *self = Screen::new(rows, cols);
                 self.term = term;
+                self.color_scheme_dark = scheme_dark;
             }
             b'M' => {
                 let (top, _) = self.scroll_region;
@@ -1911,5 +1929,23 @@ mod tests {
     fn color_scheme_query_replies_dark() {
         let s = parse(b"\x1b[?996nX");
         assert_eq!(s.replies, vec![b"\x1b[?997;1n".to_vec()]);
+    }
+
+    #[test]
+    fn color_scheme_query_reflects_set_preference() {
+        // After the daemon records a light scheme, ?996n must answer light (;2n).
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(4, 8);
+        s.set_color_scheme_dark(false);
+        p.advance(&mut s, b"\x1b[?996nX");
+        p.flush(&mut s);
+        assert_eq!(s.replies, vec![b"\x1b[?997;2n".to_vec()]);
+        // And RIS preserves the daemon-set scheme.
+        let mut s2 = Screen::new(4, 8);
+        s2.set_color_scheme_dark(false);
+        let mut p2 = crate::parser::Parser::new();
+        p2.advance(&mut s2, b"\x1bc\x1b[?996nX");
+        p2.flush(&mut s2);
+        assert_eq!(s2.replies, vec![b"\x1b[?997;2n".to_vec()]);
     }
 }

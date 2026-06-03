@@ -997,6 +997,10 @@ impl Session {
         let manager = self.window_manager.lock().await;
         for win in manager.windows() {
             for (_id, pane) in win.panes() {
+                // Record the scheme on EVERY pane so a later one-shot `\e[?996n`
+                // query answers the real preference (not the hardcoded default).
+                pane.with_screen_mut(|s| s.set_color_scheme_dark(dark));
+                // Push the unsolicited notification only to `?2031` subscribers.
                 let wants = pane.with_screen(|s| {
                     s.modes.contains(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES)
                 });
