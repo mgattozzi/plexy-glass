@@ -68,6 +68,10 @@ pub struct Keymap {
     root: TrieNode,
     pending: Vec<Chord>,
     pending_bytes: Vec<u8>,
+    /// The full last pending `KeyEvent` (the trie only keeps the `Chord`, which
+    /// loses kind/text/alternates). `tick()` flushes this on timeout so the
+    /// passed-through event is faithful, not a `kind=Press` reconstruction.
+    pending_last_event: Option<KeyEvent>,
     pending_since: Option<Instant>,
     timeout: Duration,
 }
@@ -90,6 +94,7 @@ impl Keymap {
             root: TrieNode::default(),
             pending: Vec::new(),
             pending_bytes: Vec::new(),
+            pending_last_event: None,
             pending_since: None,
             timeout: Duration::from_secs(1),
         }
@@ -138,6 +143,7 @@ impl Keymap {
             if !child.children.is_empty() {
                 self.pending.push(chord);
                 self.pending_bytes.extend_from_slice(&bytes);
+                self.pending_last_event = Some(event.clone());
                 self.pending_since = Some(Instant::now());
                 return KeymapAction::Pending;
             }
@@ -163,13 +169,12 @@ impl Keymap {
             && at.elapsed() >= self.timeout
         {
             let bytes = std::mem::take(&mut self.pending_bytes);
-            let last_event = self.pending.last().copied();
+            // Flush the FULL pending event (kind/text/alternates preserved), not
+            // a `kind=Press` reconstruction from the trie `Chord`.
+            let last_event = self.pending_last_event.take();
             self.cancel();
-            if let Some((mods, key)) = last_event {
-                return Some(KeymapAction::PassThrough(
-                    KeyEvent::new(key, mods),
-                    bytes,
-                ));
+            if let Some(event) = last_event {
+                return Some(KeymapAction::PassThrough(event, bytes));
             }
             return Some(KeymapAction::Cancel);
         }
@@ -190,6 +195,7 @@ impl Keymap {
     fn cancel(&mut self) {
         self.pending.clear();
         self.pending_bytes.clear();
+        self.pending_last_event = None;
         self.pending_since = None;
     }
 }
@@ -337,5 +343,29 @@ mod tests {
         let tick = k.tick().expect("expected timeout flush");
         assert!(matches!(tick, KeymapAction::PassThrough(..)));
         assert!(!k.prefix_active());
+    }
+
+    #[test]
+    fn pending_timeout_flush_preserves_full_event() {
+        // On timeout the buffered prefix key is flushed via the FULL stored
+        // event (text/shifted intact), not a `Chord`-reconstructed bare Press.
+        let mut k = Keymap::new();
+        k.set_timeout(Duration::from_millis(50));
+        k.bind(
+            &[chord(Modifiers::CTRL, Key::Char('a')), chord(Modifiers::empty(), Key::Char('c'))],
+            Command::NewWindow,
+        );
+        let mut event = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
+        event.text = Some("a".into());
+        event.shifted = Some('A');
+        assert!(matches!(k.consume(event, vec![0x01]), KeymapAction::Pending));
+        sleep(Duration::from_millis(80));
+        match k.tick().expect("expected timeout flush") {
+            KeymapAction::PassThrough(ev, _) => {
+                assert_eq!(ev.text.as_deref(), Some("a"), "text preserved through tick");
+                assert_eq!(ev.shifted, Some('A'), "shifted key preserved through tick");
+            }
+            other => panic!("expected PassThrough, got {other:?}"),
+        }
     }
 }

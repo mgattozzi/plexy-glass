@@ -142,9 +142,10 @@ impl EnabledCaps {
 
 /// Read the outer terminal's reply to `PROBE` for up to `budget`, returning the
 /// accumulated bytes. Uses a short `poll(2)` per chunk so a terminal that does
-/// not answer cannot hang the client. Best-effort: any error ends the read.
-/// A signal interrupt (`EINTR`) during `poll` is treated as timeout and ends the
-/// read early; the only consequence is a fallback to `Legacy` classification.
+/// not answer cannot hang the client. Best-effort: a non-EINTR error ends the
+/// read. A signal interrupt (`EINTR`) on `poll`/`read` is retried within the
+/// remaining deadline, so a stray signal during the probe window does not
+/// mis-classify a capable terminal as `Legacy`.
 ///
 /// The fd is borrowed for the duration of the call and is never closed here.
 pub fn read_probe_reply(fd: BorrowedFd<'_>, budget: Duration) -> Vec<u8> {
@@ -162,15 +163,30 @@ pub fn read_probe_reply(fd: BorrowedFd<'_>, budget: Duration) -> Vec<u8> {
         };
         // SAFETY: single valid pollfd, count 1, finite non-negative timeout.
         let rc = unsafe { libc::poll(&mut pfd, 1, ms) };
-        if rc <= 0 {
-            break; // timeout or error, stop probing
+        if rc < 0 {
+            // A signal (EINTR) is not a real error, so retry within the remaining
+            // deadline rather than mis-classifying the terminal as Legacy. Any
+            // other poll error ends the probe.
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+        if rc == 0 {
+            break; // poll's deadline elapsed with no data ready
         }
         // SAFETY: `raw` is a valid readable fd borrowed from the caller for the
         // whole call; `chunk` is a valid writable buffer of `chunk.len()` bytes.
         // We never close `raw` here, so the borrow outlives the read.
         let n = unsafe { libc::read(raw, chunk.as_mut_ptr().cast(), chunk.len()) };
-        if n <= 0 {
-            break;
+        if n < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break; // other read error
+        }
+        if n == 0 {
+            break; // EOF
         }
         let n = n as usize;
         out.extend_from_slice(&chunk[..n]);
