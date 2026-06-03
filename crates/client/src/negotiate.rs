@@ -44,10 +44,11 @@ pub fn classify(reply: &[u8]) -> NegotiatedKbd {
     }
 }
 
-/// True once `out` contains a DA1 reply, any CSI sequence ending in `c`
-/// (`\e[?...c`). DA1 is sent last in `PROBE`, so this is the sentinel that all
-/// earlier replies have arrived.
-fn da1_reply_seen(out: &[u8]) -> bool {
+/// Index just past the terminating `c` of the first DA1 reply in `out`, i.e.
+/// any CSI sequence ending in `c` (`\e[?...c`), or `None` if no complete DA1
+/// reply is present yet. DA1 is sent last in `PROBE`, so this marks the boundary
+/// between the terminal's probe answer and any trailing user type-ahead.
+fn da1_reply_end(out: &[u8]) -> Option<usize> {
     let mut i = 0;
     while i + 1 < out.len() {
         if out[i] == 0x1b && out[i + 1] == b'[' {
@@ -57,12 +58,33 @@ fn da1_reply_seen(out: &[u8]) -> bool {
                 j += 1;
             }
             if j < out.len() && out[j] == b'c' {
-                return true;
+                return Some(j + 1);
             }
         }
         i += 1;
     }
-    false
+    None
+}
+
+/// True once `out` contains a DA1 reply, the sentinel that all earlier `PROBE`
+/// replies have arrived.
+fn da1_reply_seen(out: &[u8]) -> bool {
+    da1_reply_end(out).is_some()
+}
+
+/// User type-ahead captured during the probe window: the bytes of `reply` that
+/// follow the DA1 sentinel. The terminal answers `PROBE` in order, ending with
+/// DA1, so anything after the DA1 `c` is input the user typed before the pump
+/// began reading stdin, and it must be forwarded to the session, not dropped.
+///
+/// Returns empty when no DA1 reply is present: a terminal that never answered
+/// DA1 gives us no reliable boundary, and we cannot tell its escape noise from
+/// real input, so we forward nothing rather than risk injecting garbage.
+pub fn type_ahead_after_probe(reply: &[u8]) -> &[u8] {
+    match da1_reply_end(reply) {
+        Some(end) => &reply[end..],
+        None => &[],
+    }
 }
 
 /// True if `reply` contains a Kitty flags report `\e[?<digits>u`.
@@ -192,8 +214,11 @@ pub fn read_probe_reply(fd: BorrowedFd<'_>, budget: Duration) -> Vec<u8> {
         out.extend_from_slice(&chunk[..n]);
         // Stop as soon as the DA1 reply (the sentinel, sent last) arrives, since
         // that guarantees the Kitty + XTVERSION replies already arrived, and
-        // reading further would only capture user type-ahead. This is what
+        // reading further would only capture more user type-ahead. This is what
         // prevents a slow XTVERSION DCS from leaking past the probe into a pane.
+        // Any type-ahead already read alongside the sentinel is preserved in
+        // `out`; `type_ahead_after_probe` separates it so the caller can forward
+        // it.
         if da1_reply_seen(&out) {
             break;
         }
@@ -230,6 +255,29 @@ mod tests {
         assert!(da1_reply_seen(b"\x1b[?31u\x1bP>|ghostty 1.3.1\x1b\\\x1b[?1;2c"));
         // A bare `c` in a version string must NOT be mistaken for DA1.
         assert!(!da1_reply_seen(b"\x1bP>|contour 1.0\x1b\\"));
+    }
+
+    #[test]
+    fn type_ahead_after_probe_extracts_trailing_user_input() {
+        // Real Ghostty reply order (Kitty report, XTVERSION DCS, DA1) followed by
+        // keystrokes the user typed during the 120ms probe window. Everything
+        // after the DA1 `c` is that type-ahead and must be recovered verbatim.
+        let reply = b"\x1b[?31u\x1bP>|ghostty 1.3.1\x1b\\\x1b[?1;2cls\r";
+        assert_eq!(type_ahead_after_probe(reply), b"ls\r");
+    }
+
+    #[test]
+    fn type_ahead_after_probe_empty_when_da1_is_last() {
+        // Probe answered with nothing typed, so no trailing input.
+        assert_eq!(type_ahead_after_probe(b"\x1b[?1;2c"), b"");
+    }
+
+    #[test]
+    fn type_ahead_after_probe_empty_without_da1() {
+        // No DA1 sentinel means no reliable boundary, so forward nothing (don't
+        // risk injecting a partial escape reply as input).
+        assert_eq!(type_ahead_after_probe(b"\x1b[?31u"), b"");
+        assert_eq!(type_ahead_after_probe(b""), b"");
     }
 
     #[test]

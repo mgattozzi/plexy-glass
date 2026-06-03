@@ -54,6 +54,10 @@ pub async fn run(
     // terminal can't hang us.
     let probe_reply = negotiate::read_probe_reply(stdin_fd, std::time::Duration::from_millis(120));
     let kbd = negotiate::classify(&probe_reply);
+    // Keystrokes the user typed during the probe window land after the DA1
+    // sentinel in `probe_reply`. The pump reads stdin fresh, so without this
+    // they'd be dropped; replay them as initial input once the session attaches.
+    let type_ahead = negotiate::type_ahead_after_probe(&probe_reply).to_vec();
     let caps = negotiate::EnabledCaps { kbd, focus_events: true, color_scheme: true };
 
     // Enable SGR-encoded mouse coords (?1006h), button-event tracking (?1002h,
@@ -82,6 +86,14 @@ pub async fn run(
     let spec = spawn_cmd.unwrap_or_else(default_spawn_spec);
     handshake_spawn(&mut reader, &mut writer, name, create_if_missing, Some(spec), initial_size)
         .await?;
+
+    // Replay probe-window type-ahead now that a pane exists to receive it. These
+    // are plain keystrokes: focus/theme/mouse/paste modes are enabled only after
+    // the probe, so the post-DA1 tail can't carry those events. Send it as Input.
+    if !type_ahead.is_empty() {
+        pump::send_client_msg(&mut writer, &ClientMsg::Input(bytes::Bytes::from(type_ahead)))
+            .await?;
+    }
 
     // SIGWINCH plumbing.
     let (resize_tx, resize_rx) = mpsc::channel(4);
