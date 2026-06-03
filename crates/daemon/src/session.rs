@@ -334,6 +334,10 @@ pub struct ClientHandle {
     pub client_id: u64,
     pub size: PtySize,
     pub frame_rx: watch::Receiver<Arc<VirtualScreen>>,
+    /// Whether this client's outer terminal currently has focus (`\e[I`/`\e[O`).
+    /// Starts `false` because `?1004` reports no initial state on enable, so we
+    /// learn it on the first transition. Used for the any-client-focused aggregate.
+    pub focused: bool,
 }
 
 pub struct Session {
@@ -912,6 +916,7 @@ impl Session {
                 client_id,
                 size,
                 frame_rx: frame_rx_for_session,
+                focused: false,
             });
         }
         self.recompute_size_and_notify();
@@ -919,6 +924,7 @@ impl Session {
             client_id,
             size,
             frame_rx: frame_rx_for_caller,
+            focused: false,
         })
     }
 
@@ -1022,21 +1028,40 @@ impl Session {
     /// Synthesize a focus transition between two panes after the active pane
     /// changed: queue `\e[O` (focus-out) to `old` and `\e[I` (focus-in) to
     /// `new`, each gated independently on that pane's ?1004 (`FOCUS_EVENTS`)
-    /// mode. Panes are looked up in the active window; a pane that no longer
-    /// exists (e.g. the old one was just killed) is skipped.
+    /// mode. Panes are searched across ALL windows, since a cross-window switch
+    /// leaves the old pane in the previous window and it must still get its
+    /// focus-out. A pane that no longer exists (e.g. just killed) is skipped.
     pub async fn synthesize_focus_transition(&self, old: PaneId, new: PaneId) {
         let manager = self.window_manager.lock().await;
-        let win = manager.active_window();
-        if let Some(p) = win.pane(old)
+        let find = |id: PaneId| manager.windows().iter().find_map(|w| w.pane(id));
+        if let Some(p) = find(old)
             && p.with_screen(|s| s.modes.contains(plexy_glass_emulator::Modes::FOCUS_EVENTS))
         {
             p.send_input(bytes::Bytes::from_static(b"\x1b[O")).await.ok();
         }
-        if let Some(p) = win.pane(new)
+        if let Some(p) = find(new)
             && p.with_screen(|s| s.modes.contains(plexy_glass_emulator::Modes::FOCUS_EVENTS))
         {
             p.send_input(bytes::Bytes::from_static(b"\x1b[I")).await.ok();
         }
+    }
+
+    /// Update one client's focus state and report whether the **aggregate**
+    /// focus changed. Any-client-focused rule: the session is focused iff at
+    /// least one attached client's outer terminal is. Returns `Some(true)` when
+    /// the aggregate transitioned to focused (caller emits `\e[I`), `Some(false)`
+    /// when it transitioned to unfocused (caller emits `\e[O`), or `None` when the
+    /// aggregate is unchanged (another client already held/lacked focus). A
+    /// disconnected client simply drops from the set, so its focus naturally
+    /// stops counting on the next transition.
+    pub async fn set_client_focus(&self, client_id: u64, focused: bool) -> Option<bool> {
+        let mut clients = self.clients.lock().await;
+        let any_before = clients.iter().any(|c| c.focused);
+        if let Some(c) = clients.iter_mut().find(|c| c.client_id == client_id) {
+            c.focused = focused;
+        }
+        let any_after = clients.iter().any(|c| c.focused);
+        (any_before != any_after).then_some(any_after)
     }
 
     /// Re-encode a canonical key event into the active pane's negotiated
@@ -1711,6 +1736,34 @@ mod tests {
         let s2 = Arc::clone(&s);
         let cid = h.client_id;
         tokio::task::spawn_blocking(move || s2.deregister_client(cid)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn focus_aggregates_across_clients_any_focused() {
+        // Any-client-focused: the pane is focused iff at least one client is.
+        let s = Session::new("focusagg".into(), spec(), size(), cfg()).unwrap();
+        let s2 = Arc::clone(&s);
+        let a = tokio::task::spawn_blocking(move || {
+            s2.register_client(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let s2 = Arc::clone(&s);
+        let b = tokio::task::spawn_blocking(move || {
+            s2.register_client(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        // Both start unfocused. A gains focus → aggregate false→true (emit focus-in).
+        assert_eq!(s.set_client_focus(a.client_id, true).await, Some(true));
+        // B gains focus → already focused, no aggregate change.
+        assert_eq!(s.set_client_focus(b.client_id, true).await, None);
+        // A loses focus → B still focused, no change (no spurious focus-out).
+        assert_eq!(s.set_client_focus(a.client_id, false).await, None);
+        // B loses focus → aggregate true→false (emit focus-out).
+        assert_eq!(s.set_client_focus(b.client_id, false).await, Some(false));
     }
 
     #[tokio::test]

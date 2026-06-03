@@ -579,16 +579,18 @@ where
             ClientMsg::Detach => break,
             ClientMsg::Shutdown => break,
             ClientMsg::FocusIn => {
-                // Multi-client rule: a pane is focused if ANY client has it
-                // active+focused. With a single attached client this is the
-                // direct transition; the per-pane ?1004 gate lives in
-                // `focus_active_pane`.
-                session.focus_active_pane(true).await;
+                // Any-client-focused rule: emit focus-in only when the aggregate
+                // transitions from no-client-focused to some-client-focused. The
+                // per-pane ?1004 gate lives in `focus_active_pane`.
+                if let Some(now) = session.set_client_focus(client_id, true).await {
+                    session.focus_active_pane(now).await;
+                }
             }
             ClientMsg::FocusOut => {
-                // Focus-out only when all subscribers lose it; with one client
-                // here that is exactly this transition.
-                session.focus_active_pane(false).await;
+                // Emit focus-out only when ALL attached clients have lost focus.
+                if let Some(now) = session.set_client_focus(client_id, false).await {
+                    session.focus_active_pane(now).await;
+                }
             }
             ClientMsg::ColorScheme(scheme) => {
                 // Most-recently-active client's preference wins; forward to all
