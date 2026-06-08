@@ -1961,6 +1961,7 @@ mod tests {
             cwd: None,
             windows: vec![WindowTemplate {
                 name: "main".into(),
+                cwd: None,
                 layout: PaneNode::Leaf(PaneTemplate {
                     command: None,
                     cwd: None,
@@ -1992,12 +1993,13 @@ mod tests {
             windows: vec![
                 WindowTemplate {
                     name: "split".into(),
+                    cwd: None,
                     layout: PaneNode::Split {
                         dir: SplitDirection::Vertical,
                         children: vec![pane(None), pane(None), pane(None)],
                     },
                 },
-                WindowTemplate { name: "solo".into(), layout: pane(None) },
+                WindowTemplate { name: "solo".into(), cwd: None, layout: pane(None) },
             ],
         };
         let s = Session::build_from_template(&tmpl, size(), cfg()).await.unwrap();

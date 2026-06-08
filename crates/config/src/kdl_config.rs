@@ -197,7 +197,8 @@ fn decode_session(node: &KdlNode, src: &str) -> Result<SessionTemplate, ConfigEr
 
 fn decode_window(node: &KdlNode, src: &str) -> Result<WindowTemplate, ConfigError> {
     let name = string_arg(node, 0, src, "window name")?.to_string();
-    ensure_only_props(node, &[], src)?;
+    ensure_only_props(node, &["cwd"], src)?;
+    let cwd = prop_str(node, "cwd").map(str::to_string);
     let nodes: Vec<&KdlNode> = node.children().map(|d| d.nodes().iter().collect()).unwrap_or_default();
     let layout = match nodes.as_slice() {
         [single] => decode_layout_node(single, src)?,
@@ -208,7 +209,7 @@ fn decode_window(node: &KdlNode, src: &str) -> Result<WindowTemplate, ConfigErro
             return Err(decode_err(src, node, &format!("window `{name}` must contain exactly one layout node; wrap multiple panes in a `split`")));
         }
     };
-    Ok(WindowTemplate { name, layout })
+    Ok(WindowTemplate { name, cwd, layout })
 }
 
 fn decode_layout_node(node: &KdlNode, src: &str) -> Result<PaneNode, ConfigError> {
@@ -1051,5 +1052,24 @@ keymap {
     fn no_sessions_by_default() {
         assert!(parse_config("").unwrap().sessions.is_empty());
         assert!(parse_config(r##"palette { bg "#000000" }"##).unwrap().sessions.is_empty());
+    }
+
+    #[test]
+    fn decodes_window_cwd() {
+        let cfg = parse_config(
+            r##"session "x" cwd="~/p" {
+                window "api" cwd="~/p/api" { pane }
+                window "logs" { pane }
+            }"##,
+        )
+        .unwrap();
+        assert_eq!(cfg.sessions[0].windows[0].cwd.as_deref(), Some("~/p/api"));
+        assert_eq!(cfg.sessions[0].windows[1].cwd, None);
+    }
+
+    #[test]
+    fn window_rejects_unknown_prop() {
+        let err = parse_config(r##"session "x" { window "w" bogus="1" { pane } }"##);
+        assert!(err.is_err(), "unknown window property must error");
     }
 }

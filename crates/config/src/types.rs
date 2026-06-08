@@ -179,6 +179,7 @@ pub struct SessionTemplate {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowTemplate {
     pub name: String,
+    pub cwd: Option<String>,
     pub layout: PaneNode,
 }
 
