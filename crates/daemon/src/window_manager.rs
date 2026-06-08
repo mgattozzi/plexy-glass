@@ -590,6 +590,12 @@ impl WindowManager {
         }
     }
 
+    /// The cwd a split / new pane in the active window spawns at: the window's
+    /// home base (deterministic, never the active pane's live `cd` location).
+    pub fn split_cwd(&self) -> Option<String> {
+        self.active_window().home_cwd.clone()
+    }
+
     /// Rename the active window (command-prompt `rename` path). Mirrors the
     /// rename-overlay commit, but the name comes straight from the prompt.
     pub fn rename_active_window(&mut self, name: String) {
@@ -722,7 +728,7 @@ impl WindowManager {
             Command::SplitV => {
                 let new_id = self.alloc_pane_id();
                 let mut spec = self.default_spec.clone();
-                spec.cwd = inherit_cwd(self.active_window().active_pane());
+                spec.cwd = self.split_cwd();
                 let notify = Arc::clone(&self.notify);
                 let death = self.death_tx.clone();
                 let config = Arc::clone(&self.config);
@@ -739,7 +745,7 @@ impl WindowManager {
             Command::SplitH => {
                 let new_id = self.alloc_pane_id();
                 let mut spec = self.default_spec.clone();
-                spec.cwd = inherit_cwd(self.active_window().active_pane());
+                spec.cwd = self.split_cwd();
                 let notify = Arc::clone(&self.notify);
                 let death = self.death_tx.clone();
                 let config = Arc::clone(&self.config);
@@ -780,9 +786,10 @@ impl WindowManager {
                 self.next_window_id += 1;
                 let first_pane = self.alloc_pane_id();
                 let mut spec = self.default_spec.clone();
-                spec.cwd = inherit_cwd(self.active_window().active_pane());
+                let home = self.session_cwd.clone();
+                spec.cwd = home.clone();
                 let n = id.raw();
-                let window = Window::spawn_first(
+                let mut window = Window::spawn_first(
                     id,
                     format!("shell{n}"),
                     first_pane,
@@ -792,6 +799,7 @@ impl WindowManager {
                     self.death_tx.clone(),
                     Arc::clone(&self.config),
                 )?;
+                window.home_cwd = home;
                 self.windows.push(window);
                 self.last_active_window = Some(self.active);
                 self.active = self.windows.len() - 1;
@@ -1567,21 +1575,6 @@ fn command_clears_zoom(cmd: &Command) -> bool {
     )
 }
 
-fn inherit_cwd(active_pane: Option<&crate::pane::Pane>) -> Option<String> {
-    active_pane
-        .and_then(|p| p.with_screen(|s| s.cwd.clone()))
-        .and_then(|url| cwd_from_osc7(&url))
-}
-
-/// OSC 7 sends `file://hostname/path`. Strip the scheme and optional
-/// hostname and return the path string, or `None` if the format is
-/// unexpected.
-fn cwd_from_osc7(url: &str) -> Option<String> {
-    let after_scheme = url.strip_prefix("file://")?;
-    // Skip hostname if present (may be empty: "file:///path").
-    let path_start = after_scheme.find('/')?;
-    Some(after_scheme[path_start..].to_string())
-}
 
 #[cfg(test)]
 mod tests {
@@ -1822,7 +1815,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn osc7_cwd_inherited_on_split() {
+    async fn split_cwd_is_window_home_base_not_active_pane_cwd() {
         let notify = Arc::new(Notify::new());
         let mut m = WindowManager::new(
             spec(),
@@ -1832,21 +1825,16 @@ mod tests {
             cfg(),
         )
         .unwrap();
-        // Inject a cwd directly onto the active pane's screen.
+        m.set_window_home_cwd(0, Some("/home/base".into()));
+        // The active pane reports a DIFFERENT live cwd via OSC 7, and it must be ignored.
         if let Some(pane) = m.active_window().active_pane() {
-            pane.with_screen_mut(|s| s.cwd = Some("file:///tmp/work".to_string()));
+            pane.with_screen_mut(|s| s.cwd = Some("file:///somewhere/else".to_string()));
         }
+        // A split spawns at the window home base, never the active pane's cd location.
+        assert_eq!(m.split_cwd().as_deref(), Some("/home/base"));
+        // And the split still succeeds structurally.
         m.handle_command(Command::SplitV).unwrap();
-        // We can't easily inspect the spawned pane's spec.cwd post-spawn,
-        // but verify the split succeeded.
         assert_eq!(m.active_window().layout().panes().len(), 2);
-    }
-
-    #[test]
-    fn cwd_from_osc7_strips_file_scheme_and_hostname() {
-        assert_eq!(super::cwd_from_osc7("file:///tmp"), Some("/tmp".to_string()));
-        assert_eq!(super::cwd_from_osc7("file://localhost/tmp"), Some("/tmp".to_string()));
-        assert_eq!(super::cwd_from_osc7("not-a-file-url"), None);
     }
 
     #[tokio::test]
