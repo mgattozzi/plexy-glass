@@ -440,6 +440,7 @@ impl Session {
                 WindowStateV1 {
                     name: w.name.clone(),
                     sync_input: w.sync_input,
+                    home_cwd: w.home_cwd.clone(),
                     active_pane,
                     panes,
                     layout,
@@ -678,6 +679,7 @@ impl Session {
             for (i, saved_w) in saved.windows.iter().enumerate() {
                 if let Some(win) = wm.windows_mut().get_mut(i) {
                     win.sync_input = saved_w.sync_input;
+                    win.home_cwd = saved_w.home_cwd.clone();
                     let leaves = win.layout().dfs_leaves();
                     // Restore user-assigned pane names by DFS index (the same
                     // order panes were serialized in).
@@ -2062,6 +2064,21 @@ mod tests {
         let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
         let wm = restored.window_manager.lock().await;
         assert_eq!(wm.windows()[0].layout().panes().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn restore_round_trips_window_home_cwd() {
+        let original = Session::new("rthome".into(), spec(), size(), cfg()).unwrap();
+        let saved = {
+            let mut wm = original.window_manager.lock().await;
+            wm.set_window_home_cwd(0, Some("/restored/base".into()));
+            // `snapshot_for_persist` is sync and takes the locked `WindowManager`.
+            original.snapshot_for_persist(&wm)
+        };
+        assert_eq!(saved.windows[0].home_cwd.as_deref(), Some("/restored/base"));
+        let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
+        let wm = restored.window_manager.lock().await;
+        assert_eq!(wm.windows()[0].home_cwd.as_deref(), Some("/restored/base"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

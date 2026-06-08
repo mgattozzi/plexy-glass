@@ -454,6 +454,7 @@ mod tests {
             windows: vec![crate::persist::WindowStateV1 {
                 name: "stale".into(),
                 sync_input: false,
+                home_cwd: None,
                 active_pane: 0,
                 panes: vec![crate::persist::PaneStateV1 { cwd: None, name: None }],
                 layout: crate::persist::LayoutStateV1::Leaf(0),

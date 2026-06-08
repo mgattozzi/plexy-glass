@@ -11,6 +11,9 @@ use std::path::PathBuf;
 ///
 /// v1 -> v2: added `PaneStateV1.name` (optional, `#[serde(default)]`). v1 files
 /// still load (the missing field defaults to `None`) so loads accept either.
+///
+/// Additive optional fields added since v2 do not bump the version (older files
+/// default them to `None` via `#[serde(default)]`): `WindowStateV1.home_cwd`.
 pub const SCHEMA_VERSION: u32 = 2;
 
 /// Oldest on-disk schema this build can still load (older files are rejected).
@@ -31,6 +34,10 @@ pub struct SessionStateV1 {
 pub struct WindowStateV1 {
     pub name: String,
     pub sync_input: bool,
+    /// The window's home base (per-window cwd). Absent in older files, where
+    /// `#[serde(default)]` fills it as `None`.
+    #[serde(default)]
+    pub home_cwd: Option<String>,
     pub active_pane: u32,
     pub panes: Vec<PaneStateV1>,
     pub layout: LayoutStateV1,
@@ -202,6 +209,7 @@ mod tests {
             windows: vec![WindowStateV1 {
                 name: "shell".into(),
                 sync_input: false,
+                home_cwd: None,
                 active_pane: 0,
                 panes: vec![PaneStateV1 { cwd: Some("/tmp".into()), name: None }],
                 layout: LayoutStateV1::Leaf(0),
