@@ -19,6 +19,10 @@ pub struct Window {
     /// NOT mutated), so unzoom restores exactly. Cleared by any structural
     /// change.
     pub zoomed: Option<PaneId>,
+    /// The window's permanent home base: panes/splits created here spawn at this
+    /// cwd. Resolved once at construction (window cwd → session cwd, expanded);
+    /// `None` = no anchor (daemon cwd). Not mutated after construction.
+    pub home_cwd: Option<String>,
     panes: HashMap<PaneId, Pane>,
     layout: LayoutTree,
     active: PaneId,
@@ -62,6 +66,7 @@ impl Window {
             name,
             sync_input: false,
             zoomed: None,
+            home_cwd: None,
             panes,
             layout: LayoutTree::single(first_pane_id),
             active: first_pane_id,
@@ -281,6 +286,7 @@ impl Window {
             name,
             sync_input: false,
             zoomed: None,
+            home_cwd: None,
             panes,
             layout: LayoutTree::single(pid),
             active: pid,

@@ -728,7 +728,9 @@ impl Session {
         let session = Self::new(template.name.clone(), first_spec, size, Arc::clone(&config))?;
         {
             let mut wm = session.window_manager.lock().await;
+            wm.set_session_cwd(crate::declared::home_base(None, template.cwd.as_deref()));
             wm.set_window_name(0, first_window.name.clone());
+            wm.set_window_home_cwd(0, win0_home.clone());
             build_window_from_bin(&mut wm, 0, &bin0, &leaves0, win0_home.as_deref())?;
             for (wi, w) in template.windows.iter().enumerate().skip(1) {
                 let bin = crate::declared::to_binary(&w.layout);
@@ -736,6 +738,7 @@ impl Session {
                 let home = crate::declared::home_base(w.cwd.as_deref(), template.cwd.as_deref());
                 let first = crate::declared::pane_spec(leaves[0], home.as_deref());
                 wm.new_window_with_spec(first, w.name.clone())?;
+                wm.set_window_home_cwd(wi, home.clone());
                 build_window_from_bin(&mut wm, wi, &bin, &leaves, home.as_deref())?;
             }
             wm.set_active_window(0);
@@ -2018,7 +2021,6 @@ mod tests {
         s.terminate_panes().await;
     }
 
-    #[ignore = "enabled in Task 3 once Window.home_cwd exists"]
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_window_cwd_seeds_first_pane() {
         use plexy_glass_config::{PaneNode, PaneTemplate, SessionTemplate, WindowTemplate};
@@ -2038,13 +2040,10 @@ mod tests {
         };
         let s = Session::build_from_template(&tmpl, size(), cfg()).await.unwrap();
         let wm = s.window_manager.lock().await;
-        // TODO(Task 3): assert home_cwd seeds (window cwd /win/api, session /session)
         // window "api": its first pane spawns at the window cwd.
-        // assert_eq!(wm.windows()[0].home_cwd.as_deref(), Some("/win/api"));
+        assert_eq!(wm.windows()[0].home_cwd.as_deref(), Some("/win/api"));
         // window "logs": no window cwd, so it falls back to the session cwd.
-        // assert_eq!(wm.windows()[1].home_cwd.as_deref(), Some("/session"));
-        // Placeholder until Window.home_cwd exists in Task 3:
-        assert_eq!(wm.windows().len(), 2);
+        assert_eq!(wm.windows()[1].home_cwd.as_deref(), Some("/session"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

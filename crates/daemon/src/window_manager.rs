@@ -79,6 +79,10 @@ pub struct WindowManager {
     /// `SpawnSpec` used to create new panes/windows (cloned from the client's
     /// initial `Spawn`).
     default_spec: SpawnSpec,
+    /// The session's base cwd (config `session cwd`, tilde-expanded). Seeds the
+    /// home base of windows created interactively (`NewWindow`); `None` for
+    /// non-declared sessions.
+    session_cwd: Option<String>,
     /// Each pane sends its `PaneId` here when its child exits. `None` in tests
     /// where pane lifecycle is driven manually.
     death_tx: Option<mpsc::Sender<PaneId>>,
@@ -171,6 +175,7 @@ impl WindowManager {
                 env: first_spec.env,
                 cwd: None,
             },
+            session_cwd: None,
             death_tx,
             selection: None,
             config,
@@ -569,6 +574,19 @@ impl WindowManager {
     pub fn set_window_name(&mut self, window_idx: usize, name: String) {
         if let Some(w) = self.windows.get_mut(window_idx) {
             w.name = name;
+        }
+    }
+
+    /// Set the session base cwd (declared/restored sessions call this so
+    /// interactive new windows anchor to it).
+    pub fn set_session_cwd(&mut self, cwd: Option<String>) {
+        self.session_cwd = cwd;
+    }
+
+    /// Set a window's home base by index (used while building/restoring).
+    pub fn set_window_home_cwd(&mut self, window_idx: usize, home_cwd: Option<String>) {
+        if let Some(w) = self.windows.get_mut(window_idx) {
+            w.home_cwd = home_cwd;
         }
     }
 
