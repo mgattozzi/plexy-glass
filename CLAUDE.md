@@ -165,7 +165,12 @@ paste; sync-panes; a configurable status bar with live reload; **KDL v2 config**
 **declarative default sessions** (recursive `session → window → split/pane`
 layouts with per-pane shell commands, built fresh at daemon boot; config wins for
 declared names over saved on-disk state — `crates/daemon/src/declared.rs` +
-`Session::build_from_template`); deep OSC handling
+`Session::build_from_template`; windows accept a `cwd`
+(`window "api" cwd="~/p/api" { … }`) — a window's cwd is its permanent
+**home base**: every pane and split created in the window spawns there
+(precedence `pane.cwd → window.cwd → session.cwd → daemon cwd`), and splits /
+interactive new panes always use the home base, not the active pane's live
+OSC-7 location; a `Ctrl+a c` window anchors to the session cwd); deep OSC handling
 (8 hyperlinks, 52 clipboard, 133 prompt marks, 10/11/12 colors, 0/1/2 titles);
 keyboard passthrough; interactive overlays (window/pane rename, help); a
 `Ctrl+a :` **command prompt** with in-place **session switching**
