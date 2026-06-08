@@ -103,24 +103,41 @@ fn count_leaves(node: &BinLayout) -> u32 {
     }
 }
 
-/// The `SpawnSpec` for a declared pane: `command` runs via the default shell
-/// `-c`; no command = an interactive default shell. cwd = pane cwd, else the
-/// session cwd, with a leading `~` expanded. `env` empty = inherit daemon env.
-pub(crate) fn pane_spec(pt: &PaneTemplate, session_cwd: &Option<String>) -> SpawnSpec {
-    let home = std::env::var("HOME").ok();
-    make_spec(&default_shell(), pt, session_cwd, home.as_deref())
+/// A window's home base: the cwd new panes/splits in the window inherit.
+/// `window` cwd wins over `session` cwd; a leading `~` is expanded. `None`
+/// means "no anchor" (the daemon's cwd).
+pub(crate) fn resolve_home_cwd(
+    window_cwd: Option<&str>,
+    session_cwd: Option<&str>,
+    home: Option<&str>,
+) -> Option<String> {
+    window_cwd.or(session_cwd).map(|c| expand_tilde(c, home))
 }
 
-fn make_spec(shell: &str, pt: &PaneTemplate, session_cwd: &Option<String>, home: Option<&str>) -> SpawnSpec {
+/// `resolve_home_cwd` reading `HOME` from the environment.
+pub(crate) fn home_base(window_cwd: Option<&str>, session_cwd: Option<&str>) -> Option<String> {
+    let home = std::env::var("HOME").ok();
+    resolve_home_cwd(window_cwd, session_cwd, home.as_deref())
+}
+
+/// The `SpawnSpec` for a declared pane: `command` runs via the default shell
+/// `-c`; no command = an interactive default shell. cwd = the pane's own cwd
+/// (tilde-expanded), else the window `home_cwd` (already expanded). `env` empty
+/// = inherit daemon env.
+pub(crate) fn pane_spec(pt: &PaneTemplate, home_cwd: Option<&str>) -> SpawnSpec {
+    let home = std::env::var("HOME").ok();
+    make_spec(&default_shell(), pt, home_cwd, home.as_deref())
+}
+
+fn make_spec(shell: &str, pt: &PaneTemplate, home_cwd: Option<&str>, home: Option<&str>) -> SpawnSpec {
     let args = match &pt.command {
         Some(cmd) => vec!["-c".to_string(), cmd.clone()],
         None => vec![],
     };
-    let cwd = pt
-        .cwd
-        .as_deref()
-        .or(session_cwd.as_deref())
-        .map(|c| expand_tilde(c, home));
+    let cwd = match pt.cwd.as_deref() {
+        Some(c) => Some(expand_tilde(c, home)),
+        None => home_cwd.map(str::to_string),
+    };
     SpawnSpec { program: shell.to_string(), args, env: vec![], cwd }
 }
 
@@ -156,7 +173,7 @@ mod tests {
     #[test]
     fn make_spec_command_runs_via_shell_dash_c() {
         let pt = PaneTemplate { command: Some("npm run dev".into()), cwd: None, name: None };
-        let s = make_spec("/bin/zsh", &pt, &None, None);
+        let s = make_spec("/bin/zsh", &pt, None, None);
         assert_eq!(s.program, "/bin/zsh");
         assert_eq!(s.args, vec!["-c".to_string(), "npm run dev".to_string()]);
         assert!(s.env.is_empty());
@@ -166,20 +183,48 @@ mod tests {
     #[test]
     fn make_spec_no_command_is_interactive_shell() {
         let pt = PaneTemplate { command: None, cwd: None, name: None };
-        let s = make_spec("/bin/sh", &pt, &None, None);
+        let s = make_spec("/bin/sh", &pt, None, None);
         assert_eq!(s.program, "/bin/sh");
         assert!(s.args.is_empty());
     }
 
     #[test]
     fn make_spec_cwd_precedence_and_tilde() {
-        let session_cwd = Some("~/proj".to_string());
+        // `home_cwd` is already resolved (`resolve_home_cwd` expanded the tilde upstream).
+        let home_cwd = Some("/home/u/proj");
         let pt_override = PaneTemplate { command: None, cwd: Some("~/proj/sub".into()), name: None };
-        let s = make_spec("/bin/sh", &pt_override, &session_cwd, Some("/home/u"));
+        let s = make_spec("/bin/sh", &pt_override, home_cwd, Some("/home/u"));
         assert_eq!(s.cwd.as_deref(), Some("/home/u/proj/sub"));
         let pt_inherit = PaneTemplate { command: None, cwd: None, name: None };
-        let s2 = make_spec("/bin/sh", &pt_inherit, &session_cwd, Some("/home/u"));
+        let s2 = make_spec("/bin/sh", &pt_inherit, home_cwd, Some("/home/u"));
         assert_eq!(s2.cwd.as_deref(), Some("/home/u/proj"));
+    }
+
+    fn pt(cwd: Option<&str>) -> PaneTemplate {
+        PaneTemplate { command: None, cwd: cwd.map(str::to_string), name: None }
+    }
+
+    #[test]
+    fn resolve_home_cwd_window_wins_then_session() {
+        // window cwd wins over session cwd; tilde expands.
+        assert_eq!(resolve_home_cwd(Some("~/w"), Some("~/s"), Some("/home/u")), Some("/home/u/w".into()));
+        // no window cwd → session cwd.
+        assert_eq!(resolve_home_cwd(None, Some("~/s"), Some("/home/u")), Some("/home/u/s".into()));
+        // neither → None.
+        assert_eq!(resolve_home_cwd(None, None, Some("/home/u")), None);
+    }
+
+    #[test]
+    fn make_spec_pane_cwd_overrides_home_base() {
+        // pane cwd wins over the resolved home base.
+        let s = make_spec("/bin/sh", &pt(Some("~/pane")), Some("/home/u/home_base"), Some("/home/u"));
+        assert_eq!(s.cwd.as_deref(), Some("/home/u/pane"));
+        // no pane cwd → home base (already expanded; not re-expanded).
+        let s = make_spec("/bin/sh", &pt(None), Some("/home/u/home_base"), Some("/home/u"));
+        assert_eq!(s.cwd.as_deref(), Some("/home/u/home_base"));
+        // no pane cwd, no home base → None.
+        let s = make_spec("/bin/sh", &pt(None), None, Some("/home/u"));
+        assert_eq!(s.cwd, None);
     }
 
     #[test]
