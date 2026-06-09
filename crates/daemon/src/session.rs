@@ -635,6 +635,9 @@ impl Session {
                 }
             }
         }
+        if let Some(p) = wm.popup() {
+            p.pane.kill_child();
+        }
     }
 
     /// Build a Session from a saved on-disk state. The base shell is the

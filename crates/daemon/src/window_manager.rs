@@ -133,6 +133,9 @@ pub struct WindowManager {
     /// target of `join-pane`/`swap-pane`. Runtime-only (not persisted); cleared
     /// when its pane dies (`handle_pane_death`) or is joined.
     marked_pane: Option<PaneId>,
+    /// The floating popup pane (transient, modal, never in any layout tree),
+    /// or `None`. See `crate::popup`.
+    popup: Option<crate::popup::Popup>,
 }
 
 /// Maximum retained command-prompt history entries.
@@ -191,6 +194,7 @@ impl WindowManager {
             status_message: None,
             command_history: Vec::new(),
             marked_pane: None,
+            popup: None,
         })
     }
 
@@ -434,6 +438,13 @@ impl WindowManager {
     /// Close a pane whose child exited. Called by Connection when it
     /// receives a `PaneId` on the death channel.
     pub fn handle_pane_death(&mut self, pane_id: PaneId) -> Result<(), DaemonError> {
+        // The popup's pane lives outside every window; its death just closes
+        // the popup (the primary dismissal path: the command exited).
+        if self.popup.as_ref().map(|p| p.pane.id()) == Some(pane_id) {
+            self.popup = None;
+            self.notify.notify_one();
+            return Ok(());
+        }
         let viewport = self.viewport();
         let mut closed_idx: Option<usize> = None;
         for (idx, w) in self.windows.iter_mut().enumerate() {
@@ -456,6 +467,11 @@ impl WindowManager {
                 self.active = self.windows.len() - 1;
             }
             self.fixup_last_active_after_removal(idx);
+        }
+        // The session ends when its last window closes; a floating popup must
+        // not orphan its child (nothing else would reap it).
+        if self.windows.is_empty() {
+            self.close_popup();
         }
         // A dead pane can no longer be a join/swap target.
         if self.marked_pane == Some(pane_id) {
@@ -594,6 +610,70 @@ impl WindowManager {
     /// home base (deterministic, never the active pane's live `cd` location).
     pub fn split_cwd(&self) -> Option<String> {
         self.active_window().home_cwd.clone()
+    }
+
+    /// The floating popup, if open.
+    pub fn popup(&self) -> Option<&crate::popup::Popup> {
+        self.popup.as_ref()
+    }
+
+    pub fn has_popup(&self) -> bool {
+        self.popup.is_some()
+    }
+
+    /// The cwd the popup spawns at: the active pane's live OSC-7 location,
+    /// falling back to the window home base. This intentionally diverges from
+    /// `split_cwd` (home base only): a popup acts on the current context.
+    pub fn popup_cwd(&self) -> Option<String> {
+        self.active_window()
+            .active_pane()
+            .and_then(|p| p.with_screen(|s| s.cwd.clone()))
+            .and_then(|url| crate::popup::osc7_to_path(&url))
+            .or_else(|| self.active_window().home_cwd.clone())
+    }
+
+    /// Open the floating popup (last-wins: an existing popup is replaced, but
+    /// only once the new pane has actually spawned).
+    /// `command` runs via `$SHELL -c`; `None` runs the interactive shell.
+    pub fn open_popup(&mut self, command: Option<String>) -> Result<(), DaemonError> {
+        let shell = crate::declared::default_shell();
+        let args = match &command {
+            Some(cmd) => vec!["-c".to_string(), cmd.clone()],
+            None => Vec::new(),
+        };
+        let spec = SpawnSpec {
+            program: shell,
+            args,
+            env: self.default_spec.env.clone(),
+            cwd: self.popup_cwd(),
+        };
+        let size = crate::popup::popup_pty_size(plexy_glass_mux::popup_rect(self.viewport()));
+        let id = self.alloc_pane_id();
+        let pane = crate::pane::Pane::spawn(
+            id,
+            spec,
+            size,
+            Arc::clone(&self.notify),
+            self.death_tx.clone(),
+            Arc::clone(&self.config),
+        )?;
+        // Last-wins: only replace (and kill) the old popup once the new one
+        // actually spawned, so a spawn failure can't destroy the old popup.
+        self.close_popup();
+        let title = command.unwrap_or_else(|| "popup".to_string());
+        self.popup = Some(crate::popup::Popup { pane, title });
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    /// Close the floating popup (if open), killing its child. The child's
+    /// later death-channel message finds neither a window pane nor a popup
+    /// and is a harmless no-op.
+    pub fn close_popup(&mut self) {
+        if let Some(p) = self.popup.take() {
+            p.pane.kill_child();
+            self.notify.notify_one();
+        }
     }
 
     /// Rename the active window (command-prompt `rename` path). Mirrors the
@@ -997,10 +1077,12 @@ impl WindowManager {
                     pane.enter_copy_mode(total_lines, pane_rows, start_line, start_col);
                 }
             }
-            // Popup lifecycle is handled at the connection/session layer (later
-            // tasks); window_manager receives these as a no-op until that work
-            // lands.
-            Command::OpenPopup { .. } | Command::ClosePopup => {}
+            Command::OpenPopup { command } => {
+                self.open_popup(command)?;
+            }
+            Command::ClosePopup => {
+                self.close_popup();
+            }
         }
         self.notify.notify_one();
         Ok(())
@@ -1011,6 +1093,10 @@ impl WindowManager {
         let viewport = host_viewport(new_size);
         for w in self.windows.iter_mut() {
             w.resize(viewport)?;
+        }
+        if let Some(p) = &self.popup {
+            p.pane
+                .resize(crate::popup::popup_pty_size(plexy_glass_mux::popup_rect(viewport)))?;
         }
         self.notify.notify_one();
         Ok(())
@@ -1493,26 +1579,31 @@ impl WindowManager {
     }
 
     fn close_active_window(&mut self) {
+        if !self.windows.is_empty() {
+            let removed = self.active;
+            // The marked pane can't survive its window's removal (KillWindow
+            // drops every pane synchronously, so the death channel won't clear
+            // it).
+            if let Some(marked) = self.marked_pane
+                && self.windows[removed].pane(marked).is_some()
+            {
+                self.marked_pane = None;
+            }
+            self.windows.remove(removed);
+            if self.windows.is_empty() {
+                self.last_active_window = None;
+            } else {
+                if self.active >= self.windows.len() {
+                    self.active = self.windows.len() - 1;
+                }
+                self.fixup_last_active_after_removal(removed);
+            }
+        }
+        // The session ends when its last window closes; a floating popup must
+        // not orphan its child (mirrors the death-channel path).
         if self.windows.is_empty() {
-            return;
+            self.close_popup();
         }
-        let removed = self.active;
-        // The marked pane can't survive its window's removal (KillWindow drops
-        // every pane synchronously, so the death channel won't clear it).
-        if let Some(marked) = self.marked_pane
-            && self.windows[removed].pane(marked).is_some()
-        {
-            self.marked_pane = None;
-        }
-        self.windows.remove(removed);
-        if self.windows.is_empty() {
-            self.last_active_window = None;
-            return;
-        }
-        if self.active >= self.windows.len() {
-            self.active = self.windows.len() - 1;
-        }
-        self.fixup_last_active_after_removal(removed);
     }
 
     /// Repair `last_active_window` after the window at `removed` is dropped:
@@ -2936,5 +3027,149 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(!m.active_window().bell_flag(), "the current window is never bell-flagged");
+    }
+
+    #[tokio::test]
+    async fn open_popup_sets_state_with_derived_size() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        assert!(!m.has_popup());
+        m.handle_command(Command::OpenPopup { command: None }).unwrap();
+        assert!(m.has_popup());
+        let rect = plexy_glass_mux::popup_rect(m.viewport());
+        let (rows, cols) = m
+            .popup()
+            .unwrap()
+            .pane
+            .with_screen(|s| (s.active.num_rows(), s.active.num_cols()));
+        assert_eq!((rows, cols), (rect.rows - 2, rect.cols - 2));
+        assert_eq!(m.popup().unwrap().title, "popup");
+    }
+
+    #[tokio::test]
+    async fn open_popup_is_last_wins_and_close_clears() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::OpenPopup { command: Some("sleep 600".into()) }).unwrap();
+        assert_eq!(m.popup().unwrap().title, "sleep 600");
+        m.handle_command(Command::OpenPopup { command: None }).unwrap();
+        assert_eq!(m.popup().unwrap().title, "popup", "second open replaces the first");
+        m.handle_command(Command::ClosePopup).unwrap();
+        assert!(!m.has_popup());
+        // Idempotent.
+        m.handle_command(Command::ClosePopup).unwrap();
+        assert!(!m.has_popup());
+    }
+
+    #[tokio::test]
+    async fn popup_cwd_prefers_live_osc7_then_home_base() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.set_window_home_cwd(0, Some("/home/base".into()));
+        // No live OSC-7 cwd → home base.
+        assert_eq!(m.popup_cwd().as_deref(), Some("/home/base"));
+        // Live OSC-7 cwd wins (documented divergence from split_cwd).
+        if let Some(pane) = m.active_window().active_pane() {
+            pane.with_screen_mut(|s| s.cwd = Some("file:///live/here".to_string()));
+        }
+        assert_eq!(m.popup_cwd().as_deref(), Some("/live/here"));
+        assert_eq!(m.split_cwd().as_deref(), Some("/home/base"), "splits unaffected");
+    }
+
+    #[tokio::test]
+    async fn popup_pane_death_closes_popup_only() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::OpenPopup { command: None }).unwrap();
+        let popup_id = m.popup().unwrap().pane.id();
+        m.handle_pane_death(popup_id).unwrap();
+        assert!(!m.has_popup());
+        assert_eq!(m.windows().len(), 1, "layout untouched by popup death");
+    }
+
+    #[tokio::test]
+    async fn last_window_death_also_closes_popup() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::OpenPopup { command: None }).unwrap();
+        // The only layout pane dies → session is ending; popup must not orphan.
+        m.handle_pane_death(PaneId(0)).unwrap();
+        assert!(m.is_empty());
+        assert!(!m.has_popup());
+    }
+
+    #[tokio::test]
+    async fn kill_window_emptying_session_also_closes_popup() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::OpenPopup { command: None }).unwrap();
+        m.handle_command(Command::KillWindow).unwrap();
+        assert!(m.is_empty());
+        assert!(!m.has_popup());
+    }
+
+    #[tokio::test]
+    async fn host_resize_resizes_popup_pane() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::OpenPopup { command: None }).unwrap();
+        m.on_host_resize(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let rect = plexy_glass_mux::popup_rect(m.viewport());
+        let (rows, cols) = m
+            .popup()
+            .unwrap()
+            .pane
+            .with_screen(|s| (s.active.num_rows(), s.active.num_cols()));
+        assert_eq!((rows, cols), (rect.rows - 2, rect.cols - 2));
     }
 }

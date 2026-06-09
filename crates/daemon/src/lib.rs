@@ -20,6 +20,7 @@ pub mod pane;
 pub mod paste_buffers;
 pub mod paths;
 pub mod persist;
+pub mod popup;
 pub mod registry;
 pub mod renderer;
 pub mod session;
