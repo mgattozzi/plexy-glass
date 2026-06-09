@@ -1050,6 +1050,19 @@ impl WindowManager {
         if self.pane_is_in_copy_mode(pane_id) {
             return self.handle_copy_mode_mouse(pane_id, event).await;
         }
+        // Rule 4.5: a left-press on a *non-active* pane focuses it and is
+        // consumed, even when the pane's app has mouse mode on. Without this,
+        // panes running mouse-reporting apps (less, hx, TUIs) would forward the
+        // click via Rule 5 and never become focusable. Mirrors the focus-only
+        // behavior `handle_left_press` gives plain panes.
+        if matches!(event.kind, MouseKind::Press)
+            && event.button == MouseButton::Left
+            && pane_id != self.active_window().active()
+        {
+            self.active_window_mut().focus(pane_id);
+            self.notify.notify_one();
+            return Ok(());
+        }
         // Rule 5: pane has child-app mouse-mode on → passthrough.
         if self.pane_has_any_mouse_mode(pane_id) {
             return self.forward_mouse_to_pane(pane_id, event).await;
@@ -2110,6 +2123,40 @@ mod tests {
         .await
         .unwrap();
         assert!(m.resize_drag.is_none());
+    }
+
+    // Regression: a pane running an app that enabled mouse reporting (less, hx,
+    // a TUI) must still be focusable by left-clicking it. Previously Rule 5
+    // forwarded *every* event to the child before the focus-on-click rule could
+    // run, so a click on such a pane never changed focus.
+    #[tokio::test]
+    async fn left_click_focuses_non_active_pane_even_with_app_mouse_mode() {
+        let mut m = make_two_pane_manager().await;
+        let active = m.active_window().active();
+        let other = if active == PaneId(0) { PaneId(1) } else { PaneId(0) };
+        // Simulate less/hx: the non-active pane's app enabled mouse reporting.
+        m.active_window()
+            .pane(other)
+            .unwrap()
+            .with_screen_mut(|s| s.modes.insert(plexy_glass_emulator::Modes::MOUSE_BTN));
+        assert!(m.pane_has_any_mouse_mode(other));
+        // Click in the middle of the other pane (avoiding borders), translating
+        // the logical rect back to physical coords via the status-bar offset.
+        let vp = m.viewport();
+        let rect = m.active_window().layout().rect_of(other, vp).unwrap();
+        let event = MouseEvent {
+            kind: MouseKind::Press,
+            button: MouseButton::Left,
+            modifiers: plexy_glass_mux::MouseModifiers::default(),
+            row: rect.row + rect.rows / 2 + m.pane_row_offset,
+            col: rect.col + rect.cols / 2,
+        };
+        m.handle_mouse(event).await.unwrap();
+        assert_eq!(
+            m.active_window().active(),
+            other,
+            "left-clicking a pane with app mouse mode on should focus it"
+        );
     }
 
     // SP4: with the status bar on top, mouse events (physical coords) must be
