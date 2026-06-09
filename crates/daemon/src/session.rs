@@ -113,6 +113,16 @@ async fn render_coordinator(
                 })
                 .collect();
 
+            // Snapshot the floating popup for this frame (screen + title + rect).
+            let popup_owned: Option<(plexy_glass_emulator::Screen, String, plexy_glass_mux::Rect)> =
+                m.popup().map(|p| {
+                    (
+                        p.pane.with_screen(|s| s.clone()),
+                        p.title.clone(),
+                        plexy_glass_mux::popup_rect(m.viewport()),
+                    )
+                });
+
             // Build event-driven widget context, refresh, snapshot.
             let session_name = session.name.clone();
             let attached_clients = session.clients.lock().await.len() as u8;
@@ -220,6 +230,10 @@ async fn render_coordinator(
                 None => None,
             };
 
+            let popup_view = popup_owned.as_ref().map(|(screen, title, rect)| {
+                plexy_glass_mux::PopupView { rect: *rect, screen, title }
+            });
+
             Compositor::compose(
                 &views,
                 (host.rows, host.cols),
@@ -228,7 +242,7 @@ async fn render_coordinator(
                 selection.as_ref(),
                 overlay_view.as_ref(),
                 message.as_deref(),
-                None,
+                popup_view.as_ref(),
             )
         };
         let _ = frame_tx.send(Arc::new(frame));
@@ -318,12 +332,17 @@ fn command_label(command: &str) -> String {
         "choose_buffer" => "Choose buffer",
         "toggle_monitor_activity" => "Monitor activity",
         "toggle_monitor_bell" => "Monitor bell",
+        "popup" => "Popup (scratch shell)",
+        "close_popup" => "Close popup",
         other => {
             if let Some(n) = other
                 .strip_prefix("select_window:")
                 .and_then(|x| x.parse::<u32>().ok())
             {
                 return format!("Select window {}", n + 1);
+            }
+            if let Some(cmd) = other.strip_prefix("popup:") {
+                return format!("Popup: {cmd}");
             }
             return other.to_string();
         }
@@ -979,6 +998,15 @@ impl Session {
 
     pub async fn handle_input_bytes(&self, bytes: &[u8]) -> Result<(), DaemonError> {
         let manager = self.window_manager.lock().await;
+        // A floating popup is modal: raw input bytes go to its child, never to
+        // the layout panes (sync-panes included) while it is open.
+        if let Some(p) = manager.popup() {
+            let pane = p.pane.clone();
+            drop(manager);
+            pane.send_input(bytes::Bytes::copy_from_slice(bytes)).await.ok();
+            self.notify.notify_one();
+            return Ok(());
+        }
         let win = manager.active_window();
         if win.sync_input {
             for id in win.layout().panes() {
@@ -1110,6 +1138,31 @@ impl Session {
         Ok(())
     }
 
+    /// Re-encode a key event for the floating popup's child and write it.
+    /// While a popup is open the connection routes PassThrough keys here
+    /// instead of `handle_key_event` (the popup is modal).
+    pub async fn handle_popup_key_event(
+        &self,
+        event: &plexy_glass_mux::KeyEvent,
+        raw_bytes: &[u8],
+        client_kbd: NegotiatedKbd,
+    ) -> Result<(), DaemonError> {
+        let manager = self.window_manager.lock().await;
+        if let Some(p) = manager.popup() {
+            let bytes = encode_for_pane(&p.pane, event, raw_bytes, client_kbd);
+            let pane = p.pane.clone();
+            drop(manager);
+            pane.send_input(bytes::Bytes::from(bytes)).await.ok();
+            self.notify.notify_one();
+        }
+        Ok(())
+    }
+
+    /// Whether the floating popup is open (connection input-routing check).
+    pub async fn popup_active(&self) -> bool {
+        self.window_manager.lock().await.has_popup()
+    }
+
     pub async fn handle_command(&self, cmd: plexy_glass_mux::Command) -> Result<(), DaemonError> {
         let mut manager = self.window_manager.lock().await;
         manager.handle_command(cmd)?;
@@ -1197,11 +1250,8 @@ impl Session {
             | PromptCommand::ChooseBuffer => {
                 return Ok(None);
             }
-            // Wired to Command::OpenPopup/ClosePopup in a later task (popup
-            // session integration); temporary no-op until then.
-            PromptCommand::Popup(_) | PromptCommand::ClosePopup => {
-                return Ok(None);
-            }
+            PromptCommand::Popup(cmd) => Command::OpenPopup { command: cmd },
+            PromptCommand::ClosePopup => Command::ClosePopup,
         };
         self.handle_command(mapped).await?;
         Ok(None)
@@ -1666,6 +1716,52 @@ mod tests {
             s.handle_prompt_command(PromptCommand::Switch("x".into())).await,
             Ok(None)
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prompt_popup_maps_to_open_and_close() {
+        let s = Session::new("t-popup-prompt".into(), spec(), size(), cfg()).unwrap();
+        s.handle_prompt_command(plexy_glass_mux::PromptCommand::Popup(Some("sleep 600".into())))
+            .await
+            .unwrap();
+        {
+            let m = s.window_manager.lock().await;
+            assert_eq!(m.popup().unwrap().title, "sleep 600");
+        }
+        s.handle_prompt_command(plexy_glass_mux::PromptCommand::ClosePopup).await.unwrap();
+        assert!(!s.window_manager.lock().await.has_popup());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn input_bytes_route_to_popup_when_open() {
+        let s = Session::new("t-popup-input".into(), spec(), size(), cfg()).unwrap();
+        s.handle_command(plexy_glass_mux::Command::OpenPopup { command: Some("cat".into()) })
+            .await
+            .unwrap();
+        let mut rx = {
+            let m = s.window_manager.lock().await;
+            m.popup().unwrap().pane.subscribe_output()
+        };
+        s.handle_input_bytes(b"popup_gets_this\n").await.unwrap();
+        // cat echoes what it reads; the bytes must surface on the POPUP pane.
+        let mut seen: Vec<u8> = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Ok(chunk)) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+            {
+                seen.extend_from_slice(&chunk);
+                if seen.windows(15).any(|w| w == b"popup_gets_this") {
+                    break;
+                }
+            }
+        }
+        assert!(
+            seen.windows(15).any(|w| w == b"popup_gets_this"),
+            "popup pane never echoed routed input: {seen:?}"
+        );
+        // Kill the popup child so it doesn't outlive the test.
+        s.handle_command(plexy_glass_mux::Command::ClosePopup).await.unwrap();
     }
 
     // Regression: `build_snapshot_ctx` used `blocking_lock` and was driven by the
