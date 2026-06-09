@@ -1301,3 +1301,139 @@ fn pane_kitty_keyboard_query_gets_flags_reply() {
         sess.snapshot_str()
     );
 }
+
+// Popup e2e marker scheme: the diff renderer elides unchanged space cells, so
+// the centered border title (" cat ") never reaches the wire contiguously, and
+// any literal typed text (PTY echo) aliases a shell-printed copy of itself. So
+// the popup command *prints* a marker built by shell quote concatenation
+// ('POPUP_''LIVE' → POPUP_LIVE): the contiguous form appears on the wire only
+// when a shell *executed* the line, never from the typed/echoed bytes.
+
+#[test]
+fn popup_opens_types_and_closes_with_chord() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    // Open a popup from the command prompt: print a marker, then `cat` holds
+    // the popup open.
+    sess.send_prefix(b':');
+    sess.send_str("popup printf 'POPUP_''LIVE '; cat\r");
+    assert!(
+        sess.wait_for(b"POPUP_LIVE", Duration::from_secs(5)),
+        "popup never opened (marker never rendered): {}",
+        sess.snapshot_str()
+    );
+    // Modal: this line must go to `cat` in the popup, NOT the layout shell. If
+    // routing is broken the layout shell executes it and the contiguous form
+    // appears; under correct routing cat only ever sees the literal quoted
+    // bytes. Asserted after AFTER_CLOSE below, since the same input queue
+    // orders a leaked probe's output before the close probe's.
+    sess.send_str("echo 'MODAL_''LEAK'\n");
+    // Default close chord; afterwards keys reach the layout shell again. Poll
+    // by re-sending the probe (lines that land before the close die with the
+    // popup).
+    sess.send_prefix(b'q');
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut ok = false;
+    while Instant::now() < deadline {
+        sess.send_str("echo 'AFTER_''CLOSE'\n");
+        if sess.wait_for(b"AFTER_CLOSE", Duration::from_millis(500)) {
+            ok = true;
+            break;
+        }
+    }
+    assert!(ok, "layout shell never got keys after close: {}", sess.snapshot_str());
+    assert!(
+        !sess.snapshot_str().contains("MODAL_LEAK"),
+        "popup was not modal: a key line leaked to the layout shell: {}",
+        sess.snapshot_str()
+    );
+}
+
+#[test]
+fn popup_autocloses_when_command_exits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    sess.send_prefix(b':');
+    sess.send_str("popup true\r");
+    // `true` exits immediately, the popup auto-closes, and the layout shell
+    // receives keys again. Poll by re-sending the probe, since keys typed
+    // before the auto-close land in the dying popup and vanish. The
+    // contiguous marker only appears once a shell *executes* the line.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut ok = false;
+    while Instant::now() < deadline {
+        sess.send_str("echo 'POPUP_''GONE'\n");
+        if sess.wait_for(b"POPUP_GONE", Duration::from_millis(500)) {
+            ok = true;
+            break;
+        }
+    }
+    assert!(ok, "popup never auto-closed: {}", sess.snapshot_str());
+}
+
+#[test]
+fn popup_does_not_survive_detach() {
+    use std::process::Stdio;
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    sess.send_prefix(b':');
+    sess.send_str("popup printf 'POPUP_''LIVE '; cat\r");
+    assert!(
+        sess.wait_for(b"POPUP_LIVE", Duration::from_secs(5)),
+        "popup never opened: {}",
+        sess.snapshot_str()
+    );
+    // The popup is fully modal (`prefix+d` is swallowed like every other
+    // non-popup chord), so end the client like a closing terminal would (the
+    // graceful detach and the disconnect share the daemon's `cleanup_and_exit`
+    // teardown, which is where the popup is closed).
+    drop(sess);
+    // Wait until the daemon has processed the disconnect: `list` reports the
+    // "main" session with 0 clients. Teardown closes the popup BEFORE it
+    // deregisters the client, so 0 clients ⇒ the popup is already gone and the
+    // reattach below cannot catch a transient still-open-popup frame.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut deregistered = false;
+    while Instant::now() < deadline {
+        let out = std::process::Command::cargo_bin("plexy-glass")
+            .unwrap()
+            .arg("list")
+            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .stdout(Stdio::piped())
+            .output()
+            .expect("list");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if stdout
+            .lines()
+            .any(|l| l.starts_with("main ") && l.split_whitespace().last() == Some("0"))
+        {
+            deregistered = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(deregistered, "daemon never deregistered the dropped client");
+    // Reattach with a fresh client (fresh output buffer).
+    let mut sess2 = TestSession::spawn(&env);
+    assert!(sess2.wait_ready("main", Duration::from_secs(5)), "reattach never rendered");
+    // If the popup survived, keys route to `cat` and the probe never executes.
+    sess2.send_str("echo 'NO_''POPUP'\n");
+    assert!(
+        sess2.wait_for(b"NO_POPUP", Duration::from_secs(8)),
+        "layout shell unreachable after reattach (popup likely survived): {}",
+        sess2.snapshot_str()
+    );
+    // And the reattach repaint must not contain the surviving popup's grid
+    // (which would include the POPUP_LIVE marker it printed).
+    assert!(
+        !sess2.snapshot_str().contains("POPUP_LIVE"),
+        "popup grid survived detach: {}",
+        sess2.snapshot_str()
+    );
+}
