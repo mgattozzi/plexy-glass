@@ -59,6 +59,10 @@ pub enum Command {
     OpenPopup { command: Option<String> },
     /// Close the floating popup, killing its child.
     ClosePopup,
+    /// Rearrange the active window's panes into a preset layout.
+    SelectLayout(crate::preset::LayoutPreset),
+    /// Cycle to the next preset layout (remembered per window).
+    NextLayout,
 }
 
 pub type Chord = (Modifiers, Key);

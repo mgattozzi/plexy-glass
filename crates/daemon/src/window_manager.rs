@@ -1087,6 +1087,9 @@ impl WindowManager {
             Command::ClosePopup => {
                 self.close_popup();
             }
+            Command::SelectLayout(_) | Command::NextLayout => {
+                // Applied in a later task (layout application on `WindowManager`).
+            }
         }
         self.notify.notify_one();
         Ok(())

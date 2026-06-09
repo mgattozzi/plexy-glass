@@ -143,6 +143,19 @@ pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
             command: arg.filter(|a| !a.is_empty()).map(str::to_string),
         },
         "close_popup" => Command::ClosePopup,
+        "next_layout" => Command::NextLayout,
+        "layout" => {
+            let arg_str = arg.filter(|a| !a.is_empty()).ok_or_else(|| {
+                KeyParseError::MissingArg { command: name.to_string() }
+            })?;
+            let preset = plexy_glass_mux::LayoutPreset::parse(arg_str).ok_or_else(|| {
+                KeyParseError::BadArg {
+                    command: name.to_string(),
+                    arg: arg_str.to_string(),
+                }
+            })?;
+            Command::SelectLayout(preset)
+        }
         "select_window" => {
             let arg_str = arg.ok_or_else(|| KeyParseError::MissingArg {
                 command: name.to_string(),
@@ -325,5 +338,32 @@ mod tests {
     fn parses_close_popup() {
         let c = parse_command("close_popup").unwrap();
         assert_eq!(c.command, Command::ClosePopup);
+    }
+
+    #[test]
+    fn parses_layout_with_name() {
+        use plexy_glass_mux::LayoutPreset;
+        let c = parse_command("layout:tiled").unwrap();
+        assert_eq!(c.command, Command::SelectLayout(LayoutPreset::Tiled));
+        let c = parse_command("layout:even-horizontal").unwrap();
+        assert_eq!(c.command, Command::SelectLayout(LayoutPreset::EvenHorizontal));
+    }
+
+    #[test]
+    fn layout_requires_a_valid_name() {
+        assert!(matches!(
+            parse_command("layout"),
+            Err(KeyParseError::MissingArg { .. })
+        ));
+        assert!(matches!(
+            parse_command("layout:bogus"),
+            Err(KeyParseError::BadArg { .. })
+        ));
+    }
+
+    #[test]
+    fn parses_next_layout() {
+        let c = parse_command("next_layout").unwrap();
+        assert_eq!(c.command, Command::NextLayout);
     }
 }
