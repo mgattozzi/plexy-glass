@@ -411,10 +411,7 @@ where
                             // the active layout pane. This must precede the
                             // copy-mode routing below, since a pre-existing
                             // copy-mode pane must not steal popup keys.
-                            let popup_open = {
-                                let m = session.window_manager.lock().await;
-                                m.has_popup()
-                            };
+                            let popup_open = session.popup_active().await;
                             if popup_open {
                                 let action = keymap.consume(ke, raw_bytes);
                                 prefix_active.store(keymap.prefix_active(), Ordering::SeqCst);

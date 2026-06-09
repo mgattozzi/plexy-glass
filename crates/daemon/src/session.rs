@@ -1022,11 +1022,18 @@ impl Session {
         Ok(())
     }
 
-    /// Queue a focus-event sequence (`\e[I` in / `\e[O` out) to the active pane,
-    /// but only if that pane enabled focus reporting (?1004). No-op otherwise.
+    /// Queue a focus-event sequence (`\e[I` in / `\e[O` out) to the focused
+    /// pane, the floating popup's child while one is open (it is modal and
+    /// focused), otherwise the active layout pane, gated on that pane's
+    /// ?1004 (`FOCUS_EVENTS`) mode. No-op otherwise.
     pub async fn focus_active_pane(&self, focused: bool) {
         let manager = self.window_manager.lock().await;
-        if let Some(pane) = manager.active_window().active_pane() {
+        let target = match manager.popup() {
+            Some(p) => Some(p.pane.clone()),
+            None => manager.active_window().active_pane().cloned(),
+        };
+        drop(manager);
+        if let Some(pane) = target {
             let wants =
                 pane.with_screen(|s| s.modes.contains(plexy_glass_emulator::Modes::FOCUS_EVENTS));
             if wants {
@@ -1053,6 +1060,15 @@ impl Session {
                 if wants {
                     pane.send_input(bytes::Bytes::from_static(seq)).await.ok();
                 }
+            }
+        }
+        if let Some(p) = manager.popup() {
+            p.pane.with_screen_mut(|s| s.set_color_scheme_dark(dark));
+            let wants = p.pane.with_screen(|s| {
+                s.modes.contains(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES)
+            });
+            if wants {
+                p.pane.send_input(bytes::Bytes::from_static(seq)).await.ok();
             }
         }
     }
@@ -1760,6 +1776,49 @@ mod tests {
             seen.windows(15).any(|w| w == b"popup_gets_this"),
             "popup pane never echoed routed input: {seen:?}"
         );
+        // Kill the popup child so it doesn't outlive the test.
+        s.handle_command(plexy_glass_mux::Command::ClosePopup).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn focus_events_route_to_popup_when_open() {
+        let s = Session::new("t-popup-focus".into(), spec(), size(), cfg()).unwrap();
+        s.handle_command(plexy_glass_mux::Command::OpenPopup { command: Some("cat".into()) })
+            .await
+            .unwrap();
+        let mut rx = {
+            let m = s.window_manager.lock().await;
+            let popup = m.popup().unwrap();
+            // Subscribe to ?1004 on the POPUP pane; the layout pane stays
+            // unsubscribed, so a `\e[I` can only have come via the popup.
+            popup
+                .pane
+                .with_screen_mut(|sc| sc.modes.insert(plexy_glass_emulator::Modes::FOCUS_EVENTS));
+            popup.pane.subscribe_output()
+        };
+        s.focus_active_pane(true).await;
+        // The popup runs `$SHELL -c cat`; in canonical mode the PTY echoes the
+        // ESC as caret notation (`^[[I`) and cat holds input until a newline,
+        // so accept the focus-in sequence in either raw or caret-echoed form.
+        let raw: &[u8] = &[0x1b, b'[', b'I'];
+        let caret: &[u8] = b"^[[I";
+        let hit = |buf: &[u8]| {
+            buf.windows(raw.len()).any(|w| w == raw)
+                || buf.windows(caret.len()).any(|w| w == caret)
+        };
+        let mut seen: Vec<u8> = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Ok(chunk)) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+            {
+                seen.extend_from_slice(&chunk);
+                if hit(&seen) {
+                    break;
+                }
+            }
+        }
+        assert!(hit(&seen), "popup pane never saw the focus-in sequence: {seen:?}");
         // Kill the popup child so it doesn't outlive the test.
         s.handle_command(plexy_glass_mux::Command::ClosePopup).await.unwrap();
     }
