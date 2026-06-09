@@ -18,6 +18,7 @@ pub mod layout;
 pub mod mouse;
 pub mod overlay;
 pub mod pane_id;
+pub mod preset;
 pub mod rect;
 pub mod selection;
 pub mod status;
@@ -38,6 +39,7 @@ pub use overlay::{
     Overlay, OverlayAction, OverlayHandler, PickerEntry, RenameTarget, picker_filtered_indices,
 };
 pub use pane_id::{PaneId, WindowId};
+pub use preset::LayoutPreset;
 pub use rect::Rect;
 pub use selection::{Selection, SelectionKind, extract_text, line_at, word_at};
 pub use status::StatusLine;

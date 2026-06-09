@@ -12,7 +12,7 @@ use crate::{
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
-enum LayoutNode {
+pub(crate) enum LayoutNode {
     Leaf(PaneId),
     Split {
         dir: SplitDir,
@@ -127,6 +127,48 @@ impl LayoutTree {
     pub fn rect_of(&self, pane: PaneId, viewport: Rect) -> Option<Rect> {
         let root = self.root.as_ref()?;
         rect_of_in(root, pane, viewport)
+    }
+
+    /// Replace the tree with `preset` arranged over `panes` (order matters:
+    /// for the main-* presets the FIRST pane takes the main slot). Empty
+    /// `panes` is a no-op; a single pane becomes a bare Leaf.
+    pub fn apply_preset(&mut self, preset: crate::preset::LayoutPreset, panes: &[PaneId]) {
+        if panes.is_empty() {
+            return;
+        }
+        debug_assert!(
+            {
+                let mut seen = panes.to_vec();
+                seen.sort_unstable();
+                seen.windows(2).all(|w| w[0] != w[1])
+            },
+            "apply_preset requires unique PaneIds (duplicates would violate the \
+             one-leaf-per-pane tree invariant)"
+        );
+        self.root = Some(crate::preset::build(preset, panes));
+    }
+
+    /// Overwrite split ratios in preorder (root, then the first subtree, then
+    /// the second), clamping each to subdivide's [0.1, 0.9]. Used by session
+    /// restore to re-apply saved ratios after the shape replay (the saved
+    /// preorder ratio list maps 1:1 onto the rebuilt tree). Extra ratios are
+    /// ignored; missing ones leave splits at their current value. Returns how
+    /// many were applied.
+    pub fn set_ratios_preorder(&mut self, ratios: &[f32]) -> usize {
+        fn walk(node: &mut LayoutNode, ratios: &[f32], i: &mut usize) {
+            if let LayoutNode::Split { ratio, first, second, .. } = node {
+                let Some(r) = ratios.get(*i) else { return };
+                *ratio = r.clamp(0.1, 0.9);
+                *i += 1;
+                walk(first, ratios, i);
+                walk(second, ratios, i);
+            }
+        }
+        let mut i = 0;
+        if let Some(root) = self.root.as_mut() {
+            walk(root, ratios, &mut i);
+        }
+        i
     }
 }
 
@@ -890,6 +932,26 @@ mod tests {
         let before = t.panes();
         assert!(!t.swap_panes(PaneId(0), PaneId(99)));
         assert_eq!(t.panes(), before, "tree unchanged on a missing id");
+    }
+
+    #[test]
+    fn set_ratios_preorder_applies_in_order_and_clamps() {
+        let mut t = LayoutTree::single(PaneId(0));
+        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After).unwrap();
+        t.split(PaneId(0), SplitDir::Horizontal, PaneId(2), SplitPosition::After).unwrap();
+        // Preorder: root split, then the nested split under `first`.
+        let applied = t.set_ratios_preorder(&[0.3, 0.95]);
+        assert_eq!(applied, 2);
+        let vp = Rect::new(0, 0, 40, 100);
+        let r0 = t.rect_of(PaneId(0), vp).unwrap();
+        // Root ratio 0.3 over usable 99 cols → first child ~30 wide.
+        assert!((29..=31).contains(&r0.cols), "{r0:?}");
+        let r2 = t.rect_of(PaneId(2), vp).unwrap();
+        // Nested 0.95 clamps to 0.9: pane 0 gets ~90% of the first column's
+        // usable rows, pane 2 the rest (small but >= 1).
+        assert!(r2.rows >= 1 && r2.rows <= 8, "{r2:?}");
+        // Extra ratios are ignored; missing ones leave defaults.
+        assert_eq!(t.set_ratios_preorder(&[0.5]), 1);
     }
 
     #[test]
