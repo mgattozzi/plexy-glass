@@ -660,6 +660,10 @@ impl WindowManager {
         // Last-wins: only replace (and kill) the old popup once the new one
         // actually spawned, so a spawn failure can't destroy the old popup.
         self.close_popup();
+        // Rule 0 will swallow the in-flight Release once the popup is open, so
+        // an active drag/selection would freeze and bite after close. Drop them.
+        self.resize_drag = None;
+        self.selection = None;
         let title = command.unwrap_or_else(|| "popup".to_string());
         self.popup = Some(crate::popup::Popup { pane, title });
         self.notify.notify_one();
@@ -1102,9 +1106,38 @@ impl WindowManager {
         Ok(())
     }
 
-    /// Dispatch one decoded mouse event through the 6-rule precedence ladder
-    /// (see docs/superpowers/specs/2026-05-22-full-mouse-design.md §6).
+    /// Dispatch one decoded mouse event through the precedence ladder
+    /// (Rule 0: modal popup, see docs/superpowers/specs/2026-06-09-popup-panes-design.md;
+    /// then docs/superpowers/specs/2026-05-22-full-mouse-design.md §6).
     pub async fn handle_mouse(&mut self, event: MouseEvent) -> Result<(), DaemonError> {
+        // Rule 0: a floating popup owns the mouse entirely while open. A click
+        // in the box interior is forwarded to the child (translated to interior
+        // coordinates) when it enabled mouse reporting; everything else (border,
+        // outside, status bar) is swallowed. Modal by design.
+        if let Some(popup) = self.popup.as_ref() {
+            let event = self.to_pane_coords(event);
+            let rect = plexy_glass_mux::popup_rect(self.viewport());
+            let interior = rect.rows >= 3
+                && rect.cols >= 3
+                && event.row > rect.row
+                && event.row < rect.row + rect.rows - 1
+                && event.col > rect.col
+                && event.col < rect.col + rect.cols - 1;
+            if !interior {
+                return Ok(());
+            }
+            if !popup.pane.with_screen(|s| s.modes.any_mouse_mode_active()) {
+                return Ok(());
+            }
+            let mut local = event;
+            local.row = event.row - rect.row - 1;
+            local.col = event.col - rect.col - 1;
+            let encoding = popup.pane.with_screen(|s| mouse_encoding_for(s.modes));
+            let bytes = encode_for_child(local, encoding);
+            let pane = popup.pane.clone();
+            let _ = pane.send_input(bytes::Bytes::from(bytes)).await;
+            return Ok(());
+        }
         // Rule 2 (first): status-bar row hit. The bar lives outside the pane
         // band, so test it against the *physical* row before translating. A
         // drag in progress still consumes everything, including moves that
@@ -3171,5 +3204,83 @@ mod tests {
             .pane
             .with_screen(|s| (s.active.num_rows(), s.active.num_cols()));
         assert_eq!((rows, cols), (rect.rows - 2, rect.cols - 2));
+    }
+
+    #[tokio::test]
+    async fn popup_swallows_clicks_outside_and_keeps_focus() {
+        let mut m = make_two_pane_manager().await;
+        let focused_before = m.active_window().active();
+        let other = if focused_before == PaneId(0) { PaneId(1) } else { PaneId(0) };
+        m.handle_command(Command::OpenPopup { command: None }).unwrap();
+        // Click squarely inside the OTHER layout pane (outside the popup box).
+        // Geometry check: viewport is (1,1,21,78), so the popup box spans rows
+        // 3..=18, cols 9..=70. SplitV focuses the new right pane, so `other` is
+        // the left pane at col 1, left of the popup's left edge (col 9). (Even
+        // if `other` were the right pane, row rect.row+1 == 2 is above the box.)
+        let vp = m.viewport();
+        let rect = m.active_window().layout().rect_of(other, vp).unwrap();
+        let popup_box = plexy_glass_mux::popup_rect(vp);
+        assert!(
+            rect.col < popup_box.col || rect.row + 1 < popup_box.row,
+            "test premise: click target must be outside the popup box"
+        );
+        m.handle_mouse(MouseEvent {
+            kind: MouseKind::Press,
+            button: MouseButton::Left,
+            modifiers: plexy_glass_mux::MouseModifiers::default(),
+            row: rect.row + 1 + m.pane_row_offset,
+            col: rect.col,
+        })
+        .await
+        .unwrap();
+        assert_eq!(m.active_window().active(), focused_before, "popup is modal: no focus change");
+        assert!(m.has_popup(), "popup still open");
+        assert!(m.resize_drag.is_none(), "no border drag starts under a popup");
+    }
+
+    #[tokio::test]
+    async fn popup_swallows_interior_click_when_child_has_no_mouse_mode() {
+        let mut m = make_two_pane_manager().await;
+        let focused_before = m.active_window().active();
+        m.handle_command(Command::OpenPopup { command: None }).unwrap();
+        // Box center is genuinely interior: for a (1,1,21,78) viewport the box
+        // is rows 3..=18 / cols 9..=70, so (11, 40) sits inside the border. It
+        // also happens to sit on the SplitV gutter, and without Rule 0 this press
+        // would start a resize drag, so the drag/focus asserts below bite.
+        let rect = plexy_glass_mux::popup_rect(m.viewport());
+        m.handle_mouse(MouseEvent {
+            kind: MouseKind::Press,
+            button: MouseButton::Left,
+            modifiers: plexy_glass_mux::MouseModifiers::default(),
+            row: rect.row + rect.rows / 2 + m.pane_row_offset,
+            col: rect.col + rect.cols / 2,
+        })
+        .await
+        .unwrap();
+        assert!(m.has_popup());
+        assert!(m.selection().is_none(), "no layout selection starts under a popup");
+        assert!(m.resize_drag.is_none(), "no border drag starts under a popup");
+        assert_eq!(m.active_window().active(), focused_before, "no focus change under a popup");
+    }
+
+    #[tokio::test]
+    async fn open_popup_clears_in_flight_resize_drag() {
+        let mut m = make_two_pane_manager().await;
+        let gutter = gutter_col_for(&m);
+        // Start a border drag...
+        m.handle_mouse(MouseEvent {
+            kind: MouseKind::Press,
+            button: MouseButton::Left,
+            modifiers: plexy_glass_mux::MouseModifiers::default(),
+            row: 5,
+            col: gutter,
+        })
+        .await
+        .unwrap();
+        assert!(m.resize_drag.is_some(), "premise: drag started");
+        // ...then a popup opens (e.g. via a keybinding) mid-drag.
+        m.handle_command(Command::OpenPopup { command: None }).unwrap();
+        assert!(m.resize_drag.is_none(), "popup open must drop the frozen drag");
+        assert!(m.selection().is_none());
     }
 }
