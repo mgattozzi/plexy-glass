@@ -16,8 +16,9 @@ fn config_path() -> Result<PathBuf, ConfigError> {
     Ok(dirs.config_dir().join("config.kdl"))
 }
 
-/// Load `~/.config/plexy-glass/config.kdl`. Missing file => built-in default,
-/// no error. Parse/decode error => built-in default + Some(err).
+/// Load `config.kdl` from the platform config directory (`~/.config/plexy-glass/config.kdl`
+/// on Linux, `~/Library/Application Support/plexy-glass/config.kdl` on macOS).
+/// Missing file => built-in default, no error. Parse/decode error => built-in default + Some(err).
 pub fn load_or_default() -> (Config, Option<ConfigError>) {
     let path = match config_path() {
         Ok(p) => p,
