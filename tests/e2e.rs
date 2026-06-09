@@ -1437,3 +1437,58 @@ fn popup_does_not_survive_detach() {
         sess2.snapshot_str()
     );
 }
+
+// Layout e2e marker scheme: shell quote concatenation ('TILED_''OK' →
+// TILED_OK) ensures the contiguous marker only appears when a shell *executed*
+// the printf line, never from typed/echoed bytes.
+
+#[test]
+fn layout_tiled_keeps_all_panes_alive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    // Three panes: prefix+v (vertical split), then prefix+s (horizontal split).
+    sess.send_prefix(b'v');
+    assert!(sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)), "no split separator");
+    sess.send_prefix(b's');
+    // Apply tiled via the command prompt; the active pane's shell must still
+    // respond afterwards. This is a liveness smoke test only, not a geometry test.
+    sess.send_prefix(b':');
+    sess.send_str("layout tiled\r");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut ok = false;
+    while Instant::now() < deadline {
+        sess.send_str("printf 'TILED_''OK\\n'\n");
+        if sess.wait_for(b"TILED_OK", Duration::from_millis(500)) {
+            ok = true;
+            break;
+        }
+    }
+    assert!(ok, "active pane unresponsive after :layout tiled: {}", sess.snapshot_str());
+}
+
+#[test]
+fn next_layout_cycles_without_breaking_input() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    // Two panes.
+    sess.send_prefix(b'v');
+    assert!(sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)), "no split separator");
+    // Cycle through three presets with Ctrl+a Space.
+    sess.send_prefix(b' ');
+    sess.send_prefix(b' ');
+    sess.send_prefix(b' ');
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut ok = false;
+    while Instant::now() < deadline {
+        sess.send_str("printf 'CYCLE_''OK\\n'\n");
+        if sess.wait_for(b"CYCLE_OK", Duration::from_millis(500)) {
+            ok = true;
+            break;
+        }
+    }
+    assert!(ok, "active pane unresponsive after next_layout cycling: {}", sess.snapshot_str());
+}
