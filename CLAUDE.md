@@ -179,7 +179,14 @@ keyboard passthrough; interactive overlays (window/pane rename, help); a
 sessions); **pane mobility** — break (`Ctrl+a !`), a marked pane (`Ctrl+a m`),
 join (`:join-pane`), and swap (`Ctrl+a {`/`}`, `:swap-pane`); **paste buffers** —
 copy-mode yanks push a bounded named-buffer stack, `Ctrl+a ]` pastes the newest,
-`Ctrl+a =` opens a choose-buffer overlay; and per-window **activity/bell
+`Ctrl+a =` opens a choose-buffer overlay; **popup panes** — `Ctrl+a P` /
+`:popup [cmd]` / `bind "…" "popup:lazygit"` opens a transient PTY-backed
+floating pane (centered 80%×80% box) running `$SHELL -c <cmd>` at the active
+pane's live OSC-7 cwd (home-base fallback); modal (all keys to the child, every
+other chord swallowed), auto-closes on child exit, `Ctrl+a q` / `:close-popup`
+closes, and it is transient across detach (any client's teardown closes it) —
+`crates/daemon/src/popup.rs` + the `popup` field on `WindowManager`; and
+per-window **activity/bell
 monitoring** (`Ctrl+a M` / `:monitor-activity` / `:monitor-bell`) surfaced as
 `#`/`!` flags in the status window-list; and **keyboard-protocol negotiation** —
 the emulator is a correct negotiating terminal (guarded CSI-`m` dispatch so
@@ -220,4 +227,4 @@ session (see the 2026-06-01 declarative-sessions spec's non-goals). (choose-tree
 break/join/swap + marked pane, paste buffers, and activity/bell monitoring shipped
 — 2026-05-31 specs/plans; the KDL config migration + declarative sessions shipped
 — 2026-06-01 specs/plans; keyboard-protocol negotiation + colored underlines
-shipped — 2026-06-01 specs/plans.)
+shipped — 2026-06-01 specs/plans; popup panes shipped — 2026-06-09 spec/plan.)
