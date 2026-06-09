@@ -1193,6 +1193,11 @@ impl Session {
             | PromptCommand::ChooseBuffer => {
                 return Ok(None);
             }
+            // Wired to Command::OpenPopup/ClosePopup in a later task (popup
+            // session integration); temporary no-op until then.
+            PromptCommand::Popup(_) | PromptCommand::ClosePopup => {
+                return Ok(None);
+            }
         };
         self.handle_command(mapped).await?;
         Ok(None)

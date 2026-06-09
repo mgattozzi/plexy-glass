@@ -59,6 +59,10 @@ pub enum PromptCommand {
     ChooseBuffer,
     ToggleMonitorActivity,
     ToggleMonitorBell,
+    /// Open a floating popup running the given command line (`None` = scratch shell).
+    Popup(Option<String>),
+    /// Close the floating popup.
+    ClosePopup,
 }
 
 /// A human-readable parse failure.
@@ -77,10 +81,10 @@ impl std::error::Error for ParseError {}
 
 /// Static verb names, sorted, for Tab-completion of the first token.
 pub const VERBS: &[&str] = &[
-    "break", "buffers", "copy", "detach", "focus", "help", "join", "kill", "last",
-    "mark", "monitor-activity", "monitor-bell", "new", "next", "paste", "prev",
-    "reload", "rename", "rename-pane", "resize", "sessions", "split", "swap",
-    "switch", "sync", "tree", "win", "zoom",
+    "break", "buffers", "close-popup", "copy", "detach", "focus", "help", "join",
+    "kill", "last", "mark", "monitor-activity", "monitor-bell", "new", "next",
+    "paste", "popup", "prev", "reload", "rename", "rename-pane", "resize",
+    "sessions", "split", "swap", "switch", "sync", "tree", "win", "zoom",
 ];
 
 fn err(msg: impl Into<String>) -> ParseError {
@@ -226,6 +230,12 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
                 Ok(PromptCommand::Switch(rest.to_string()))
             }
         }
+        "popup" => Ok(PromptCommand::Popup(if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_string())
+        })),
+        "close-popup" => no_args(PromptCommand::ClosePopup),
         other => Err(err(format!("unknown command: {other}"))),
     }
 }
@@ -443,6 +453,25 @@ mod tests {
         let mut sorted = VERBS.to_vec();
         sorted.sort_unstable();
         assert_eq!(VERBS, sorted.as_slice(), "VERBS must stay sorted for completion");
+    }
+
+    #[test]
+    fn parses_popup_verb() {
+        assert_eq!(p("popup").unwrap(), PromptCommand::Popup(None));
+        assert_eq!(p("popup lazygit").unwrap(), PromptCommand::Popup(Some("lazygit".into())));
+        assert_eq!(
+            p("popup git log --oneline").unwrap(),
+            PromptCommand::Popup(Some("git log --oneline".into()))
+        );
+    }
+
+    #[test]
+    fn parses_close_popup_verb() {
+        assert_eq!(p("close-popup").unwrap(), PromptCommand::ClosePopup);
+        assert_eq!(
+            p("close-popup x").unwrap_err().to_string(),
+            "close-popup: takes no arguments"
+        );
     }
 
     #[test]
