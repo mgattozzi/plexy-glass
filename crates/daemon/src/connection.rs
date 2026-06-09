@@ -404,6 +404,43 @@ where
                                 }
                                 continue;
                             }
+                            // A floating popup is modal: keys still run through
+                            // the keymap (so the close/open chords fire), but any
+                            // OTHER recognized command is swallowed, and
+                            // PassThrough bytes go to the POPUP's child instead of
+                            // the active layout pane. This must precede the
+                            // copy-mode routing below, since a pre-existing
+                            // copy-mode pane must not steal popup keys.
+                            let popup_open = {
+                                let m = session.window_manager.lock().await;
+                                m.has_popup()
+                            };
+                            if popup_open {
+                                let action = keymap.consume(ke, raw_bytes);
+                                prefix_active.store(keymap.prefix_active(), Ordering::SeqCst);
+                                match action {
+                                    KeymapAction::PassThrough(event_ke, bytes_back) => {
+                                        let _ = session
+                                            .handle_popup_key_event(
+                                                &event_ke,
+                                                &bytes_back,
+                                                client_kbd,
+                                            )
+                                            .await;
+                                    }
+                                    KeymapAction::Command(
+                                        cmd @ (Command::ClosePopup | Command::OpenPopup { .. }),
+                                    ) => {
+                                        let _ = session.handle_command(cmd).await;
+                                    }
+                                    KeymapAction::Command(_)
+                                    | KeymapAction::Pending
+                                    | KeymapAction::Cancel => {
+                                        session.notify.notify_one();
+                                    }
+                                }
+                                continue;
+                            }
                             // Snap scrollback to live on any keystroke.
                             {
                                 let manager = session.window_manager.lock().await;
@@ -533,15 +570,23 @@ where
                             }
                         }
                         InputEvent::Paste(bytes) => {
+                            // The popup pane's bracketed-paste mode wins while a
+                            // popup is open (handle_input_bytes routes popup-first).
                             let want_bracketed = {
                                 let manager = session.window_manager.lock().await;
-                                manager
-                                    .active_window()
-                                    .active_pane()
-                                    .map(|p| p.with_screen(|s| {
+                                if let Some(p) = manager.popup() {
+                                    p.pane.with_screen(|s| {
                                         s.modes.contains(plexy_glass_emulator::Modes::BRACKETED_PASTE)
-                                    }))
-                                    .unwrap_or(false)
+                                    })
+                                } else {
+                                    manager
+                                        .active_window()
+                                        .active_pane()
+                                        .map(|p| p.with_screen(|s| {
+                                            s.modes.contains(plexy_glass_emulator::Modes::BRACKETED_PASTE)
+                                        }))
+                                        .unwrap_or(false)
+                                }
                             };
                             let payload = if want_bracketed {
                                 wrap_paste(&bytes)
@@ -609,6 +654,11 @@ async fn cleanup_and_exit(
     client_id: u64,
     renderer_task: tokio::task::JoinHandle<()>,
 ) -> Result<(), DaemonError> {
+    // A floating popup is transient: it does not survive detach (any client).
+    {
+        let mut m = session.window_manager.lock().await;
+        m.close_popup();
+    }
     let session_for_dereg = Arc::clone(&session);
     let _ = tokio::task::spawn_blocking(move || {
         session_for_dereg.deregister_client(client_id);

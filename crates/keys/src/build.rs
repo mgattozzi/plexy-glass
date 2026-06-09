@@ -77,6 +77,28 @@ mod tests {
     }
 
     #[test]
+    fn default_bindings_include_popup_chords() {
+        let km_cfg = plexy_glass_config::built_in_keymap();
+        let mut km = build_keymap(&km_cfg);
+        // Ctrl+a P → OpenPopup { command: None }
+        let e1 = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
+        assert!(matches!(km.consume(e1, vec![0x01]), KeymapAction::Pending));
+        let e2 = KeyEvent::new(Key::Char('P'), Modifiers::empty());
+        assert!(matches!(
+            km.consume(e2, b"P".to_vec()),
+            KeymapAction::Command(Command::OpenPopup { command: None })
+        ));
+        // Ctrl+a q → ClosePopup
+        let e3 = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
+        assert!(matches!(km.consume(e3, vec![0x01]), KeymapAction::Pending));
+        let e4 = KeyEvent::new(Key::Char('q'), Modifiers::empty());
+        assert!(matches!(
+            km.consume(e4, b"q".to_vec()),
+            KeymapAction::Command(Command::ClosePopup)
+        ));
+    }
+
+    #[test]
     fn invalid_binding_is_logged_and_skipped() {
         let cfg = KeymapConfig {
             prefix: "Ctrl+a".into(),

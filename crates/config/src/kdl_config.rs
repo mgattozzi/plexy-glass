@@ -819,6 +819,8 @@ keymap {
     bind "Ctrl+a ]" "paste_buffer"
     bind "Ctrl+a =" "choose_buffer"
     bind "Ctrl+a M" "toggle_monitor_activity"
+    bind "Ctrl+a P" "popup"
+    bind "Ctrl+a q" "close_popup"
 }
 "##;
 
