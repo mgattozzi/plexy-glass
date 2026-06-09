@@ -997,6 +997,10 @@ impl WindowManager {
                     pane.enter_copy_mode(total_lines, pane_rows, start_line, start_col);
                 }
             }
+            // Popup lifecycle is handled at the connection/session layer (later
+            // tasks); window_manager receives these as a no-op until that work
+            // lands.
+            Command::OpenPopup { .. } | Command::ClosePopup => {}
         }
         self.notify.notify_one();
         Ok(())
@@ -2718,7 +2722,7 @@ mod tests {
             m.handle_command(Command::SplitV).unwrap();
             m.handle_command(Command::ZoomToggle).unwrap();
             assert!(m.active_window().is_zoomed());
-            m.handle_command(cmd).unwrap();
+            m.handle_command(cmd.clone()).unwrap();
             assert!(!m.active_window().is_zoomed(), "{cmd:?} must clear zoom");
         }
         // Join/SwapMarked need a same-window marked pane.
@@ -2730,7 +2734,7 @@ mod tests {
             m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Right)).unwrap(); // active 1
             m.handle_command(Command::ZoomToggle).unwrap();
             assert!(m.active_window().is_zoomed());
-            m.handle_command(cmd).unwrap();
+            m.handle_command(cmd.clone()).unwrap();
             assert!(!m.active_window().is_zoomed(), "{cmd:?} must clear zoom");
         }
     }

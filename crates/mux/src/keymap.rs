@@ -5,7 +5,7 @@ use crate::{Direction, Key, KeyEvent, KeyEventKind, Modifiers, SplitDir};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Command {
     NewWindow,
     NextWindow,
@@ -53,6 +53,12 @@ pub enum Command {
     EnterCopyMode,
     ToggleSyncPanes,
     ReloadConfig,
+    /// Open a floating popup pane running `command` via `$SHELL -c` (`None` =
+    /// the default interactive shell), centered over the layout. Last-wins if
+    /// a popup is already open.
+    OpenPopup { command: Option<String> },
+    /// Close the floating popup, killing its child.
+    ClosePopup,
 }
 
 pub type Chord = (Modifiers, Key);
@@ -147,7 +153,7 @@ impl Keymap {
                 self.pending_since = Some(Instant::now());
                 return KeymapAction::Pending;
             }
-            if let Some(cmd) = child.terminal {
+            if let Some(cmd) = child.terminal.clone() {
                 self.cancel();
                 return KeymapAction::Command(cmd);
             }

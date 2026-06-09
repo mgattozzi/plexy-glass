@@ -139,6 +139,10 @@ pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
         "choose_buffer" => Command::ChooseBuffer,
         "toggle_monitor_activity" => Command::ToggleMonitorActivity,
         "toggle_monitor_bell" => Command::ToggleMonitorBell,
+        "popup" => Command::OpenPopup {
+            command: arg.filter(|a| !a.is_empty()).map(str::to_string),
+        },
+        "close_popup" => Command::ClosePopup,
         "select_window" => {
             let arg_str = arg.ok_or_else(|| KeyParseError::MissingArg {
                 command: name.to_string(),
@@ -291,5 +295,35 @@ mod tests {
     fn parses_reload_config_command() {
         let c = parse_command("reload_config").unwrap();
         assert_eq!(c.command, Command::ReloadConfig);
+    }
+
+    #[test]
+    fn parses_popup_bare() {
+        let c = parse_command("popup").unwrap();
+        assert_eq!(c.command, Command::OpenPopup { command: None });
+    }
+
+    #[test]
+    fn parses_popup_with_command_preserving_spaces_and_colons() {
+        let c = parse_command("popup:git log --oneline").unwrap();
+        assert_eq!(
+            c.command,
+            Command::OpenPopup { command: Some("git log --oneline".into()) }
+        );
+        // splitn(2, ':') keeps later colons intact.
+        let c = parse_command("popup:rg foo:bar").unwrap();
+        assert_eq!(c.command, Command::OpenPopup { command: Some("rg foo:bar".into()) });
+    }
+
+    #[test]
+    fn parses_popup_empty_arg_as_bare() {
+        let c = parse_command("popup:").unwrap();
+        assert_eq!(c.command, Command::OpenPopup { command: None });
+    }
+
+    #[test]
+    fn parses_close_popup() {
+        let c = parse_command("close_popup").unwrap();
+        assert_eq!(c.command, Command::ClosePopup);
     }
 }
