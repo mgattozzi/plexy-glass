@@ -158,6 +158,7 @@ pub fn built_in_keymap() -> KeymapConfig {
             binding("Ctrl+a M", "toggle_monitor_activity"),
             binding("Ctrl+a P", "popup"),
             binding("Ctrl+a q", "close_popup"),
+            binding("Ctrl+a Space", "next_layout"),
         ],
     }
 }

@@ -821,6 +821,7 @@ keymap {
     bind "Ctrl+a M" "toggle_monitor_activity"
     bind "Ctrl+a P" "popup"
     bind "Ctrl+a q" "close_popup"
+    bind "Ctrl+a Space" "next_layout"
 }
 "##;
 

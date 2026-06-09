@@ -23,6 +23,10 @@ pub struct Window {
     /// cwd. Resolved once at construction (window cwd → session cwd, expanded);
     /// `None` = no anchor (daemon cwd). Not mutated after construction.
     pub home_cwd: Option<String>,
+    /// The preset most recently applied to this window, if any (the cursor
+    /// for `next_layout` cycling). Runtime-only (not persisted), and manual
+    /// splits and resizes deliberately do not reset it.
+    pub last_preset: Option<plexy_glass_mux::LayoutPreset>,
     panes: HashMap<PaneId, Pane>,
     layout: LayoutTree,
     active: PaneId,
@@ -67,6 +71,7 @@ impl Window {
             sync_input: false,
             zoomed: None,
             home_cwd: None,
+            last_preset: None,
             panes,
             layout: LayoutTree::single(first_pane_id),
             active: first_pane_id,
@@ -287,6 +292,7 @@ impl Window {
             sync_input: false,
             zoomed: None,
             home_cwd: None,
+            last_preset: None,
             panes,
             layout: LayoutTree::single(pid),
             active: pid,

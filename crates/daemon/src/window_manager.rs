@@ -680,6 +680,42 @@ impl WindowManager {
         }
     }
 
+    /// Rearrange the active window's panes into `preset`. For the main-*
+    /// presets the active pane takes the main slot; otherwise DFS order is
+    /// kept. A pure rearrangement: panes/PTYs are untouched, then resized to
+    /// their new rects. Single-pane windows are a structural no-op but still
+    /// record the preset so cycling stays predictable.
+    pub fn apply_layout_preset(
+        &mut self,
+        preset: plexy_glass_mux::LayoutPreset,
+    ) -> Result<(), DaemonError> {
+        use plexy_glass_mux::LayoutPreset;
+        let viewport = self.viewport();
+        let win = self.active_window_mut();
+        let mut panes = win.layout().dfs_leaves();
+        if matches!(preset, LayoutPreset::MainHorizontal | LayoutPreset::MainVertical)
+            && let Some(pos) = panes.iter().position(|p| *p == win.active())
+        {
+            let active = panes.remove(pos);
+            panes.insert(0, active);
+        }
+        win.layout_mut().apply_preset(preset, &panes);
+        win.last_preset = Some(preset);
+        win.resize(viewport)?;
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    /// Apply the preset after the window's remembered one (wrapping), or the
+    /// first preset when none has been applied yet.
+    pub fn next_layout(&mut self) -> Result<(), DaemonError> {
+        let next = match self.active_window().last_preset {
+            Some(p) => p.next(),
+            None => plexy_glass_mux::LayoutPreset::ALL[0],
+        };
+        self.apply_layout_preset(next)
+    }
+
     /// Rename the active window (command-prompt `rename` path). Mirrors the
     /// rename-overlay commit, but the name comes straight from the prompt.
     pub fn rename_active_window(&mut self, name: String) {
@@ -1087,8 +1123,11 @@ impl WindowManager {
             Command::ClosePopup => {
                 self.close_popup();
             }
-            Command::SelectLayout(_) | Command::NextLayout => {
-                // Applied in a later task (layout application on `WindowManager`).
+            Command::SelectLayout(preset) => {
+                self.apply_layout_preset(preset)?;
+            }
+            Command::NextLayout => {
+                self.next_layout()?;
             }
         }
         self.notify.notify_one();
@@ -1716,6 +1755,8 @@ fn command_clears_zoom(cmd: &Command) -> bool {
             | Command::JoinPane(_)
             | Command::SwapPane(_)
             | Command::SwapMarkedPane
+            | Command::SelectLayout(_)
+            | Command::NextLayout
     )
 }
 
@@ -2156,6 +2197,82 @@ mod tests {
         .unwrap();
         m.handle_command(Command::SplitV).unwrap();
         m
+    }
+
+    #[tokio::test]
+    async fn select_layout_puts_active_pane_in_the_main_slot() {
+        let mut m = make_two_pane_manager().await;
+        m.handle_command(Command::SplitH).unwrap(); // 3 panes
+        let active = m.active_window().active();
+        m.handle_command(Command::SelectLayout(plexy_glass_mux::LayoutPreset::MainVertical))
+            .unwrap();
+        let vp = m.viewport();
+        let rects: Vec<(PaneId, plexy_glass_mux::Rect)> = m
+            .active_window()
+            .layout()
+            .dfs_leaves()
+            .into_iter()
+            .map(|p| (p, m.active_window().layout().rect_of(p, vp).unwrap()))
+            .collect();
+        let (widest, widest_rect) = rects
+            .iter()
+            .max_by_key(|(_, r)| r.cols)
+            .copied()
+            .unwrap();
+        assert_eq!(widest, active, "active pane takes the main slot: {rects:?}");
+        assert!(
+            widest_rect.cols > vp.cols / 2,
+            "main pane has the major share: {widest_rect:?}"
+        );
+        // Focus unchanged; PTYs resized to the new rects.
+        assert_eq!(m.active_window().active(), active);
+        let (rows, cols) = m
+            .active_window()
+            .pane(active)
+            .unwrap()
+            .with_screen(|s| (s.active.num_rows(), s.active.num_cols()));
+        assert_eq!((rows, cols), (widest_rect.rows, widest_rect.cols));
+    }
+
+    #[tokio::test]
+    async fn next_layout_cycles_in_order_and_remembers() {
+        use plexy_glass_mux::LayoutPreset;
+        let mut m = make_two_pane_manager().await;
+        m.handle_command(Command::NextLayout).unwrap();
+        assert_eq!(m.active_window().last_preset, Some(LayoutPreset::EvenHorizontal));
+        m.handle_command(Command::NextLayout).unwrap();
+        assert_eq!(m.active_window().last_preset, Some(LayoutPreset::EvenVertical));
+        // A manual split does NOT reset the cycle position.
+        m.handle_command(Command::SplitV).unwrap();
+        m.handle_command(Command::NextLayout).unwrap();
+        assert_eq!(m.active_window().last_preset, Some(LayoutPreset::MainHorizontal));
+    }
+
+    #[tokio::test]
+    async fn select_layout_clears_zoom() {
+        let mut m = make_two_pane_manager().await;
+        m.handle_command(Command::ZoomToggle).unwrap();
+        assert!(m.active_window().is_zoomed());
+        m.handle_command(Command::SelectLayout(plexy_glass_mux::LayoutPreset::Tiled))
+            .unwrap();
+        assert!(!m.active_window().is_zoomed());
+    }
+
+    #[tokio::test]
+    async fn select_layout_single_pane_is_noop_but_remembers() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.handle_command(Command::SelectLayout(plexy_glass_mux::LayoutPreset::Tiled))
+            .unwrap();
+        assert_eq!(m.active_window().layout().panes().len(), 1);
+        assert_eq!(m.active_window().last_preset, Some(plexy_glass_mux::LayoutPreset::Tiled));
     }
 
     fn gutter_col_for(m: &WindowManager) -> u16 {

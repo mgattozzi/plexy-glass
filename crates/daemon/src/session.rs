@@ -334,6 +334,7 @@ fn command_label(command: &str) -> String {
         "toggle_monitor_bell" => "Monitor bell",
         "popup" => "Popup (scratch shell)",
         "close_popup" => "Close popup",
+        "next_layout" => "Next layout",
         other => {
             if let Some(n) = other
                 .strip_prefix("select_window:")
@@ -343,6 +344,9 @@ fn command_label(command: &str) -> String {
             }
             if let Some(cmd) = other.strip_prefix("popup:") {
                 return format!("Popup: {cmd}");
+            }
+            if let Some(name) = other.strip_prefix("layout:") {
+                return format!("Layout: {name}");
             }
             return other.to_string();
         }
@@ -1268,11 +1272,7 @@ impl Session {
             }
             PromptCommand::Popup(cmd) => Command::OpenPopup { command: cmd },
             PromptCommand::ClosePopup => Command::ClosePopup,
-            // Wired to Command::SelectLayout in a later task (layout
-            // application); temporary no-op until then.
-            PromptCommand::Layout(_) => {
-                return Ok(None);
-            }
+            PromptCommand::Layout(preset) => Command::SelectLayout(preset),
         };
         self.handle_command(mapped).await?;
         Ok(None)

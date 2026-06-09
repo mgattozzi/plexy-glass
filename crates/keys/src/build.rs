@@ -99,6 +99,20 @@ mod tests {
     }
 
     #[test]
+    fn default_bindings_include_next_layout_on_space() {
+        let km_cfg = plexy_glass_config::built_in_keymap();
+        let mut km = build_keymap(&km_cfg);
+        // Ctrl+a Space → NextLayout
+        let e1 = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
+        assert!(matches!(km.consume(e1, vec![0x01]), KeymapAction::Pending));
+        let e2 = KeyEvent::new(Key::Char(' '), Modifiers::empty());
+        assert!(matches!(
+            km.consume(e2, b" ".to_vec()),
+            KeymapAction::Command(Command::NextLayout)
+        ));
+    }
+
+    #[test]
     fn invalid_binding_is_logged_and_skipped() {
         let cfg = KeymapConfig {
             prefix: "Ctrl+a".into(),
