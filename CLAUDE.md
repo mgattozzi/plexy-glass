@@ -63,6 +63,15 @@ scope. If a step is wrong, fix the plan first, then proceed.
   fail (each documented with a one-line `// invariant:` comment).
 - No `#[allow]` annotations without a one-line justification comment.
 
+## User documentation
+
+`README.md` and `docs/configuration.md` are the user-facing docs. Any change to
+the user-visible surface — commands, command-prompt verbs, keybinding verbs,
+default bindings, the config schema, CLI subcommands, or notable behavior —
+must update them **in the same change**. Treat this as a completion gate
+alongside clippy and the full test suite: a feature is not done while the docs
+describe the world before it.
+
 ## Unicode and text width
 
 Terminal layout is measured in **display columns**, never bytes or `char`s. Every
@@ -199,8 +208,13 @@ wire `1+bitset`), a per-pane key **re-encode** stage (legacy / modifyOtherKeys
 27-form / Kitty CSI-u with down-conversion), client probe→negotiate→graceful-
 fallback→precise-teardown of the outer terminal, focus/color-scheme routed
 end-to-end, and **colored underlines** (SGR `58`/`59`, per-cell
-`underline_color`, advertised as `Setulc`). Each has a spec in
-`docs/superpowers/specs/`.
+`underline_color`, advertised as `Setulc`); and **preset layouts** — five
+presets (`even-horizontal`/`even-vertical`/`main-horizontal`/`main-vertical`/
+`tiled`), `Ctrl+a Space` cycling with per-window memory, `:layout <name>` /
+`layout:<name>` verbs, the active pane takes the main slot in main-*, evenness
+via a balanced ratio tree (`crates/mux/src/preset.rs`), and ratio-faithful
+restore (saved split ratios are re-applied on restore — fixing the old 50/50
+limitation). Each has a spec in `docs/superpowers/specs/`.
 
 The overlay subsystem is the substrate for modal UI: add `Overlay` +
 `OverlayView` variants (mux), an `OverlayHandler` arm, `WindowManager::open_*`
@@ -215,11 +229,15 @@ the daemon adapts to `OverlayKeyResult`, instead of routing through
 Established feature workflow (it has paid off — keep using it): brainstorm →
 write a spec → adversarial self-review of the spec → implement one task per
 `jj commit` (each green under the gates above) → adversarial review of the
-implementation. Workflows (`Workflow` tool) drive the review fan-outs.
+implementation; user-facing docs (README / the configuration reference) are
+updated as part of each feature, per **User documentation**. Workflows
+(`Workflow` tool) drive the review fan-outs.
 
 Not yet built (future work): capture-pane / pipe-pane; cross-window **swap**-pane
 and the choose-tree filter/collapse + session rename (deferred in their specs);
-silence monitoring + bell/activity alert messages; set/save/load paste buffers.
+silence monitoring + bell/activity alert messages; set/save/load paste buffers;
+**`keymap.prefix` is decoded but never consumed** — the prefix is hard-coded
+`Ctrl+a` (known gap surfaced while writing the configuration reference).
 Declarative-session v1 boundaries left for later: split ratios + active
 window/pane selection in the template, per-pane env maps, re-reading templates on
 `Ctrl+a R` reload, and `switch_session` auto-creating a not-yet-running declared
@@ -227,4 +245,5 @@ session (see the 2026-06-01 declarative-sessions spec's non-goals). (choose-tree
 break/join/swap + marked pane, paste buffers, and activity/bell monitoring shipped
 — 2026-05-31 specs/plans; the KDL config migration + declarative sessions shipped
 — 2026-06-01 specs/plans; keyboard-protocol negotiation + colored underlines
-shipped — 2026-06-01 specs/plans; popup panes shipped — 2026-06-09 spec/plan.)
+shipped — 2026-06-01 specs/plans; popup panes shipped — 2026-06-09 spec/plan;
+preset layouts + the user-facing config docs shipped — 2026-06-09 spec/plan.)
