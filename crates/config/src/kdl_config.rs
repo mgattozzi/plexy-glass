@@ -1070,6 +1070,122 @@ keymap {
         assert_eq!(cfg.sessions[0].windows[1].cwd, None);
     }
 
+    /// The complete worked example from `docs/configuration.md` ("A complete
+    /// worked example"). Keep the two verbatim-identical: this test is what
+    /// stops the doc example from rotting silently when the decoder changes.
+    const DOCS_WORKED_EXAMPLE: &str = r##"
+// ~/.config/plexy-glass/config.kdl  (Linux)
+// ~/Library/Application Support/plexy-glass/config.kdl  (macOS)
+
+palette {
+    // Override two built-in names; everything else keeps its default.
+    accent "#7aa2f7"
+    alert "#f7768e"
+}
+
+status {
+    position "top"
+    refresh "2s"
+    left {
+        session { style fg="bg" bg="accent" bold=#true; padding 1 1 }
+        prefix-indicator content=" PREFIX " { style fg="bg" bg="alert" bold=#true }
+        text value=" "
+    }
+    middle {
+        window-list {
+            active-style fg="bg" bg="accent" bold=#true
+            inactive-style fg="muted" bg="bg_bar"
+        }
+    }
+    right {
+        git-branch interval="10s" { style fg="ok" bg="bg_bar" }
+        text value=" | " { style fg="muted" bg="bg_bar" }
+        cwd max-components=3 { style fg="fg" bg="bg_bar" }
+        text value=" | " { style fg="muted" bg="bg_bar" }
+        shell command="uname" interval="1m" timeout="2s" { args "-sr"; style fg="info" bg="bg_bar" }
+        text value=" | " { style fg="muted" bg="bg_bar" }
+        time format="%a %H:%M" interval="30s" { style fg="fg" bg="bg_bar" }
+        text value=" " { style fg="muted" bg="bg_bar" }
+    }
+}
+
+keymap {
+    prefix "Ctrl+a"
+    inherit-defaults #true
+    // New bindings on top of the defaults:
+    bind "Ctrl+a g" "popup:lazygit"
+    bind "Ctrl+a t" "layout:tiled"
+    // A second chord for an existing command: F5 also reloads.
+    bind "Ctrl+a F5" "reload_config"
+}
+
+session "dev" cwd="~/projects/app" {
+    window "edit" {
+        pane command="hx ."
+    }
+    window "run" {
+        split vertical {
+            pane command="cargo watch -x check" name="check"
+            split horizontal {
+                pane name="shell"
+                pane command="tail -f log/dev.log" cwd="~/projects/app/log" name="logs"
+            }
+        }
+    }
+    window "db" cwd="~/projects/app/db" {
+        pane
+    }
+}
+"##;
+
+    #[test]
+    fn docs_worked_example_parses() {
+        let cfg = parse_config(DOCS_WORKED_EXAMPLE).expect("docs/configuration.md example must parse");
+        // Palette: overrides merged onto the built-in entries.
+        assert_eq!(cfg.palette.entries.get("accent").map(String::as_str), Some("#7aa2f7"));
+        assert_eq!(cfg.palette.entries.get("alert").map(String::as_str), Some("#f7768e"));
+        assert_eq!(cfg.palette.entries.get("bg").map(String::as_str), Some("#1D1C19"));
+        // Status: position, refresh, and the documented zone shapes.
+        assert_eq!(cfg.status.position, Position::Top);
+        assert_eq!(cfg.status.refresh, Duration::from_secs(2));
+        assert_eq!(cfg.status.left.len(), 3);
+        assert_eq!(cfg.status.middle.len(), 1);
+        assert_eq!(cfg.status.right.len(), 8);
+        match &cfg.status.right[4] {
+            WidgetSpec::Shell { command, args, interval, timeout, .. } => {
+                assert_eq!(command, "uname");
+                assert_eq!(args, &vec!["-sr".to_string()]);
+                assert_eq!(*interval, Some(Duration::from_secs(60)));
+                assert_eq!(*timeout, Duration::from_secs(2));
+            }
+            other => panic!("expected Shell, got {other:?}"),
+        }
+        // Keymap: defaults inherited plus the three documented binds.
+        assert!(cfg.keymap.inherit_defaults);
+        assert_eq!(cfg.keymap.bindings.len(), 3);
+        assert_eq!(
+            cfg.keymap.bindings[0],
+            KeymapBinding { keys: "Ctrl+a g".into(), command: "popup:lazygit".into() }
+        );
+        // Session template: three windows, nested split in "run".
+        assert_eq!(cfg.sessions.len(), 1);
+        let s = &cfg.sessions[0];
+        assert_eq!(s.name, "dev");
+        assert_eq!(s.cwd.as_deref(), Some("~/projects/app"));
+        assert_eq!(s.windows.len(), 3);
+        assert_eq!(s.windows[2].cwd.as_deref(), Some("~/projects/app/db"));
+        match &s.windows[1].layout {
+            PaneNode::Split { dir: SplitDirection::Vertical, children } => {
+                assert_eq!(children.len(), 2);
+                assert!(matches!(
+                    &children[1],
+                    PaneNode::Split { dir: SplitDirection::Horizontal, children } if children.len() == 2
+                ));
+            }
+            other => panic!("expected vertical Split, got {other:?}"),
+        }
+    }
+
     #[test]
     fn window_rejects_unknown_prop() {
         let err = parse_config(r##"session "x" { window "w" bogus="1" { pane } }"##);
