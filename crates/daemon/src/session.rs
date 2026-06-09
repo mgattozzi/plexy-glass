@@ -228,6 +228,7 @@ async fn render_coordinator(
                 selection.as_ref(),
                 overlay_view.as_ref(),
                 message.as_deref(),
+                None,
             )
         };
         let _ = frame_tx.send(Arc::new(frame));

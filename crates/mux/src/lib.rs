@@ -26,7 +26,7 @@ pub mod virtual_screen;
 
 pub use buffer::{BufferAction, BufferEntry, BufferOutcome, BufferPickerState, handle_buffers};
 pub use command_prompt::{Completion, FocusTarget, ParseError, PromptCommand, SwapTarget};
-pub use compositor::{Compositor, OverlayView, PaneView, StatusPlacement};
+pub use compositor::{Compositor, OverlayView, PaneView, PopupView, StatusPlacement, popup_rect};
 pub use copy_mode::{CopyMode, CopyModeAction, CopyModeHandler, MatchSpan, SearchState};
 pub use diff::DiffRenderer;
 pub use direction::{Direction, SplitDir};

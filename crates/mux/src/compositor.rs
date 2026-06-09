@@ -29,6 +29,27 @@ pub struct PaneView<'a> {
     pub marked: bool,
 }
 
+/// Minimum popup box (border included): 3-row × 10-col interior.
+const MIN_POPUP_ROWS: u16 = 5;
+const MIN_POPUP_COLS: u16 = 12;
+
+/// The floating popup's outer box (border included): 80% × 80% of `pane_area`
+/// (the logical layout band), centered, clamped to a minimum interior of
+/// 3 rows × 10 cols, and never larger than the band itself. The single source
+/// of truth for popup geometry: the daemon computes it once per use (spawn,
+/// resize, mouse, render) over `WindowManager::viewport()`.
+pub fn popup_rect(pane_area: Rect) -> Rect {
+    // invariant: rows/cols are u16, so (u32 * 8) / 10 < u16::MAX and the
+    // narrowing back to u16 cannot truncate.
+    let want_rows = u16::try_from((u32::from(pane_area.rows) * 8) / 10).unwrap_or(u16::MAX);
+    let want_cols = u16::try_from((u32::from(pane_area.cols) * 8) / 10).unwrap_or(u16::MAX);
+    let rows = want_rows.max(MIN_POPUP_ROWS).min(pane_area.rows);
+    let cols = want_cols.max(MIN_POPUP_COLS).min(pane_area.cols);
+    let row = pane_area.row + (pane_area.rows - rows) / 2;
+    let col = pane_area.col + (pane_area.cols - cols) / 2;
+    Rect::new(row, col, rows, cols)
+}
+
 /// Where the status bar sits relative to the pane area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusPlacement {
@@ -64,9 +85,22 @@ pub enum OverlayView<'a> {
     Buffer { state: &'a crate::buffer::BufferPickerState },
 }
 
+/// A render-ready view of the floating popup pane: a live PTY-backed grid in
+/// a bordered, titled box. `rect` is the OUTER box in logical pane-band
+/// coordinates (same space as `PaneView.rect`), computed by the daemon via
+/// `popup_rect` so render and hit-testing cannot drift.
+pub struct PopupView<'a> {
+    pub rect: Rect,
+    pub screen: &'a Screen,
+    pub title: &'a str,
+}
+
 pub struct Compositor;
 
 impl Compositor {
+    // One optional layer per frame element (status/selection/overlay/message/
+    // popup); a params struct would just rename the same eight positions.
+    #[allow(clippy::too_many_arguments)]
     pub fn compose(
         panes: &[PaneView<'_>],
         host_size: (u16, u16),
@@ -75,6 +109,7 @@ impl Compositor {
         selection: Option<&crate::selection::Selection>,
         overlay: Option<&OverlayView<'_>>,
         message: Option<&str>,
+        popup: Option<&PopupView<'_>>,
     ) -> VirtualScreen {
         let (host_rows, host_cols) = host_size;
         let host_rows = host_rows.max(1);
@@ -319,6 +354,12 @@ impl Compositor {
                 put_char(&mut screen, row, c, ' ', attrs);
             }
             put_str(&mut screen, row, 0, &format!(" {msg}"), attrs, host_cols);
+        }
+
+        // Floating popup pane: above panes/borders/status/cursor, below any
+        // static overlay (mutually exclusive with overlays in practice).
+        if let Some(p) = popup {
+            paint_popup(&mut screen, p, pane_row_offset, pane_area_rows, host_cols);
         }
 
         // Interactive overlay (rename prompt / help), painted last so it sits
@@ -735,6 +776,71 @@ fn paint_buffers(
     }
 }
 
+/// Paint the floating popup: a bordered, titled box at `popup.rect` whose
+/// interior shows the popup pane's live grid. The popup is focused, so its
+/// child's cursor replaces whatever the active layout pane set above.
+fn paint_popup(
+    screen: &mut VirtualScreen,
+    popup: &PopupView<'_>,
+    pane_row_offset: u16,
+    pane_area_rows: u16,
+    cols: u16,
+) {
+    let rect = popup.rect;
+    if rect.rows < 3 || rect.cols < 3 {
+        return;
+    }
+    if rect.row.saturating_add(rect.rows) > pane_area_rows
+        || rect.col.saturating_add(rect.cols) > cols
+    {
+        // Stale geometry mid-resize; skip this frame rather than overflow.
+        return;
+    }
+    let attrs = plexy_glass_emulator::Attrs::empty();
+    // Border frame + cleared interior.
+    for r in 0..rect.rows {
+        for c in 0..rect.cols {
+            let ch = border_glyph(r, c, rect.rows, rect.cols);
+            put_char(screen, pane_row_offset + rect.row + r, rect.col + c, ch, attrs);
+        }
+    }
+    // Title centered on the top border.
+    let title = format!(" {} ", popup.title);
+    let inner_w = rect.cols - 2;
+    let tw = display_width(&title);
+    let tcol = rect.col + 1 + inner_w.saturating_sub(tw) / 2;
+    put_str(screen, pane_row_offset + rect.row, tcol, &title, attrs, rect.col + rect.cols - 1);
+    // Interior: the popup pane's grid.
+    let max_r = (rect.rows - 2).min(popup.screen.active.num_rows());
+    let max_c = (rect.cols - 2).min(popup.screen.active.num_cols());
+    for r in 0..max_r {
+        let Some(row) = popup.screen.active.rows.get(r as usize) else { continue };
+        for c in 0..max_c {
+            if let Some(cell) = row.cells.get(c as usize) {
+                screen.put(
+                    pane_row_offset + rect.row + 1 + r,
+                    rect.col + 1 + c,
+                    cell.clone(),
+                );
+            }
+        }
+    }
+    // Focused popup: its child cursor wins (translated to the interior).
+    let cur = &popup.screen.cursor;
+    if cur.row < rect.rows - 2 && cur.col < rect.cols - 2 {
+        screen.cursor =
+            Some((pane_row_offset + rect.row + 1 + cur.row, rect.col + 1 + cur.col));
+    } else {
+        // Resize race: the popup grid momentarily exceeds the interior. No
+        // cursor beats a stale layout-pane cursor floating over the box.
+        screen.cursor = None;
+    }
+    screen.cursor_visible = popup
+        .screen
+        .modes
+        .contains(plexy_glass_emulator::Modes::CURSOR_VISIBLE);
+}
+
 /// Box-drawing glyph for cell (r, c) within a `h`x`w` frame; space inside.
 fn border_glyph(r: u16, c: u16, h: u16, w: u16) -> char {
     let last_r = h - 1;
@@ -971,9 +1077,122 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None, None);
+        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
         assert_eq!(vs.cursor, Some((0, 2)));
+    }
+
+    #[test]
+    fn popup_rect_is_80pct_centered() {
+        // Band like a 24x80 host: `host_viewport` → (1,1,21,78).
+        let band = Rect::new(1, 1, 21, 78);
+        let r = popup_rect(band);
+        assert_eq!((r.rows, r.cols), (16, 62)); // floor(21*0.8), floor(78*0.8)
+        assert_eq!(r.row, 1 + (21 - 16) / 2);
+        assert_eq!(r.col, 1 + (78 - 62) / 2);
+    }
+
+    #[test]
+    fn popup_rect_clamps_to_min_and_band() {
+        // Tiny band: the min box is 5x12 but the band caps it.
+        let band = Rect::new(0, 0, 4, 10);
+        let r = popup_rect(band);
+        assert_eq!((r.rows, r.cols), (4, 10));
+        // Small-but-roomy band: the 5x12 minimum wins over 80%.
+        let band = Rect::new(0, 0, 6, 14);
+        let r = popup_rect(band);
+        assert_eq!((r.rows, r.cols), (5, 12));
+    }
+
+    #[test]
+    fn compose_paints_popup_box_title_grid_and_cursor() {
+        // Layout pane with text positioned *under* the popup interior (CUP is
+        // 1-indexed: row 4, col 12 = grid (3, 11), inside interior rows 3..=8
+        // cols 11..=30), so it must be covered by the popup.
+        let mut e = Emulator::new(10, 40);
+        pane(&mut e, b"\x1b[4;12HUNDERNEATH ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 10, 40),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+            marked: false,
+        };
+        // Popup pane: 6x20 grid showing "hi".
+        let mut pe = Emulator::new(6, 20);
+        pane(&mut pe, b"hi ");
+        let rect = Rect::new(2, 10, 8, 22); // interior 6x20
+        let pv = PopupView { rect, screen: pe.screen(), title: "cat" };
+        let vs = Compositor::compose(
+            &[view],
+            (10, 40),
+            None,
+            StatusPlacement::Bottom,
+            None,
+            None,
+            None,
+            Some(&pv),
+        );
+        // Corners of the border frame.
+        assert_eq!(vs.cell(2, 10).unwrap().grapheme.as_str(), "┌");
+        assert_eq!(vs.cell(9, 31).unwrap().grapheme.as_str(), "┘");
+        // Title " cat " appears on the top border row.
+        let top_row: String = (10..32)
+            .map(|c| vs.cell(2, c).unwrap().grapheme.as_str().to_string())
+            .collect();
+        assert!(top_row.contains(" cat "), "top border missing title: {top_row}");
+        // Interior shows the popup grid at (rect.row+1, rect.col+1), so the
+        // pane's "UN" at (3, 11)-(3, 12) is covered by the popup's "hi".
+        assert_eq!(vs.cell(3, 11).unwrap().grapheme.as_str(), "h");
+        assert_eq!(vs.cell(3, 12).unwrap().grapheme.as_str(), "i");
+        // Past the popup text, the pane's 'D' at (3, 13) is covered by the
+        // popup grid's blank cell, not shown through.
+        assert_ne!(vs.cell(3, 13).unwrap().grapheme.as_str(), "D");
+        // Cursor follows the popup child (pe cursor at (0,2) after "hi ").
+        assert_eq!(vs.cursor, Some((3, 13)));
+    }
+
+    #[test]
+    fn popup_paints_shifted_down_when_status_bar_on_top() {
+        let mut e = Emulator::new(9, 40);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 9, 40),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+            marked: false,
+        };
+        let mut pe = Emulator::new(3, 10);
+        pane(&mut pe, b"p ");
+        let rect = Rect::new(2, 10, 5, 12); // interior 3x10
+        let pv = PopupView { rect, screen: pe.screen(), title: "t" };
+        let status = status_with_left("AB");
+        let vs = Compositor::compose(
+            &[view],
+            (10, 40),
+            Some(&status),
+            StatusPlacement::Top,
+            None,
+            None,
+            None,
+            Some(&pv),
+        );
+        // Top status row occupies physical row 0; the popup's logical row 2
+        // paints at physical row 3 (pane_row_offset = 1).
+        assert_eq!(vs.cell(3, 10).unwrap().grapheme.as_str(), "┌");
+        // Interior glyph and cursor are shifted by the same offset: the
+        // popup's 'p' at grid (0,0) lands at (3+1, 10+1); its cursor at
+        // grid (0,1) after "p " (the trailing space stays buffered) lands
+        // at (3+1, 10+1+1).
+        assert_eq!(vs.cell(4, 11).unwrap().grapheme.as_str(), "p");
+        assert_eq!(vs.cursor, Some((4, 12)));
     }
 
     #[test]
@@ -994,7 +1213,7 @@ mod tests {
         };
         let mut sel = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
         sel.extend(0, 4, Rect::new(0, 0, 4, 6));
-        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel), None, None);
+        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel), None, None, None);
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -1034,7 +1253,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None, None);
+        let vs = Compositor::compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "L");
         assert_eq!(vs.cell(0, 4).unwrap().grapheme.as_str(), "R");
         // Border column.
@@ -1064,7 +1283,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None, None);
+        let vs = Compositor::compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None, None, None);
         // Row 0 should be the last scrollback row (BBBB), not CCCC.
         let r0: String = (0..4)
             .map(|c| vs.cell(0, c).unwrap().grapheme.as_str().to_string())
@@ -1097,7 +1316,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None);
+        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None);
         assert_eq!(vs.cursor, Some((3, 7)));
     }
 
@@ -1125,7 +1344,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None);
+        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None);
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -1179,7 +1398,7 @@ mod tests {
             marked: false,
         };
         let status = status_with_left("中B");
-        let vs = Compositor::compose(&[view], (3, 8), Some(&status), StatusPlacement::Bottom, None, None, None);
+        let vs = Compositor::compose(&[view], (3, 8), Some(&status), StatusPlacement::Bottom, None, None, None, None);
         assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "中");
         assert!(vs.cell(2, 1).unwrap().grapheme.is_empty(), "wide spacer after 中");
         assert_eq!(vs.cell(2, 2).unwrap().grapheme.as_str(), "B");
@@ -1202,7 +1421,7 @@ mod tests {
             marked: false,
         };
         let status = status_with_left("AB");
-        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None, None);
+        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "A", "status at row 0");
         assert_eq!(vs.cell(0, 1).unwrap().grapheme.as_str(), "B");
         assert_eq!(vs.cell(1, 0).unwrap().grapheme.as_str(), "X", "pane shifted to row 1");
@@ -1224,7 +1443,7 @@ mod tests {
             marked: false,
         };
         let status = status_with_left("AB");
-        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None, None);
+        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "X", "pane stays at row 0");
         assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "A", "status at last row");
     }
@@ -1245,7 +1464,7 @@ mod tests {
             marked: false,
         };
         let ov = OverlayView::RenamePrompt { label: "rename window", buf: "hi" };
-        let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
         // Bottom row (3) is a REVERSE prompt bar.
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "prompt bar is REVERSE");
         // Text " rename window \u{25b8} hi", with 'r' at col 1.
@@ -1268,7 +1487,7 @@ mod tests {
             marked: false,
         };
         let ov = OverlayView::Command { buf: "spl" };
-        let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "command bar is REVERSE");
         // Text " :spl": ':' at col 1, 's' at col 2.
         assert_eq!(vs.cell(3, 1).unwrap().grapheme.as_str(), ":");
@@ -1298,6 +1517,7 @@ mod tests {
             None,
             None,
             Some("no session: foo"),
+            None,
         );
         // Bottom row (3) is a REVERSE message bar; text rendered after a space.
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "message bar is REVERSE");
@@ -1329,6 +1549,7 @@ mod tests {
             None,
             Some(&ov),
             Some("this message must not show"),
+            None,
         );
         // The overlay owns the bottom row: 'r' of "rename window" is at col 1,
         // proving the message did not overwrite it.
@@ -1352,7 +1573,7 @@ mod tests {
         };
         let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
-        let vs = Compositor::compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let vs = Compositor::compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
         let mut found_corner = false;
         let mut found_text = false;
         for r in 0..10 {
@@ -1398,7 +1619,7 @@ mod tests {
             picker_view("work", "work - 2 win", false),
         ];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "", selected: 1 };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
 
         let mut found_corner = false;
         let mut found_marker = false;
@@ -1437,7 +1658,7 @@ mod tests {
         // A CJK session name must be sized and placed as one cell + a spacer.
         let entries = vec![picker_view("中文", "中文", false)];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "", selected: 0 };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
         let mut found = false;
         for r in 0..10 {
             for c in 0..49 {
@@ -1470,7 +1691,7 @@ mod tests {
         };
         let entries = vec![picker_view("main", "main", true)];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "zzz", selected: 0 };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
         let mut text = String::new();
         for r in 0..10 {
             for c in 0..50 {
@@ -1501,7 +1722,7 @@ mod tests {
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
         let status = status_with_left("S");
         let vs =
-            Compositor::compose(&[view], (4, 40), Some(&status), StatusPlacement::Bottom, None, Some(&ov), None);
+            Compositor::compose(&[view], (4, 40), Some(&status), StatusPlacement::Bottom, None, Some(&ov), None, None);
         let mut found_corner = false;
         for r in 0..4 {
             for c in 0..40 {
@@ -1559,7 +1780,7 @@ mod tests {
             mode: crate::tree::TreeMode::Navigate,
         };
         let ov = OverlayView::Tree { state: &state };
-        let vs = Compositor::compose(&[view], (12, 50), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let vs = Compositor::compose(&[view], (12, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
 
         let mut found_corner = false;
         let mut found_marker = false;
@@ -1625,7 +1846,7 @@ mod tests {
             selected: 1,
         };
         let ov = OverlayView::Buffer { state: &state };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
         let mut text = String::new();
         let mut selected_reverse = false;
         for r in 0..10 {
@@ -1659,7 +1880,7 @@ mod tests {
         };
         let state = crate::buffer::BufferPickerState { entries: vec![], selected: 0 };
         let ov = OverlayView::Buffer { state: &state };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
         let mut text = String::new();
         for r in 0..10 {
             for c in 0..50 {
@@ -1685,7 +1906,7 @@ mod tests {
             title: None,
             marked: true,
         };
-        let vs = Compositor::compose(&[view], (3, 8), None, StatusPlacement::Bottom, None, None, None);
+        let vs = Compositor::compose(&[view], (3, 8), None, StatusPlacement::Bottom, None, None, None, None);
         let mut magenta = false;
         for r in 0..3 {
             for c in 0..8 {
@@ -1717,7 +1938,7 @@ mod tests {
             mode: crate::tree::TreeMode::ConfirmKill,
         };
         let ov = OverlayView::Tree { state: &state };
-        let vs = Compositor::compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None);
+        let vs = Compositor::compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
         let mut text = String::new();
         for r in 0..12 {
             for c in 0..60 {
