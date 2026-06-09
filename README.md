@@ -73,8 +73,10 @@ the only time you'd type it is with `--foreground` for development.)
 
 ## Default keybindings
 
-The prefix is `Ctrl+a`. Every binding below is rebindable (and the prefix is
-configurable) via the `keymap` block in `config.kdl`.
+The prefix is `Ctrl+a`. Every binding below is rebindable via the `keymap`
+block in `config.kdl` (see the
+[configuration reference](docs/configuration.md); note that the prefix itself
+is currently fixed, so rebinding it means redeclaring the chords).
 
 ### Sessions and client
 
