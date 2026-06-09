@@ -1268,6 +1268,11 @@ impl Session {
             }
             PromptCommand::Popup(cmd) => Command::OpenPopup { command: cmd },
             PromptCommand::ClosePopup => Command::ClosePopup,
+            // Wired to Command::SelectLayout in a later task (layout
+            // application); temporary no-op until then.
+            PromptCommand::Layout(_) => {
+                return Ok(None);
+            }
         };
         self.handle_command(mapped).await?;
         Ok(None)

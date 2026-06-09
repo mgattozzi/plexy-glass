@@ -63,6 +63,8 @@ pub enum PromptCommand {
     Popup(Option<String>),
     /// Close the floating popup.
     ClosePopup,
+    /// Rearrange the active window's panes into a preset layout.
+    Layout(crate::LayoutPreset),
 }
 
 /// A human-readable parse failure.
@@ -82,9 +84,10 @@ impl std::error::Error for ParseError {}
 /// Static verb names, sorted, for Tab-completion of the first token.
 pub const VERBS: &[&str] = &[
     "break", "buffers", "close-popup", "copy", "detach", "focus", "help", "join",
-    "kill", "last", "mark", "monitor-activity", "monitor-bell", "new", "next",
-    "paste", "popup", "prev", "reload", "rename", "rename-pane", "resize",
-    "sessions", "split", "swap", "switch", "sync", "tree", "win", "zoom",
+    "kill", "last", "layout", "mark", "monitor-activity", "monitor-bell", "new",
+    "next", "paste", "popup", "prev", "reload", "rename", "rename-pane",
+    "resize", "sessions", "split", "swap", "switch", "sync", "tree", "win",
+    "zoom",
 ];
 
 fn err(msg: impl Into<String>) -> ParseError {
@@ -236,6 +239,17 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
             Some(rest.to_string())
         })),
         "close-popup" => no_args(PromptCommand::ClosePopup),
+        "layout" => {
+            const NAMES: &str =
+                "even-horizontal, even-vertical, main-horizontal, main-vertical, tiled";
+            if rest.is_empty() {
+                return Err(err(format!("layout: expected one of {NAMES}")));
+            }
+            match crate::LayoutPreset::parse(rest) {
+                Some(p) => Ok(PromptCommand::Layout(p)),
+                None => Err(err(format!("layout: unknown layout `{rest}`; expected one of {NAMES}"))),
+            }
+        }
         other => Err(err(format!("unknown command: {other}"))),
     }
 }
@@ -472,6 +486,24 @@ mod tests {
             p("close-popup x").unwrap_err().to_string(),
             "close-popup: takes no arguments"
         );
+    }
+
+    #[test]
+    fn parses_layout_verb() {
+        use crate::LayoutPreset;
+        assert_eq!(p("layout tiled").unwrap(), PromptCommand::Layout(LayoutPreset::Tiled));
+        assert_eq!(
+            p("layout main-vertical").unwrap(),
+            PromptCommand::Layout(LayoutPreset::MainVertical)
+        );
+    }
+
+    #[test]
+    fn layout_verb_errors_name_the_valid_set() {
+        let msg = p("layout").unwrap_err().to_string();
+        assert!(msg.contains("even-horizontal") && msg.contains("tiled"), "{msg}");
+        let msg = p("layout bogus").unwrap_err().to_string();
+        assert!(msg.contains("bogus") && msg.contains("tiled"), "{msg}");
     }
 
     #[test]
