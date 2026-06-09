@@ -685,6 +685,8 @@ impl WindowManager {
     /// kept. A pure rearrangement: panes/PTYs are untouched, then resized to
     /// their new rects. Single-pane windows are a structural no-op but still
     /// record the preset so cycling stays predictable.
+    /// Callers must clear zoom first (`handle_command` does, via
+    /// `command_clears_zoom`).
     pub fn apply_layout_preset(
         &mut self,
         preset: plexy_glass_mux::LayoutPreset,

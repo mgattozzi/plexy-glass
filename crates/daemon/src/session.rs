@@ -667,8 +667,8 @@ impl Session {
     /// same as `new`; we then replay structural changes (splits, extra
     /// windows, names, sync_input, focus) to reach the saved layout.
     /// Each restored pane spawns the caller-supplied `base_spec` with cwd
-    /// set from the saved state. Split ratios reset to 50/50 (a v1
-    /// limitation; users can mouse-drag to restore).
+    /// set from the saved state. Split ratios are restored from the saved
+    /// state.
     pub async fn restore_from(
         saved: crate::persist::SessionStateV1,
         base_spec: plexy_glass_protocol::SpawnSpec,
@@ -737,8 +737,8 @@ impl Session {
     /// Unlike `restore_from`, this never reads disk, the template is the
     /// source of truth. Each pane runs its declared `command` via the default
     /// shell (or an interactive shell when no command), with cwd resolved from
-    /// the pane/session template. Split ratios are 50/50 (same v1 limitation as
-    /// restore).
+    /// the pane/session template. Split ratios are 50/50 (templates have no
+    /// ratios).
     pub async fn build_from_template(
         template: &plexy_glass_config::SessionTemplate,
         size: PtySize,
@@ -826,6 +826,18 @@ fn replay_window_layout(
             .and_then(|p| p.cwd.clone());
         wm.split_window_at_dfs(window_idx, op.target_dfs_idx, op.dir, spec)?;
     }
+    // The replay rebuilt the exact saved shape at default 0.5 ratios, so the
+    // saved preorder ratio list maps 1:1 onto the live tree's splits.
+    // Re-apply them, then resize panes to their corrected rects.
+    let mut ratios = Vec::new();
+    preorder_ratios(&saved.layout, &mut ratios);
+    if !ratios.is_empty() {
+        let viewport = wm.viewport();
+        if let Some(win) = wm.windows_mut().get_mut(window_idx) {
+            win.layout_mut().set_ratios_preorder(&ratios);
+            win.resize(viewport)?;
+        }
+    }
     Ok(())
 }
 
@@ -835,6 +847,16 @@ struct ReplayOp {
     /// DFS index that the newly-spawned pane will occupy AFTER the split.
     new_pane_dfs_idx: u32,
     dir: plexy_glass_mux::SplitDir,
+}
+
+/// Collect split ratios in preorder (root, first subtree, second), the same
+/// order `set_ratios_preorder` consumes.
+fn preorder_ratios(node: &crate::persist::LayoutStateV1, out: &mut Vec<f32>) {
+    if let crate::persist::LayoutStateV1::Split { ratio, first, second, .. } = node {
+        out.push(*ratio);
+        preorder_ratios(first, out);
+        preorder_ratios(second, out);
+    }
 }
 
 fn collect_replay_ops(node: &crate::persist::LayoutStateV1, base_dfs: u32, out: &mut Vec<ReplayOp>) {
@@ -2233,6 +2255,49 @@ mod tests {
         let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
         let wm = restored.window_manager.lock().await;
         assert_eq!(wm.windows()[0].layout().panes().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_preserves_split_ratios() {
+        // Build a saved state by hand: two panes side by side at 0.3 / 0.7.
+        use crate::persist::{
+            LayoutDirV1, LayoutStateV1, PaneStateV1, SessionStateV1, WindowStateV1,
+        };
+        let _g = test_isolate_state_dir();
+        let saved = SessionStateV1 {
+            schema: crate::persist::SCHEMA_VERSION,
+            name: "t-ratio-restore".into(),
+            created: chrono::Utc::now(),
+            active_window: 0,
+            windows: vec![WindowStateV1 {
+                name: "w".into(),
+                sync_input: false,
+                home_cwd: None,
+                active_pane: 0,
+                panes: vec![
+                    PaneStateV1 { cwd: None, name: None },
+                    PaneStateV1 { cwd: None, name: None },
+                ],
+                layout: LayoutStateV1::Split {
+                    dir: LayoutDirV1::Vertical,
+                    ratio: 0.3,
+                    first: Box::new(LayoutStateV1::Leaf(0)),
+                    second: Box::new(LayoutStateV1::Leaf(1)),
+                },
+            }],
+        };
+        let s = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
+        let m = s.window_manager.lock().await;
+        let vp = m.viewport();
+        let win = m.active_window();
+        let leaves = win.layout().dfs_leaves();
+        let r0 = win.layout().rect_of(leaves[0], vp).unwrap();
+        // 0.3 of the usable width (NOT the 0.5 the replay used to leave):
+        // for an 80-col host, viewport is 78 wide → usable 77 → ~23 cols.
+        assert!(
+            (20..=26).contains(&r0.cols),
+            "first pane should be ~30% wide, got {r0:?} of {vp:?}"
+        );
     }
 
     #[tokio::test]
