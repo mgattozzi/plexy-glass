@@ -256,6 +256,22 @@ fn build_session_end_frame(host: PtySize) -> plexy_glass_mux::VirtualScreen {
     plexy_glass_mux::VirtualScreen::blank(host.rows, host.cols)
 }
 
+/// Substitute the `prefix` token (word-wise, case-insensitive) with the
+/// configured prefix string and rejoin with single spaces.
+///
+/// Edge: if the configured prefix string is not a valid single chord, the
+/// keymap already fell back to Ctrl+a at build time (and warned), but here we
+/// substitute the raw configured string verbatim. The config is already broken
+/// and has been warned about, so this is acceptable display drift; keep it
+/// honest.
+fn substitute_prefix_token(keys: &str, prefix: &str) -> String {
+    let parts: Vec<&str> = keys
+        .split_whitespace()
+        .map(|tok| if tok.eq_ignore_ascii_case("prefix") { prefix } else { tok })
+        .collect();
+    parts.join(" ")
+}
+
 /// Build the effective keybinding list for the help overlay: the built-in
 /// defaults (when `inherit_defaults`) overlaid with the user's bindings, later
 /// bindings overriding earlier ones by key chord, preserving first-seen order.
@@ -275,15 +291,18 @@ fn build_help_lines(config: &plexy_glass_config::Config) -> Vec<(String, String)
         }
     }
     let km = &config.keymap;
+    let prefix = &km.prefix;
     let mut ordered: Vec<(String, String)> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     if km.inherit_defaults {
         for b in plexy_glass_config::built_in_keymap().bindings {
-            upsert(&mut ordered, &mut index, &b.keys, &b.command);
+            let resolved = substitute_prefix_token(&b.keys, prefix);
+            upsert(&mut ordered, &mut index, &resolved, &b.command);
         }
     }
     for b in &km.bindings {
-        upsert(&mut ordered, &mut index, &b.keys, &b.command);
+        let resolved = substitute_prefix_token(&b.keys, prefix);
+        upsert(&mut ordered, &mut index, &resolved, &b.command);
     }
     ordered
 }
@@ -352,4 +371,75 @@ fn command_label(command: &str) -> String {
         }
     };
     label.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plexy_glass_config::{KeymapBinding, built_in_default};
+
+    fn binding(keys: &str, command: &str) -> KeymapBinding {
+        KeymapBinding { keys: keys.into(), command: command.into() }
+    }
+
+    /// Test 1: default config, the output contains ("Ctrl+a c", "New window") and
+    /// NO key string containing the word "prefix" (case-insensitive).
+    #[test]
+    fn default_config_has_no_prefix_token_in_keys() {
+        let cfg = built_in_default();
+        let lines = build_help_lines(&cfg);
+
+        // Must contain the resolved form of the canonical "new window" binding.
+        assert!(
+            lines.iter().any(|(k, v)| k == "Ctrl+a c" && v == "New window"),
+            "expected (\"Ctrl+a c\", \"New window\") in help lines; got:\n{lines:?}"
+        );
+
+        // No key column may still carry the raw token.
+        for (keys, _) in &lines {
+            for tok in keys.split_whitespace() {
+                assert!(
+                    !tok.eq_ignore_ascii_case("prefix"),
+                    "found unresolved 'prefix' token in help key string: {keys:?}"
+                );
+            }
+        }
+    }
+
+    /// Test 2: custom prefix "Ctrl+b": "prefix c" → "Ctrl+b c", a user
+    /// binding "prefix H" → "Ctrl+b H", and an absolute binding "Ctrl+x q" stays
+    /// verbatim.
+    #[test]
+    fn custom_prefix_substituted_in_help_lines() {
+        let mut cfg = built_in_default();
+        cfg.keymap.prefix = "Ctrl+b".into();
+        // Add user bindings: one prefix-relative and one absolute.
+        cfg.keymap.bindings.push(binding("prefix H", "resize_pane_left"));
+        cfg.keymap.bindings.push(binding("Ctrl+x q", "detach"));
+
+        let lines = build_help_lines(&cfg);
+
+        assert!(
+            lines.iter().any(|(k, v)| k == "Ctrl+b c" && v == "New window"),
+            "expected (\"Ctrl+b c\", \"New window\"); got:\n{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|(k, _)| k == "Ctrl+b H"),
+            "expected \"Ctrl+b H\" in help lines; got:\n{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|(k, _)| k == "Ctrl+x q"),
+            "expected absolute \"Ctrl+x q\" unchanged; got:\n{lines:?}"
+        );
+
+        // Still no raw token.
+        for (keys, _) in &lines {
+            for tok in keys.split_whitespace() {
+                assert!(
+                    !tok.eq_ignore_ascii_case("prefix"),
+                    "found unresolved 'prefix' token in help key string: {keys:?}"
+                );
+            }
+        }
+    }
 }
