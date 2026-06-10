@@ -223,6 +223,29 @@ pub fn extract_text(selection: &Selection, screen: &plexy_glass_emulator::Screen
     out
 }
 
+/// The visible grid as plain text: one `String` line per grid row, wide-glyph
+/// spacer cells skipped, per-line trailing whitespace trimmed, trailing blank
+/// lines dropped. The CLI `capture` verb's renderer.
+///
+/// Wide-spacer cells have an empty grapheme (`""`), so `push_str("")` is a
+/// no-op and they are naturally skipped without an explicit `is_wide_spacer()`
+/// check. Blank cells carry a space grapheme (`" "`); `trim_end` removes them.
+pub fn screen_text(screen: &plexy_glass_emulator::Screen) -> String {
+    let mut lines: Vec<String> = Vec::with_capacity(screen.active.num_rows() as usize);
+    for row in &screen.active.rows {
+        let mut line = String::new();
+        for cell in &row.cells {
+            line.push_str(cell.grapheme.as_str());
+        }
+        let trimmed = line.trim_end();
+        lines.push(trimmed.to_string());
+    }
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,5 +385,39 @@ mod tests {
     fn line_at_on_blank_row_returns_none() {
         let screen = screen_from(2, 10, &["hello", ""]);
         assert!(line_at(PaneId(0), &screen, 1).is_none());
+    }
+
+    // ── screen_text tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn screen_text_plain_two_lines() {
+        let screen = screen_from(3, 20, &["hello", "world", ""]);
+        let txt = super::screen_text(&screen);
+        assert_eq!(txt, "hello\nworld");
+    }
+
+    #[test]
+    fn screen_text_wide_grapheme_appears_once() {
+        // "世" is a wide (2-col) CJK character; the emulator places it at col 0
+        // and inserts a spacer at col 1. screen_text must emit "世" once.
+        let screen = screen_from(2, 20, &["世", ""]);
+        let txt = super::screen_text(&screen);
+        assert_eq!(txt, "世");
+    }
+
+    #[test]
+    fn screen_text_trailing_spaces_trimmed() {
+        // Content "ab" in a 10-col grid; the remaining 8 cols are blank spaces.
+        let screen = screen_from(2, 10, &["ab", ""]);
+        let txt = super::screen_text(&screen);
+        assert_eq!(txt, "ab");
+    }
+
+    #[test]
+    fn screen_text_trailing_blank_lines_dropped() {
+        // Content only on row 0 of a 5-row grid; rows 1-4 must not appear.
+        let screen = screen_from(5, 20, &["content", "", "", "", ""]);
+        let txt = super::screen_text(&screen);
+        assert_eq!(txt, "content");
     }
 }

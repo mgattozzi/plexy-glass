@@ -41,7 +41,7 @@ pub use overlay::{
 pub use pane_id::{PaneId, WindowId};
 pub use preset::LayoutPreset;
 pub use rect::Rect;
-pub use selection::{Selection, SelectionKind, extract_text, line_at, word_at};
+pub use selection::{Selection, SelectionKind, extract_text, line_at, screen_text, word_at};
 pub use status::StatusLine;
 pub use tree::{
     TreeAction, TreeKind, TreeMode, TreeNode, TreeOutcome, TreeState, handle_tree, pane_label,
