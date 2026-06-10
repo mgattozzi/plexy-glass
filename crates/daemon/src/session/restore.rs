@@ -132,7 +132,7 @@ impl Session {
 /// Build `window_idx`'s panes from a binary layout, using each leaf's declared
 /// `SpawnSpec`. The window's first pane already exists; we replay split ops in
 /// pre-order (same accounting as `collect_replay_ops`), then apply pane names.
-pub(super) fn build_window_from_bin(
+fn build_window_from_bin(
     wm: &mut WindowManager,
     window_idx: usize,
     bin: &crate::declared::BinLayout,
@@ -170,7 +170,7 @@ pub(super) fn restore_cwd(saved: Option<&str>) -> Option<String> {
 /// Replay a saved layout for `window_idx`. The window's first pane is
 /// already present; we walk the saved layout depth-first, splitting the
 /// existing structure at each Split node to spawn the next pane.
-pub(super) fn replay_window_layout(
+fn replay_window_layout(
     wm: &mut WindowManager,
     window_idx: usize,
     saved: &crate::persist::WindowStateV1,

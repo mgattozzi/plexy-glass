@@ -5,7 +5,7 @@ use crate::{Direction, Key, KeyEvent, KeyEventKind, Modifiers, SplitDir};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     NewWindow,
     NextWindow,

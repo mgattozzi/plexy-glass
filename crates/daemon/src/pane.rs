@@ -41,7 +41,7 @@ struct Inner {
     /// the emulator screen). `None` until the user renames the pane; shown on
     /// the pane's top border and persisted in the saved-session file.
     name: Mutex<Option<String>>,
-    /// Held behind a Mutex so hot reload (Task 8) can swap the Arc.
+    /// Held behind a Mutex so hot reload can swap the Arc.
     /// Wrapped in Arc so the reader thread can clone a handle without
     /// borrowing self.
     config: Arc<Mutex<Arc<Config>>>,

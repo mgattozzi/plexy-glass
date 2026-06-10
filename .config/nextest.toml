@@ -45,6 +45,16 @@ pty = { max-threads = 4 }
 [[profile.default.overrides]]
 filter = 'binary(e2e)'
 test-group = 'e2e'
+# Upstream cargo-nextest macOS fd-inheritance race: a sibling test process
+# spawned in the same instant can transiently inherit another test's output
+# pipe (proven via lsof, nothing in plexy-glass holds the fds), so nextest
+# occasionally reports a "leaked" handle after the test itself has passed.
+# This timeout absorbs SHORT transient holds; a long-running sibling (e.g.
+# the ~8s osc7 e2e test) can hold the pipe past any reasonable timeout, so
+# an occasional "leaky" report can still appear. It's benign upstream
+# noise, not a plexy-glass process leak (verified: no processes survive
+# the run).
+leak-timeout = "500ms"
 
 [[profile.default.overrides]]
 filter = 'package(plexy-glass-daemon)'

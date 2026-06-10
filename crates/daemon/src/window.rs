@@ -107,7 +107,7 @@ impl Window {
     }
 
     /// The most recently focused pane other than the current active one, if
-    /// it still exists. Used by `select_last_pane` (Task 3).
+    /// it still exists. Used by `select_last_pane`.
     pub fn last_pane(&self) -> Option<PaneId> {
         self.focus_history
             .iter()

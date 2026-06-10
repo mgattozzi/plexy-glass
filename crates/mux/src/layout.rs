@@ -30,7 +30,7 @@ pub enum SplitPosition {
     After,
 }
 
-/// Which border of a pane was hit (used by drag-resize). Body added in M4.
+/// Which border of a pane was hit (used by drag-resize).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorderSide {
     Right,
@@ -39,7 +39,7 @@ pub enum BorderSide {
 
 /// Result of a border hit-test: the pane whose right/bottom edge was clicked,
 /// plus the side. Combined, these uniquely identify a Split ancestor whose
-/// ratio should be adjusted. Body added in M4.
+/// ratio should be adjusted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BorderHit {
     pub adjacent_pane: PaneId,

@@ -39,15 +39,14 @@ pub struct WindowManager {
     /// drags.
     selection: Option<Selection>,
     /// Active config shared with every pane this manager spawns. Hot reload
-    /// (Task 8) swaps this Arc and walks the panes calling `update_config`.
+    /// swaps this Arc and walks the panes calling `update_config`.
     config: Arc<plexy_glass_config::Config>,
-    /// Border drag-resize in progress (M5). `None` between drags.
+    /// Border drag-resize in progress. `None` between drags.
     resize_drag: Option<ResizeDrag>,
-    /// Last left-press for multi-click classification (M6/M7).
-    #[allow(dead_code)] // read by M6/M7
+    /// Last left-press for multi-click classification.
     click_history: Option<ClickHistory>,
     /// Physical row index where the status bar paints, or `None` if the bar is
-    /// hidden. Set by `set_status_layout` (M10).
+    /// hidden. Set by `set_status_layout`.
     status_bar_row: Option<u16>,
     /// Vertical offset of the logical pane band from physical row 0: `0` when
     /// the status bar is at the bottom, `1` when it is at the top. Mouse events
@@ -55,7 +54,7 @@ pub struct WindowManager {
     /// layout's logical pane-coordinate space. Set by `set_status_layout`.
     pane_row_offset: u16,
     /// Clickable regions in the current status bar. Refreshed each render
-    /// tick via `set_status_hits`. M10.
+    /// tick via `set_status_hits`.
     status_hits: Vec<plexy_glass_status::StatusHit>,
     /// Set when a status-bar click on the session widget fires `Detach`.
     /// `Connection::serve_attach` polls this each iteration of its input loop

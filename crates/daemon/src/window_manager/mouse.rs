@@ -7,8 +7,7 @@ use plexy_glass_mux::{
 use std::time::Instant;
 
 /// Active border drag-resize. Cleared on Release. While `Some`, all mouse
-/// events go to `handle_resize_drag_event`. Fields read by M5 wiring.
-#[allow(dead_code)] // fields populated by M5
+/// events go to `handle_resize_drag_event`.
 pub(super) struct ResizeDrag {
     adjacent_pane: PaneId,
     side: BorderSide,
@@ -17,8 +16,7 @@ pub(super) struct ResizeDrag {
 
 /// Last left-press metadata for multi-click classification (double-click =
 /// Word, triple-click = Line). Resets when the click target changes or the
-/// 400ms window expires. Fields read by M6/M7 wiring.
-#[allow(dead_code)] // fields populated by M6/M7
+/// 400ms window expires.
 pub(super) struct ClickHistory {
     pane: PaneId,
     row: u16,
@@ -117,7 +115,7 @@ impl WindowManager {
         self.handle_default_mouse(pane_id, event, viewport).await
     }
 
-    // ----- Precedence-ladder helpers (M2 stubs filled in by M4-M10) -----
+    // ----- Precedence-ladder helpers -----
 
     fn is_status_bar_row(&self, row: u16) -> bool {
         self.status_bar_row == Some(row)
@@ -424,7 +422,7 @@ impl WindowManager {
         let local_col = event.col.saturating_sub(pane_rect.col);
 
         // Shift+left-click EXTENDS the existing selection in this pane
-        // instead of starting a new one (M7).
+        // instead of starting a new one.
         if event.modifiers.shift
             && self
                 .selection
@@ -463,7 +461,7 @@ impl WindowManager {
             return Ok(());
         }
 
-        // Multi-click classification (M7): double = Word, triple = Line.
+        // Multi-click classification: double = Word, triple = Line.
         let count = self.classify_click_count(pane_id, &event);
         let new_sel = if count >= 3 {
             self.active_window()

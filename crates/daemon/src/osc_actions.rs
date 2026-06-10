@@ -34,7 +34,8 @@ pub async fn open_url(url: &str) -> Result<(), DaemonError> {
 }
 
 /// Write `payload` bytes to the system clipboard. Tries platform-appropriate
-/// CLIs in order; first available wins. Failure is logged once per session.
+/// CLIs in order; first available wins. When no tool is found, a warning is
+/// logged on every call; a tool that runs but fails is ignored silently.
 pub async fn write_clipboard(payload: &[u8]) -> Result<(), DaemonError> {
     let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
         &[("pbcopy", &[])]

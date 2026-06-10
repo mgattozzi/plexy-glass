@@ -9,14 +9,14 @@ use tokio::sync::watch;
 /// Per-pane data captured under the window-manager lock, owned so the borrowed
 /// `PaneView`s handed to the compositor don't keep the lock held during
 /// `compose`.
-pub(super) struct OwnedPane {
-    pub(super) id: plexy_glass_mux::PaneId,
-    pub(super) rect: plexy_glass_mux::Rect,
-    pub(super) screen: plexy_glass_emulator::Screen,
-    pub(super) is_active: bool,
-    pub(super) scroll: u32,
-    pub(super) copy_mode: Option<plexy_glass_mux::CopyMode>,
-    pub(super) name: Option<String>,
+struct OwnedPane {
+    id: plexy_glass_mux::PaneId,
+    rect: plexy_glass_mux::Rect,
+    screen: plexy_glass_emulator::Screen,
+    is_active: bool,
+    scroll: u32,
+    copy_mode: Option<plexy_glass_mux::CopyMode>,
+    name: Option<String>,
 }
 
 pub(super) async fn render_coordinator(
@@ -169,7 +169,7 @@ pub(super) async fn render_coordinator(
             let _ = engine.refresh_due_intervals(&ctx).await;
             let snap = engine.snapshot().await;
             // Push clickable regions to the window manager so the next
-            // status-bar click can dispatch the matching command (M10).
+            // status-bar click can dispatch the matching command.
             let hits = snap.click_hits();
             let host_size = m.host_size();
             // Honor the configured status-bar position for both the click row
@@ -252,14 +252,14 @@ pub(super) async fn render_coordinator(
     // and exit their loops, which closes their sockets and lets clients restore.
 }
 
-pub(super) fn build_session_end_frame(host: PtySize) -> plexy_glass_mux::VirtualScreen {
+fn build_session_end_frame(host: PtySize) -> plexy_glass_mux::VirtualScreen {
     plexy_glass_mux::VirtualScreen::blank(host.rows, host.cols)
 }
 
 /// Build the effective keybinding list for the help overlay: the built-in
 /// defaults (when `inherit_defaults`) overlaid with the user's bindings, later
 /// bindings overriding earlier ones by key chord, preserving first-seen order.
-pub(super) fn build_help_lines(config: &plexy_glass_config::Config) -> Vec<(String, String)> {
+fn build_help_lines(config: &plexy_glass_config::Config) -> Vec<(String, String)> {
     fn upsert(
         ordered: &mut Vec<(String, String)>,
         index: &mut std::collections::HashMap<String, usize>,

@@ -320,17 +320,27 @@ impl TestSession {
 
     /// Wait (bounded) for the client to exit on its own, e.g. after the daemon
     /// is killed from another connection. Takes the child so `Drop` won't also
-    /// kill it. Returns whether it exited within `timeout`.
+    /// kill it. Returns whether it exited within `timeout`. On timeout the
+    /// waiter thread already owns the child, so `Drop` can't reap it; kill by
+    /// pid instead so a hung client doesn't outlive the (loudly failing) test.
     fn wait_exit(&mut self, timeout: Duration) -> bool {
         let Some(mut child) = self.child.take() else {
             return true;
         };
+        let pid = child.process_id();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = child.wait();
             let _ = tx.send(());
         });
-        rx.recv_timeout(timeout).is_ok()
+        let exited = rx.recv_timeout(timeout).is_ok();
+        if !exited && let Some(pid) = pid {
+            // SIGKILL by pid; the waiter thread then reaps via its `wait()`.
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status();
+        }
+        exited
     }
 }
 

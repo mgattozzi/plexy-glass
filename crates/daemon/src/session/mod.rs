@@ -42,8 +42,6 @@ pub struct Session {
     pub closing: AtomicBool,
     next_client_id: AtomicU64,
     coordinator_handle: StdMutex<Option<JoinHandle<()>>>,
-    /// Holds the death channel receiver until Task 13 wires up the consumer.
-    pub pending_death_rx: Mutex<Option<mpsc::Receiver<PaneId>>>,
     status_engine_slot: StdMutex<Arc<plexy_glass_status::EngineInner>>,
     status_tick_handle: StdMutex<Option<JoinHandle<()>>>,
     config_slot: StdMutex<Arc<plexy_glass_config::Config>>,
@@ -64,7 +62,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// Snapshot the current active config Arc. Hot reload (Task 8) swaps the
+    /// Snapshot the current active config Arc. Hot reload swaps the
     /// inner Arc; callers should call this each time they need a current view
     /// of the config rather than caching across awaits.
     pub fn config_snapshot(&self) -> Arc<plexy_glass_config::Config> {
@@ -178,7 +176,6 @@ impl Session {
             closing: AtomicBool::new(false),
             next_client_id: AtomicU64::new(0),
             coordinator_handle: StdMutex::new(None),
-            pending_death_rx: Mutex::new(Some(death_rx)),
             status_engine_slot: StdMutex::new(status_engine),
             status_tick_handle: StdMutex::new(None),
             status_msg_handle: StdMutex::new(None),
@@ -192,14 +189,8 @@ impl Session {
         // invariant: no other thread holds coordinator_handle at construction time
         *session.coordinator_handle.lock().expect("coordinator lock poisoned") = Some(coord_handle);
 
-        // Take the receiver out of `pending_death_rx` and spawn the consumer.
-        // invariant: pending_death_rx is Some immediately after Session construction
-        let death_rx = session
-            .pending_death_rx
-            .try_lock()
-            .expect("pending_death_rx lock: no contention at construction time")
-            .take()
-            .expect("invariant: pending_death_rx is Some after Session::new");
+        // Spawn the pane-death consumer; it owns the receiver end of the
+        // death channel.
         let session_for_death = Arc::clone(&session);
         let death_task = tokio::spawn(async move {
             let mut death_rx = death_rx;

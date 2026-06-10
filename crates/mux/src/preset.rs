@@ -4,7 +4,7 @@
 
 use crate::{direction::SplitDir, layout::LayoutNode, pane_id::PaneId};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutPreset {
     /// Panes side by side in one row.
     EvenHorizontal,
