@@ -55,7 +55,12 @@ pub enum ExitStatus {
 }
 
 /// Bumped any time `ClientMsg` or `ServerMsg` changes meaning.
-pub const PROTOCOL_VERSION: u16 = 5;
+///
+/// History:
+/// - v5: keyboard-protocol negotiation, colored underlines
+/// - v6: scripting messages: `RunCommand`, `SendInput`, `CapturePane` /
+///   `CommandResult`, `PaneCapture`
+pub const PROTOCOL_VERSION: u16 = 6;
 
 /// Which keyboard protocol a client negotiated with its *outer* terminal. The
 /// daemon decodes that client's input bytes in this protocol.
@@ -113,6 +118,12 @@ pub enum ClientMsg {
     FocusOut,
     /// Outer terminal reported its color scheme (`\e[?997;Xn`).
     ColorScheme(ColorScheme),
+    /// Run one command-prompt line against a session (CLI `cmd`).
+    RunCommand { session: Option<String>, line: String },
+    /// Write raw bytes into a session's input path (CLI `send`).
+    SendInput { session: Option<String>, bytes: Bytes },
+    /// Capture the focused pane's visible screen text (CLI `capture`).
+    CapturePane { session: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +137,11 @@ pub enum ServerMsg {
     Exited { status: ExitStatus },
     Error(crate::errors::ProtocolError),
     ConfigReloaded { error: Option<String> },
+    /// Outcome of `RunCommand` / `SendInput`: `ok` drives the CLI exit code;
+    /// `message` is the confirmation or error text.
+    CommandResult { ok: bool, message: Option<String> },
+    /// `CapturePane` response.
+    PaneCapture { text: String },
 }
 
 #[cfg(test)]
@@ -284,5 +300,28 @@ mod tests {
         let bytes = postcard::to_allocvec(&err).expect("serialize");
         let decoded: ServerMsg = postcard::from_bytes(&bytes).expect("deserialize");
         assert_eq!(err, decoded);
+    }
+
+    #[test]
+    fn scripting_messages_round_trip() {
+        let msgs = [
+            ClientMsg::RunCommand { session: Some("w".into()), line: "split v".into() },
+            ClientMsg::RunCommand { session: None, line: "layout tiled".into() },
+            ClientMsg::SendInput { session: None, bytes: Bytes::from_static(b"ls\r") },
+            ClientMsg::CapturePane { session: Some("w".into()) },
+        ];
+        for m in msgs {
+            let enc = postcard::to_allocvec(&m).unwrap();
+            assert_eq!(postcard::from_bytes::<ClientMsg>(&enc).unwrap(), m);
+        }
+        let outs = [
+            ServerMsg::CommandResult { ok: true, message: None },
+            ServerMsg::CommandResult { ok: false, message: Some("nope".into()) },
+            ServerMsg::PaneCapture { text: "hello\nworld".into() },
+        ];
+        for m in outs {
+            let enc = postcard::to_allocvec(&m).unwrap();
+            assert_eq!(postcard::from_bytes::<ServerMsg>(&enc).unwrap(), m);
+        }
     }
 }
