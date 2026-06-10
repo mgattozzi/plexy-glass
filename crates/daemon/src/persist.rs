@@ -169,36 +169,7 @@ pub fn list_saved() -> Vec<(String, u8, u8)> {
 mod tests {
     use super::*;
 
-    struct EnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        old_xdg: Option<std::ffi::OsString>,
-        _tmp: tempfile::TempDir,
-    }
-
-    fn isolate() -> EnvGuard {
-        // Crate-wide lock: persist/session/registry tests all mutate
-        // `XDG_STATE_HOME` and must serialize against each other.
-        let lock = crate::STATE_ENV_LOCK.lock().expect("env mutex poisoned");
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let old_xdg = std::env::var_os("XDG_STATE_HOME");
-        // SAFETY: env mutation is guarded by `ENV_LOCK`, held for the guard's lifetime.
-        unsafe {
-            std::env::set_var("XDG_STATE_HOME", tmp.path());
-        }
-        EnvGuard { _lock: lock, old_xdg, _tmp: tmp }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: `ENV_LOCK` is held for `self`'s lifetime.
-            unsafe {
-                match &self.old_xdg {
-                    Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-                    None => std::env::remove_var("XDG_STATE_HOME"),
-                }
-            }
-        }
-    }
+    use crate::test_env::isolate;
 
     fn sample_state(name: &str) -> SessionStateV1 {
         SessionStateV1 {

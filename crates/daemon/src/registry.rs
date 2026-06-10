@@ -270,6 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_then_get() {
+        let _g = crate::test_env::isolate();
         let r = SessionRegistry::new();
         let s = r.create("main".into(), spec(), size(), cfg()).await.unwrap();
         assert_eq!(s.name, "main");
@@ -279,6 +280,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_create_fails() {
+        let _g = crate::test_env::isolate();
         let r = SessionRegistry::new();
         r.create("main".into(), spec(), size(), cfg()).await.unwrap();
         let err =
@@ -288,6 +290,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn list_returns_sorted_entries() {
+        let _g = crate::test_env::isolate();
         let r = SessionRegistry::new();
         r.create("zeta".into(), spec(), size(), cfg()).await.unwrap();
         r.create("alpha".into(), spec(), size(), cfg()).await.unwrap();
@@ -299,6 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn kill_unknown_returns_session_not_found() {
+        let _g = crate::test_env::isolate();
         let r = SessionRegistry::new();
         let err = r.kill("ghost").await.unwrap_err();
         assert!(matches!(err, DaemonError::Protocol(ProtocolError::SessionNotFound { .. })));
@@ -306,6 +310,7 @@ mod tests {
 
     #[tokio::test]
     async fn name_validation_rejects_empty() {
+        let _g = crate::test_env::isolate();
         let r = SessionRegistry::new();
         let err = r.create("".into(), spec(), size(), cfg()).await.map(|_| ()).unwrap_err();
         assert!(matches!(err, DaemonError::Protocol(ProtocolError::EmptyName)));
@@ -313,6 +318,7 @@ mod tests {
 
     #[tokio::test]
     async fn name_validation_rejects_invalid_chars() {
+        let _g = crate::test_env::isolate();
         let r = SessionRegistry::new();
         let err = r
             .create("has space".into(), spec(), size(), cfg())
@@ -324,6 +330,7 @@ mod tests {
 
     #[tokio::test]
     async fn closing_sessions_are_pruned_on_get() {
+        let _g = crate::test_env::isolate();
         let r = SessionRegistry::new();
         let s = r.create("dead".into(), spec(), size(), cfg()).await.unwrap();
         s.closing.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -333,6 +340,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn reload_config_swaps_session_config() {
+        let _g = crate::test_env::isolate();
         let r = SessionRegistry::new();
         let s = r.create("test".into(), spec(), size(), cfg()).await.unwrap();
         let cfg_before = s.config_snapshot();
@@ -346,36 +354,9 @@ mod tests {
         assert_eq!(cfg_before.status.right.len(), cfg_after.status.right.len());
     }
 
-    struct RegEnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        old_xdg: Option<std::ffi::OsString>,
-        _tmp: tempfile::TempDir,
-    }
-
-    fn reg_isolate_state_dir() -> RegEnvGuard {
-        // Crate-wide lock: serializes against persist/session env-mutating tests.
-        let lock = crate::STATE_ENV_LOCK.lock().expect("reg env mutex poisoned");
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let old_xdg = std::env::var_os("XDG_STATE_HOME");
-        // SAFETY: env mutation guarded by REG_ENV_LOCK for guard lifetime.
-        unsafe { std::env::set_var("XDG_STATE_HOME", tmp.path()); }
-        RegEnvGuard { _lock: lock, old_xdg, _tmp: tmp }
-    }
-    impl Drop for RegEnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: REG_ENV_LOCK held for self's lifetime.
-            unsafe {
-                match &self.old_xdg {
-                    Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-                    None => std::env::remove_var("XDG_STATE_HOME"),
-                }
-            }
-        }
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn kill_with_pinned_session_keeps_file_deleted() {
-        let _g = reg_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let r = SessionRegistry::new();
         // Hold the strong Arc across the kill to simulate an attached client /
         // running coordinator that pins the Session past the kill (the exact
@@ -400,7 +381,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn kill_deletes_saved_file() {
-        let _g = reg_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let r = SessionRegistry::new();
         let s = r.create("kill-me".into(), spec(), size(), cfg()).await.unwrap();
         s.mark_dirty();
@@ -416,7 +397,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn create_declared_builds_template() {
-        let _g = reg_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let r = SessionRegistry::new();
         let cfg = cfg_with_session(r##"session "dev" { window "w" { pane } }"##);
         let s = r.create_declared(&cfg.sessions[0], Arc::clone(&cfg), size()).await.unwrap();
@@ -427,7 +408,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn attach_or_create_routes_declared_name_to_template() {
-        let _g = reg_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let r = SessionRegistry::new();
         let cfg = cfg_with_session(r##"session "dev" { window "w" { split vertical { pane; pane } } }"##);
         // No saved file, no live session: attach must build the 2-pane template,
@@ -442,7 +423,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn declared_session_wins_over_saved_disk_state() {
-        let _g = reg_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         // A saved file for "dev" with a DIFFERENT (1-pane, name "stale") shape
         // than the declared template, so the test distinguishes "config wins"
         // from "no file present".
@@ -481,7 +462,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn non_declared_name_unaffected_by_routing() {
-        let _g = reg_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let r = SessionRegistry::new();
         let cfg = cfg_with_session(r##"session "dev" { window "w" { pane } }"##);
         // "other" isn't declared, so this is a normal fresh create (1 pane from
@@ -497,6 +478,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn closing_sessions_are_pruned_on_list() {
+        let _g = crate::test_env::isolate();
         let r = SessionRegistry::new();
         let alive = r.create("alive".into(), spec(), size(), cfg()).await.unwrap();
         let dead = r.create("dead".into(), spec(), size(), cfg()).await.unwrap();

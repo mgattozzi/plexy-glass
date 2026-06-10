@@ -9,6 +9,52 @@
 #[cfg(test)]
 pub(crate) static STATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Per-test `XDG_STATE_HOME` isolation.
+///
+/// Any test that constructs a `Session`, a `SessionRegistry`, or otherwise
+/// reaches the persist layer must take `let _g = crate::test_env::isolate();`
+/// as its first line and hold the guard for the test's full duration,
+/// otherwise the debounced persist loop (or an `attach_or_create` restore)
+/// reads/writes the user's *real* state dir.
+#[cfg(test)]
+pub(crate) mod test_env {
+    /// Holds the crate-wide env lock, points `XDG_STATE_HOME` at a fresh
+    /// tempdir, and restores the previous value on drop.
+    pub(crate) struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        old_xdg: Option<std::ffi::OsString>,
+        _tmp: tempfile::TempDir,
+    }
+
+    pub(crate) fn isolate() -> EnvGuard {
+        // A poisoned lock is safe to reuse: the panicking test's guard already
+        // restored the env var during unwind.
+        let lock = super::STATE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let old_xdg = std::env::var_os("XDG_STATE_HOME");
+        // SAFETY: env mutation is guarded by `STATE_ENV_LOCK`, held for the
+        // lifetime of the guard.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", tmp.path());
+        }
+        EnvGuard { _lock: lock, old_xdg, _tmp: tmp }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: `STATE_ENV_LOCK` is held for `self`'s lifetime.
+            unsafe {
+                match &self.old_xdg {
+                    Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                    None => std::env::remove_var("XDG_STATE_HOME"),
+                }
+            }
+        }
+    }
+}
+
 pub mod args;
 pub mod connection;
 pub mod declared;

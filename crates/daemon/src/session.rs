@@ -1736,6 +1736,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_construct_succeeds() {
+        let _g = crate::test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).expect("construct session");
         assert_eq!(s.name, "main");
         assert!(!s.closing.load(Ordering::SeqCst));
@@ -1743,6 +1744,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_prompt_command_applies_effects() {
+        let _g = crate::test_env::isolate();
         use plexy_glass_mux::{Direction, PromptCommand};
         let s = Session::new("pc".into(), spec(), size(), cfg()).unwrap();
 
@@ -1786,6 +1788,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn prompt_popup_maps_to_open_and_close() {
+        let _g = crate::test_env::isolate();
         let s = Session::new("t-popup-prompt".into(), spec(), size(), cfg()).unwrap();
         s.handle_prompt_command(plexy_glass_mux::PromptCommand::Popup(Some("sleep 600".into())))
             .await
@@ -1800,6 +1803,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn input_bytes_route_to_popup_when_open() {
+        let _g = crate::test_env::isolate();
         let s = Session::new("t-popup-input".into(), spec(), size(), cfg()).unwrap();
         s.handle_command(plexy_glass_mux::Command::OpenPopup { command: Some("cat".into()) })
             .await
@@ -1832,6 +1836,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn focus_events_route_to_popup_when_open() {
+        let _g = crate::test_env::isolate();
         let s = Session::new("t-popup-focus".into(), spec(), size(), cfg()).unwrap();
         s.handle_command(plexy_glass_mux::Command::OpenPopup { command: Some("cat".into()) })
             .await
@@ -1880,6 +1885,7 @@ mod tests {
     // scenario the tick task hits) must succeed and return real state.
     #[tokio::test(flavor = "multi_thread")]
     async fn build_snapshot_ctx_works_from_spawned_task() {
+        let _g = crate::test_env::isolate();
         let s = Session::new("snapctx".into(), spec(), size(), cfg()).unwrap();
         let s2 = Arc::clone(&s);
         let ctx = tokio::spawn(async move { build_snapshot_ctx(&s2).await })
@@ -1891,6 +1897,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_snapshot_ctx_surfaces_window_alert_flags() {
+        let _g = crate::test_env::isolate();
         let s = Session::new("snapalert".into(), spec(), size(), cfg()).unwrap();
         {
             // Add a second window and flag it (the WindowManager's sticky flags
@@ -1909,6 +1916,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_entry_reports_one_window_one_pane_zero_clients() {
+        let _g = crate::test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         let entry = tokio::task::spawn_blocking(move || s.list_entry()).await.unwrap();
         assert_eq!(entry.name, "main");
@@ -1919,6 +1927,7 @@ mod tests {
 
     #[tokio::test]
     async fn tree_snapshot_reports_windows_and_panes() {
+        let _g = crate::test_env::isolate();
         let s = Session::new("snap".into(), spec(), size(), cfg()).unwrap();
         {
             // Split the first window so it has two panes, then add a window.
@@ -1944,6 +1953,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_then_effective_size_matches_single_client() {
+        let _g = crate::test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         let s2 = Arc::clone(&s);
         let h = tokio::task::spawn_blocking(move || {
@@ -1962,6 +1972,7 @@ mod tests {
 
     #[tokio::test]
     async fn focus_aggregates_across_clients_any_focused() {
+        let _g = crate::test_env::isolate();
         // Any-client-focused: the pane is focused iff at least one client is.
         let s = Session::new("focusagg".into(), spec(), size(), cfg()).unwrap();
         let s2 = Arc::clone(&s);
@@ -1990,6 +2001,7 @@ mod tests {
 
     #[tokio::test]
     async fn smallest_client_wins() {
+        let _g = crate::test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         let s2 = Arc::clone(&s);
         let a = tokio::task::spawn_blocking(move || {
@@ -2021,6 +2033,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_input_bytes_sends_to_active_pane() {
+        let _g = crate::test_env::isolate();
         let spec = SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -2046,6 +2059,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_input_bytes_broadcasts_when_sync_active() {
+        let _g = crate::test_env::isolate();
         let spec = SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -2086,6 +2100,7 @@ mod tests {
 
     #[tokio::test]
     async fn closing_session_refuses_register() {
+        let _g = crate::test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         s.closing.store(true, Ordering::SeqCst);
         let s2 = Arc::clone(&s);
@@ -2096,6 +2111,7 @@ mod tests {
 
     #[tokio::test]
     async fn coordinator_publishes_initial_frame() {
+        let _g = crate::test_env::isolate();
         let s = Session::new("test".into(), spec(), size(), cfg()).unwrap();
         let mut rx = s.frame_rx_template.clone();
         s.notify.notify_one();
@@ -2109,6 +2125,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn coordinator_emits_tail_frame_when_last_pane_dies() {
+        let _g = crate::test_env::isolate();
         let spec = SpawnSpec {
             program: "/bin/echo".into(),
             args: vec!["hi".into()],
@@ -2128,39 +2145,9 @@ mod tests {
         assert!(s.closing.load(Ordering::SeqCst), "session did not converge to closing");
     }
 
-    struct EnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        old_xdg: Option<std::ffi::OsString>,
-        _tmp: tempfile::TempDir,
-    }
-
-    fn test_isolate_state_dir() -> EnvGuard {
-        // Crate-wide lock: serializes against persist/registry env-mutating tests.
-        let lock = crate::STATE_ENV_LOCK.lock().expect("env mutex poisoned");
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let old_xdg = std::env::var_os("XDG_STATE_HOME");
-        // SAFETY: env mutation guarded by `ENV_LOCK` for the guard's lifetime.
-        unsafe {
-            std::env::set_var("XDG_STATE_HOME", tmp.path());
-        }
-        EnvGuard { _lock: lock, old_xdg, _tmp: tmp }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: `ENV_LOCK` is held for `self`'s lifetime.
-            unsafe {
-                match &self.old_xdg {
-                    Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-                    None => std::env::remove_var("XDG_STATE_HOME"),
-                }
-            }
-        }
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn restore_from_round_trips_single_pane_session() {
-        let _g = test_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let original = Session::new("rt".into(), spec(), size(), cfg()).unwrap();
         original.mark_dirty();
         tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
@@ -2177,7 +2164,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_single_pane() {
         use plexy_glass_config::{PaneNode, PaneTemplate, SessionTemplate, WindowTemplate};
-        let _g = test_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let tmpl = SessionTemplate {
             name: "dev".into(),
             cwd: None,
@@ -2205,7 +2192,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_split_and_multiwindow() {
         use plexy_glass_config::{PaneNode, PaneTemplate, SessionTemplate, SplitDirection, WindowTemplate};
-        let _g = test_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let pane = |c: Option<&str>| {
             PaneNode::Leaf(PaneTemplate { command: c.map(str::to_string), cwd: None, name: None })
         };
@@ -2240,7 +2227,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_window_cwd_seeds_first_pane() {
         use plexy_glass_config::{PaneNode, PaneTemplate, SessionTemplate, WindowTemplate};
-        let _g = test_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let pane = |cwd: Option<&str>| PaneNode::Leaf(PaneTemplate {
             command: None,
             cwd: cwd.map(str::to_string),
@@ -2264,7 +2251,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn restore_from_round_trips_two_pane_split() {
-        let _g = test_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let original = Session::new("rt2".into(), spec(), size(), cfg()).unwrap();
         original
             .handle_command(plexy_glass_mux::Command::SplitV)
@@ -2286,7 +2273,7 @@ mod tests {
         use crate::persist::{
             LayoutDirV1, LayoutStateV1, PaneStateV1, SessionStateV1, WindowStateV1,
         };
-        let _g = test_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let saved = SessionStateV1 {
             schema: crate::persist::SCHEMA_VERSION,
             name: "t-ratio-restore".into(),
@@ -2325,6 +2312,7 @@ mod tests {
 
     #[tokio::test]
     async fn restore_round_trips_window_home_cwd() {
+        let _g = crate::test_env::isolate();
         let original = Session::new("rthome".into(), spec(), size(), cfg()).unwrap();
         let saved = {
             let mut wm = original.window_manager.lock().await;
@@ -2343,7 +2331,7 @@ mod tests {
         // Regression: OSC 7 stores the raw `file://host/path` URL on `Screen.cwd`,
         // and persisting that verbatim made restored panes spawn in `$HOME`
         // (`portable-pty` silently falls back for non-directory cwds).
-        let _g = test_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let s = Session::new("t-osc7-snap".into(), spec(), size(), cfg()).unwrap();
         let saved = {
             let wm = s.window_manager.lock().await;
@@ -2384,7 +2372,7 @@ mod tests {
         // restore `Ctrl+a c` (NewWindow anchors to `session_cwd`) lost its
         // anchor. Window 0's saved home base is the persisted proxy for it.
         use crate::persist::{LayoutStateV1, PaneStateV1, SessionStateV1, WindowStateV1};
-        let _g = test_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let saved = SessionStateV1 {
             schema: crate::persist::SCHEMA_VERSION,
             name: "t-restore-anchor".into(),
@@ -2413,7 +2401,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn restore_from_round_trips_pane_name() {
-        let _g = test_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let original = Session::new("rtn".into(), spec(), size(), cfg()).unwrap();
         {
             let wm = original.window_manager.lock().await;
@@ -2437,7 +2425,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn split_command_writes_persisted_layout() {
-        let _g = test_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let s = Session::new("p5-split".into(), spec(), size(), cfg()).unwrap();
         s.handle_command(plexy_glass_mux::Command::SplitV).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
@@ -2450,7 +2438,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn kill_closes_split_unix_socket_to_client() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let _g = test_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let s = Session::new("sp".into(), spec(), size(), cfg()).unwrap();
         let handle = tokio::task::block_in_place(|| s.register_client(size())).unwrap();
         let frame_rx = handle.frame_rx.clone();
@@ -2509,7 +2497,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn begin_close_drops_frame_tx_so_clients_detach() {
-        let _g = test_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let s = Session::new("fx".into(), spec(), size(), cfg()).unwrap();
         // A client's renderer watches this; when the coordinator drops
         // frame_tx, changed() returns Err and the renderer (hence client)
@@ -2531,7 +2519,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn begin_close_is_idempotent_and_stops_persist() {
-        let _g = test_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let s = Session::new("bc".into(), spec(), size(), cfg()).unwrap();
         s.mark_dirty();
         tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
@@ -2552,7 +2540,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn mark_dirty_eventually_writes_file() {
-        let _g = test_isolate_state_dir();
+        let _g = crate::test_env::isolate();
         let s = Session::new("dirty-test".into(), spec(), size(), cfg()).unwrap();
         s.mark_dirty();
         tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
@@ -2564,6 +2552,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_for_persist_captures_single_pane_session() {
+        let _g = crate::test_env::isolate();
         let s = Session::new("snap1".into(), spec(), size(), cfg()).unwrap();
         let wm = s.window_manager.lock().await;
         let snap = s.snapshot_for_persist(&wm);
@@ -2579,6 +2568,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_for_persist_captures_two_pane_split() {
+        let _g = crate::test_env::isolate();
         let s = Session::new("snap2".into(), spec(), size(), cfg()).unwrap();
         {
             let mut wm = s.window_manager.lock().await;

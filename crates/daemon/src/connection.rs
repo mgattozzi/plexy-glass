@@ -996,6 +996,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn end_to_end_attach_renders_then_exits() {
+        let _g = crate::test_env::isolate();
         let (server_side, client_side) = duplex(64 * 1024);
         let server = tokio::spawn(async move {
             Connection::serve(
@@ -1059,6 +1060,7 @@ mod tests {
     // pre-existing live session "b": registered on b, deregistered from a.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn command_prompt_switch_moves_client_between_sessions() {
+        let _g = crate::test_env::isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -1147,6 +1149,7 @@ mod tests {
     // switches there. Exercises the picker open → filter → commit → switch path.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn session_picker_filters_and_switches() {
+        let _g = crate::test_env::isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -1228,6 +1231,7 @@ mod tests {
     // moves the selection to the "beta" session node; Enter switches there.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn choose_tree_switches_sessions() {
+        let _g = crate::test_env::isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -1363,6 +1367,7 @@ mod tests {
     // landed on beta's `WindowManager` via a fresh `tree_snapshot` of beta.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn choose_tree_renames_window_in_other_session() {
+        let _g = crate::test_env::isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -1450,13 +1455,11 @@ mod tests {
     // moves the pane back into window 0 and removes the emptied source window.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn break_and_join_panes_via_keys() {
+        let _g = crate::test_env::isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
-        // Tests share the real persist dir; drop any saved "main" so this test
-        // attaches a FRESH session rather than restoring accumulated state.
-        let _ = crate::persist::delete_session("main");
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
         let cat = || SpawnSpec {
@@ -1554,11 +1557,11 @@ mod tests {
     // `Ctrl+a =` + `d` deletes a buffer (the registry count drops).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn paste_buffer_reaches_pane_and_chooser_deletes() {
+        let _g = crate::test_env::isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
-        let _ = crate::persist::delete_session("main"); // attach fresh, not restored
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
         let cat = || SpawnSpec {
@@ -1672,11 +1675,11 @@ mod tests {
     // selection, `y` to yank) so the yank→push wiring is protected.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn copy_mode_yank_pushes_a_paste_buffer() {
+        let _g = crate::test_env::isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
-        let _ = crate::persist::delete_session("main"); // attach fresh, not restored
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
         let cat = || SpawnSpec {
@@ -1741,16 +1744,14 @@ mod tests {
 
     // End-to-end through the production render coordinator (the sole caller of
     // update_monitor_flags): a BEL in a BACKGROUND window flags that window
-    // (monitor-bell on by default), and switching to it clears the flag. Uses a
-    // unique session name + delete-at-start for isolation from the shared persist
-    // dir.
+    // (monitor-bell on by default), and switching to it clears the flag.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn background_bell_flags_window_via_coordinator() {
+        let _g = crate::test_env::isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
-        let _ = crate::persist::delete_session("bellmon");
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
         let cat = || SpawnSpec {
@@ -1870,11 +1871,11 @@ mod tests {
     // nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn focus_in_reaches_only_a_subscribing_pane() {
+        let _g = crate::test_env::isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
-        let _ = crate::persist::delete_session("focusrt");
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
         let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
@@ -1964,11 +1965,11 @@ mod tests {
     // A pane WITHOUT ?1004 receives no focus-in bytes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn focus_in_is_dropped_for_non_subscriber() {
+        let _g = crate::test_env::isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
-        let _ = crate::persist::delete_session("nofocus");
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
         let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
@@ -2046,11 +2047,11 @@ mod tests {
     // so `\x1b[?997;1n` comes back as `^[[?997;1n`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn color_scheme_reaches_only_a_subscribing_pane() {
+        let _g = crate::test_env::isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
-        let _ = crate::persist::delete_session("themert");
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
         let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
@@ -2138,11 +2139,11 @@ mod tests {
     // A pane WITHOUT ?2031 receives no color-scheme report.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn color_scheme_is_dropped_for_non_subscriber() {
+        let _g = crate::test_env::isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
-        let _ = crate::persist::delete_session("notheme");
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
         let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
@@ -2225,11 +2226,11 @@ mod tests {
     // the old per-call-site machinery, the exact gap the refactor closes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pane_switch_synthesizes_focus_in_to_destination() {
+        let _g = crate::test_env::isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
-        let _ = crate::persist::delete_session("focusswap");
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
         let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };

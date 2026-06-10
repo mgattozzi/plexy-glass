@@ -107,14 +107,12 @@ only for ASCII.
 - Don't launch multiple `cargo` / `nextest` invocations at once — they serialize
   on the target-dir lock and look like a hang. Run one at a time (the suite is
   ~1 minute).
-- **In-process `connection.rs` tests share the real `$XDG_STATE_HOME` persist
-  dir** (unlike the e2e binary, which `isolate_dirs`). `attach_or_create` restores
-  a saved session by name, so a test that creates session `"main"` (or mutates
-  layout and lets the debounced persist land) can restore stale on-disk state on a
-  later run and break window/pane-count assertions. New connection tests should
-  use a **unique session name** and `let _ = crate::persist::delete_session(name);`
-  at the top (all attaches precede the debounced persist). A proper fix would set
-  a per-test `XDG_STATE_HOME` tempdir like `persist.rs`'s tests do.
+- **Every in-process daemon test that builds a `Session`/registry must start
+  with `let _g = crate::test_env::isolate();`** (`crates/daemon/src/lib.rs`) —
+  it points `XDG_STATE_HOME` at a per-test tempdir (held for the test's whole
+  body, across `.await`s) so the debounced persist loop and `attach_or_create`
+  restores never touch the user's real state dir. The single guard replaces the
+  old per-module copies and the unique-name + `delete_session` workaround.
 - **`Command::NewWindow` / splits spawn `$SHELL`, not the test's `SpawnSpec`**
   (`default_spec` deliberately runs the default shell). A unit test whose child
   must produce specific OUTPUT (e.g. echo a BEL byte back) cannot rely on the
