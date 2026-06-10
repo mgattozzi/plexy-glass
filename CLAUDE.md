@@ -65,12 +65,19 @@ scope. If a step is wrong, fix the plan first, then proceed.
 
 ## User documentation
 
-`README.md` and `docs/configuration.md` are the user-facing docs. Any change to
-the user-visible surface — commands, command-prompt verbs, keybinding verbs,
-default bindings, the config schema, CLI subcommands, or notable behavior —
-must update them **in the same change**. Treat this as a completion gate
-alongside clippy and the full test suite: a feature is not done while the docs
-describe the world before it.
+User-facing docs are **per-topic files under `docs/`**, with `README.md` as
+the index (intro, quick start, keybindings, links). Current topics:
+
+- `docs/configuration.md` — the `config.kdl` reference (palette, status bar,
+  keymap + verb vocabulary, declarative sessions, the command prompt).
+- `docs/scripting.md` — the `cmd` / `send` / `capture` CLI surface.
+
+Any change to the user-visible surface — commands, command-prompt verbs,
+keybinding verbs, default bindings, the config schema, CLI subcommands, or
+notable behavior — must update the relevant topic doc (or add a new one when a
+feature opens a genuinely new topic; link it from README) **in the same
+change**. Treat this as a completion gate alongside clippy and the full test
+suite: a feature is not done while the docs describe the world before it.
 
 ## Unicode and text width
 

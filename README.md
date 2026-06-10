@@ -86,11 +86,10 @@ plexy-glass send -n work --enter "cargo test"
 plexy-glass capture -n work | grep "test result: ok"
 ```
 
-`cmd` reuses the command-prompt grammar verbatim (see the
-[configuration reference](docs/configuration.md#scripting-from-the-cli)).
-All three verbs exit 0 on success and 1 on any failure.
-Session resolution: `-n NAME` targets that session; without `-n`, the sole
-running session is used (error if zero or more than one).
+`cmd` reuses the command-prompt grammar verbatim. All three verbs exit 0 on
+success and 1 on any failure; `-n NAME` targets a session, and without `-n`
+the sole running session is used (error if zero or more than one). See
+[docs/scripting.md](docs/scripting.md) for the full reference.
 
 ## Default keybindings
 
