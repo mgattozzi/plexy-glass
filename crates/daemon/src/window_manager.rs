@@ -3158,8 +3158,16 @@ mod tests {
     async fn update_monitor_flags_sets_background_bell_from_a_real_bel() {
         // Exercises the full emulator-BEL → pane-bell → window-flag chain with a
         // real BEL (not a faked atomic). monitor_bell is on by default.
+        //
+        // Window 1 must run the test's `cat` spec, NOT `Command::NewWindow`
+        // (which deliberately spawns `$SHELL`): cat echoes the typed BEL byte
+        // verbatim within milliseconds, whereas an interactive login shell
+        // only emits a BEL if its line editor happens to beep on ^G, and that
+        // comes after fork/exec + sourcing the user's rc files, which under
+        // full-suite load occasionally exceeded the 5s deadline (the old
+        // flake) and breaks outright under a different/misconfigured $SHELL.
         let mut m = mk_mgr(); // window 0
-        m.handle_command(Command::NewWindow).unwrap(); // window 1 (active)
+        m.new_window_with_spec(spec(), "w1".into()).unwrap(); // window 1 (active), runs `cat`
         m.handle_command(Command::SelectWindow(0)).unwrap(); // window 0 active; window 1 background
         let pid = m.windows()[1].layout().panes()[0];
         // The trailing newline flushes cat's line so it OUTPUTS the raw BEL (the

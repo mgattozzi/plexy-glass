@@ -115,6 +115,14 @@ only for ASCII.
   use a **unique session name** and `let _ = crate::persist::delete_session(name);`
   at the top (all attaches precede the debounced persist). A proper fix would set
   a per-test `XDG_STATE_HOME` tempdir like `persist.rs`'s tests do.
+- **`Command::NewWindow` / splits spawn `$SHELL`, not the test's `SpawnSpec`**
+  (`default_spec` deliberately runs the default shell). A unit test whose child
+  must produce specific OUTPUT (e.g. echo a BEL byte back) cannot rely on the
+  user's interactive login shell — its startup sources real rc files (slow and
+  load-sensitive) and its behavior is config-dependent. Use
+  `new_window_with_spec(spec(), ...)` to get a deterministic `cat` child. (This
+  was the root cause of the historical `…_from_a_real_bel` full-suite flake:
+  the BEL only existed because zsh's line editor beeps on ^G.)
 - Each e2e test spawns a client that auto-spawns a *daemon*; the `TestEnv` guard
   returned by `isolate_dirs` kills that daemon on drop (`plexy-glass kill` in the
   test's isolated env). Don't bypass it, or daemons orphan and hold PTYs open.
