@@ -4,7 +4,7 @@ use crate::{
     InputEvent, InputRouter, error::DaemonError, input_router::decode_protocol,
     registry::SessionRegistry, renderer::Renderer, session::Session,
 };
-use plexy_glass_mux::{Command, KeymapAction, PromptCommand, VirtualScreen};
+use plexy_glass_mux::{Command, Keymap, KeymapAction, PromptCommand, VirtualScreen};
 use plexy_glass_protocol::{
     ClientMsg, Codec, ProtocolError, PtySize, ServerMsg, SpawnSpec, server_handshake,
 };
@@ -283,133 +283,17 @@ where
                                     let mut m = session.window_manager.lock().await;
                                     m.handle_overlay_key(&ke)
                                 };
-                                match result {
-                                    crate::window_manager::OverlayKeyResult::Ignored => {}
-                                    crate::window_manager::OverlayKeyResult::Redraw => {
-                                        session.notify.notify_one();
-                                    }
-                                    crate::window_manager::OverlayKeyResult::Committed => {
-                                        // A rename changed persistent state: redraw
-                                        // and schedule a debounced save.
-                                        session.notify.notify_one();
-                                        session.mark_dirty();
-                                    }
-                                    crate::window_manager::OverlayKeyResult::SwitchSession(name) => {
-                                        switch_session(
-                                            &mut session,
-                                            &mut client_id,
-                                            size,
-                                            &registry,
-                                            &switch_tx,
-                                            name,
-                                        )
-                                        .await;
-                                    }
-                                    crate::window_manager::OverlayKeyResult::Tree(action) => {
-                                        dispatch_tree_action(
-                                            &mut session,
-                                            &mut client_id,
-                                            size,
-                                            &registry,
-                                            &switch_tx,
-                                            action,
-                                        )
-                                        .await;
-                                    }
-                                    crate::window_manager::OverlayKeyResult::Buffer(action) => {
-                                        use plexy_glass_mux::BufferAction;
-                                        match action {
-                                            BufferAction::Paste(name) => {
-                                                if let Some(content) =
-                                                    registry.paste_buffer_get(&name).await
-                                                {
-                                                    paste_bytes(&session, content).await;
-                                                } else {
-                                                    // The overlay closed; repaint
-                                                    // it away even on a get() miss.
-                                                    session.notify.notify_one();
-                                                }
-                                            }
-                                            BufferAction::Delete(name) => {
-                                                registry.delete_paste_buffer(&name).await;
-                                                // Repaint the still-open overlay.
-                                                session.notify.notify_one();
-                                            }
-                                        }
-                                    }
-                                    crate::window_manager::OverlayKeyResult::Command(line) => {
-                                        match plexy_glass_mux::command_prompt::parse(&line) {
-                                            Err(e) => {
-                                                session
-                                                    .set_status_message(e.to_string())
-                                                    .await;
-                                            }
-                                            Ok(PromptCommand::Detach) => {
-                                                detach_requested = true;
-                                            }
-                                            Ok(PromptCommand::Reload) => {
-                                                if let Err(e) =
-                                                    registry.reload_config().await
-                                                {
-                                                    session
-                                                        .set_status_message(format!(
-                                                            "reload failed: {e}"
-                                                        ))
-                                                        .await;
-                                                }
-                                                // Even on error the registry applied
-                                                // the built-in defaults everywhere,
-                                                // so the keymap rebuild must still
-                                                // happen.
-                                                let new_cfg = session.config_snapshot();
-                                                keymap = plexy_glass_keys::build_keymap(
-                                                    &new_cfg.keymap,
-                                                );
-                                                session.notify.notify_one();
-                                            }
-                                            Ok(PromptCommand::Switch(name)) => {
-                                                switch_session(
-                                                    &mut session,
-                                                    &mut client_id,
-                                                    size,
-                                                    &registry,
-                                                    &switch_tx,
-                                                    name,
-                                                )
-                                                .await;
-                                            }
-                                            Ok(PromptCommand::ChooseSession) => {
-                                                open_session_picker_overlay(&session, &registry)
-                                                    .await;
-                                            }
-                                            Ok(PromptCommand::ChooseTree) => {
-                                                open_tree_overlay(&session, &registry).await;
-                                            }
-                                            Ok(PromptCommand::PasteBuffer) => {
-                                                paste_top_buffer(&session, &registry).await;
-                                            }
-                                            Ok(PromptCommand::ChooseBuffer) => {
-                                                open_buffer_picker_overlay(&session, &registry)
-                                                    .await;
-                                            }
-                                            Ok(other) => {
-                                                match session
-                                                    .handle_prompt_command(other)
-                                                    .await
-                                                {
-                                                    Ok(Some(msg)) => {
-                                                        session.set_status_message(msg).await;
-                                                    }
-                                                    Ok(None) => {}
-                                                    Err(e) => {
-                                                        session
-                                                            .set_status_message(e.to_string())
-                                                            .await;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
+                                let mut ctx = ClientCtx {
+                                    session: &mut session,
+                                    client_id: &mut client_id,
+                                    size,
+                                    registry: &registry,
+                                    switch_tx: &switch_tx,
+                                };
+                                // The extracted fn can't `break`/`continue` this
+                                // loop; it returns the detach intent instead.
+                                if apply_overlay_result(&mut ctx, &mut keymap, result).await {
+                                    detach_requested = true;
                                 }
                                 if detach_requested {
                                     break;
@@ -523,33 +407,23 @@ where
                                             .await;
                                     }
                                 }
-                                KeymapAction::Command(cmd) => match cmd {
-                                    Command::Detach => {
-                                        detach_requested = true;
-                                        break;
-                                    }
-                                    Command::ReloadConfig => {
-                                        if let Err(e) = registry.reload_config().await {
-                                            session
-                                                .set_status_message(format!(
-                                                    "reload failed: {e}"
-                                                ))
-                                                .await;
+                                KeymapAction::Command(cmd) => match ConnVerb::from_command(cmd) {
+                                    Ok(verb) => {
+                                        let mut ctx = ClientCtx {
+                                            session: &mut session,
+                                            client_id: &mut client_id,
+                                            size,
+                                            registry: &registry,
+                                            switch_tx: &switch_tx,
+                                        };
+                                        if run_connection_verb(&mut ctx, &mut keymap, verb)
+                                            .await
+                                        {
+                                            detach_requested = true;
+                                            break;
                                         }
-                                        // Even on error the registry applied the
-                                        // built-in defaults everywhere, so the
-                                        // keymap rebuild below must still happen.
-                                        // Rebuild this Connection's keymap from
-                                        // the new config so the user who fired
-                                        // the reload sees binding changes
-                                        // immediately.
-                                        let new_cfg = session.config_snapshot();
-                                        keymap = plexy_glass_keys::build_keymap(
-                                            &new_cfg.keymap,
-                                        );
-                                        session.notify.notify_one();
                                     }
-                                    Command::CommandPrompt => {
+                                    Err(Command::CommandPrompt) => {
                                         // Opened here (not in handle_command)
                                         // because it needs the live session list
                                         // for `switch ` Tab-completion.
@@ -565,19 +439,7 @@ where
                                         }
                                         session.notify.notify_one();
                                     }
-                                    Command::ChooseSession => {
-                                        open_session_picker_overlay(&session, &registry).await;
-                                    }
-                                    Command::ChooseTree => {
-                                        open_tree_overlay(&session, &registry).await;
-                                    }
-                                    Command::PasteBuffer => {
-                                        paste_top_buffer(&session, &registry).await;
-                                    }
-                                    Command::ChooseBuffer => {
-                                        open_buffer_picker_overlay(&session, &registry).await;
-                                    }
-                                    other => {
+                                    Err(other) => {
                                         if let Err(e) = session.handle_command(other).await {
                                             session.set_status_message(e.to_string()).await;
                                         }
@@ -667,56 +529,68 @@ async fn cleanup_and_exit(
     Ok(())
 }
 
-/// Re-point a live client at another running session in place. Registers on the
-/// target *before* deregistering the source so the client is never momentarily
-/// unattached, hands the renderer the target's frame stream (forcing a full
-/// repaint), then swaps the loop's `session`/`client_id`. All failure paths land
-/// on the transient status line and leave the client on the source session.
-///
-/// Returns `true` iff the client actually moved to a different session. Callers
-/// that follow a switch with target-scoped work (e.g. focusing a window/pane by
-/// id) MUST gate that work on `true`, because on failure `session` still points
-/// at the source, and because pane/window ids are not unique across sessions,
-/// applying the target's ids to the source would silently mutate the wrong
-/// session.
-async fn switch_session(
-    session: &mut Arc<Session>,
-    client_id: &mut u64,
+/// Per-client connection state threaded through session switches and
+/// cross-session actions (overlay results, connection-layer verbs). Bundles
+/// what was a 5-argument tuple. `session`/`client_id` are `&mut` because a
+/// switch re-points both in place. The input loop constructs the bundle at
+/// each dispatch site instead of holding one long-lived instance, since the
+/// batch body also uses `session` directly between dispatches, so a loop-long
+/// `&mut` borrow would not check.
+struct ClientCtx<'a> {
+    session: &'a mut Arc<Session>,
+    client_id: &'a mut u64,
     size: PtySize,
-    registry: &Arc<SessionRegistry>,
-    switch_tx: &mpsc::UnboundedSender<watch::Receiver<Arc<VirtualScreen>>>,
-    name: String,
-) -> bool {
-    let Some(target) = registry.get(&name).await else {
-        session.set_status_message(format!("no session: {name}")).await;
-        return false;
-    };
-    if target.name == session.name {
-        session.set_status_message(format!("already on {name}")).await;
-        return false;
-    }
-    // `register_client` takes a `blocking_lock` internally, so keep it off the runtime.
-    let target_for_register = Arc::clone(&target);
-    let new_handle = match tokio::task::spawn_blocking(move || {
-        target_for_register.register_client(size)
-    })
-    .await
-    {
-        Ok(Ok(h)) => h,
-        _ => {
-            session
-                .set_status_message(format!("cannot switch to {name}"))
-                .await;
+    registry: &'a Arc<SessionRegistry>,
+    switch_tx: &'a mpsc::UnboundedSender<watch::Receiver<Arc<VirtualScreen>>>,
+}
+
+impl ClientCtx<'_> {
+    /// Re-point this client at another running session in place. Registers on
+    /// the target *before* deregistering the source so the client is never
+    /// momentarily unattached, hands the renderer the target's frame stream
+    /// (forcing a full repaint), then swaps the loop's `session`/`client_id`.
+    /// All failure paths land on the transient status line and leave the
+    /// client on the source session.
+    ///
+    /// Returns `true` iff the client actually moved to a different session.
+    /// Callers that follow a switch with target-scoped work (e.g. focusing a
+    /// window/pane by id) MUST gate that work on `true`, because on failure
+    /// `session` still points at the source, and because pane/window ids are
+    /// not unique across sessions, applying the target's ids to the source
+    /// would silently mutate the wrong session.
+    async fn switch_session(&mut self, name: String) -> bool {
+        let Some(target) = self.registry.get(&name).await else {
+            self.session.set_status_message(format!("no session: {name}")).await;
+            return false;
+        };
+        if target.name == self.session.name {
+            self.session.set_status_message(format!("already on {name}")).await;
             return false;
         }
-    };
-    // Re-point the renderer (rebind + invalidate + full repaint).
-    let _ = switch_tx.send(new_handle.frame_rx.clone());
-    let old = std::mem::replace(session, target);
-    let old_id = std::mem::replace(client_id, new_handle.client_id);
-    let _ = tokio::task::spawn_blocking(move || old.deregister_client(old_id)).await;
-    session.set_status_message(format!("switched to {name}")).await;
-    true
+        // `register_client` takes a `blocking_lock` internally, so keep it off the runtime.
+        let target_for_register = Arc::clone(&target);
+        let size = self.size;
+        let new_handle = match tokio::task::spawn_blocking(move || {
+            target_for_register.register_client(size)
+        })
+        .await
+        {
+            Ok(Ok(h)) => h,
+            _ => {
+                self.session
+                    .set_status_message(format!("cannot switch to {name}"))
+                    .await;
+                return false;
+            }
+        };
+        // Re-point the renderer (rebind + invalidate + full repaint).
+        let _ = self.switch_tx.send(new_handle.frame_rx.clone());
+        let old = std::mem::replace(self.session, target);
+        let old_id = std::mem::replace(self.client_id, new_handle.client_id);
+        let _ = tokio::task::spawn_blocking(move || old.deregister_client(old_id)).await;
+        self.session.set_status_message(format!("switched to {name}")).await;
+        true
+    }
 }
 
 /// Snapshot the live sessions (sorted by name, current one marked) and open the
@@ -824,100 +698,256 @@ fn build_tree_nodes(
     nodes
 }
 
-/// Perform a choose-tree action. `Switch` re-points this client (and focuses the
-/// chosen window/pane); the `Kill*`/`Rename*` actions reach into the target
-/// session via the registry. The current session is always notified afterward so
-/// its still-open overlay repaints the optimistic model update.
-async fn dispatch_tree_action(
-    session: &mut Arc<Session>,
-    client_id: &mut u64,
-    size: PtySize,
-    registry: &Arc<SessionRegistry>,
-    switch_tx: &mpsc::UnboundedSender<watch::Receiver<Arc<VirtualScreen>>>,
-    action: plexy_glass_mux::TreeAction,
-) {
-    use plexy_glass_mux::TreeAction;
-    match action {
-        TreeAction::Switch { session: tgt, window, pane } => {
-            // Only focus the chosen window/pane when the client is actually on
-            // the target session: either it was already there, or the switch
-            // succeeded. On a failed switch the client stays on the SOURCE, and
-            // because ids are not unique across sessions, applying the target's
-            // ids here would mutate the wrong session.
-            let on_target = if tgt == session.name {
-                true
-            } else {
-                switch_session(session, client_id, size, registry, switch_tx, tgt).await
-            };
-            if on_target {
-                let mut m = session.window_manager.lock().await;
-                if let Some(w) = window {
-                    m.select_window_by_id(w);
+impl ClientCtx<'_> {
+    /// Perform a choose-tree action. `Switch` re-points this client (and focuses
+    /// the chosen window/pane); the `Kill*`/`Rename*` actions reach into the
+    /// target session via the registry. The current session is always notified
+    /// afterward so its still-open overlay repaints the optimistic model update.
+    async fn dispatch_tree_action(&mut self, action: plexy_glass_mux::TreeAction) {
+        use plexy_glass_mux::TreeAction;
+        match action {
+            TreeAction::Switch { session: tgt, window, pane } => {
+                // Only focus the chosen window/pane when the client is actually
+                // on the target session: either it was already there, or the
+                // switch succeeded. On a failed switch the client stays on the
+                // SOURCE, and because ids are not unique across sessions,
+                // applying the target's ids here would mutate the wrong session.
+                let on_target = if tgt == self.session.name {
+                    true
+                } else {
+                    self.switch_session(tgt).await
+                };
+                if on_target {
+                    let mut m = self.session.window_manager.lock().await;
+                    if let Some(w) = window {
+                        m.select_window_by_id(w);
+                    }
+                    if let Some(p) = pane {
+                        m.focus_pane_by_id(p);
+                    }
                 }
-                if let Some(p) = pane {
-                    m.focus_pane_by_id(p);
+                self.session.notify.notify_one();
+            }
+            TreeAction::KillSession(name) => {
+                match self.registry.kill(&name).await {
+                    Ok(()) => self.session.set_status_message(format!("killed {name}")).await,
+                    Err(e) => self.session.set_status_message(e.to_string()).await,
                 }
+                self.session.notify.notify_one();
             }
-            session.notify.notify_one();
-        }
-        TreeAction::KillSession(name) => {
-            match registry.kill(&name).await {
-                Ok(()) => session.set_status_message(format!("killed {name}")).await,
-                Err(e) => session.set_status_message(e.to_string()).await,
-            }
-            session.notify.notify_one();
-        }
-        TreeAction::KillWindow { session: tgt, window } => {
-            if let Some(t) = registry.get(&tgt).await {
-                {
-                    let mut m = t.window_manager.lock().await;
-                    m.kill_window_panes(window);
+            TreeAction::KillWindow { session: tgt, window } => {
+                if let Some(t) = self.registry.get(&tgt).await {
+                    {
+                        let mut m = t.window_manager.lock().await;
+                        m.kill_window_panes(window);
+                    }
+                    t.notify.notify_one();
+                } else {
+                    self.session.set_status_message(format!("no session: {tgt}")).await;
                 }
-                t.notify.notify_one();
-            } else {
-                session.set_status_message(format!("no session: {tgt}")).await;
+                self.session.notify.notify_one();
             }
-            session.notify.notify_one();
-        }
-        TreeAction::KillPane { session: tgt, pane } => {
-            if let Some(t) = registry.get(&tgt).await {
-                {
-                    let mut m = t.window_manager.lock().await;
-                    m.kill_pane_child(pane);
+            TreeAction::KillPane { session: tgt, pane } => {
+                if let Some(t) = self.registry.get(&tgt).await {
+                    {
+                        let mut m = t.window_manager.lock().await;
+                        m.kill_pane_child(pane);
+                    }
+                    t.notify.notify_one();
+                } else {
+                    self.session.set_status_message(format!("no session: {tgt}")).await;
                 }
-                t.notify.notify_one();
-            } else {
-                session.set_status_message(format!("no session: {tgt}")).await;
+                self.session.notify.notify_one();
             }
-            session.notify.notify_one();
-        }
-        TreeAction::RenameWindow { session: tgt, window, name } => {
-            if let Some(t) = registry.get(&tgt).await {
-                {
-                    let mut m = t.window_manager.lock().await;
-                    m.rename_window_by_id(window, name);
+            TreeAction::RenameWindow { session: tgt, window, name } => {
+                if let Some(t) = self.registry.get(&tgt).await {
+                    {
+                        let mut m = t.window_manager.lock().await;
+                        m.rename_window_by_id(window, name);
+                    }
+                    t.mark_dirty();
+                    t.notify.notify_one();
+                } else {
+                    self.session.set_status_message(format!("no session: {tgt}")).await;
                 }
-                t.mark_dirty();
-                t.notify.notify_one();
-            } else {
-                session.set_status_message(format!("no session: {tgt}")).await;
+                self.session.notify.notify_one();
             }
-            session.notify.notify_one();
-        }
-        TreeAction::RenamePane { session: tgt, pane, name } => {
-            if let Some(t) = registry.get(&tgt).await {
-                {
-                    let mut m = t.window_manager.lock().await;
-                    m.rename_pane_by_id(pane, name);
+            TreeAction::RenamePane { session: tgt, pane, name } => {
+                if let Some(t) = self.registry.get(&tgt).await {
+                    {
+                        let mut m = t.window_manager.lock().await;
+                        m.rename_pane_by_id(pane, name);
+                    }
+                    t.mark_dirty();
+                    t.notify.notify_one();
+                } else {
+                    self.session.set_status_message(format!("no session: {tgt}")).await;
                 }
-                t.mark_dirty();
-                t.notify.notify_one();
-            } else {
-                session.set_status_message(format!("no session: {tgt}")).await;
+                self.session.notify.notify_one();
             }
-            session.notify.notify_one();
         }
     }
+}
+
+/// A command verb handled at the connection layer rather than inside the
+/// session: it needs this connection's context (registry, renderer switch
+/// channel, keymap). Both the keymap `Command` arm and the command-prompt
+/// `PromptCommand` arm map into this, so each verb's body exists exactly once
+/// (`run_connection_verb`). Note that the matching placeholder arms in
+/// `WindowManager::handle_command` stay, they are load-bearing for match
+/// exhaustiveness.
+enum ConnVerb {
+    Detach,
+    Reload,
+    Switch(String),
+    ChooseSession,
+    ChooseTree,
+    PasteBuffer,
+    ChooseBuffer,
+}
+
+impl ConnVerb {
+    /// Keymap commands handled at the connection layer. Everything else is
+    /// returned unchanged for the caller (`CommandPrompt` opener or
+    /// `Session::handle_command`). The keymap has no by-name switch binding,
+    /// so `Switch` only arises from `from_prompt`.
+    fn from_command(cmd: Command) -> Result<Self, Command> {
+        match cmd {
+            Command::Detach => Ok(Self::Detach),
+            Command::ReloadConfig => Ok(Self::Reload),
+            Command::ChooseSession => Ok(Self::ChooseSession),
+            Command::ChooseTree => Ok(Self::ChooseTree),
+            Command::PasteBuffer => Ok(Self::PasteBuffer),
+            Command::ChooseBuffer => Ok(Self::ChooseBuffer),
+            other => Err(other),
+        }
+    }
+
+    /// Prompt commands handled at the connection layer. Everything else is
+    /// returned unchanged for `Session::handle_prompt_command`.
+    fn from_prompt(cmd: PromptCommand) -> Result<Self, PromptCommand> {
+        match cmd {
+            PromptCommand::Detach => Ok(Self::Detach),
+            PromptCommand::Reload => Ok(Self::Reload),
+            PromptCommand::Switch(name) => Ok(Self::Switch(name)),
+            PromptCommand::ChooseSession => Ok(Self::ChooseSession),
+            PromptCommand::ChooseTree => Ok(Self::ChooseTree),
+            PromptCommand::PasteBuffer => Ok(Self::PasteBuffer),
+            PromptCommand::ChooseBuffer => Ok(Self::ChooseBuffer),
+            other => Err(other),
+        }
+    }
+}
+
+/// Execute a connection-layer verb. Returns `true` for `Detach`, which the
+/// caller (who owns the input loop) must translate into its own `break`.
+async fn run_connection_verb(
+    ctx: &mut ClientCtx<'_>,
+    keymap: &mut Keymap,
+    verb: ConnVerb,
+) -> bool {
+    match verb {
+        ConnVerb::Detach => return true,
+        ConnVerb::Reload => {
+            if let Err(e) = ctx.registry.reload_config().await {
+                ctx.session
+                    .set_status_message(format!("reload failed: {e}"))
+                    .await;
+            }
+            // Even on error the registry applied the built-in defaults
+            // everywhere, so the keymap rebuild must still happen. Rebuilding
+            // this Connection's keymap from the new config means the user who
+            // fired the reload sees binding changes immediately.
+            let new_cfg = ctx.session.config_snapshot();
+            *keymap = plexy_glass_keys::build_keymap(&new_cfg.keymap);
+            ctx.session.notify.notify_one();
+        }
+        ConnVerb::Switch(name) => {
+            ctx.switch_session(name).await;
+        }
+        ConnVerb::ChooseSession => {
+            open_session_picker_overlay(ctx.session, ctx.registry).await;
+        }
+        ConnVerb::ChooseTree => {
+            open_tree_overlay(ctx.session, ctx.registry).await;
+        }
+        ConnVerb::PasteBuffer => {
+            paste_top_buffer(ctx.session, ctx.registry).await;
+        }
+        ConnVerb::ChooseBuffer => {
+            open_buffer_picker_overlay(ctx.session, ctx.registry).await;
+        }
+    }
+    false
+}
+
+/// Apply the result of one key delivered to an open overlay, the block that
+/// grows with every new overlay, extracted so the input loop stays shallow.
+/// Returns `true` when the result requested a detach (`:detach` from the
+/// command prompt); the caller owns the loop and must `break` on it.
+async fn apply_overlay_result(
+    ctx: &mut ClientCtx<'_>,
+    keymap: &mut Keymap,
+    result: crate::window_manager::OverlayKeyResult,
+) -> bool {
+    use crate::window_manager::OverlayKeyResult;
+    match result {
+        OverlayKeyResult::Ignored => {}
+        OverlayKeyResult::Redraw => {
+            ctx.session.notify.notify_one();
+        }
+        OverlayKeyResult::Committed => {
+            // A rename changed persistent state: redraw and schedule a
+            // debounced save.
+            ctx.session.notify.notify_one();
+            ctx.session.mark_dirty();
+        }
+        OverlayKeyResult::SwitchSession(name) => {
+            ctx.switch_session(name).await;
+        }
+        OverlayKeyResult::Tree(action) => {
+            ctx.dispatch_tree_action(action).await;
+        }
+        OverlayKeyResult::Buffer(action) => {
+            use plexy_glass_mux::BufferAction;
+            match action {
+                BufferAction::Paste(name) => {
+                    if let Some(content) = ctx.registry.paste_buffer_get(&name).await {
+                        paste_bytes(ctx.session, content).await;
+                    } else {
+                        // The overlay closed; repaint it away even on a
+                        // get() miss.
+                        ctx.session.notify.notify_one();
+                    }
+                }
+                BufferAction::Delete(name) => {
+                    ctx.registry.delete_paste_buffer(&name).await;
+                    // Repaint the still-open overlay.
+                    ctx.session.notify.notify_one();
+                }
+            }
+        }
+        OverlayKeyResult::Command(line) => {
+            match plexy_glass_mux::command_prompt::parse(&line) {
+                Err(e) => {
+                    ctx.session.set_status_message(e.to_string()).await;
+                }
+                Ok(cmd) => match ConnVerb::from_prompt(cmd) {
+                    Ok(verb) => return run_connection_verb(ctx, keymap, verb).await,
+                    Err(other) => match ctx.session.handle_prompt_command(other).await {
+                        Ok(Some(msg)) => {
+                            ctx.session.set_status_message(msg).await;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            ctx.session.set_status_message(e.to_string()).await;
+                        }
+                    },
+                },
+            }
+        }
+    }
+    false
 }
 
 /// Snapshot the paste buffers (newest-first) and open the choose-buffer overlay.
