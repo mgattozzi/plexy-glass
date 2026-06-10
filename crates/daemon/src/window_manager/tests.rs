@@ -1,4 +1,5 @@
 use super::*;
+use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind};
 
 fn spec() -> SpawnSpec {
     SpawnSpec {
