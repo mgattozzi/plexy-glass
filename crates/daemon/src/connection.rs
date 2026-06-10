@@ -592,30 +592,7 @@ where
                             }
                         }
                         InputEvent::Paste(bytes) => {
-                            // The popup pane's bracketed-paste mode wins while a
-                            // popup is open (handle_input_bytes routes popup-first).
-                            let want_bracketed = {
-                                let manager = session.window_manager.lock().await;
-                                if let Some(p) = manager.popup() {
-                                    p.pane.with_screen(|s| {
-                                        s.modes.contains(plexy_glass_emulator::Modes::BRACKETED_PASTE)
-                                    })
-                                } else {
-                                    manager
-                                        .active_window()
-                                        .active_pane()
-                                        .map(|p| p.with_screen(|s| {
-                                            s.modes.contains(plexy_glass_emulator::Modes::BRACKETED_PASTE)
-                                        }))
-                                        .unwrap_or(false)
-                                }
-                            };
-                            let payload = if want_bracketed {
-                                wrap_paste(&bytes)
-                            } else {
-                                bytes
-                            };
-                            let _ = session.handle_input_bytes(&payload).await;
+                            paste_bytes(&session, bytes).await;
                         }
                         InputEvent::Bytes(bs) => {
                             let _ = session.handle_input_bytes(&bs).await;
@@ -954,9 +931,9 @@ async fn open_buffer_picker_overlay(session: &Arc<Session>, registry: &Arc<Sessi
     session.notify.notify_one();
 }
 
-/// Paste the most-recent paste buffer into the active pane (bracketed if the
-/// pane requests it), or set a status when there is none. Shared by `Ctrl+a ]`
-/// and the `:paste` verb.
+/// Paste the most-recent paste buffer into the input-target pane (bracketed
+/// if that pane requests it), or set a status when there is none. Shared by
+/// `Ctrl+a ]` and the `:paste` verb.
 async fn paste_top_buffer(session: &Arc<Session>, registry: &Arc<SessionRegistry>) {
     match registry.paste_buffer_top().await {
         Some(content) => paste_bytes(session, content).await,
@@ -964,19 +941,18 @@ async fn paste_top_buffer(session: &Arc<Session>, registry: &Arc<SessionRegistry
     }
 }
 
-/// Send `content` to the active pane, wrapping in bracketed-paste markers when
-/// the pane has that mode on (mirrors `InputEvent::Paste`). Also used by the
-/// choose-buffer overlay's paste action.
+/// Send `content` to the input-target pane (the popup's child while one is
+/// open, otherwise the active pane, via `WindowManager::input_target_pane`),
+/// wrapping in bracketed-paste markers when THAT pane has the mode on. The
+/// gate and `handle_input_bytes` resolve the same target, so the mode that
+/// decides the wrapping is always the receiving pane's. Shared by
+/// `InputEvent::Paste`, `Ctrl+a ]`, and the choose-buffer paste action.
 async fn paste_bytes(session: &Arc<Session>, content: Vec<u8>) {
     let want_bracketed = {
         let manager = session.window_manager.lock().await;
         manager
-            .active_window()
-            .active_pane()
-            .map(|p| {
-                p.with_screen(|s| s.modes.contains(plexy_glass_emulator::Modes::BRACKETED_PASTE))
-            })
-            .unwrap_or(false)
+            .input_target_pane()
+            .is_some_and(|p| p.wants_bracketed_paste())
     };
     let payload = if want_bracketed { wrap_paste(&content) } else { content };
     let _ = session.handle_input_bytes(&payload).await;

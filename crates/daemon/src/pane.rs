@@ -408,6 +408,13 @@ impl Pane {
         f(emu.screen())
     }
 
+    /// Whether this pane's application turned on bracketed paste (?2004).
+    /// The paste paths gate their `\e[200~`/`\e[201~` wrapping on the pane
+    /// the bytes actually go to, see `WindowManager::input_target_pane`.
+    pub fn wants_bracketed_paste(&self) -> bool {
+        self.with_screen(|s| s.modes.contains(plexy_glass_emulator::Modes::BRACKETED_PASTE))
+    }
+
     pub fn with_screen_mut<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut plexy_glass_emulator::Screen) -> R,

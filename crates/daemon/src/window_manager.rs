@@ -628,6 +628,18 @@ impl WindowManager {
         self.popup.is_some()
     }
 
+    /// The pane user input goes to: the floating popup's pane while one is
+    /// open (it is modal and owns input), otherwise the active window's
+    /// active pane. This is THE definition of "where user input goes", so
+    /// keep every input-routing decision (byte routing, paste bracketing,
+    /// focus events, …) on it so they cannot disagree about the target.
+    pub fn input_target_pane(&self) -> Option<&crate::pane::Pane> {
+        match &self.popup {
+            Some(p) => Some(&p.pane),
+            None => self.active_window().active_pane(),
+        }
+    }
+
     /// The cwd the popup spawns at: the active pane's live OSC-7 location,
     /// falling back to the window home base. This intentionally diverges from
     /// `split_cwd` (home base only): a popup acts on the current context.
@@ -3262,6 +3274,75 @@ mod tests {
         // Idempotent.
         m.handle_command(Command::ClosePopup).unwrap();
         assert!(!m.has_popup());
+    }
+
+    #[tokio::test]
+    async fn input_target_pane_prefers_popup() {
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
+        let layout_pane = m.active_window().active();
+        assert_eq!(
+            m.input_target_pane().map(|p| p.id()),
+            Some(layout_pane),
+            "no popup: input targets the active layout pane"
+        );
+        m.handle_command(Command::OpenPopup { command: None }).unwrap();
+        let popup_id = m.popup().unwrap().pane.id();
+        assert_eq!(
+            m.input_target_pane().map(|p| p.id()),
+            Some(popup_id),
+            "popup open: it is modal and owns user input"
+        );
+        m.handle_command(Command::ClosePopup).unwrap();
+        assert_eq!(
+            m.input_target_pane().map(|p| p.id()),
+            Some(layout_pane),
+            "popup closed: input returns to the active layout pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn paste_gate_reads_the_popup_pane_mode_not_the_layout_pane() {
+        // Regression: the Ctrl+a ] / choose-buffer paste gate used to read
+        // `BRACKETED_PASTE` from the active LAYOUT pane even while a popup was
+        // open, but the bytes go to the popup (`handle_input_bytes` is
+        // popup-first), so the wrong pane's mode decided the wrapping. The
+        // gate decision must be computed from
+        // `input_target_pane().wants_bracketed_paste()`.
+        let notify = Arc::new(Notify::new());
+        let mut m = WindowManager::new(
+            spec(),
+            PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            notify,
+            None,
+            cfg(),
+        )
+        .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
+        m.handle_command(Command::OpenPopup { command: None }).unwrap();
+        // The popup app turns bracketed paste ON; the layout pane has it OFF.
+        m.popup().unwrap().pane.with_screen_mut(|s| {
+            s.modes.insert(plexy_glass_emulator::Modes::BRACKETED_PASTE);
+        });
+        let layout = m.active_window().active_pane().unwrap();
+        assert!(!layout.wants_bracketed_paste(), "layout pane: mode off");
+        assert!(
+            m.input_target_pane().unwrap().wants_bracketed_paste(),
+            "while a popup is open, the paste gate's input is the POPUP's mode"
+        );
+        m.handle_command(Command::ClosePopup).unwrap();
+        assert!(
+            !m.input_target_pane().unwrap().wants_bracketed_paste(),
+            "popup closed: the gate reads the layout pane's mode again"
+        );
     }
 
     #[tokio::test]

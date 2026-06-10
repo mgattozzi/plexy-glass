@@ -1046,42 +1046,41 @@ impl Session {
     }
 
     pub async fn handle_input_bytes(&self, bytes: &[u8]) -> Result<(), DaemonError> {
-        let manager = self.window_manager.lock().await;
-        // A floating popup is modal: raw input bytes go to its child, never to
-        // the layout panes (sync-panes included) while it is open.
-        if let Some(p) = manager.popup() {
-            let pane = p.pane.clone();
-            drop(manager);
-            pane.send_input(bytes::Bytes::copy_from_slice(bytes)).await.ok();
-            self.notify.notify_one();
-            return Ok(());
-        }
-        let win = manager.active_window();
-        if win.sync_input {
-            for id in win.layout().panes() {
-                if let Some(pane) = win.pane(id) {
-                    pane.send_input(bytes::Bytes::copy_from_slice(bytes)).await.ok();
-                }
+        // Resolve the target panes under the lock, send after dropping it.
+        // Three cases: a floating popup is modal (input goes to its child,
+        // never the layout panes, sync-panes included); otherwise sync-panes
+        // fans out to every layout pane; otherwise the single input target
+        // (= the active pane; see `WindowManager::input_target_pane`).
+        let targets: Vec<crate::pane::Pane> = {
+            let manager = self.window_manager.lock().await;
+            if !manager.has_popup() && manager.active_window().sync_input {
+                let win = manager.active_window();
+                win.layout()
+                    .panes()
+                    .into_iter()
+                    .filter_map(|id| win.pane(id))
+                    .cloned()
+                    .collect()
+            } else {
+                manager.input_target_pane().cloned().into_iter().collect()
             }
-        } else if let Some(pane) = win.active_pane() {
+        };
+        for pane in targets {
             pane.send_input(bytes::Bytes::copy_from_slice(bytes)).await.ok();
         }
-        drop(manager);
         self.notify.notify_one();
         Ok(())
     }
 
     /// Queue a focus-event sequence (`\e[I` in / `\e[O` out) to the focused
-    /// pane, the floating popup's child while one is open (it is modal and
-    /// focused), otherwise the active layout pane, gated on that pane's
+    /// pane, `WindowManager::input_target_pane` (the popup's child while one
+    /// is open, otherwise the active layout pane), gated on that pane's
     /// ?1004 (`FOCUS_EVENTS`) mode. No-op otherwise.
     pub async fn focus_active_pane(&self, focused: bool) {
-        let manager = self.window_manager.lock().await;
-        let target = match manager.popup() {
-            Some(p) => Some(p.pane.clone()),
-            None => manager.active_window().active_pane().cloned(),
+        let target = {
+            let manager = self.window_manager.lock().await;
+            manager.input_target_pane().cloned()
         };
-        drop(manager);
         if let Some(pane) = target {
             let wants =
                 pane.with_screen(|s| s.modes.contains(plexy_glass_emulator::Modes::FOCUS_EVENTS));
