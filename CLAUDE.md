@@ -220,7 +220,19 @@ presets (`even-horizontal`/`even-vertical`/`main-horizontal`/`main-vertical`/
 `layout:<name>` verbs, the active pane takes the main slot in main-*, evenness
 via a balanced ratio tree (`crates/mux/src/preset.rs`), and ratio-faithful
 restore (saved split ratios are re-applied on restore — fixing the old 50/50
-limitation). Each has a spec in `docs/superpowers/specs/`.
+limitation); and **CLI scripting** — `plexy-glass cmd [-n NAME] <LINE>...` runs
+command-prompt lines headlessly reusing the prompt grammar verbatim
+(`command_prompt::parse`), `plexy-glass send [-n NAME] [--enter] <TEXT>...` injects
+bytes into the input path (popup- and sync-panes-aware), and
+`plexy-glass capture [-n NAME]` reads the focused pane's visible grid as plain
+text (`screen_text` in `crates/mux/src/selection.rs`); protocol v6
+(`RunCommand`/`SendInput`/`CapturePane` + `CommandResult`/`PaneCapture`);
+sole-or-explicit session resolution with exact error texts; interactive-only
+verbs (detach/switch/help/sessions/tree/buffers) refused with
+`"<verb>: requires an attached client"`; `reload`/`paste` work headless;
+honest exit codes (0 all-ok, 1 any-failure, stop-at-first for multi-line cmd);
+`send`/`capture` are popup-aware by design (same input-target-pane path);
+no auto-spawn (distinct from list/reload). Each has a spec in `docs/superpowers/specs/`.
 
 The overlay subsystem is the substrate for modal UI: add `Overlay` +
 `OverlayView` variants (mux), an `OverlayHandler` arm, `WindowManager::open_*`
@@ -239,7 +251,7 @@ implementation; user-facing docs (README / the configuration reference) are
 updated as part of each feature, per **User documentation**. Workflows
 (`Workflow` tool) drive the review fan-outs.
 
-Not yet built (future work): capture-pane / pipe-pane; cross-window **swap**-pane
+Not yet built (future work): pipe-pane; cross-window **swap**-pane
 and the choose-tree filter/collapse + session rename (deferred in their specs);
 silence monitoring + bell/activity alert messages; set/save/load paste buffers;
 **`keymap.prefix` is decoded but never consumed** — the prefix is hard-coded
@@ -253,4 +265,7 @@ break/join/swap + marked pane, paste buffers, and activity/bell monitoring shipp
 — 2026-06-01 specs/plans; keyboard-protocol negotiation + colored underlines
 shipped — 2026-06-01 specs/plans; popup panes shipped — 2026-06-09 spec/plan;
 preset layouts + the user-facing config docs shipped — 2026-06-09 spec/plan;
-cleanup bundle — C1–C12 bug/test/structure fixes — shipped 2026-06-09 spec/plan.)
+cleanup bundle — C1–C12 bug/test/structure fixes — shipped 2026-06-09 spec/plan;
+CLI scripting surface — `plexy-glass cmd / send / capture`, prompt-grammar reuse,
+protocol v6, popup-aware, sole-or-explicit session resolution — shipped
+2026-06-10 spec/plan.)

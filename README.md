@@ -67,9 +67,30 @@ Other subcommands:
 | `plexy-glass kill` | Stop this runtime dir's daemon |
 | `plexy-glass kill --all` | Stop every plexy-glass daemon for the current user |
 | `plexy-glass reload` | Reload `config.kdl` from the platform config dir |
+| `plexy-glass cmd [-n NAME] <LINE>...` | Run one or more command-prompt lines against a session |
+| `plexy-glass send [-n NAME] [--enter] <TEXT>...` | Type text into the focused pane (popup-aware) |
+| `plexy-glass capture [-n NAME]` | Print the focused pane's visible screen text (popup-aware) |
 
 (`plexy-glass daemon` exists but auto-spawn runs it for you internally, so
 the only time you'd type it is with `--foreground` for development.)
+
+### Scripting
+
+The `cmd`, `send`, and `capture` verbs let you drive a running session from a
+script or another tool, no terminal attachment required:
+
+```sh
+# Apply a structural command, then run a test and check the output
+plexy-glass cmd -n work "split v" "layout main-vertical"
+plexy-glass send -n work --enter "cargo test"
+plexy-glass capture -n work | grep "test result: ok"
+```
+
+`cmd` reuses the command-prompt grammar verbatim (see the
+[configuration reference](docs/configuration.md#scripting-from-the-cli)).
+All three verbs exit 0 on success and 1 on any failure.
+Session resolution: `-n NAME` targets that session; without `-n`, the sole
+running session is used (error if zero or more than one).
 
 ## Default keybindings
 
