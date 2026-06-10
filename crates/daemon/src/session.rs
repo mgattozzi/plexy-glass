@@ -435,7 +435,11 @@ impl Session {
                     .iter()
                     .map(|pid| {
                         let pane = w.pane(*pid);
-                        let cwd = pane.and_then(|p| p.with_screen(|s| s.cwd.clone()));
+                        // `Screen.cwd` holds the raw OSC-7 URL; persist a plain
+                        // path so restore's `SpawnSpec.cwd` is a real directory.
+                        let cwd = pane
+                            .and_then(|p| p.with_screen(|s| s.cwd.clone()))
+                            .and_then(|url| crate::popup::osc7_to_path(&url));
                         let name = pane.and_then(|p| p.name());
                         PaneStateV1 { cwd, name }
                     })
@@ -682,11 +686,19 @@ impl Session {
             DaemonError::Io(std::io::Error::other("restored window has zero panes"))
         })?;
         let mut first_spec = base_spec.clone();
-        first_spec.cwd = first_pane_saved.cwd.clone();
+        first_spec.cwd = restore_cwd(first_pane_saved.cwd.as_deref());
 
         let session = Self::new(saved.name.clone(), first_spec, size, Arc::clone(&config))?;
         {
             let mut wm = session.window_manager.lock().await;
+            // Re-anchor the session base cwd so interactive new windows
+            // (`Ctrl+a c` anchors to session_cwd) keep working after restore.
+            // SessionStateV1 has no session-level cwd field; window 0's saved
+            // home base is the persisted proxy (for a declared session it
+            // equals the session cwd when window 0 has no own cwd, and for an
+            // interactively created session both are None, preserving the
+            // pre-detach daemon-cwd behavior).
+            wm.set_session_cwd(first_window.home_cwd.clone());
             // Window 0 already exists from Session::new with its first pane, so
             // restore its name + remaining panes via replay.
             wm.set_window_name(0, first_window.name.clone());
@@ -698,7 +710,7 @@ impl Session {
                     )))
                 })?;
                 let mut spec_for_first = base_spec.clone();
-                spec_for_first.cwd = first_pane.cwd.clone();
+                spec_for_first.cwd = restore_cwd(first_pane.cwd.as_deref());
                 wm.new_window_with_spec(spec_for_first, w.name.clone())?;
                 replay_window_layout(&mut wm, wi, w, &base_spec)?;
             }
@@ -807,6 +819,15 @@ fn build_window_from_bin(
     Ok(())
 }
 
+/// Convert a saved pane cwd into a spawnable filesystem path. New persist
+/// files store plain paths (which pass through unchanged), but legacy files
+/// carry raw OSC-7 `file://host/path` URLs; portable-pty silently falls back
+/// to `$HOME` for a cwd that isn't a directory, so the URL must be stripped
+/// here. Malformed values map to `None` (daemon-cwd fallback).
+fn restore_cwd(saved: Option<&str>) -> Option<String> {
+    saved.and_then(crate::popup::osc7_to_path)
+}
+
 /// Replay a saved layout for `window_idx`. The window's first pane is
 /// already present; we walk the saved layout depth-first, splitting the
 /// existing structure at each Split node to spawn the next pane.
@@ -820,10 +841,12 @@ fn replay_window_layout(
     collect_replay_ops(&saved.layout, 0, &mut ops);
     for op in ops {
         let mut spec = base_spec.clone();
-        spec.cwd = saved
-            .panes
-            .get(op.new_pane_dfs_idx as usize)
-            .and_then(|p| p.cwd.clone());
+        spec.cwd = restore_cwd(
+            saved
+                .panes
+                .get(op.new_pane_dfs_idx as usize)
+                .and_then(|p| p.cwd.as_deref()),
+        );
         wm.split_window_at_dfs(window_idx, op.target_dfs_idx, op.dir, spec)?;
     }
     // The replay rebuilt the exact saved shape at default 0.5 ratios, so the
@@ -2313,6 +2336,79 @@ mod tests {
         let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
         let wm = restored.window_manager.lock().await;
         assert_eq!(wm.windows()[0].home_cwd.as_deref(), Some("/restored/base"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_converts_osc7_cwd_to_plain_path() {
+        // Regression: OSC 7 stores the raw `file://host/path` URL on `Screen.cwd`,
+        // and persisting that verbatim made restored panes spawn in `$HOME`
+        // (`portable-pty` silently falls back for non-directory cwds).
+        let _g = test_isolate_state_dir();
+        let s = Session::new("t-osc7-snap".into(), spec(), size(), cfg()).unwrap();
+        let saved = {
+            let wm = s.window_manager.lock().await;
+            let pid = wm.active_window().active();
+            wm.active_window().pane(pid).unwrap().with_screen_mut(|scr| {
+                scr.cwd = Some("file://localhost/tmp/somewhere".into());
+            });
+            s.snapshot_for_persist(&wm)
+        };
+        assert_eq!(
+            saved.windows[0].panes[0].cwd.as_deref(),
+            Some("/tmp/somewhere"),
+            "persisted pane cwd must be a plain path, not an OSC-7 URL"
+        );
+    }
+
+    #[test]
+    fn restore_cwd_strips_legacy_osc7_urls() {
+        // Legacy persist files (pre-fix) carry raw OSC-7 URLs; the restore
+        // seam must convert them so SpawnSpec.cwd is a real directory path.
+        assert_eq!(restore_cwd(Some("file:///tmp")).as_deref(), Some("/tmp"));
+        assert_eq!(
+            restore_cwd(Some("file://localhost/tmp/x")).as_deref(),
+            Some("/tmp/x")
+        );
+        assert_eq!(
+            restore_cwd(Some("/plain/path")).as_deref(),
+            Some("/plain/path")
+        );
+        // Malformed -> None (daemon-cwd fallback), not a bogus path.
+        assert_eq!(restore_cwd(Some("file://nohostnopath")), None);
+        assert_eq!(restore_cwd(None), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_reanchors_session_cwd_for_new_windows() {
+        // Regression: `restore_from` never called `set_session_cwd`, so after a
+        // restore `Ctrl+a c` (NewWindow anchors to `session_cwd`) lost its
+        // anchor. Window 0's saved home base is the persisted proxy for it.
+        use crate::persist::{LayoutStateV1, PaneStateV1, SessionStateV1, WindowStateV1};
+        let _g = test_isolate_state_dir();
+        let saved = SessionStateV1 {
+            schema: crate::persist::SCHEMA_VERSION,
+            name: "t-restore-anchor".into(),
+            created: chrono::Utc::now(),
+            active_window: 0,
+            windows: vec![WindowStateV1 {
+                name: "w".into(),
+                sync_input: false,
+                home_cwd: Some("/tmp".into()),
+                active_pane: 0,
+                panes: vec![PaneStateV1 { cwd: None, name: None }],
+                layout: LayoutStateV1::Leaf(0),
+            }],
+        };
+        let s = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
+        s.handle_command(plexy_glass_mux::Command::NewWindow).await.unwrap();
+        let wm = s.window_manager.lock().await;
+        // NewWindow stamps session_cwd onto the new window's home base; if
+        // the anchor was restored, the second window inherits it.
+        assert_eq!(
+            wm.windows()[1].home_cwd.as_deref(),
+            Some("/tmp"),
+            "restored session must re-anchor session_cwd for NewWindow"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
