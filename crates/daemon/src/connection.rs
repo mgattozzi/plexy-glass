@@ -348,7 +348,19 @@ where
                                                 detach_requested = true;
                                             }
                                             Ok(PromptCommand::Reload) => {
-                                                let _ = registry.reload_config().await;
+                                                if let Err(e) =
+                                                    registry.reload_config().await
+                                                {
+                                                    session
+                                                        .set_status_message(format!(
+                                                            "config error: {e}"
+                                                        ))
+                                                        .await;
+                                                }
+                                                // Even on error the registry applied
+                                                // the built-in defaults everywhere,
+                                                // so the keymap rebuild must still
+                                                // happen.
                                                 let new_cfg = session.config_snapshot();
                                                 keymap = plexy_glass_keys::build_keymap(
                                                     &new_cfg.keymap,
@@ -428,7 +440,9 @@ where
                                     KeymapAction::Command(
                                         cmd @ (Command::ClosePopup | Command::OpenPopup { .. }),
                                     ) => {
-                                        let _ = session.handle_command(cmd).await;
+                                        if let Err(e) = session.handle_command(cmd).await {
+                                            session.set_status_message(e.to_string()).await;
+                                        }
                                     }
                                     KeymapAction::Command(_)
                                     | KeymapAction::Pending
@@ -515,7 +529,16 @@ where
                                         break;
                                     }
                                     Command::ReloadConfig => {
-                                        let _ = registry.reload_config().await;
+                                        if let Err(e) = registry.reload_config().await {
+                                            session
+                                                .set_status_message(format!(
+                                                    "config error: {e}"
+                                                ))
+                                                .await;
+                                        }
+                                        // Even on error the registry applied the
+                                        // built-in defaults everywhere, so the
+                                        // keymap rebuild below must still happen.
                                         // Rebuild this Connection's keymap from
                                         // the new config so the user who fired
                                         // the reload sees binding changes
@@ -555,7 +578,9 @@ where
                                         open_buffer_picker_overlay(&session, &registry).await;
                                     }
                                     other => {
-                                        let _ = session.handle_command(other).await;
+                                        if let Err(e) = session.handle_command(other).await {
+                                            session.set_status_message(e.to_string()).await;
+                                        }
                                     }
                                 },
                                 KeymapAction::Pending => {

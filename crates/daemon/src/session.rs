@@ -1641,6 +1641,13 @@ async fn persist_loop(weak: std::sync::Weak<Session>) {
         };
         if let Err(e) = crate::persist::save_session(&snap) {
             tracing::warn!(error = %e, name = %session.name, "session persist failed");
+            // `dirty` was already swapped to false above; without this the
+            // snapshot is silently lost until the next structural change.
+            // mark_dirty re-sets the flag AND notifies, so the next
+            // `notified().await` returns immediately (stored permit) and the
+            // 1500ms debounce sleep paces the retry, so we get a 1.5s retry
+            // cadence while the disk stays unwritable, not a busy loop.
+            session.mark_dirty();
         }
     }
 }
@@ -2548,6 +2555,37 @@ mod tests {
             .expect("load")
             .expect("file should exist");
         assert_eq!(loaded.name, "dirty-test");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn persist_failure_resets_dirty_and_retries() {
+        let _g = crate::test_env::isolate();
+        let s = Session::new("persist-retry".into(), spec(), size(), cfg()).unwrap();
+        // Inject a write failure: occupy the sessions-dir path with a FILE so
+        // `save_session`'s `create_dir_all` fails (ENOTDIR-class error).
+        let dir = crate::persist::sessions_dir();
+        std::fs::create_dir_all(dir.parent().expect("sessions dir has a parent")).unwrap();
+        std::fs::write(&dir, b"not a directory").unwrap();
+        s.mark_dirty();
+        // Debounce is 1500ms, so by 1800ms the failed attempt has run and must
+        // have re-set `dirty` (the old code left it false, losing the snapshot).
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(
+            s.dirty.load(std::sync::atomic::Ordering::Relaxed),
+            "failed persist must re-set dirty so the snapshot is retried"
+        );
+        // Heal the path. The failure handler self-notified, so the loop
+        // retries on its own and we don't need another `mark_dirty`.
+        std::fs::remove_file(&dir).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+        let loaded = crate::persist::load_session("persist-retry")
+            .expect("load")
+            .expect("retry after heal should have persisted the session");
+        assert_eq!(loaded.name, "persist-retry");
+        assert!(
+            !s.dirty.load(std::sync::atomic::Ordering::Relaxed),
+            "successful retry should leave dirty clear"
+        );
     }
 
     #[tokio::test]
