@@ -173,6 +173,58 @@ mod tests {
     }
 
     #[test]
+    fn custom_prefix_retargets_inherited_defaults() {
+        // When the configured prefix is Ctrl+b, all defaults that used `prefix X`
+        // (stored as "prefix X" in the binding strings) must resolve to Ctrl+b X,
+        // NOT Ctrl+a X. This test fails before P2 because the defaults still store
+        // literal "Ctrl+a X" strings which always resolve to Ctrl+a regardless of cfg.prefix.
+        let cfg = KeymapConfig {
+            prefix: "Ctrl+b".into(),
+            inherit_defaults: true,
+            bindings: vec![KeymapBinding {
+                keys: "prefix H".into(),
+                command: "resize_pane_left".into(),
+            }],
+        };
+        let mut km = build_keymap(&cfg);
+
+        // Ctrl+b c → NewWindow (default retargeted to new prefix)
+        let e1 = KeyEvent::new(Key::Char('b'), Modifiers::CTRL);
+        assert!(
+            matches!(km.consume(e1, vec![0x02]), KeymapAction::Pending),
+            "Ctrl+b should arm the prefix"
+        );
+        let e2 = KeyEvent::new(Key::Char('c'), Modifiers::empty());
+        assert!(
+            matches!(km.consume(e2, b"c".to_vec()), KeymapAction::Command(Command::NewWindow)),
+            "Ctrl+b c should fire NewWindow"
+        );
+
+        // Ctrl+a should be PassThrough now (nothing bound under it)
+        let e3 = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
+        let a3 = km.consume(e3, vec![0x01]);
+        assert!(
+            matches!(a3, KeymapAction::PassThrough(..)),
+            "Ctrl+a should be PassThrough (no binding under Ctrl+a): got {a3:?}"
+        );
+
+        // Ctrl+b H → ResizePane(Left) (user binding using `prefix` token)
+        let e4 = KeyEvent::new(Key::Char('b'), Modifiers::CTRL);
+        assert!(
+            matches!(km.consume(e4, vec![0x02]), KeymapAction::Pending),
+            "Ctrl+b should arm the prefix (second time)"
+        );
+        let e5 = KeyEvent::new(Key::Char('H'), Modifiers::empty());
+        assert!(
+            matches!(
+                km.consume(e5, b"H".to_vec()),
+                KeymapAction::Command(Command::ResizePane(plexy_glass_mux::Direction::Left))
+            ),
+            "Ctrl+b H should fire ResizePane(Left)"
+        );
+    }
+
+    #[test]
     fn invalid_binding_is_logged_and_skipped() {
         let cfg = KeymapConfig {
             prefix: "Ctrl+a".into(),
