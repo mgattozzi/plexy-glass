@@ -191,7 +191,16 @@ impl Window {
             pixel_width: 0,
             pixel_height: 0,
         };
-        let pane = Pane::spawn(new_pane_id, spec, size, output_notify, death_tx, config)?;
+        let pane = match Pane::spawn(new_pane_id, spec, size, output_notify, death_tx, config) {
+            Ok(p) => p,
+            Err(e) => {
+                // Roll the layout node back: a failed spawn must not leave a
+                // dangling leaf with no pane behind it (it would render as a
+                // dead region and corrupt close/focus bookkeeping).
+                let _ = self.layout.close(new_pane_id);
+                return Err(e);
+            }
+        };
         self.panes.insert(new_pane_id, pane);
         self.focus_history.push_back(self.active);
         self.active = new_pane_id;

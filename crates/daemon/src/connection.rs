@@ -903,6 +903,8 @@ impl ConnVerb {
 
     /// Prompt commands handled at the connection layer. Everything else is
     /// returned unchanged for `Session::handle_prompt_command`.
+    /// Lockstep: any verb added here must also be handled in `run_prompt_line`
+    /// (see `tests::run_prompt_line_never_silently_noops_connection_verbs`).
     fn from_prompt(cmd: PromptCommand) -> Result<Self, PromptCommand> {
         match cmd {
             PromptCommand::Detach => Ok(Self::Detach),
@@ -2710,6 +2712,102 @@ mod tests {
                 "`{line}` refusal text wrong: {msg}"
             );
         }
+    }
+
+    /// Lockstep guard for the headless verb policy.
+    /// `Session::handle_prompt_command` carries a defensive `Ok(None)` arm for
+    /// the connection-level verbs, currently seven: Detach, Reload, Switch,
+    /// ChooseSession, ChooseTree, PasteBuffer, ChooseBuffer. If a future verb
+    /// is added to that arm (and `ConnVerb::from_prompt`) but NOT to
+    /// `run_prompt_line`'s intercept, `cmd "<verb>"` would fall through to the
+    /// defensive arm and silently exit 0 doing nothing. This test hardcodes
+    /// the current seven (plus `help`, refused for its modal overlay) and
+    /// asserts each is either refused with a message or specially handled
+    /// with a real effect, never a silent no-op. If you add a
+    /// connection-level verb, extend BOTH `run_prompt_line` and this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_prompt_line_never_silently_noops_connection_verbs() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("guard".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+
+        // Refused: these act on the calling client (detach/switch) or open
+        // modal overlays (help/sessions/tree/buffers).
+        for line in ["detach", "switch x", "sessions", "tree", "buffers", "help"] {
+            let (ok, message) = run_prompt_line(&session, &registry, line).await;
+            assert!(!ok, "`{line}` must be refused headless, not silently succeed");
+            let msg = message.unwrap_or_default();
+            assert!(
+                msg.contains("requires an attached client"),
+                "`{line}` refusal text wrong: {msg}"
+            );
+        }
+
+        // Specially handled with a real effect (not the defensive no-op):
+        // `reload` re-reads config through the registry (a missing-or-valid
+        // config file is Ok, the same dependency as
+        // `registry::tests::reload_config_swaps_session_config`), and `paste`
+        // pastes the top buffer (or sets a "no paste buffer" status).
+        for line in ["reload", "paste"] {
+            let (ok, message) = run_prompt_line(&session, &registry, line).await;
+            assert!(ok, "headless `{line}` failed: {message:?}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_command_reload_is_ok_via_wire() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        registry.attach_or_create("s1".into(), script_cat(), script_size(), cfg).await.unwrap();
+
+        // `load_or_default` treats a missing config file as Ok-with-defaults
+        // (`load.rs`), so a reload succeeds without any config on disk.
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::RunCommand { session: Some("s1".into()), line: "reload".into() },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(ok, "reload over the wire failed: {message:?}");
+    }
+
+    // Dispatch-error coverage. No prompt verb errs naturally in a fresh
+    // session: `win 9` out-of-range is a silent no-op (`switch_to_window`
+    // bounds-checks and returns), and join/swap/break with no marked pane set
+    // a status message and return Ok. The deterministic dispatch Err is a
+    // spawn failure: pin the default program to a nonexistent path so
+    // `split v` fails inside `WindowManager::handle_command`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_command_dispatch_error_is_not_ok() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("s1".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+        session
+            .window_manager
+            .lock()
+            .await
+            .set_default_program("/nonexistent/plexy-glass-no-such-shell");
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::RunCommand { session: Some("s1".into()), line: "split v".into() },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok, "split with an unspawnable program must report failure");
+        let msg = message.expect("dispatch error must carry a message");
+        assert!(msg.contains("spawn"), "unexpected dispatch error text: {msg}");
+        // The failed split must not have left a half-created pane behind.
+        assert_eq!(session.window_manager.lock().await.active_window().layout().panes().len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

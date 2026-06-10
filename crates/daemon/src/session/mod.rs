@@ -726,7 +726,10 @@ impl Session {
                 self.mark_dirty();
                 return Ok(None);
             }
-            // Handled at the connection layer; defensive no-op here.
+            // Handled at the connection layer, so this is a defensive no-op. Lockstep:
+            // any verb added to this arm must also be handled (or refused) in
+            // `connection::run_prompt_line`, see connection.rs's
+            // `run_prompt_line_never_silently_noops_connection_verbs` test.
             PromptCommand::Detach
             | PromptCommand::Reload
             | PromptCommand::Switch(_)
