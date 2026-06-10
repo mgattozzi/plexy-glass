@@ -21,6 +21,11 @@ pub struct ClientHandle {
     /// Starts `false` because `?1004` reports no initial state on enable, so we
     /// learn it on the first transition. Used for the any-client-focused aggregate.
     pub focused: bool,
+    /// Whether this client's keymap prefix is currently armed (mid-chord).
+    /// Written by the connection's input loop after every `Keymap::consume`;
+    /// read by the render paths for the any-client-armed aggregate that
+    /// drives the `prefix-indicator` status widget.
+    pub prefix_armed: Arc<AtomicBool>,
 }
 
 pub struct Session {
@@ -389,7 +394,15 @@ impl Session {
         SessionTree { name: self.name.clone(), active_window, total_panes, windows }
     }
 
-    pub fn register_client(self: &Arc<Self>, size: PtySize) -> Result<ClientHandle, DaemonError> {
+    /// `prefix_armed` is the connection's live prefix flag (shared, not
+    /// copied): the input loop keeps storing into the same atomic, so a
+    /// client that switches sessions re-registers the SAME flag on the
+    /// target and re-arming keeps working after the switch.
+    pub fn register_client(
+        self: &Arc<Self>,
+        size: PtySize,
+        prefix_armed: Arc<AtomicBool>,
+    ) -> Result<ClientHandle, DaemonError> {
         if self.closing.load(Ordering::SeqCst) {
             return Err(DaemonError::Protocol(ProtocolError::SessionNotFound {
                 name: self.name.clone(),
@@ -405,6 +418,7 @@ impl Session {
                 size,
                 frame_rx: frame_rx_for_session,
                 focused: false,
+                prefix_armed: Arc::clone(&prefix_armed),
             });
         }
         self.recompute_size_and_notify();
@@ -413,6 +427,7 @@ impl Session {
             size,
             frame_rx: frame_rx_for_caller,
             focused: false,
+            prefix_armed,
         })
     }
 
@@ -574,6 +589,14 @@ impl Session {
         }
         let any_after = clients.iter().any(|c| c.focused);
         (any_before != any_after).then_some(any_after)
+    }
+
+    /// Any-client-armed aggregate for the `prefix-indicator` status widget:
+    /// true iff at least one attached client's keymap prefix is mid-chord.
+    /// Mirrors the any-client-focused rule above.
+    pub async fn any_prefix_armed(&self) -> bool {
+        let clients = self.clients.lock().await;
+        clients.iter().any(|c| c.prefix_armed.load(Ordering::SeqCst))
     }
 
     /// Re-encode a canonical key event into the active pane's negotiated
@@ -1112,12 +1135,13 @@ async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::Snaps
         .unwrap_or(false);
     let sync_active = manager.active_window().sync_input;
     let zoom_active = manager.active_window().is_zoomed();
+    let prefix_active = session.any_prefix_armed().await;
     plexy_glass_status::SnapshotCtx {
         session_name,
         windows,
         active_window: active_idx,
         attached_clients,
-        prefix_active: false,
+        prefix_active,
         active_pane_cwd,
         copy_mode_active,
         sync_active,
@@ -1372,7 +1396,10 @@ mod tests {
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         let s2 = Arc::clone(&s);
         let h = tokio::task::spawn_blocking(move || {
-            s2.register_client(PtySize { rows: 10, cols: 30, pixel_width: 0, pixel_height: 0 })
+            s2.register_client(
+                PtySize { rows: 10, cols: 30, pixel_width: 0, pixel_height: 0 },
+                Arc::new(AtomicBool::new(false)),
+            )
         })
         .await
         .unwrap()
@@ -1392,14 +1419,20 @@ mod tests {
         let s = Session::new("focusagg".into(), spec(), size(), cfg()).unwrap();
         let s2 = Arc::clone(&s);
         let a = tokio::task::spawn_blocking(move || {
-            s2.register_client(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            s2.register_client(
+                PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+                Arc::new(AtomicBool::new(false)),
+            )
         })
         .await
         .unwrap()
         .unwrap();
         let s2 = Arc::clone(&s);
         let b = tokio::task::spawn_blocking(move || {
-            s2.register_client(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            s2.register_client(
+                PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+                Arc::new(AtomicBool::new(false)),
+            )
         })
         .await
         .unwrap()
@@ -1415,19 +1448,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn any_prefix_armed_aggregates_across_clients() {
+        let _g = crate::test_env::isolate();
+        // Any-client-armed: the prefix indicator shows iff at least one
+        // attached client's keymap prefix is mid-chord.
+        let s = Session::new("prefixagg".into(), spec(), size(), cfg()).unwrap();
+        let flag_a = Arc::new(AtomicBool::new(false));
+        let flag_b = Arc::new(AtomicBool::new(false));
+        let s2 = Arc::clone(&s);
+        let fa = Arc::clone(&flag_a);
+        let _a = tokio::task::spawn_blocking(move || s2.register_client(size(), fa))
+            .await
+            .unwrap()
+            .unwrap();
+        let s2 = Arc::clone(&s);
+        let fb = Arc::clone(&flag_b);
+        let b = tokio::task::spawn_blocking(move || s2.register_client(size(), fb))
+            .await
+            .unwrap()
+            .unwrap();
+        // Nobody armed.
+        assert!(!s.any_prefix_armed().await);
+        // One client arms → aggregate true.
+        flag_a.store(true, Ordering::SeqCst);
+        assert!(s.any_prefix_armed().await);
+        // Arming the other one too keeps it true.
+        flag_b.store(true, Ordering::SeqCst);
+        assert!(s.any_prefix_armed().await);
+        // Both disarm → false.
+        flag_a.store(false, Ordering::SeqCst);
+        flag_b.store(false, Ordering::SeqCst);
+        assert!(!s.any_prefix_armed().await);
+        // A departed client's armed flag stops counting.
+        flag_b.store(true, Ordering::SeqCst);
+        let s2 = Arc::clone(&s);
+        let cid_b = b.client_id;
+        tokio::task::spawn_blocking(move || s2.deregister_client(cid_b)).await.unwrap();
+        assert!(!s.any_prefix_armed().await);
+    }
+
+    #[tokio::test]
     async fn smallest_client_wins() {
         let _g = crate::test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         let s2 = Arc::clone(&s);
         let a = tokio::task::spawn_blocking(move || {
-            s2.register_client(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            s2.register_client(
+                PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+                Arc::new(AtomicBool::new(false)),
+            )
         })
         .await
         .unwrap()
         .unwrap();
         let s2 = Arc::clone(&s);
         let b = tokio::task::spawn_blocking(move || {
-            s2.register_client(PtySize { rows: 10, cols: 30, pixel_width: 0, pixel_height: 0 })
+            s2.register_client(
+                PtySize { rows: 10, cols: 30, pixel_width: 0, pixel_height: 0 },
+                Arc::new(AtomicBool::new(false)),
+            )
         })
         .await
         .unwrap()
@@ -1519,8 +1598,11 @@ mod tests {
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         s.closing.store(true, Ordering::SeqCst);
         let s2 = Arc::clone(&s);
-        let result =
-            tokio::task::spawn_blocking(move || s2.register_client(size())).await.unwrap();
+        let result = tokio::task::spawn_blocking(move || {
+            s2.register_client(size(), Arc::new(AtomicBool::new(false)))
+        })
+        .await
+        .unwrap();
         assert!(result.is_err());
     }
 
@@ -1879,7 +1961,10 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let _g = crate::test_env::isolate();
         let s = Session::new("sp".into(), spec(), size(), cfg()).unwrap();
-        let handle = tokio::task::block_in_place(|| s.register_client(size())).unwrap();
+        let handle = tokio::task::block_in_place(|| {
+            s.register_client(size(), Arc::new(AtomicBool::new(false)))
+        })
+        .unwrap();
         let frame_rx = handle.frame_rx.clone();
 
         // Real bidirectional socket, split exactly like serve_attach does.

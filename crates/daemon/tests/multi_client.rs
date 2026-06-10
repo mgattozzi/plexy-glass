@@ -3,6 +3,7 @@
 use plexy_glass_daemon::Session;
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 fn spec() -> SpawnSpec {
     SpawnSpec {
@@ -25,7 +26,10 @@ async fn two_clients_effective_size_is_min() {
 
     let s2 = Arc::clone(&s);
     let a = tokio::task::spawn_blocking(move || {
-        s2.register_client(PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 })
+        s2.register_client(
+            PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 },
+            Arc::new(AtomicBool::new(false)),
+        )
     })
     .await
     .unwrap()
@@ -33,7 +37,10 @@ async fn two_clients_effective_size_is_min() {
 
     let s2 = Arc::clone(&s);
     let b = tokio::task::spawn_blocking(move || {
-        s2.register_client(PtySize { rows: 20, cols: 60, pixel_width: 0, pixel_height: 0 })
+        s2.register_client(
+            PtySize { rows: 20, cols: 60, pixel_width: 0, pixel_height: 0 },
+            Arc::new(AtomicBool::new(false)),
+        )
     })
     .await
     .unwrap()
@@ -70,12 +77,15 @@ async fn concurrent_register_is_safe() {
     for i in 0..8u16 {
         let s2 = Arc::clone(&s);
         let h = tokio::task::spawn_blocking(move || {
-            s2.register_client(PtySize {
-                rows: 10 + i,
-                cols: 30 + i,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
+            s2.register_client(
+                PtySize {
+                    rows: 10 + i,
+                    cols: 30 + i,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
         });
         handles.push(h);
     }

@@ -186,11 +186,18 @@ where
         }
     };
 
+    // This connection's live prefix-armed flag. The input loop stores the
+    // keymap state into it after every consume; the session's render paths
+    // read it (via the registered ClientHandle) for the any-client-armed
+    // aggregate behind the `prefix-indicator` widget.
+    let prefix_active = Arc::new(AtomicBool::new(false));
+
     // Register this connection as a client. `register_client` calls
     // `blocking_lock` internally, so dispatch it off the async runtime.
     let session_for_register = Arc::clone(&session);
+    let prefix_for_register = Arc::clone(&prefix_active);
     let handle = match tokio::task::spawn_blocking(move || {
-        session_for_register.register_client(size)
+        session_for_register.register_client(size, prefix_for_register)
     })
     .await
     {
@@ -226,7 +233,6 @@ where
     // protocol (older/unknown peers downgraded to Legacy upstream).
     let mut router = InputRouter::with_protocol(decode_protocol(client_kbd));
     let mut keymap = plexy_glass_keys::build_keymap(&config.keymap);
-    let prefix_active = Arc::new(AtomicBool::new(false));
 
     loop {
         let frame = tokio::select! {
@@ -289,6 +295,7 @@ where
                                     size,
                                     registry: &registry,
                                     switch_tx: &switch_tx,
+                                    prefix_armed: &prefix_active,
                                 };
                                 // The extracted fn can't `break`/`continue` this
                                 // loop; it returns the detach intent instead.
@@ -310,7 +317,7 @@ where
                             let popup_open = session.popup_active().await;
                             if popup_open {
                                 let action = keymap.consume(ke, raw_bytes);
-                                prefix_active.store(keymap.prefix_active(), Ordering::SeqCst);
+                                store_prefix_armed(&prefix_active, &keymap, &session);
                                 match action {
                                     KeymapAction::PassThrough(event_ke, bytes_back) => {
                                         let _ = session
@@ -344,7 +351,7 @@ where
                                 }
                             }
                             let action = keymap.consume(ke, raw_bytes);
-                            prefix_active.store(keymap.prefix_active(), Ordering::SeqCst);
+                            store_prefix_armed(&prefix_active, &keymap, &session);
                             match action {
                                 KeymapAction::PassThrough(event_ke, bytes_back) => {
                                     // If the active pane is in copy mode, route the key event
@@ -415,6 +422,7 @@ where
                                             size,
                                             registry: &registry,
                                             switch_tx: &switch_tx,
+                                            prefix_armed: &prefix_active,
                                         };
                                         if run_connection_verb(&mut ctx, &mut keymap, verb)
                                             .await
@@ -529,6 +537,27 @@ async fn cleanup_and_exit(
     Ok(())
 }
 
+/// Publish the keymap's prefix-armed state after a `Keymap::consume`, and
+/// repaint iff it TRANSITIONED. The flag is read by the session's render
+/// paths (any-client-armed aggregate → `prefix-indicator` widget), but
+/// storing it does not wake the render loop by itself, so:
+///
+/// - disarmed→armed (`Pending`): notify here. (The `Pending` arm also
+///   notifies, and `Notify` coalesces permits into one wakeup.)
+/// - armed→disarmed via `Command`/`Cancel`: notify here; redundant with the
+///   repaints those paths already trigger, again coalesced.
+/// - armed→disarmed via `PassThrough` (prefix timed out lazily inside
+///   `consume`, then the key fell through): nothing else repaints, so this
+///   notify is the only thing that clears the indicator.
+/// - no transition (plain typing, `PassThrough` with prefix idle): no
+///   notify, so ordinary keystrokes don't force a status repaint.
+fn store_prefix_armed(flag: &Arc<AtomicBool>, keymap: &Keymap, session: &Arc<Session>) {
+    let armed = keymap.prefix_active();
+    if flag.swap(armed, Ordering::SeqCst) != armed {
+        session.notify.notify_one();
+    }
+}
+
 /// Per-client connection state threaded through session switches and
 /// cross-session actions (overlay results, connection-layer verbs). Bundles
 /// what was a 5-argument tuple. `session`/`client_id` are `&mut` because a
@@ -542,6 +571,9 @@ struct ClientCtx<'a> {
     size: PtySize,
     registry: &'a Arc<SessionRegistry>,
     switch_tx: &'a mpsc::UnboundedSender<watch::Receiver<Arc<VirtualScreen>>>,
+    /// The connection's live prefix-armed flag; re-registered on the target
+    /// session during a switch so re-arming keeps working afterwards.
+    prefix_armed: &'a Arc<AtomicBool>,
 }
 
 impl ClientCtx<'_> {
@@ -570,8 +602,9 @@ impl ClientCtx<'_> {
         // `register_client` takes a `blocking_lock` internally, so keep it off the runtime.
         let target_for_register = Arc::clone(&target);
         let size = self.size;
+        let prefix_armed = Arc::clone(self.prefix_armed);
         let new_handle = match tokio::task::spawn_blocking(move || {
-            target_for_register.register_client(size)
+            target_for_register.register_client(size, prefix_armed)
         })
         .await
         {
@@ -1172,6 +1205,94 @@ mod tests {
 
         // The client has moved: b now has it, a has none.
         wait_until(0, 1).await;
+
+        server.abort();
+    }
+
+    // Pressing the prefix (Ctrl+a) through serve's input path arms the
+    // session-level any_prefix_armed aggregate (which feeds the
+    // `prefix-indicator` widget); an unbound follow-up key (Cancel) disarms it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prefix_press_arms_session_follow_up_key_disarms() {
+        let _g = crate::test_env::isolate();
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
+        let cat = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        let attach = ClientMsg::AttachOrCreate {
+            name: Some("prefixarm".into()),
+            create_if_missing: true,
+            cmd: Some(cat),
+            size,
+        };
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&attach).unwrap())
+            .await
+            .unwrap();
+
+        // Drain server output so the socket never backs up.
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while cr.read(&mut buf).await.unwrap_or(0) > 0 {}
+        });
+
+        // Wait for the client to be registered on the session.
+        let session = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(s) = registry.get("prefixarm").await
+                    && s.clients.lock().await.len() == 1
+                {
+                    break s;
+                }
+                assert!(Instant::now() < deadline, "timed out waiting for attach");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        assert!(!session.any_prefix_armed().await, "armed before any input");
+
+        let wait_armed = |want: bool, what: &'static str| {
+            let session = Arc::clone(&session);
+            async move {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while session.any_prefix_armed().await != want {
+                    assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        };
+
+        // Ctrl+a (0x01) arms the prefix.
+        let input = ClientMsg::Input(bytes::Bytes::from_static(b"\x01"));
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&input).unwrap())
+            .await
+            .unwrap();
+        wait_armed(true, "arm").await;
+
+        // `e` is unbound after the prefix → Cancel → disarmed. (Even if the
+        // 1s chord timeout fires first, consume cancels lazily and the key
+        // passes through, so it's disarmed either way.)
+        let input = ClientMsg::Input(bytes::Bytes::from_static(b"e"));
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&input).unwrap())
+            .await
+            .unwrap();
+        wait_armed(false, "disarm").await;
 
         server.abort();
     }

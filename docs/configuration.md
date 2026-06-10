@@ -182,8 +182,12 @@ window-list { active-style fg="fg" bg="accent"; inactive-style fg="muted" bg="bg
 
 #### `prefix-indicator`
 
-Shows `content` while the prefix key is armed, nothing otherwise. Both
-`content` (string property) and `style` are required.
+Shows `content` while the prefix key is armed (by any attached client),
+nothing otherwise. It doubles as the mode badge, which takes precedence over
+the armed indicator: ` COPY ` while the active pane is in copy mode
+(click to exit), ` SYNC ` while sync-panes is on (click to toggle), and
+` Z ` while the active pane is zoomed. Both `content` (string property) and
+`style` are required.
 
 ```kdl
 prefix-indicator content=" PFX " { style fg="bg" bg="highlight" bold=#true }

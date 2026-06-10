@@ -145,12 +145,15 @@ pub(super) async fn render_coordinator(
                 .unwrap_or(false);
             let sync_active = m.active_window().sync_input;
             let zoom_active = m.active_window().is_zoomed();
+            // Any-client-armed aggregate; same WM→clients lock order as the
+            // `attached_clients` read above.
+            let prefix_active = session.any_prefix_armed().await;
             let ctx = plexy_glass_status::EvalContext {
                 session_name: &session_name,
                 windows: &windows_data,
                 active_window: m.active_idx(),
                 attached_clients,
-                prefix_active: false,
+                prefix_active,
                 active_pane_cwd: active_pane_cwd.as_deref(),
                 copy_mode_active,
                 sync_active,
