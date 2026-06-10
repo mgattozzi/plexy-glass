@@ -4,11 +4,11 @@ use clap::{Parser, Subcommand};
 #[command(name = "plexy-glass", about = "A terminal multiplexer with first-class OSC handling", version)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Cmd>,
+    command: Option<Subcommands>,
 }
 
 #[derive(Debug, Subcommand)]
-enum Cmd {
+enum Subcommands {
     /// Attach to a session (creates it if it doesn't exist).
     Attach {
         /// Session name. If omitted: attach to the only existing session, or create "main" if none.
@@ -32,6 +32,31 @@ enum Cmd {
     },
     /// Reload the daemon's config from the platform config dir (config.kdl).
     Reload,
+    /// Run command-prompt lines against a session (see `docs/configuration.md` §6).
+    Cmd {
+        /// Target session (defaults to the sole running session).
+        #[arg(short = 'n', long = "name")]
+        name: Option<String>,
+        /// One or more prompt lines, e.g. "split v" "layout tiled".
+        #[arg(required = true)]
+        lines: Vec<String>,
+    },
+    /// Type text into a session's focused pane (popup-aware).
+    Send {
+        #[arg(short = 'n', long = "name")]
+        name: Option<String>,
+        /// Append Enter (a carriage return) after the text.
+        #[arg(long = "enter")]
+        enter: bool,
+        /// Text fragments, joined with single spaces.
+        #[arg(required_unless_present = "enter")]
+        text: Vec<String>,
+    },
+    /// Print the focused pane's visible screen text (popup-aware).
+    Capture {
+        #[arg(short = 'n', long = "name")]
+        name: Option<String>,
+    },
     /// Start the daemon (used internally by auto-spawn; `--foreground` for dev).
     Daemon(plexy_glass_daemon::DaemonArgs),
 }
@@ -47,17 +72,17 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     // Default to `attach` with no name when no subcommand is given.
-    match cli.command.unwrap_or(Cmd::Attach { name: None }) {
-        Cmd::Attach { name } => {
+    match cli.command.unwrap_or(Subcommands::Attach { name: None }) {
+        Subcommands::Attach { name } => {
             plexy_glass_client::client_attach_smart(name).await?;
         }
-        Cmd::List => {
+        Subcommands::List => {
             plexy_glass_client::client_list().await?;
         }
-        Cmd::ListSaved => {
+        Subcommands::ListSaved => {
             plexy_glass_client::client_list_saved().await?;
         }
-        Cmd::Kill { name, all } => match name {
+        Subcommands::Kill { name, all } => match name {
             Some(session_name) => {
                 plexy_glass_client::client_kill_session(session_name).await?;
             }
@@ -84,10 +109,44 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         },
-        Cmd::Reload => {
+        Subcommands::Reload => {
             plexy_glass_client::client_reload_config().await?;
         }
-        Cmd::Daemon(args) => {
+        Subcommands::Cmd { name, lines } => {
+            match plexy_glass_client::client_run_commands(name, lines).await {
+                Ok(true) => {}
+                Ok(false) => std::process::exit(1),
+                Err(e) => {
+                    eprintln!("plexy-glass: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Subcommands::Send { name, enter, text } => {
+            let mut bytes = text.join(" ").into_bytes();
+            if enter {
+                bytes.push(b'\r');
+            }
+            match plexy_glass_client::client_send_input(name, bytes).await {
+                Ok(true) => {}
+                Ok(false) => std::process::exit(1),
+                Err(e) => {
+                    eprintln!("plexy-glass: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Subcommands::Capture { name } => {
+            match plexy_glass_client::client_capture(name).await {
+                Ok(true) => {}
+                Ok(false) => std::process::exit(1),
+                Err(e) => {
+                    eprintln!("plexy-glass: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Subcommands::Daemon(args) => {
             plexy_glass_daemon::run(args).await?;
         }
     }

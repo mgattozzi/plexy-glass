@@ -6,6 +6,17 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 use tracing::{debug, info};
 
+/// Connect to the daemon socket without spawning one if absent.
+///
+/// Returns `Err(ClientError::Connect { … })` when no daemon is reachable.
+/// Scripting verbs (`cmd`, `send`, `capture`) use this so they never
+/// accidentally start a daemon, since a missing daemon is a user error there.
+pub async fn connect_only(socket: &Path) -> Result<UnixStream, ClientError> {
+    UnixStream::connect(socket)
+        .await
+        .map_err(|source| ClientError::Connect { path: socket.to_path_buf(), source })
+}
+
 /// Connect to the daemon socket, spawning a new daemon if one is not running.
 /// Returns the connected stream.
 pub async fn connect_or_spawn(socket: &Path) -> Result<UnixStream, ClientError> {

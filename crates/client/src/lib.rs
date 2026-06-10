@@ -12,7 +12,7 @@ pub use args::ClientArgs;
 pub use error::ClientError;
 pub use kill::{KillOutcome, kill, kill_all};
 pub use pump::{handshake_spawn, pump};
-pub use transport::{connect_or_spawn, default_socket_path};
+pub use transport::{connect_only, connect_or_spawn, default_socket_path};
 pub use tty::{HostTty, current_size};
 
 use plexy_glass_protocol::{
@@ -293,6 +293,146 @@ pub async fn client_attach_smart(explicit_name: Option<String>) -> Result<(), Cl
                 }
             }
         }
+    }
+}
+
+/// Run one or more command-prompt lines against a session.
+///
+/// Each line uses its own connection (one frame per connection, matching the
+/// daemon's pre-attach dispatch contract). Stops at the first failure and
+/// returns `Ok(false)`; all lines ok → `Ok(true)`. A connect or handshake
+/// error propagates as `Err(ClientError)`.
+///
+/// "No daemon running" surfaces as `ClientError::Connect` (the scripting verbs
+/// use `connect_only`, never the auto-spawning path, per spec).
+pub async fn client_run_commands(
+    name: Option<String>,
+    lines: Vec<String>,
+) -> Result<bool, ClientError> {
+    let socket = default_socket_path()?;
+    for line in lines {
+        let stream = connect_only(&socket).await?;
+        let (mut reader, mut writer) = tokio::io::split(stream);
+        client_handshake(&mut reader, &mut writer).await?;
+
+        let msg = ClientMsg::RunCommand { session: name.clone(), line };
+        let payload = postcard::to_allocvec(&msg)
+            .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
+        Codec::write_frame(&mut writer, &payload).await?;
+
+        let frame = Codec::read_frame(&mut reader)
+            .await?
+            .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
+        let reply: ServerMsg = postcard::from_bytes(&frame)
+            .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+        match reply {
+            ServerMsg::CommandResult { ok: true, message } => {
+                if let Some(m) = message {
+                    println!("{m}");
+                }
+            }
+            ServerMsg::CommandResult { ok: false, message } => {
+                eprintln!(
+                    "plexy-glass cmd: {}",
+                    message.as_deref().unwrap_or("command failed")
+                );
+                return Ok(false);
+            }
+            ServerMsg::Error(e) => return Err(ClientError::DaemonError(e)),
+            other => {
+                return Err(ClientError::Io(std::io::Error::other(format!(
+                    "unexpected reply from daemon: {other:?}"
+                ))));
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Write raw bytes into a session's focused pane (popup-aware).
+///
+/// Single round-trip. Returns `Ok(true)` on success, `Ok(false)` when the
+/// daemon reports an error (message printed to stderr). No daemon → `Err`.
+pub async fn client_send_input(
+    name: Option<String>,
+    bytes: Vec<u8>,
+) -> Result<bool, ClientError> {
+    let socket = default_socket_path()?;
+    let stream = connect_only(&socket).await?;
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    client_handshake(&mut reader, &mut writer).await?;
+
+    let msg = ClientMsg::SendInput {
+        session: name,
+        bytes: bytes::Bytes::from(bytes),
+    };
+    let payload = postcard::to_allocvec(&msg)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
+    Codec::write_frame(&mut writer, &payload).await?;
+
+    let frame = Codec::read_frame(&mut reader)
+        .await?
+        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
+    let reply: ServerMsg = postcard::from_bytes(&frame)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    match reply {
+        ServerMsg::CommandResult { ok: true, message } => {
+            if let Some(m) = message {
+                println!("{m}");
+            }
+            Ok(true)
+        }
+        ServerMsg::CommandResult { ok: false, message } => {
+            eprintln!(
+                "plexy-glass send: {}",
+                message.as_deref().unwrap_or("send failed")
+            );
+            Ok(false)
+        }
+        ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
+        other => Err(ClientError::Io(std::io::Error::other(format!(
+            "unexpected reply from daemon: {other:?}"
+        )))),
+    }
+}
+
+/// Capture the focused pane's visible screen text (popup-aware) and print to
+/// stdout.
+///
+/// Returns `Ok(true)` on success, `Ok(false)` when the daemon reports an error
+/// (message on stderr). No daemon → `Err`.
+pub async fn client_capture(name: Option<String>) -> Result<bool, ClientError> {
+    let socket = default_socket_path()?;
+    let stream = connect_only(&socket).await?;
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    client_handshake(&mut reader, &mut writer).await?;
+
+    let msg = ClientMsg::CapturePane { session: name };
+    let payload = postcard::to_allocvec(&msg)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
+    Codec::write_frame(&mut writer, &payload).await?;
+
+    let frame = Codec::read_frame(&mut reader)
+        .await?
+        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
+    let reply: ServerMsg = postcard::from_bytes(&frame)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    match reply {
+        ServerMsg::PaneCapture { text } => {
+            println!("{text}");
+            Ok(true)
+        }
+        ServerMsg::CommandResult { ok: false, message } => {
+            eprintln!(
+                "plexy-glass capture: {}",
+                message.as_deref().unwrap_or("capture failed")
+            );
+            Ok(false)
+        }
+        ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
+        other => Err(ClientError::Io(std::io::Error::other(format!(
+            "unexpected reply from daemon: {other:?}"
+        )))),
     }
 }
 
