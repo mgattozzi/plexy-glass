@@ -52,7 +52,7 @@ The file is KDL **v2**. The practical differences from v1 that bite people:
   falls back to the built-in defaults everywhere, since we'd rather run on a
   known-good config than on stale state. All three triggers surface the
   error: `plexy-glass reload` prints `config reload error: …` to the shell,
-  and the in-session triggers (`Ctrl+a R`, `:reload`) show `config error: …`
+  and the in-session triggers (`Ctrl+a R`, `:reload`) show `reload failed: …`
   in the status line (the daemon log also records it). Note that the same
   message-fidelity limits apply: decode errors include line/column, and a raw
   KDL syntax error gives only `Failed to parse KDL document`.

@@ -2156,7 +2156,13 @@ mod tests {
         let _g = crate::test_env::isolate();
         let original = Session::new("rt".into(), spec(), size(), cfg()).unwrap();
         original.mark_dirty();
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+                crate::persist::load_session("rt").ok().flatten().is_some()
+            })
+            .await,
+            "persist debounce never wrote 'rt'"
+        );
         drop(original);
         let saved = crate::persist::load_session("rt")
             .expect("load")
@@ -2263,7 +2269,13 @@ mod tests {
             .handle_command(plexy_glass_mux::Command::SplitV)
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+                crate::persist::load_session("rt2").ok().flatten().is_some()
+            })
+            .await,
+            "persist debounce never wrote 'rt2'"
+        );
         drop(original);
         let saved = crate::persist::load_session("rt2")
             .expect("load")
@@ -2415,7 +2427,13 @@ mod tests {
             wm.active_window().pane(pid).unwrap().set_name(Some("logs".into()));
         }
         original.mark_dirty();
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+                crate::persist::load_session("rtn").ok().flatten().is_some()
+            })
+            .await,
+            "persist debounce never wrote 'rtn'"
+        );
         drop(original);
         let saved = crate::persist::load_session("rtn").expect("load").expect("file");
         assert_eq!(saved.windows[0].panes[0].name.as_deref(), Some("logs"));
@@ -2434,7 +2452,13 @@ mod tests {
         let _g = crate::test_env::isolate();
         let s = Session::new("p5-split".into(), spec(), size(), cfg()).unwrap();
         s.handle_command(plexy_glass_mux::Command::SplitV).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+                crate::persist::load_session("p5-split").ok().flatten().is_some()
+            })
+            .await,
+            "persist debounce never wrote 'p5-split'"
+        );
         let loaded = crate::persist::load_session("p5-split")
             .expect("load")
             .expect("file");
@@ -2528,7 +2552,13 @@ mod tests {
         let _g = crate::test_env::isolate();
         let s = Session::new("bc".into(), spec(), size(), cfg()).unwrap();
         s.mark_dirty();
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+                crate::persist::load_session("bc").ok().flatten().is_some()
+            })
+            .await,
+            "persist debounce never wrote 'bc'"
+        );
         assert!(crate::persist::load_session("bc").unwrap().is_some());
         crate::persist::delete_session("bc").unwrap();
         // Close, then try hard to make the persist task re-save.
@@ -2536,6 +2566,9 @@ mod tests {
         s.begin_close(); // idempotent: must not panic
         s.mark_dirty();
         s.persist_notify.notify_one();
+        // Negative assertion: proving absence requires a fixed wait. We sleep
+        // long enough for the debounce (1500ms) + one extra cycle to fire if
+        // begin_close failed to suppress it, then assert no file was written.
         tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
         assert!(
             crate::persist::load_session("bc").unwrap().is_none(),
@@ -2549,7 +2582,13 @@ mod tests {
         let _g = crate::test_env::isolate();
         let s = Session::new("dirty-test".into(), spec(), size(), cfg()).unwrap();
         s.mark_dirty();
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+                crate::persist::load_session("dirty-test").ok().flatten().is_some()
+            })
+            .await,
+            "persist debounce never wrote 'dirty-test'"
+        );
         let loaded = crate::persist::load_session("dirty-test")
             .expect("load")
             .expect("file should exist");
@@ -2566,17 +2605,25 @@ mod tests {
         std::fs::create_dir_all(dir.parent().expect("sessions dir has a parent")).unwrap();
         std::fs::write(&dir, b"not a directory").unwrap();
         s.mark_dirty();
-        // Debounce is 1500ms, so by 1800ms the failed attempt has run and must
-        // have re-set `dirty` (the old code left it false, losing the snapshot).
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        // Poll until the failed attempt has run and re-set dirty=true
+        // (the old code left it false, losing the snapshot).
         assert!(
-            s.dirty.load(std::sync::atomic::Ordering::Relaxed),
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+                s.dirty.load(std::sync::atomic::Ordering::Relaxed)
+            })
+            .await,
             "failed persist must re-set dirty so the snapshot is retried"
         );
         // Heal the path. The failure handler self-notified, so the loop
         // retries on its own and we don't need another `mark_dirty`.
         std::fs::remove_file(&dir).unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+                crate::persist::load_session("persist-retry").ok().flatten().is_some()
+            })
+            .await,
+            "retry after heal should have persisted the session"
+        );
         let loaded = crate::persist::load_session("persist-retry")
             .expect("load")
             .expect("retry after heal should have persisted the session");

@@ -363,7 +363,13 @@ mod tests {
         // condition under which the bug resurrected the file).
         let s = r.create("pinned".into(), spec(), size(), cfg()).await.unwrap();
         s.mark_dirty();
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+                crate::persist::load_session("pinned").ok().flatten().is_some()
+            })
+            .await,
+            "persist debounce never wrote 'pinned'"
+        );
         assert!(crate::persist::load_session("pinned").unwrap().is_some());
 
         r.kill("pinned").await.unwrap();
@@ -371,6 +377,9 @@ mod tests {
         // Try to make the (now-aborted) persist task resurrect the file.
         s.mark_dirty();
         s.persist_notify.notify_one();
+        // Negative assertion: proving absence requires a fixed wait. We sleep
+        // long enough for the debounce (1500ms) + one cycle, then confirm the
+        // killed session's task did not resurrect the file.
         tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
         assert!(
             crate::persist::load_session("pinned").unwrap().is_none(),
@@ -385,7 +394,13 @@ mod tests {
         let r = SessionRegistry::new();
         let s = r.create("kill-me".into(), spec(), size(), cfg()).await.unwrap();
         s.mark_dirty();
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+                crate::persist::load_session("kill-me").ok().flatten().is_some()
+            })
+            .await,
+            "persist debounce never wrote 'kill-me'"
+        );
         assert!(crate::persist::load_session("kill-me").unwrap().is_some());
         r.kill("kill-me").await.unwrap();
         assert!(crate::persist::load_session("kill-me").unwrap().is_none());

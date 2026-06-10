@@ -353,7 +353,7 @@ where
                                                 {
                                                     session
                                                         .set_status_message(format!(
-                                                            "config error: {e}"
+                                                            "reload failed: {e}"
                                                         ))
                                                         .await;
                                                 }
@@ -532,7 +532,7 @@ where
                                         if let Err(e) = registry.reload_config().await {
                                             session
                                                 .set_status_message(format!(
-                                                    "config error: {e}"
+                                                    "reload failed: {e}"
                                                 ))
                                                 .await;
                                         }

@@ -71,6 +71,31 @@ pub(crate) mod test_env {
             }
         }
     }
+
+    /// Poll `cond` every 50 ms until it returns `true` or `deadline` elapses.
+    ///
+    /// Returns whether the condition was met. Use this to wait out the persist
+    /// debounce (and similar async side-effects) without a fixed sleep; tests
+    /// exit early on success so the suite is faster than any fixed-sleep bound.
+    ///
+    /// Note that for *negative* assertions ("X did NOT happen") a poll cannot
+    /// prove absence, so keep a short fixed sleep there and mark it with a
+    /// comment.
+    pub(crate) async fn poll_until(
+        deadline: std::time::Duration,
+        mut cond: impl FnMut() -> bool,
+    ) -> bool {
+        let start = std::time::Instant::now();
+        loop {
+            if cond() {
+                return true;
+            }
+            if start.elapsed() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
 }
 
 pub mod args;
