@@ -93,10 +93,11 @@ the sole running session is used (error if zero or more than one). See
 
 ## Default keybindings
 
-The prefix is `Ctrl+a`. Every binding below is rebindable via the `keymap`
-block in `config.kdl` (see the
-[configuration reference](docs/configuration.md); note that the prefix itself
-is currently fixed, so rebinding it means redeclaring the chords).
+The prefix defaults to `Ctrl+a` and is configurable (`keymap { prefix "Ctrl+b" }`).
+The built-in bindings are declared with a `prefix` chord token so they all
+follow a prefix change, and every binding below is also individually
+rebindable via the `keymap` block in `config.kdl` (see the
+[configuration reference](docs/configuration.md)).
 
 ### Sessions and client
 

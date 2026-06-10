@@ -96,6 +96,26 @@ fn isolate_dirs(tmp: &tempfile::TempDir) -> TestEnv {
     }
 }
 
+/// Write `body` as the test env's `config.kdl` at BOTH platform candidate
+/// paths: `$XDG_CONFIG_HOME/plexy-glass/` (used on Linux) and
+/// `$HOME/Library/Application Support/plexy-glass/` (macOS, where the
+/// `directories` crate ignores XDG_CONFIG_HOME and derives config_dir from
+/// $HOME). `isolate_dirs` overrides both env vars, so this never touches a
+/// real config.
+fn write_config(env: &TestEnv, body: &str) {
+    if let Some((_, xdg)) = env.iter().find(|(k, _)| k == "XDG_CONFIG_HOME") {
+        let cfg_dir = std::path::PathBuf::from(xdg).join("plexy-glass");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("config.kdl"), body).unwrap();
+    }
+    if let Some((_, home)) = env.iter().find(|(k, _)| k == "HOME") {
+        let cfg_dir =
+            std::path::PathBuf::from(home).join("Library/Application Support/plexy-glass");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("config.kdl"), body).unwrap();
+    }
+}
+
 
 /// A spawned `plexy-glass` client attached to a PTY, with ONE persistent reader
 /// thread accumulating all output into a shared, never-drained buffer.
@@ -830,21 +850,7 @@ status {{
 "##
     );
 
-    // Write to the XDG path (used on Linux).
-    if let Some((_, xdg)) = env.iter().find(|(k, _)| k == "XDG_CONFIG_HOME") {
-        let cfg_dir = std::path::PathBuf::from(xdg).join("plexy-glass");
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(cfg_dir.join("config.kdl"), &kdl_body).unwrap();
-    }
-    // Also write to the macOS path ($HOME/Library/Application Support/plexy-glass).
-    // The `directories` crate on macOS ignores XDG_CONFIG_HOME and derives
-    // config_dir from $HOME instead.
-    if let Some((_, home)) = env.iter().find(|(k, _)| k == "HOME") {
-        let cfg_dir = std::path::PathBuf::from(home)
-            .join("Library/Application Support/plexy-glass");
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(cfg_dir.join("config.kdl"), &kdl_body).unwrap();
-    }
+    write_config(&env, &kdl_body);
 
     let sess = TestSession::spawn(&env);
     // The config's text widget renders on the first frame, so capture it live.
@@ -853,6 +859,57 @@ status {{
     if !sess.wait_for(marker.as_bytes(), Duration::from_secs(5)) {
         eprintln!("note: custom-config test fail-soft. raw: {}", sess.snapshot_str());
     }
+}
+
+/// `keymap { prefix "Ctrl+b" }` retargets the prefix-relative built-in
+/// defaults end-to-end: `Ctrl+b c` creates a window, `Ctrl+a c` no longer does.
+#[test]
+fn custom_prefix_retargets_bindings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    write_config(&env, "keymap { prefix \"Ctrl+b\" }\n");
+
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+
+    // Ctrl+b (0x02) then `c` → the inherited `prefix c` default fires
+    // new_window under the custom prefix. Observable: the status bar's
+    // window-list paints " {index} {name} " per window, and a window created
+    // interactively is named "shell{id}", so the second window is "shell1" (the
+    // first is "shell"). Match "shell1", not "2 shell1": the diff renderer can
+    // jump over unchanged blank cells, so the spaced form need not arrive as
+    // contiguous bytes, while a same-style word always does.
+    sess.send(&[0x02]);
+    sess.send(b"c");
+    assert!(
+        sess.wait_for(b"shell1", Duration::from_secs(10)),
+        "Ctrl+b c did not create a second window under prefix Ctrl+b. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // Negative: Ctrl+a (0x01) then `c`. With the prefix moved to Ctrl+b no
+    // binding starts with Ctrl+a, so both keys pass through to the pane's
+    // shell and no third window ("shell2") may appear. Absence needs a
+    // liveness round-trip first, all through the SAME client writer so the
+    // bytes are strictly ordered after the chord: Ctrl+u (0x15) clears the
+    // literal "c" from the shell's line buffer, then a quote-concatenated
+    // marker proves the input path and renderer caught up. Had Ctrl+a c
+    // wrongly created a window, its status repaint would render before the
+    // marker's output does.
+    sess.send(&[0x01]);
+    sess.send(b"c");
+    sess.send(&[0x15]); // kill-line: discard the passed-through "c"
+    sess.send_str("printf 'PFX_''NEG_DONE\\n'\n");
+    assert!(
+        sess.wait_for(b"PFX_NEG_DONE", Duration::from_secs(10)),
+        "liveness marker never appeared after Ctrl+a c. raw: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        !sess.snapshot_str().contains("shell2"),
+        "Ctrl+a c created a window despite prefix Ctrl+b. raw: {}",
+        sess.snapshot_str()
+    );
 }
 
 #[test]
@@ -873,16 +930,7 @@ session "main" {{
 }}
 "##
     );
-    if let Some((_, xdg)) = env.iter().find(|(k, _)| k == "XDG_CONFIG_HOME") {
-        let cfg_dir = std::path::PathBuf::from(xdg).join("plexy-glass");
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(cfg_dir.join("config.kdl"), &kdl_body).unwrap();
-    }
-    if let Some((_, home)) = env.iter().find(|(k, _)| k == "HOME") {
-        let cfg_dir = std::path::PathBuf::from(home).join("Library/Application Support/plexy-glass");
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(cfg_dir.join("config.kdl"), &kdl_body).unwrap();
-    }
+    write_config(&env, &kdl_body);
 
     // The client attaches with no name → "main", which is now declared and was
     // built at daemon boot. Its pane's command output should appear.
@@ -999,17 +1047,7 @@ status {
     }
 }
 "##;
-    if let Some((_, xdg)) = env.iter().find(|(k, _)| k == "XDG_CONFIG_HOME") {
-        let cfg_dir = std::path::PathBuf::from(xdg).join("plexy-glass");
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(cfg_dir.join("config.kdl"), body).unwrap();
-    }
-    if let Some((_, home)) = env.iter().find(|(k, _)| k == "HOME") {
-        let mac_cfg =
-            std::path::PathBuf::from(home).join("Library/Application Support/plexy-glass");
-        std::fs::create_dir_all(&mac_cfg).unwrap();
-        std::fs::write(mac_cfg.join("config.kdl"), body).unwrap();
-    }
+    write_config(&env, body);
 
     // Issue `plexy-glass reload` from a second process.
     let _ = std::process::Command::cargo_bin("plexy-glass")

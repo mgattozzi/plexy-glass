@@ -296,28 +296,37 @@ shell command="uname" interval="1m" timeout="2s" { args "-sr"; style fg="info" }
 keymap {
     prefix "Ctrl+a"          // default "Ctrl+a"
     inherit-defaults #true   // default #true
-    bind "Ctrl+a g" "popup:lazygit"
+    bind "prefix g" "popup:lazygit"
 }
 ```
 
-- `inherit-defaults`: when `#true` (the default), the built-in binding table
-  is loaded first and your `bind` lines are applied on top, so a `bind` with
-  the same chord sequence overrides that single default. When `#false`, only
-  your `bind` lines exist.
-- `prefix` is accepted and stored, but currently informational: the binding
-  table spells out full chord sequences (the built-in defaults all start
-  with `Ctrl+a`), and changing `prefix` alone does not re-prefix them. To use
-  a different prefix today, set `inherit-defaults #false` and declare
-  bindings with your prefix as the first chord.
-- `bind "<chord sequence>" "<command>"` takes two string arguments. A binding
-  whose chord or command fails to parse is skipped with a logged warning, so
-  it does not fail the whole config.
+- `inherit-defaults`: when `#true` (the default), we load the built-in
+  binding table first and apply your `bind` lines on top, so a `bind` with
+  the same chord sequence **overrides** that single default. When `#false`,
+  only your `bind` lines exist.
+- `prefix`: a single chord (e.g. `prefix "Ctrl+b"`). The word `prefix` in a
+  `bind` chord sequence resolves to this chord, and the built-in defaults are
+  declared prefix-relative (`prefix c`, `prefix v`, …), so changing `prefix`
+  retargets every inherited default and every token-form binding at once. A
+  binding that spells out a literal chord (`bind "Ctrl+a g" …`) is absolute
+  and does not follow `prefix`. If the value is empty, unparseable, or more
+  than one chord, the daemon logs a warning and falls back to `Ctrl+a`, so a
+  config typo never bricks the session.
+- `bind "<chord sequence>" "<command>"`: two string arguments. A binding
+  whose chord or command fails to parse is **skipped with a logged warning**,
+  and it does not fail the whole config.
 
 ### Chord grammar
 
 A *chord* is zero or more modifiers and one key, joined with `+`:
 `Ctrl+a`, `Alt+Left`, `Ctrl+Shift+F5`, `x`. A *chord sequence* is one or more
 chords separated by spaces: `"Ctrl+a c"` means press `Ctrl+a`, then `c`.
+
+The bare word `prefix` (case-insensitive: `prefix`, `Prefix`, `PREFIX`) is a
+chord alias that resolves to `keymap.prefix`. It is valid at any position in
+a sequence (`"prefix c"`, `"prefix Space"`, `"Ctrl+x prefix"`), and the
+built-in defaults all use it, which is what makes them follow a custom
+prefix.
 
 An armed prefix **waits indefinitely** for the rest of its chord (tmux
 semantics: there is no timeout, and the `prefix-indicator` status widget
@@ -579,11 +588,12 @@ status {
 keymap {
     prefix "Ctrl+a"
     inherit-defaults #true
-    // New bindings on top of the defaults:
-    bind "Ctrl+a g" "popup:lazygit"
-    bind "Ctrl+a t" "layout:tiled"
+    // New bindings on top of the defaults. The `prefix` token resolves to
+    // the chord configured above, so these follow a prefix change:
+    bind "prefix g" "popup:lazygit"
+    bind "prefix t" "layout:tiled"
     // A second chord for an existing command: F5 also reloads.
-    bind "Ctrl+a F5" "reload_config"
+    bind "prefix F5" "reload_config"
 }
 
 session "dev" cwd="~/projects/app" {

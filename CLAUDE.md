@@ -239,7 +239,15 @@ verbs (detach/switch/help/sessions/tree/buffers) refused with
 `"<verb>: requires an attached client"`; `reload`/`paste` work headless;
 honest exit codes (0 all-ok, 1 any-failure, stop-at-first for multi-line cmd);
 `send`/`capture` are popup-aware by design (same input-target-pane path);
-no auto-spawn (distinct from list/reload). Each has a spec in `docs/superpowers/specs/`.
+no auto-spawn (distinct from list/reload); and a **configurable prefix** —
+`keymap.prefix` is consumed for real: binding strings accept a `prefix` chord
+token (case-insensitive, any position; `parse_chord_seq_with_prefix` in
+`crates/keys/src/spec.rs`), `build_keymap` resolves it once per build with a
+warn-and-fall-back-to-`Ctrl+a` policy for invalid/empty/multi-chord values,
+every built-in default is declared prefix-relative (`binding("prefix c", …)`
+in `crates/config/src/default.rs`), and the help overlay substitutes the
+configured prefix string back into the keys column. Each has a spec in
+`docs/superpowers/specs/`.
 
 The overlay subsystem is the substrate for modal UI: add `Overlay` +
 `OverlayView` variants (mux), an `OverlayHandler` arm, `WindowManager::open_*`
@@ -260,9 +268,7 @@ updated as part of each feature, per **User documentation**. Workflows
 
 Not yet built (future work): pipe-pane; cross-window **swap**-pane
 and the choose-tree filter/collapse + session rename (deferred in their specs);
-silence monitoring + bell/activity alert messages; set/save/load paste buffers;
-**`keymap.prefix` is decoded but never consumed** — the prefix is hard-coded
-`Ctrl+a` (known gap surfaced while writing the configuration reference).
+silence monitoring + bell/activity alert messages; set/save/load paste buffers.
 Declarative-session v1 boundaries left for later: split ratios + active
 window/pane selection in the template, per-pane env maps, re-reading templates on
 `Ctrl+a R` reload, and `switch_session` auto-creating a not-yet-running declared
@@ -275,4 +281,5 @@ preset layouts + the user-facing config docs shipped — 2026-06-09 spec/plan;
 cleanup bundle — C1–C12 bug/test/structure fixes — shipped 2026-06-09 spec/plan;
 CLI scripting surface — `plexy-glass cmd / send / capture`, prompt-grammar reuse,
 protocol v6, popup-aware, sole-or-explicit session resolution — shipped
-2026-06-10 spec/plan.)
+2026-06-10 spec/plan; configurable prefix — the `prefix` chord token,
+prefix-relative defaults, resolved-chord help — shipped 2026-06-10 spec/plan.)

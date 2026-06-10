@@ -1112,11 +1112,12 @@ status {
 keymap {
     prefix "Ctrl+a"
     inherit-defaults #true
-    // New bindings on top of the defaults:
-    bind "Ctrl+a g" "popup:lazygit"
-    bind "Ctrl+a t" "layout:tiled"
+    // New bindings on top of the defaults. The `prefix` token resolves to
+    // the chord configured above, so these follow a prefix change:
+    bind "prefix g" "popup:lazygit"
+    bind "prefix t" "layout:tiled"
     // A second chord for an existing command: F5 also reloads.
-    bind "Ctrl+a F5" "reload_config"
+    bind "prefix F5" "reload_config"
 }
 
 session "dev" cwd="~/projects/app" {
@@ -1165,7 +1166,7 @@ session "dev" cwd="~/projects/app" {
         assert_eq!(cfg.keymap.bindings.len(), 3);
         assert_eq!(
             cfg.keymap.bindings[0],
-            KeymapBinding { keys: "Ctrl+a g".into(), command: "popup:lazygit".into() }
+            KeymapBinding { keys: "prefix g".into(), command: "popup:lazygit".into() }
         );
         // Session template: three windows, nested split in "run".
         assert_eq!(cfg.sessions.len(), 1);
