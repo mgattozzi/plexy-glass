@@ -1502,3 +1502,158 @@ fn next_layout_cycles_without_breaking_input() {
     }
     assert!(ok, "active pane unresponsive after next_layout cycling: {}", sess.snapshot_str());
 }
+
+// ---------------------------------------------------------------------------
+// CLI scripting verbs (S5)
+// ---------------------------------------------------------------------------
+
+/// Run a `plexy-glass` CLI verb against the test env; returns (status, stdout,
+/// stderr).
+fn run_cli(env: &TestEnv, args: &[&str]) -> (std::process::ExitStatus, String, String) {
+    let out = std::process::Command::cargo_bin("plexy-glass")
+        .unwrap()
+        .args(args)
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .output()
+        .expect("run plexy-glass");
+    (
+        out.status,
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// `plexy-glass send --enter` writes text into the attached session's pane and
+/// the output becomes visible in the PTY.
+#[test]
+fn cli_send_reaches_attached_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Quote-concatenation: 'CLI_''SENT' → CLI_SENT only when a shell *executes*
+    // the line, never from PTY echo of the typed bytes.
+    let (status, _stdout, stderr) =
+        run_cli(&env, &["send", "--enter", "printf 'CLI_''SENT\\n'"]);
+    assert!(
+        status.success(),
+        "send --enter failed (status={status:?}): {stderr}"
+    );
+
+    assert!(
+        sess.wait_for(b"CLI_SENT", Duration::from_secs(10)),
+        "CLI_SENT never appeared in pane output after send --enter. raw: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// `plexy-glass capture` reads the pane's visible screen text and returns it on
+/// stdout; polling until the previously-sent marker is visible.
+#[test]
+fn cli_capture_reads_pane() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Send a marker line first so it's on the screen.
+    let (status, _stdout, stderr) =
+        run_cli(&env, &["send", "--enter", "printf 'CAP_''MARKER\\n'"]);
+    assert!(status.success(), "send failed: {stderr}");
+
+    // Wait for the marker to appear in the PTY (so the shell executed it).
+    assert!(
+        sess.wait_for(b"CAP_MARKER", Duration::from_secs(10)),
+        "CAP_MARKER never appeared in PTY before capture poll"
+    );
+
+    // Capture is point-in-time: poll in a bounded loop.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut captured = false;
+    while Instant::now() < deadline {
+        let (status, stdout, _stderr) = run_cli(&env, &["capture"]);
+        if status.success() && stdout.contains("CAP_MARKER") {
+            captured = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        captured,
+        "capture never returned CAP_MARKER within deadline. last snapshot: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// `plexy-glass cmd` structural smoke tests: split and layout succeed; a bogus
+/// verb returns a non-zero exit code with "unknown command" on stderr; `help`
+/// returns a non-zero exit code with "requires an attached client" on stderr.
+#[test]
+fn cli_cmd_structural_and_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Split a vertical pane (this one succeeds).
+    let (status, _stdout, stderr) = run_cli(&env, &["cmd", "split v"]);
+    assert!(status.success(), "cmd 'split v' failed: {stderr}");
+    // Wait for the gutter to confirm the split landed before the next command.
+    let _ = sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(5));
+
+    // Apply the tiled layout, this one succeeds.
+    let (status, _stdout, stderr) = run_cli(&env, &["cmd", "layout tiled"]);
+    assert!(status.success(), "cmd 'layout tiled' failed: {stderr}");
+
+    // Bogus verb → non-zero exit, "unknown command" in stderr.
+    let (status, _stdout, stderr) = run_cli(&env, &["cmd", "bogusverb"]);
+    assert!(
+        !status.success(),
+        "cmd 'bogusverb' should have failed but returned success"
+    );
+    assert!(
+        stderr.contains("unknown command"),
+        "expected 'unknown command' in stderr for bogusverb, got: {stderr}"
+    );
+
+    // `help` is interactive-only, so we expect a non-zero exit and
+    // "requires an attached client" on stderr.
+    let (status, _stdout, stderr) = run_cli(&env, &["cmd", "help"]);
+    assert!(
+        !status.success(),
+        "cmd 'help' should have failed (interactive-only) but returned success"
+    );
+    assert!(
+        stderr.contains("requires an attached client"),
+        "expected 'requires an attached client' in stderr for help, got: {stderr}"
+    );
+
+    // Liveness probe: send a marker via send and confirm the session still responds.
+    let (status, _stdout, send_err) =
+        run_cli(&env, &["send", "--enter", "printf 'CMD_''LIVENESS\\n'"]);
+    assert!(status.success(), "liveness send failed: {send_err}");
+    assert!(
+        sess.wait_for(b"CMD_LIVENESS", Duration::from_secs(10)),
+        "CMD_LIVENESS never appeared after cmd error tests (session not live). raw: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// With no daemon running, `plexy-glass capture` must exit with a non-zero
+/// status (the daemon socket doesn't exist; connect_only returns an error which
+/// main maps to exit 1).
+///
+/// Note: TestEnv::drop issues `kill` after the test body; the kill prints
+/// "no daemon running", which is harmless.
+#[test]
+fn cli_no_daemon_exits_nonzero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    // Intentionally do NOT spawn a TestSession, so no daemon is running.
+    let (status, _stdout, _stderr) = run_cli(&env, &["capture"]);
+    assert!(
+        !status.success(),
+        "capture against a non-existent daemon should exit non-zero, but got success"
+    );
+}
