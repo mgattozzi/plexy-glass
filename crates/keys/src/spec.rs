@@ -43,11 +43,38 @@ pub fn parse_chord(s: &str) -> Result<ChordSpec, KeyParseError> {
 }
 
 pub fn parse_chord_seq(s: &str) -> Result<Vec<ChordSpec>, KeyParseError> {
+    parse_chord_seq_impl(s, None)
+}
+
+/// Like [`parse_chord_seq`] but also recognizes the bare word `prefix`
+/// (ASCII-case-insensitive) as a chord alias for the supplied `prefix` chord.
+/// The token is valid at any position in the sequence.
+pub fn parse_chord_seq_with_prefix(
+    s: &str,
+    prefix: ChordSpec,
+) -> Result<Vec<ChordSpec>, KeyParseError> {
+    parse_chord_seq_impl(s, Some(prefix))
+}
+
+fn parse_chord_seq_impl(
+    s: &str,
+    prefix: Option<ChordSpec>,
+) -> Result<Vec<ChordSpec>, KeyParseError> {
     let s = s.trim();
     if s.is_empty() {
         return Err(KeyParseError::Empty);
     }
-    s.split_whitespace().map(parse_chord).collect()
+    s.split_whitespace()
+        .map(|tok| {
+            if let Some(p) = prefix
+                && tok.eq_ignore_ascii_case("prefix")
+            {
+                Ok(p)
+            } else {
+                parse_chord(tok)
+            }
+        })
+        .collect()
 }
 
 fn parse_named_key(s: &str) -> Result<Key, KeyParseError> {
@@ -365,5 +392,81 @@ mod tests {
     fn parses_next_layout() {
         let c = parse_command("next_layout").unwrap();
         assert_eq!(c.command, Command::NextLayout);
+    }
+
+    // ── prefix token tests ──────────────────────────────────────────
+
+    fn ctrl_a() -> ChordSpec {
+        (Modifiers::CTRL, Key::Char('a'))
+    }
+
+    fn ctrl_b() -> ChordSpec {
+        (Modifiers::CTRL, Key::Char('b'))
+    }
+
+    #[test]
+    fn prefix_token_resolves_in_sequences() {
+        // "prefix c" with default Ctrl+a prefix == "Ctrl+a c"
+        assert_eq!(
+            parse_chord_seq_with_prefix("prefix c", ctrl_a()).unwrap(),
+            parse_chord_seq("Ctrl+a c").unwrap()
+        );
+
+        // Custom prefix: Ctrl+b substitutes
+        assert_eq!(
+            parse_chord_seq_with_prefix("prefix c", ctrl_b()).unwrap(),
+            vec![ctrl_b(), (Modifiers::empty(), Key::Char('c'))]
+        );
+
+        // Token at second position: "Ctrl+x prefix"
+        let ctrl_x = (Modifiers::CTRL, Key::Char('x'));
+        assert_eq!(
+            parse_chord_seq_with_prefix("Ctrl+x prefix", ctrl_a()).unwrap(),
+            vec![ctrl_x, ctrl_a()]
+        );
+
+        // "prefix prefix" resolves to two prefix chords
+        assert_eq!(
+            parse_chord_seq_with_prefix("prefix prefix", ctrl_a()).unwrap(),
+            vec![ctrl_a(), ctrl_a()]
+        );
+    }
+
+    #[test]
+    fn prefix_token_case_insensitive() {
+        let expected = vec![ctrl_a(), (Modifiers::empty(), Key::Char('c'))];
+        assert_eq!(
+            parse_chord_seq_with_prefix("Prefix c", ctrl_a()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            parse_chord_seq_with_prefix("PREFIX c", ctrl_a()).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn absolute_sequences_unchanged() {
+        // A representative set of sequences parses byte-identically through
+        // both entry points (no prefix token in the string).
+        let cases = ["Ctrl+a c", "Alt+Left", "Ctrl+a Ctrl+a", "Ctrl+b x"];
+        for s in cases {
+            assert_eq!(
+                parse_chord_seq_with_prefix(s, ctrl_a()).unwrap(),
+                parse_chord_seq(s).unwrap(),
+                "mismatch for {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_parse_chord_seq_rejects_the_token() {
+        // parse_chord_seq (no prefix) must NOT silently resolve "prefix", since
+        // it is not a valid chord name in the prefix-less path.
+        let err = parse_chord_seq("prefix c").unwrap_err();
+        assert!(
+            matches!(err, KeyParseError::UnknownToken(ref t) if t == "prefix"),
+            "expected UnknownToken(\"prefix\"), got {err:?}"
+        );
     }
 }

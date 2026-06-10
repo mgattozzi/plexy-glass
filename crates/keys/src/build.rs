@@ -1,21 +1,56 @@
 //! Compile a `KeymapConfig` into a runtime `Keymap`.
 
-use crate::spec::{parse_chord_seq, parse_command};
+use crate::spec::{ChordSpec, parse_chord_seq, parse_chord_seq_with_prefix, parse_command};
 use plexy_glass_config::{KeymapConfig, built_in_keymap};
-use plexy_glass_mux::Keymap;
+use plexy_glass_mux::{Key, Keymap, Modifiers};
+
+/// The default fallback prefix: `Ctrl+a`.
+///
+/// Used when `keymap.prefix` is invalid, empty, or resolves to more than one
+/// chord. A config typo must never brick the session, so this follows the same
+/// policy as invalid bindings (warn-and-skip).
+const DEFAULT_PREFIX: ChordSpec = (Modifiers::CTRL, Key::Char('a'));
+
+/// Resolve `keymap.prefix` to a single [`ChordSpec`].
+///
+/// `s` must be a single-chord string (e.g. `"Ctrl+b"`). If it is empty,
+/// unparseable, or parses to more than one chord, a warning is emitted and
+/// the function falls back to `Ctrl+a`.
+fn resolve_prefix(s: &str) -> ChordSpec {
+    match parse_chord_seq(s) {
+        Ok(chords) if chords.len() == 1 => chords[0],
+        Ok(_) => {
+            tracing::warn!(
+                value = s,
+                "keymap.prefix must be a single chord; falling back to Ctrl+a"
+            );
+            DEFAULT_PREFIX
+        }
+        Err(e) => {
+            tracing::warn!(
+                value = s,
+                error = %e,
+                "keymap.prefix is invalid; falling back to Ctrl+a"
+            );
+            DEFAULT_PREFIX
+        }
+    }
+}
 
 pub fn build_keymap(cfg: &KeymapConfig) -> Keymap {
+    // Resolve prefix; see `resolve_prefix` for the fallback policy.
+    let prefix = resolve_prefix(&cfg.prefix);
     let mut km = Keymap::new();
     if cfg.inherit_defaults {
-        apply(&mut km, &built_in_keymap().bindings);
+        apply(&mut km, &built_in_keymap().bindings, prefix);
     }
-    apply(&mut km, &cfg.bindings);
+    apply(&mut km, &cfg.bindings, prefix);
     km
 }
 
-fn apply(km: &mut Keymap, bindings: &[plexy_glass_config::KeymapBinding]) {
+fn apply(km: &mut Keymap, bindings: &[plexy_glass_config::KeymapBinding], prefix: ChordSpec) {
     for (i, b) in bindings.iter().enumerate() {
-        match (parse_chord_seq(&b.keys), parse_command(&b.command)) {
+        match (parse_chord_seq_with_prefix(&b.keys, prefix), parse_command(&b.command)) {
             (Ok(chords), Ok(cmd_spec)) => {
                 km.bind(&chords, cmd_spec.command);
             }
@@ -110,6 +145,31 @@ mod tests {
             km.consume(e2, b" ".to_vec()),
             KeymapAction::Command(Command::NextLayout)
         ));
+    }
+
+    #[test]
+    fn invalid_prefix_falls_back_to_ctrl_a() {
+        // "NotAKey", "", "Ctrl+a Ctrl+b", and "prefix" (circular) are all
+        // invalid prefix values; each must fall back to Ctrl+a.
+        // The warn itself is log-only (not observable here), but the binding fires.
+        for bad_prefix in &["NotAKey", "", "Ctrl+a Ctrl+b", "prefix"] {
+            let cfg = KeymapConfig {
+                prefix: (*bad_prefix).into(),
+                inherit_defaults: true,
+                bindings: vec![],
+            };
+            let mut km = build_keymap(&cfg);
+            let e1 = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
+            assert!(
+                matches!(km.consume(e1, vec![0x01]), KeymapAction::Pending),
+                "Pending after Ctrl+a (bad prefix={bad_prefix:?})"
+            );
+            let e2 = KeyEvent::new(Key::Char('c'), Modifiers::empty());
+            assert!(
+                matches!(km.consume(e2, b"c".to_vec()), KeymapAction::Command(Command::NewWindow)),
+                "NewWindow after Ctrl+a c (bad prefix={bad_prefix:?})"
+            );
+        }
     }
 
     #[test]
