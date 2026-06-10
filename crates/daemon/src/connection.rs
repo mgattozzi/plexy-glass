@@ -1786,27 +1786,31 @@ mod tests {
             while cr.read(&mut b).await.unwrap_or(0) > 0 {}
         });
 
-        // Ctrl+a c → window 1 (active); Ctrl+a p → back to window 0 (window 1 now
-        // background). Poll until established.
-        Codec::write_frame(
-            &mut cw,
-            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01c\x01p")))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+        // Create window 1 with the test's `cat` spec, then make window 0
+        // active again (window 1 background). Do NOT create it via Ctrl+a c
+        // (`Command::NewWindow`): that deliberately spawns `$SHELL`, and an
+        // interactive login shell only emits a BEL if its line editor happens
+        // to beep on ^G, after fork/exec plus sourcing the user's rc files,
+        // which under full-suite load occasionally exceeded the 5s deadline
+        // (the old flake) and breaks outright under a missing/misconfigured
+        // $SHELL. cat echoes the typed BEL byte verbatim within milliseconds.
+        // The bell below still flows through the full production pipeline:
+        // pane reader → bell atomic → notify → render coordinator (the sole
+        // caller of update_monitor_flags).
         let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(s) = registry.get("bellmon").await {
-                let m = s.window_manager.lock().await;
-                if m.windows().len() == 2 && m.active_idx() == 0 {
-                    break;
-                }
-            }
+        while registry.get("bellmon").await.is_none() {
             if Instant::now() > deadline {
-                panic!("two windows with window 0 active never established");
+                panic!("session never created");
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        {
+            let s = registry.get("bellmon").await.unwrap();
+            let mut m = s.window_manager.lock().await;
+            m.new_window_with_spec(cat(), "bg".into()).unwrap();
+            m.set_active_window(0);
+            assert_eq!(m.windows().len(), 2);
+            assert_eq!(m.active_idx(), 0);
         }
 
         // Emit a real BEL in the BACKGROUND window's pane (cat outputs the \x07

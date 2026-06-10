@@ -19,27 +19,41 @@ pub(crate) static STATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new((
 #[cfg(test)]
 pub(crate) mod test_env {
     /// Holds the crate-wide env lock, points `XDG_STATE_HOME` at a fresh
-    /// tempdir, and restores the previous value on drop.
+    /// tempdir, pins `SHELL` to `/bin/sh`, and restores the previous values
+    /// on drop.
+    ///
+    /// `SHELL` is pinned because everything a guarded test spawns through
+    /// `declared::default_shell()` (splits / new windows via `default_spec`,
+    /// popups, and declared-template panes without an explicit `command`)
+    /// must not depend on the developer's interactive shell existing or
+    /// behaving. An interactive login shell sources rc files and its line
+    /// editor decides whether ^G even beeps; `/bin/sh` is POSIX-guaranteed
+    /// and cheap. Tests that build a `WindowManager` directly (no
+    /// Session/registry, no guard) pin via
+    /// `WindowManager::set_default_program` instead.
     pub(crate) struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         old_xdg: Option<std::ffi::OsString>,
+        old_shell: Option<std::ffi::OsString>,
         _tmp: tempfile::TempDir,
     }
 
     pub(crate) fn isolate() -> EnvGuard {
         // A poisoned lock is safe to reuse: the panicking test's guard already
-        // restored the env var during unwind.
+        // restored the env vars during unwind.
         let lock = super::STATE_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
         let old_xdg = std::env::var_os("XDG_STATE_HOME");
+        let old_shell = std::env::var_os("SHELL");
         // SAFETY: env mutation is guarded by `STATE_ENV_LOCK`, held for the
         // lifetime of the guard.
         unsafe {
             std::env::set_var("XDG_STATE_HOME", tmp.path());
+            std::env::set_var("SHELL", "/bin/sh");
         }
-        EnvGuard { _lock: lock, old_xdg, _tmp: tmp }
+        EnvGuard { _lock: lock, old_xdg, old_shell, _tmp: tmp }
     }
 
     impl Drop for EnvGuard {
@@ -49,6 +63,10 @@ pub(crate) mod test_env {
                 match &self.old_xdg {
                     Some(v) => std::env::set_var("XDG_STATE_HOME", v),
                     None => std::env::remove_var("XDG_STATE_HOME"),
+                }
+                match &self.old_shell {
+                    Some(v) => std::env::set_var("SHELL", v),
+                    None => std::env::remove_var("SHELL"),
                 }
             }
         }

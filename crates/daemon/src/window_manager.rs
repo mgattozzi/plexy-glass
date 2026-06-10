@@ -530,6 +530,13 @@ impl WindowManager {
         }
     }
 
+    /// Test seam: pin the program new windows/splits/popups spawn (production
+    /// default is the user's `$SHELL`, which unit tests must not depend on).
+    #[cfg(test)]
+    pub(crate) fn set_default_program(&mut self, program: &str) {
+        self.default_spec.program = program.to_string();
+    }
+
     /// Spawn a new window using a caller-supplied spec (used by session
     /// restore, where every restored window's first pane gets its own cwd).
     pub fn new_window_with_spec(
@@ -636,7 +643,9 @@ impl WindowManager {
     /// only once the new pane has actually spawned).
     /// `command` runs via `$SHELL -c`; `None` runs the interactive shell.
     pub fn open_popup(&mut self, command: Option<String>) -> Result<(), DaemonError> {
-        let shell = crate::declared::default_shell();
+        // One source of truth: `default_spec.program` is built from
+        // `default_shell()` at construction (and pinnable in tests).
+        let shell = self.default_spec.program.clone();
         let args = match &command {
             Some(cmd) => vec!["-c".to_string(), cmd.clone()],
             None => Vec::new(),
@@ -1860,6 +1869,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::SplitV).unwrap();
         assert_eq!(m.active_window().layout().panes().len(), 2);
         assert_eq!(m.active_window().active(), PaneId(1));
@@ -1881,6 +1891,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::NewWindow).unwrap();
         assert_eq!(m.windows().len(), 2);
         assert_eq!(m.active_idx(), 1);
@@ -1902,6 +1913,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::SplitV).unwrap();
         // After SplitV, the new pane (`PaneId(1)`) is active.
         assert_eq!(m.active_window().active(), PaneId(1));
@@ -1931,6 +1943,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::SplitH).unwrap();
         // After SplitH, the new pane (`PaneId(1)`) is active.
         assert_eq!(m.active_window().active(), PaneId(1));
@@ -1962,6 +1975,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::SplitV).unwrap();
         // After SplitV, the new pane (`PaneId(1)`) is active on the right.
         assert_eq!(m.active_window().active(), PaneId(1));
@@ -1994,6 +2008,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::NewWindow).unwrap();
         m.handle_command(Command::NextWindow).unwrap();
         assert_eq!(m.active_idx(), 0);
@@ -2012,6 +2027,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.set_window_home_cwd(0, Some("/home/base".into()));
         // The active pane reports a DIFFERENT live cwd via OSC 7, and it must be ignored.
         if let Some(pane) = m.active_window().active_pane() {
@@ -2197,6 +2213,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // splits must not depend on `$SHELL`
         m.handle_command(Command::SplitV).unwrap();
         m
     }
@@ -2426,6 +2443,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::SplitH).unwrap(); // stacked top/bottom panes
         let vp = m.viewport();
         let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
@@ -2523,6 +2541,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::NewWindow).unwrap(); // 2 windows, active = 1
         assert_eq!(m.active_idx(), 1);
         m.set_status_layout(Some(23), 0);
@@ -2625,6 +2644,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::NewWindow).unwrap(); // active = 1, last = 0
         assert_eq!(m.active_idx(), 1);
         m.handle_command(Command::SelectLastWindow).unwrap();
@@ -2672,6 +2692,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::NewWindow).unwrap(); // W1, active=1, last=0
         m.handle_command(Command::NewWindow).unwrap(); // W2, active=2, last=1
         m.handle_command(Command::SelectWindow(0)).unwrap(); // active=0, last=Some(2) -> W2
@@ -2698,6 +2719,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::NewWindow).unwrap(); // W1 (pane 1)
         m.handle_command(Command::NewWindow).unwrap(); // W2 (pane 2)
         m.handle_command(Command::SelectWindow(0)).unwrap(); // active=0, last=Some(2) -> W2
@@ -2714,14 +2736,16 @@ mod tests {
     // ----- choose-tree -----
 
     fn mk_mgr() -> WindowManager {
-        WindowManager::new(
+        let mut m = WindowManager::new(
             spec(),
             PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
             Arc::new(Notify::new()),
             None,
             cfg(),
         )
-        .unwrap()
+        .unwrap();
+        m.set_default_program("/bin/sh"); // new windows/splits must not depend on `$SHELL`
+        m
     }
 
     fn tnode(session: &str, window: Option<u32>, pane: Option<u32>, depth: u8) -> TreeNode {
@@ -3203,6 +3227,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         assert!(!m.has_popup());
         m.handle_command(Command::OpenPopup { command: None }).unwrap();
         assert!(m.has_popup());
@@ -3227,6 +3252,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::OpenPopup { command: Some("sleep 600".into()) }).unwrap();
         assert_eq!(m.popup().unwrap().title, "sleep 600");
         m.handle_command(Command::OpenPopup { command: None }).unwrap();
@@ -3271,6 +3297,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::OpenPopup { command: None }).unwrap();
         let popup_id = m.popup().unwrap().pane.id();
         m.handle_pane_death(popup_id).unwrap();
@@ -3289,6 +3316,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::OpenPopup { command: None }).unwrap();
         // The only layout pane dies → session is ending; popup must not orphan.
         m.handle_pane_death(PaneId(0)).unwrap();
@@ -3307,6 +3335,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::OpenPopup { command: None }).unwrap();
         m.handle_command(Command::KillWindow).unwrap();
         assert!(m.is_empty());
@@ -3324,6 +3353,7 @@ mod tests {
             cfg(),
         )
         .unwrap();
+        m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
         m.handle_command(Command::OpenPopup { command: None }).unwrap();
         m.on_host_resize(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
             .unwrap();
