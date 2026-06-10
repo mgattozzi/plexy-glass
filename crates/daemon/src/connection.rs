@@ -545,10 +545,9 @@ async fn cleanup_and_exit(
 /// - disarmed→armed (`Pending`): notify here. (The `Pending` arm also
 ///   notifies, and `Notify` coalesces permits into one wakeup.)
 /// - armed→disarmed via `Command`/`Cancel`: notify here; redundant with the
-///   repaints those paths already trigger, again coalesced.
-/// - armed→disarmed via `PassThrough` (prefix timed out lazily inside
-///   `consume`, then the key fell through): nothing else repaints, so this
-///   notify is the only thing that clears the indicator.
+///   repaints those paths already trigger, again coalesced. (These are the
+///   ONLY disarm paths: an armed prefix waits indefinitely, no timeout, so
+///   `PassThrough` can't occur mid-chord.)
 /// - no transition (plain typing, `PassThrough` with prefix idle): no
 ///   notify, so ordinary keystrokes don't force a status repaint.
 fn store_prefix_armed(flag: &Arc<AtomicBool>, keymap: &Keymap, session: &Arc<Session>) {
@@ -1285,9 +1284,8 @@ mod tests {
             .unwrap();
         wait_armed(true, "arm").await;
 
-        // `e` is unbound after the prefix → Cancel → disarmed. (Even if the
-        // 1s chord timeout fires first, consume cancels lazily and the key
-        // passes through, so it's disarmed either way.)
+        // `e` is unbound after the prefix → Cancel → disarmed. (The prefix
+        // waits indefinitely, no chord timeout, so only this key resolves it.)
         let input = ClientMsg::Input(bytes::Bytes::from_static(b"e"));
         Codec::write_frame(&mut cw, &postcard::to_allocvec(&input).unwrap())
             .await

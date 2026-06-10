@@ -1,9 +1,11 @@
 //! Keymap: a chord trie that consumes typed `KeyEvent`s and emits `Command`
 //! or `PassThrough`.
+//!
+//! An armed prefix waits indefinitely for the rest of its chord (tmux
+//! semantics, no timeout); a non-matching key cancels it.
 
 use crate::{Direction, Key, KeyEvent, KeyEventKind, Modifiers, SplitDir};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -78,12 +80,6 @@ pub struct Keymap {
     root: TrieNode,
     pending: Vec<Chord>,
     pending_bytes: Vec<u8>,
-    /// The full last pending `KeyEvent` (the trie only keeps the `Chord`, which
-    /// loses kind/text/alternates). `tick()` flushes this on timeout so the
-    /// passed-through event is faithful, not a `kind=Press` reconstruction.
-    pending_last_event: Option<KeyEvent>,
-    pending_since: Option<Instant>,
-    timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +90,8 @@ pub enum KeymapAction {
     Command(Command),
     /// We're inside a chord sequence; hold until next chord.
     Pending,
-    /// Pending sequence cancelled (timeout / non-matching key).
+    /// Pending sequence cancelled (non-matching key, or a non-Press event
+    /// arriving mid-chord).
     Cancel,
 }
 
@@ -104,14 +101,7 @@ impl Keymap {
             root: TrieNode::default(),
             pending: Vec::new(),
             pending_bytes: Vec::new(),
-            pending_last_event: None,
-            pending_since: None,
-            timeout: Duration::from_secs(1),
         }
-    }
-
-    pub fn set_timeout(&mut self, t: Duration) {
-        self.timeout = t;
     }
 
     /// Add a binding. Later bindings with the same chord-sequence override earlier ones.
@@ -128,13 +118,6 @@ impl Keymap {
     }
 
     pub fn consume(&mut self, event: KeyEvent, bytes: Vec<u8>) -> KeymapAction {
-        // Check pending timeout.
-        if let Some(at) = self.pending_since
-            && at.elapsed() >= self.timeout
-        {
-            self.cancel();
-        }
-
         // Release/Repeat events never trigger bindings, they flow straight to
         // the re-encode stage. Only Press is matched.
         if event.kind != KeyEventKind::Press {
@@ -153,8 +136,6 @@ impl Keymap {
             if !child.children.is_empty() {
                 self.pending.push(chord);
                 self.pending_bytes.extend_from_slice(&bytes);
-                self.pending_last_event = Some(event.clone());
-                self.pending_since = Some(Instant::now());
                 return KeymapAction::Pending;
             }
             if let Some(cmd) = child.terminal.clone() {
@@ -172,25 +153,6 @@ impl Keymap {
         KeymapAction::Cancel
     }
 
-    /// Call periodically to handle prefix timeout. Returns `Some(PassThrough)` when
-    /// the held sequence has timed out.
-    pub fn tick(&mut self) -> Option<KeymapAction> {
-        if let Some(at) = self.pending_since
-            && at.elapsed() >= self.timeout
-        {
-            let bytes = std::mem::take(&mut self.pending_bytes);
-            // Flush the FULL pending event (kind/text/alternates preserved), not
-            // a `kind=Press` reconstruction from the trie `Chord`.
-            let last_event = self.pending_last_event.take();
-            self.cancel();
-            if let Some(event) = last_event {
-                return Some(KeymapAction::PassThrough(event, bytes));
-            }
-            return Some(KeymapAction::Cancel);
-        }
-        None
-    }
-
     fn descend(&self) -> &TrieNode {
         let mut node = &self.root;
         for chord in &self.pending {
@@ -205,8 +167,6 @@ impl Keymap {
     fn cancel(&mut self) {
         self.pending.clear();
         self.pending_bytes.clear();
-        self.pending_last_event = None;
-        self.pending_since = None;
     }
 }
 
@@ -220,6 +180,7 @@ impl Default for Keymap {
 mod tests {
     use super::*;
     use std::thread::sleep;
+    use std::time::Duration;
 
     fn chord(mods: Modifiers, key: Key) -> Chord {
         (mods, key)
@@ -340,42 +301,23 @@ mod tests {
     }
 
     #[test]
-    fn pending_timeout_triggers_cancel_on_tick() {
+    fn chord_waits_indefinitely_for_completion() {
+        // tmux semantics: an armed prefix waits for the rest of the chord with
+        // no deadline. The 1.1s sleep crosses the old 1s default timeout that
+        // used to lazily cancel the chord (and left the PFX indicator lit on a
+        // dead prefix); it must complete normally now. Deliberate real sleep,
+        // the regression IS time-dependence.
         let mut k = Keymap::new();
-        k.set_timeout(Duration::from_millis(50));
         k.bind(
             &[chord(Modifiers::CTRL, Key::Char('a')), chord(Modifiers::empty(), Key::Char('c'))],
             Command::NewWindow,
         );
         let (e1, b1) = ev(Modifiers::CTRL, Key::Char('a'), &[0x01]);
         assert!(matches!(k.consume(e1, b1), KeymapAction::Pending));
-        sleep(Duration::from_millis(80));
-        let tick = k.tick().expect("expected timeout flush");
-        assert!(matches!(tick, KeymapAction::PassThrough(..)));
-        assert!(!k.prefix_active());
+        sleep(Duration::from_millis(1100));
+        assert!(k.prefix_active(), "prefix must stay armed while waiting");
+        let (e2, b2) = ev(Modifiers::empty(), Key::Char('c'), b"c");
+        assert!(matches!(k.consume(e2, b2), KeymapAction::Command(Command::NewWindow)));
     }
 
-    #[test]
-    fn pending_timeout_flush_preserves_full_event() {
-        // On timeout the buffered prefix key is flushed via the FULL stored
-        // event (text/shifted intact), not a `Chord`-reconstructed bare Press.
-        let mut k = Keymap::new();
-        k.set_timeout(Duration::from_millis(50));
-        k.bind(
-            &[chord(Modifiers::CTRL, Key::Char('a')), chord(Modifiers::empty(), Key::Char('c'))],
-            Command::NewWindow,
-        );
-        let mut event = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
-        event.text = Some("a".into());
-        event.shifted = Some('A');
-        assert!(matches!(k.consume(event, vec![0x01]), KeymapAction::Pending));
-        sleep(Duration::from_millis(80));
-        match k.tick().expect("expected timeout flush") {
-            KeymapAction::PassThrough(ev, _) => {
-                assert_eq!(ev.text.as_deref(), Some("a"), "text preserved through tick");
-                assert_eq!(ev.shifted, Some('A'), "shifted key preserved through tick");
-            }
-            other => panic!("expected PassThrough, got {other:?}"),
-        }
-    }
 }

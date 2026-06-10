@@ -319,6 +319,11 @@ A *chord* is zero or more modifiers and one key, joined with `+`:
 `Ctrl+a`, `Alt+Left`, `Ctrl+Shift+F5`, `x`. A *chord sequence* is one or more
 chords separated by spaces: `"Ctrl+a c"` means press `Ctrl+a`, then `c`.
 
+An armed prefix **waits indefinitely** for the rest of its chord (tmux
+semantics: there is no timeout, and the `prefix-indicator` status widget
+stays lit while armed). Pressing a key that doesn't continue any binding
+cancels the pending chord; the cancelling key is consumed, not forwarded.
+
 **Modifiers** (each token is accepted capitalized, lowercase, or uppercase,
 so `Ctrl`, `ctrl`, and `CTRL` all work; the long form is `Control`/`control`
 only):
