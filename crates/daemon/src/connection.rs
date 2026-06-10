@@ -74,6 +74,52 @@ impl Connection {
                 send_msg(&mut writer, &ServerMsg::ConfigReloaded { error }).await?;
                 Ok(())
             }
+            ClientMsg::RunCommand { session, line } => {
+                let (ok, message) = match resolve_session(&registry, session).await {
+                    Err(msg) => (false, Some(msg)),
+                    Ok(sess) => run_prompt_line(&sess, &registry, &line).await,
+                };
+                send_msg(&mut writer, &ServerMsg::CommandResult { ok, message }).await?;
+                Ok(())
+            }
+            ClientMsg::SendInput { session, bytes } => {
+                let (ok, message) = match resolve_session(&registry, session).await {
+                    Err(msg) => (false, Some(msg)),
+                    Ok(sess) => match sess.handle_input_bytes(&bytes).await {
+                        Ok(()) => (true, None),
+                        Err(e) => (false, Some(e.to_string())),
+                    },
+                };
+                send_msg(&mut writer, &ServerMsg::CommandResult { ok, message }).await?;
+                Ok(())
+            }
+            ClientMsg::CapturePane { session } => {
+                // Response-type asymmetry by design: success replies
+                // `PaneCapture`, every error replies `CommandResult{ok:false}`,
+                // and the CLI client matches on either.
+                let reply = match resolve_session(&registry, session).await {
+                    Err(msg) => ServerMsg::CommandResult { ok: false, message: Some(msg) },
+                    Ok(sess) => {
+                        let text = {
+                            let manager = sess.window_manager.lock().await;
+                            manager
+                                .input_target_pane()
+                                .map(|p| p.with_screen(plexy_glass_mux::screen_text))
+                        };
+                        match text {
+                            Some(text) => ServerMsg::PaneCapture { text },
+                            // Unreachable in practice: a session with no panes
+                            // tears itself down.
+                            None => ServerMsg::CommandResult {
+                                ok: false,
+                                message: Some("no focused pane".into()),
+                            },
+                        }
+                    }
+                };
+                send_msg(&mut writer, &reply).await?;
+                Ok(())
+            }
             other => {
                 send_msg(
                     &mut writer,
@@ -991,6 +1037,73 @@ async fn open_buffer_picker_overlay(session: &Arc<Session>, registry: &Arc<Sessi
         m.open_buffer_picker(entries);
     }
     session.notify.notify_one();
+}
+
+/// Resolve the target session for a one-shot scripting message (CLI
+/// `cmd`/`send`/`capture`): an explicit name must exist; with no name there
+/// must be exactly one running session. The error string goes back to the CLI
+/// in `CommandResult`.
+async fn resolve_session(
+    registry: &Arc<SessionRegistry>,
+    name: Option<String>,
+) -> Result<Arc<Session>, String> {
+    match name {
+        Some(n) => registry.get(&n).await.ok_or_else(|| format!("no session \"{n}\"")),
+        None => {
+            let entries = registry.list().await;
+            match entries.as_slice() {
+                [] => Err("no sessions running".into()),
+                [only] => registry
+                    .get(&only.name)
+                    .await
+                    .ok_or_else(|| format!("no session \"{}\"", only.name)),
+                many => {
+                    let names =
+                        many.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", ");
+                    Err(format!("multiple sessions running: {names} — use -n"))
+                }
+            }
+        }
+    }
+}
+
+/// Run one command-prompt line headlessly (CLI `cmd`). Returns `(ok, message)`
+/// for `CommandResult`. Mirrors the attached prompt's connection-layer
+/// interception (`ConnVerb`), except verbs that act on the calling client
+/// (detach/switch) or open modal overlays (help/sessions/tree/buffers) are
+/// refused, since a one-shot connection has no attached client and opening UI
+/// from a script would hijack whoever is attached.
+async fn run_prompt_line(
+    session: &Arc<Session>,
+    registry: &Arc<SessionRegistry>,
+    line: &str,
+) -> (bool, Option<String>) {
+    let cmd = match plexy_glass_mux::command_prompt::parse(line) {
+        Ok(c) => c,
+        Err(e) => return (false, Some(e.to_string())),
+    };
+    let refuse =
+        |verb: &str| (false, Some(format!("{verb}: requires an attached client")));
+    match cmd {
+        PromptCommand::Reload => match registry.reload_config().await {
+            Ok(()) => (true, None),
+            Err(e) => (false, Some(format!("reload failed: {e}"))),
+        },
+        PromptCommand::PasteBuffer => {
+            paste_top_buffer(session, registry).await;
+            (true, None)
+        }
+        PromptCommand::Detach => refuse("detach"),
+        PromptCommand::Switch(_) => refuse("switch"),
+        PromptCommand::Help => refuse("help"),
+        PromptCommand::ChooseSession => refuse("sessions"),
+        PromptCommand::ChooseTree => refuse("tree"),
+        PromptCommand::ChooseBuffer => refuse("buffers"),
+        other => match session.handle_prompt_command(other).await {
+            Ok(message) => (true, message),
+            Err(e) => (false, Some(e.to_string())),
+        },
+    }
 }
 
 /// Paste the most-recent paste buffer into the input-target pane (bracketed
@@ -2493,5 +2606,311 @@ mod tests {
         assert!(got_focus_in, "switched-to pane never received \\e[I (as ^[[I)");
 
         server.abort();
+    }
+
+    // ── one-shot scripting verbs (RunCommand / SendInput / CapturePane) ─────
+
+    fn script_cat() -> SpawnSpec {
+        SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None }
+    }
+
+    fn script_size() -> PtySize {
+        PtySize { rows: 8, cols: 40, pixel_width: 0, pixel_height: 0 }
+    }
+
+    /// Drive one one-shot scripting message through `Connection::serve` over a
+    /// duplex (handshake → one frame → one reply), like a CLI invocation does.
+    async fn one_shot(registry: &Arc<crate::SessionRegistry>, msg: &ClientMsg) -> ServerMsg {
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(registry);
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg).await });
+        let (mut cr, mut cw) = tokio::io::split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(msg).unwrap()).await.unwrap();
+        let frame = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Codec::read_frame(&mut cr),
+        )
+        .await
+        .expect("one-shot reply timed out")
+        .unwrap()
+        .expect("server closed without replying");
+        let reply: ServerMsg = postcard::from_bytes(&frame).unwrap();
+        server.await.unwrap().unwrap();
+        reply
+    }
+
+    fn expect_command_result(reply: ServerMsg) -> (bool, Option<String>) {
+        match reply {
+            ServerMsg::CommandResult { ok, message } => (ok, message),
+            other => panic!("expected CommandResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_command_splits_via_wire() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("s1".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+        // Pin the split's spawn program so it never depends on `$SHELL`.
+        session.window_manager.lock().await.set_default_program("/bin/cat");
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::RunCommand { session: Some("s1".into()), line: "split v".into() },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(ok, "split v over the wire failed: {message:?}");
+        assert_eq!(session.window_manager.lock().await.active_window().layout().panes().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_command_parse_error_is_not_ok() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        registry.attach_or_create("s1".into(), script_cat(), script_size(), cfg).await.unwrap();
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::RunCommand { session: Some("s1".into()), line: "bogusverb".into() },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok);
+        let msg = message.expect("parse error must carry a message");
+        assert!(msg.contains("unknown command"), "unexpected parse error text: {msg}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_command_interactive_only_refused() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        registry.attach_or_create("s1".into(), script_cat(), script_size(), cfg).await.unwrap();
+
+        for line in ["detach", "switch x", "help", "sessions", "tree", "buffers"] {
+            let reply = one_shot(
+                &registry,
+                &ClientMsg::RunCommand { session: Some("s1".into()), line: line.into() },
+            )
+            .await;
+            let (ok, message) = expect_command_result(reply);
+            assert!(!ok, "interactive-only `{line}` was accepted headless");
+            let msg = message.unwrap_or_default();
+            assert!(
+                msg.contains("requires an attached client"),
+                "`{line}` refusal text wrong: {msg}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_command_resolution() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+
+        // Zero sessions + no name.
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::RunCommand { session: None, line: "split v".into() },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok);
+        assert!(message.unwrap_or_default().contains("no sessions"));
+
+        // Explicit miss.
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::RunCommand { session: Some("nope".into()), line: "split v".into() },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok);
+        assert!(message.unwrap_or_default().contains("no session \"nope\""));
+
+        // Sole session + no name → resolves to it.
+        let session_a = registry
+            .attach_or_create("a".into(), script_cat(), script_size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
+        session_a.window_manager.lock().await.set_default_program("/bin/cat");
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::RunCommand { session: None, line: "split v".into() },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(ok, "sole-session resolution failed: {message:?}");
+        assert_eq!(
+            session_a.window_manager.lock().await.active_window().layout().panes().len(),
+            2
+        );
+
+        // Two sessions + no name → ambiguous, both names listed.
+        registry
+            .attach_or_create("b".into(), script_cat(), script_size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::RunCommand { session: None, line: "split v".into() },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok);
+        let msg = message.unwrap_or_default();
+        assert!(msg.contains("a") && msg.contains("b"), "ambiguity must list names: {msg}");
+        assert!(msg.contains("multiple sessions"), "unexpected ambiguity text: {msg}");
+    }
+
+    /// Poll `pane`'s screen until `screen_text` contains `marker`.
+    async fn wait_screen_contains(pane: &crate::pane::Pane, marker: &str) {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let text = pane.with_screen(plexy_glass_mux::screen_text);
+            if text.contains(marker) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "screen never showed {marker:?}; got:\n{text}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_input_reaches_pane() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("si".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::SendInput {
+                session: Some("si".into()),
+                bytes: bytes::Bytes::from_static(b"wire_marker\n"),
+            },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(ok, "SendInput failed: {message:?}");
+
+        // `cat` echoes the line back; it must land on the focused pane's screen.
+        let pane = session
+            .window_manager
+            .lock()
+            .await
+            .input_target_pane()
+            .expect("session has a pane")
+            .clone();
+        wait_screen_contains(&pane, "wire_marker").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_pane_returns_screen_text() {
+        let _g = crate::test_env::isolate();
+        use std::time::{Duration, Instant};
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        registry.attach_or_create("cap".into(), script_cat(), script_size(), cfg).await.unwrap();
+
+        // Content arrives via the real path: send to cat over the wire, then
+        // poll capture (point-in-time) until the echo shows up.
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::SendInput {
+                session: Some("cap".into()),
+                bytes: bytes::Bytes::from_static(b"capture_marker\n"),
+            },
+        )
+        .await;
+        assert!(expect_command_result(reply).0);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let reply =
+                one_shot(&registry, &ClientMsg::CapturePane { session: Some("cap".into()) })
+                    .await;
+            let text = match reply {
+                ServerMsg::PaneCapture { text } => text,
+                other => panic!("expected PaneCapture, got {other:?}"),
+            };
+            if text.contains("capture_marker") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "capture never showed the marker; got:\n{text}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    // With a popup open, send/capture address the POPUP pane (the input
+    // target), not the layout pane underneath, so the write and the read
+    // stay symmetric.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_and_capture_are_popup_aware() {
+        let _g = crate::test_env::isolate();
+        use std::time::{Duration, Instant};
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("pop".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+        // Pin the popup's `$SHELL -c …` to `/bin/sh` so it never depends on the user's shell.
+        session.window_manager.lock().await.set_default_program("/bin/sh");
+        session
+            .handle_command(plexy_glass_mux::Command::OpenPopup { command: Some("cat".into()) })
+            .await
+            .unwrap();
+        let popup_pane = {
+            let m = session.window_manager.lock().await;
+            m.popup().expect("popup open").pane.clone()
+        };
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::SendInput {
+                session: Some("pop".into()),
+                bytes: bytes::Bytes::from_static(b"popup_marker\n"),
+            },
+        )
+        .await;
+        assert!(expect_command_result(reply).0);
+
+        // The marker lands in the POPUP pane's screen...
+        wait_screen_contains(&popup_pane, "popup_marker").await;
+
+        // ...and capture reads the popup, not the layout pane.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let reply =
+                one_shot(&registry, &ClientMsg::CapturePane { session: Some("pop".into()) })
+                    .await;
+            let text = match reply {
+                ServerMsg::PaneCapture { text } => text,
+                other => panic!("expected PaneCapture, got {other:?}"),
+            };
+            if text.contains("popup_marker") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "popup capture missed the marker; got:\n{text}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Kill the popup child so it doesn't outlive the test.
+        session.handle_command(plexy_glass_mux::Command::ClosePopup).await.unwrap();
     }
 }
