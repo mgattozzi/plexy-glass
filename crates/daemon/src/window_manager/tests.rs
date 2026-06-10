@@ -1,5 +1,7 @@
 use super::*;
-use plexy_glass_mux::{Command, MouseButton, MouseEvent, MouseKind};
+use plexy_glass_mux::{
+    Command, KeyEvent, MouseButton, MouseEvent, MouseKind, PickerEntry, TreeAction, TreeNode,
+};
 
 fn spec() -> SpawnSpec {
     SpawnSpec {
