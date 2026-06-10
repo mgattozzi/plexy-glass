@@ -252,4 +252,5 @@ break/join/swap + marked pane, paste buffers, and activity/bell monitoring shipp
 — 2026-05-31 specs/plans; the KDL config migration + declarative sessions shipped
 — 2026-06-01 specs/plans; keyboard-protocol negotiation + colored underlines
 shipped — 2026-06-01 specs/plans; popup panes shipped — 2026-06-09 spec/plan;
-preset layouts + the user-facing config docs shipped — 2026-06-09 spec/plan.)
+preset layouts + the user-facing config docs shipped — 2026-06-09 spec/plan;
+cleanup bundle — C1–C12 bug/test/structure fixes — shipped 2026-06-09 spec/plan.)
