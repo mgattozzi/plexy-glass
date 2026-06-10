@@ -923,6 +923,7 @@ dependencies = [
  "plexy-glass-emulator",
  "smol_str",
  "sysinfo",
+ "tempfile",
  "tokio",
  "tracing",
 ]

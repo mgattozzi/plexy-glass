@@ -23,7 +23,12 @@ impl Widget for ShellWidget {
         cmd.args(&self.args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::null())
+            // kill_on_drop: on timeout the `output()` future is dropped, but
+            // without this the child lives on (reparented to PID 1, holding
+            // its stdout pipe), and a hanging command respawns every refresh
+            // interval, accumulating orphan processes without bound.
+            .kill_on_drop(true);
 
         let result = tokio::time::timeout(self.timeout, cmd.output()).await;
         let text = match result {
