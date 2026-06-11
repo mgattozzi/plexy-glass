@@ -7,11 +7,13 @@
 use plexy_glass_mux::{Direction, Key, KeyEvent, KeyEventKind, Modifiers};
 
 pub fn legacy_bytes(event: KeyEvent) -> Vec<u8> {
+    // Text-producing events (plain or shifted chars) type their text. This
+    // covers down-converting a rich outer's `Shift+i` to "I" for a legacy
+    // pane (previously the Shift case fell through and ATE the key).
+    if let Some(text) = text_producing(&event) {
+        return text.into_bytes();
+    }
     match event.key {
-        Key::Char(c) if event.mods.is_empty() => {
-            let mut buf = [0u8; 4];
-            c.encode_utf8(&mut buf).as_bytes().to_vec()
-        }
         Key::Char(c) if event.mods == Modifiers::CTRL && c.is_ascii_alphabetic() => {
             // Ctrl+a..z -> 0x01..0x1a
             vec![(c.to_ascii_lowercase() as u8) - b'`']
@@ -163,6 +165,34 @@ fn key_codepoint(key: Key) -> Option<u32> {
     }
 }
 
+/// The text a key event types, when it is a text-producing event per the
+/// Kitty spec: a `Char` key whose modifiers are at most Shift and the lock
+/// keys. Such events are delivered as their text (not escape codes) unless
+/// the pane pushed "report all keys as escape codes" (0b1000). Preference
+/// order: the event's own `text` (the outer terminal told us exactly what was
+/// typed), the shifted alternate when Shift is held, best-effort uppercase,
+/// the char itself. Ctrl/Alt/Super combos, Esc, Enter/Tab/Backspace produce
+/// no text here, so they keep their escape encodings.
+fn text_producing(event: &KeyEvent) -> Option<String> {
+    let Key::Char(c) = event.key else { return None };
+    let non_text_mods = event
+        .mods
+        .difference(Modifiers::SHIFT | Modifiers::CAPS_LOCK | Modifiers::NUM_LOCK);
+    if !non_text_mods.is_empty() {
+        return None;
+    }
+    if let Some(t) = event.text.as_ref().filter(|t| !t.is_empty()) {
+        return Some(t.to_string());
+    }
+    if event.mods.contains(Modifiers::SHIFT) {
+        if let Some(sh) = event.shifted {
+            return Some(sh.to_string());
+        }
+        return Some(c.to_uppercase().to_string());
+    }
+    Some(c.to_string())
+}
+
 /// Well-known legacy meanings that modifyOtherKeys level 1 preserves.
 fn is_well_known_legacy(event: &KeyEvent) -> bool {
     match event.key {
@@ -202,6 +232,18 @@ fn kitty_bytes(event: &KeyEvent, flags: u8, app_cursor: bool) -> Vec<u8> {
     let all_keys = flags & 0b1000 != 0;
     if !all_keys && matches!(event.key, Key::Enter | Key::Tab | Key::Backspace) {
         return legacy_with_cursor(event, app_cursor);
+    }
+    // Kitty spec: without "report all keys as escape codes", text-producing
+    // events are delivered AS their text (kitty sends "I" for Shift+I at
+    // helix's flags 5), and they have no release events at all, since only
+    // escape-coded keys report event types.
+    if !all_keys
+        && let Some(text) = text_producing(event)
+    {
+        return match event.kind {
+            KeyEventKind::Release => Vec::new(),
+            KeyEventKind::Press | KeyEventKind::Repeat => text.into_bytes(),
+        };
     }
     let report_events = flags & 0b0010 != 0;
     let report_alts = flags & 0b0100 != 0;
@@ -333,6 +375,63 @@ mod tests {
     fn modify_other_keys_unmodified_char_is_legacy() {
         let e = KeyEvent::plain(Key::Char('a'));
         assert_eq!(encode(&e, KeyboardTarget::ModifyOtherKeys(2), false), b"a");
+    }
+
+    #[test]
+    fn kitty_text_producing_keys_stay_text_without_all_keys_flag() {
+        // The Kitty spec: unless "report all keys as escape codes" (0b1000) is
+        // pushed, key events that produce text are delivered AS text. Helix
+        // pushes flags 5 (disambiguate|alternates); kitty itself sends a plain
+        // "I" for Shift+I at those flags. Regression: we used to CSI-u every
+        // Char (and lowercased the codepoint) so hx received `\e[105u` (a
+        // bare `i`) for Shift+I and entered plain insert instead of
+        // insert-at-line-start.
+        // The hx bug exactly: capital from a legacy/text outer, flags 5.
+        let cap = KeyEvent::plain(Key::Char('I'));
+        assert_eq!(encode(&cap, KeyboardTarget::Kitty(5), false), b"I");
+        // Shift+i from a rich outer (shifted alternate populated).
+        let mut shifted = KeyEvent::new(Key::Char('i'), Modifiers::SHIFT);
+        shifted.shifted = Some('I');
+        assert_eq!(encode(&shifted, KeyboardTarget::Kitty(5), false), b"I");
+        // Plain lowercase at disambiguate-only.
+        let a = KeyEvent::plain(Key::Char('a'));
+        assert_eq!(encode(&a, KeyboardTarget::Kitty(1), false), b"a");
+        // Ctrl combos produce no text: still CSI-u.
+        let ctrl = KeyEvent::new(Key::Char('i'), Modifiers::CTRL);
+        assert_eq!(encode(&ctrl, KeyboardTarget::Kitty(5), false), b"\x1b[105;5u");
+        // With report-all-keys pushed, text keys DO become escape codes.
+        let mut all = KeyEvent::new(Key::Char('i'), Modifiers::SHIFT);
+        all.shifted = Some('I');
+        assert_eq!(
+            encode(&all, KeyboardTarget::Kitty(0b1101), false),
+            b"\x1b[105:73;2u"
+        );
+    }
+
+    #[test]
+    fn kitty_text_key_release_is_silent_without_all_keys() {
+        // Text-producing keys are not escape-coded at flags without 0b1000, so
+        // they have no release events either, even when the pane asked for
+        // event types (0b10). Only escape-coded keys report releases.
+        let mut e = KeyEvent::plain(Key::Char('a'));
+        e.kind = plexy_glass_mux::KeyEventKind::Release;
+        assert!(encode(&e, KeyboardTarget::Kitty(1 | 2), false).is_empty());
+    }
+
+    #[test]
+    fn legacy_shifted_char_types_its_text() {
+        // Down-converting a rich outer's Shift+i for a legacy pane must type
+        // "I". This used to fall through to `Vec::new()` and EAT the key.
+        let mut e = KeyEvent::new(Key::Char('i'), Modifiers::SHIFT);
+        e.shifted = Some('I');
+        assert_eq!(encode(&e, KeyboardTarget::Legacy, false), b"I");
+        // No shifted alternate supplied: best-effort uppercase.
+        let bare = KeyEvent::new(Key::Char('i'), Modifiers::SHIFT);
+        assert_eq!(encode(&bare, KeyboardTarget::Legacy, false), b"I");
+        // The event's own text wins when the outer reported it.
+        let mut texty = KeyEvent::new(Key::Char('7'), Modifiers::SHIFT);
+        texty.text = Some("/".into());
+        assert_eq!(encode(&texty, KeyboardTarget::Legacy, false), b"/");
     }
 
     #[test]

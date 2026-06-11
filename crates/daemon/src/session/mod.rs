@@ -2178,6 +2178,31 @@ mod reencode_tests {
         assert!(matches!(select_target(0, 0), KeyboardTarget::Legacy));
     }
 
+    // Regression (the helix Shift+I bug): an outer terminal at our pushed
+    // disambiguate-only flags sends Shift+I as plain text "I"; decode yields
+    // Char('I') with empty mods. A pane that negotiated Kitty flags 5 (helix:
+    // disambiguate|alternates) must receive the TEXT back, kitty itself
+    // sends "I" at those flags. We used to emit `\e[105u` (a bare, LOWERCASED
+    // `i` event), so helix ran plain-insert instead of insert-at-line-start.
+    #[test]
+    fn shifted_capital_round_trips_to_kitty_pane_as_text() {
+        // The hx scenario: legacy-text outer, kitty(5) pane.
+        let cap = KeyEvent::new(Key::Char('I'), Modifiers::empty());
+        let bytes = reencode_input(NegotiatedKbd::Legacy, 5, 0, false, &cap, b"I");
+        assert_eq!(bytes, b"I");
+        // From a rich outer (kitty event carrying the shifted alternate).
+        let mut rich = KeyEvent::new(Key::Char('i'), Modifiers::SHIFT);
+        rich.shifted = Some('I');
+        let bytes =
+            reencode_input(NegotiatedKbd::Kitty(1), 5, 0, false, &rich, b"\x1b[105:73;2u");
+        assert_eq!(bytes, b"I");
+        // Same rich event into a LEGACY pane: down-convert to "I" (this used
+        // to be dropped entirely, the eaten-key half of the bug).
+        let bytes =
+            reencode_input(NegotiatedKbd::Kitty(1), 0, 0, false, &rich, b"\x1b[105:73;2u");
+        assert_eq!(bytes, b"I");
+    }
+
     // BLOCKER regression: a Kitty-capable client's OUTER terminal emits CSI-u
     // for every key (`a`->\e[97u, Ctrl+a->\e[97;5u). Forwarding those bytes
     // verbatim into a default un-negotiated (Legacy) pane breaks every

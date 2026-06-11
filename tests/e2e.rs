@@ -1695,3 +1695,49 @@ fn cli_no_daemon_exits_nonzero() {
         "capture against a non-existent daemon should exit non-zero, but got success"
     );
 }
+
+// Regression for the helix Shift+I bug. The pane child pushes Kitty keyboard
+// flags 5 (disambiguate|alternates, exactly what helix pushes), then execs
+// `cat -v`, which renders every byte it receives visibly (escape sequences
+// become ^[[… text). Typing a capital "I" at the client must reach the child
+// as the literal text "I" (kitty's own behavior at flags 5), not as a
+// lowercased CSI-u event (`\e[105u`, which helix interpreted as a bare `i`).
+#[test]
+fn capital_letter_reaches_kitty_flags5_pane_as_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    // Turn the pane into a helix-alike: push flags 5, then render received
+    // bytes visibly. `exec` keeps cat as the direct child.
+    sess.send_str("printf '\\033[>5u'; exec cat -v\n");
+    // `cat` is up once our probe text round-trips. The marker is
+    // quote-concatenated so the contiguous form appears only via `cat`'s
+    // output echo.
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    let mut ready = false;
+    while std::time::Instant::now() < deadline {
+        sess.send_str("WARM_");
+        sess.send_str("UP\n");
+        if sess.wait_for(b"WARM_UP", Duration::from_millis(500)) {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "cat -v child never came up: {}", sess.snapshot_str());
+    // The regression probe: a capital I (with sentinels so the assertion can't
+    // match this test's own input echo through the client PTY; the client is
+    // raw, so there IS no local echo, but belt and braces via cat -v's
+    // rendering: a CSI-u leak would render as `^[[105u` between the sentinels).
+    sess.send_str("<I>\n");
+    assert!(
+        sess.wait_for(b"<I>", Duration::from_secs(5)),
+        "capital I never reached the kitty(5) pane as text: {}",
+        sess.snapshot_str()
+    );
+    let txt = sess.snapshot_str();
+    assert!(
+        !txt.contains("[105"),
+        "capital I leaked to the pane as a CSI-u event: {txt}"
+    );
+}
