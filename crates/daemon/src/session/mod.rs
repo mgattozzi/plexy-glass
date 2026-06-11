@@ -941,8 +941,9 @@ pub(crate) fn select_target(
 /// - pane target Legacy:
 ///   - Legacy client → `raw_bytes` verbatim. The incoming bytes are ALREADY
 ///     legacy, and raw passthrough is lossless while `encode(Legacy)` is lossy
-///     for some keys (`legacy_bytes` returns empty for modified Tab/Enter/Escape
-///     and unmatched function keys), so passthrough MUST be preserved here.
+///     for some keys (modified Enter/Tab degrade to their base byte; unmatched
+///     function keys and KeypadEnter encode to empty), so passthrough MUST be
+///     preserved here.
 ///   - non-Legacy client (Kitty/modifyOtherKeys outer terminal, so `raw_bytes`
 ///     are rich CSI-u/27-form) → down-convert via `encode(.., Legacy, ..)`.
 ///     Forwarding the rich bytes verbatim would break every keystroke for a

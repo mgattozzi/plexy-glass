@@ -46,8 +46,14 @@ pub fn legacy_bytes(event: KeyEvent) -> Vec<u8> {
         Key::Function(11) => tilde(23, event.mods),
         Key::Function(12) => tilde(24, event.mods),
         // Modifier combinations for Tab/Enter/Backspace/Escape beyond the
-        // simple cases above have no widely-agreed legacy encoding.
-        Key::Tab | Key::Enter | Key::Backspace | Key::Escape => Vec::new(),
+        // exact forms above have no faithful legacy encoding. Degrade rather
+        // than eat the keystroke: Alt keeps its legacy ESC prefix (tmux/
+        // readline behavior, Alt+Backspace is delete-word); other modifiers
+        // strip to the base key.
+        Key::Tab => base_with_alt_prefix(event.mods, 0x09),
+        Key::Enter => base_with_alt_prefix(event.mods, 0x0d),
+        Key::Backspace => base_with_alt_prefix(event.mods, 0x7f),
+        Key::Escape => base_with_alt_prefix(event.mods, 0x1b),
         Key::Function(_) | Key::KeypadEnter | Key::Char(_) => Vec::new(),
     }
 }
@@ -193,10 +199,33 @@ fn text_producing(event: &KeyEvent) -> Option<String> {
     Some(c.to_string())
 }
 
+/// The legacy degrade for a modified Enter/Tab/Backspace/Escape: the base
+/// byte, with the ESC prefix when Alt is held (the one modifier legacy
+/// encodings CAN express).
+fn base_with_alt_prefix(mods: Modifiers, base: u8) -> Vec<u8> {
+    if mods.contains(Modifiers::ALT) {
+        vec![0x1b, base]
+    } else {
+        vec![base]
+    }
+}
+
+/// Whether this exact (key, mods) pair has a faithful legacy encoding, i.e.
+/// one that preserves the modifier rather than a degraded base-key form.
+/// Modified Enter/Backspace (e.g. Shift+Enter) have NONE: kitty/xterm send
+/// them as escape codes, and routing them to legacy used to eat the keystroke.
+fn legacy_exact_form(event: &KeyEvent) -> bool {
+    match event.key {
+        Key::Enter | Key::Backspace | Key::Escape => event.mods.is_empty(),
+        Key::Tab => event.mods.is_empty() || event.mods == Modifiers::SHIFT, // \e[Z
+        _ => false,
+    }
+}
+
 /// Well-known legacy meanings that modifyOtherKeys level 1 preserves.
 fn is_well_known_legacy(event: &KeyEvent) -> bool {
     match event.key {
-        Key::Tab | Key::Backspace | Key::Enter | Key::Escape => true,
+        Key::Tab | Key::Backspace | Key::Enter | Key::Escape => legacy_exact_form(event),
         Key::Char(' ') if event.mods == Modifiers::CTRL => true, // Ctrl+Space = NUL
         Key::Char(c) if event.mods == Modifiers::CTRL && c.is_ascii_alphabetic() => true,
         _ => false,
@@ -230,7 +259,18 @@ fn kitty_bytes(event: &KeyEvent, flags: u8, app_cursor: bool) -> Vec<u8> {
         return legacy_with_cursor(event, app_cursor);
     };
     let all_keys = flags & 0b1000 != 0;
-    if !all_keys && matches!(event.key, Key::Enter | Key::Tab | Key::Backspace) {
+    // Kitty's legacy exception for Enter/Tab/Backspace applies ONLY when no
+    // modifiers (beyond locks) are held; verified against kitty's encoder
+    // (key_encoding.c). Every MODIFIED form, including Shift+Tab (which has a
+    // legacy \e[Z but kitty still CSI-u's it under disambiguate), goes
+    // through the CSI-u encoder below.
+    if !all_keys
+        && matches!(event.key, Key::Enter | Key::Tab | Key::Backspace)
+        && event
+            .mods
+            .difference(Modifiers::CAPS_LOCK | Modifiers::NUM_LOCK)
+            .is_empty()
+    {
         return legacy_with_cursor(event, app_cursor);
     }
     // Kitty spec: without "report all keys as escape codes", text-producing
@@ -432,6 +472,45 @@ mod tests {
         let mut texty = KeyEvent::new(Key::Char('7'), Modifiers::SHIFT);
         texty.text = Some("/".into());
         assert_eq!(encode(&texty, KeyboardTarget::Legacy, false), b"/");
+    }
+
+    #[test]
+    fn modified_enter_tab_backspace_are_not_eaten() {
+        // The Claude Code Shift+Enter bug: Shift+Enter has NO legacy byte
+        // form, so a disambiguate-only outer (ours) receives `\e[13;2u` from
+        // the terminal, and our re-encode used to route Enter/Tab/Backspace
+        // through legacy unconditionally, where the modified forms encoded to
+        // EMPTY: the key was eaten. Kitty sends the CSI-u form to panes that
+        // negotiated any kitty flags; xterm's modifyOtherKeys sends the
+        // 27-form; pure-legacy panes degrade to the base key (tmux behavior).
+        let shift_enter = KeyEvent::new(Key::Enter, Modifiers::SHIFT);
+        // Kitty pane (any flags): the CSI-u form.
+        assert_eq!(encode(&shift_enter, KeyboardTarget::Kitty(1), false), b"\x1b[13;2u");
+        assert_eq!(encode(&shift_enter, KeyboardTarget::Kitty(5), false), b"\x1b[13;2u");
+        // Plain Enter at the same flags stays legacy (exact form exists).
+        let enter = KeyEvent::plain(Key::Enter);
+        assert_eq!(encode(&enter, KeyboardTarget::Kitty(1), false), vec![0x0d]);
+        // Shift+Tab: kitty CSI-u's it under disambiguate (the legacy \e[Z is
+        // used only in full legacy mode; verified against kitty's encoder).
+        let shift_tab = KeyEvent::new(Key::Tab, Modifiers::SHIFT);
+        assert_eq!(encode(&shift_tab, KeyboardTarget::Kitty(1), false), b"\x1b[9;2u");
+        // At a LEGACY pane the same event degrades to the faithful \e[Z.
+        assert_eq!(encode(&shift_tab, KeyboardTarget::Legacy, false), b"\x1b[Z");
+        // Ctrl+Tab has no legacy form: CSI-u.
+        let ctrl_tab = KeyEvent::new(Key::Tab, Modifiers::CTRL);
+        assert_eq!(encode(&ctrl_tab, KeyboardTarget::Kitty(1), false), b"\x1b[9;5u");
+        // modifyOtherKeys level 1: modified Enter gets the 27-form (it is NOT
+        // a "well-known legacy" key once modified); plain Enter stays \r.
+        assert_eq!(
+            encode(&shift_enter, KeyboardTarget::ModifyOtherKeys(1), false),
+            b"\x1b[27;2;13~"
+        );
+        assert_eq!(encode(&enter, KeyboardTarget::ModifyOtherKeys(1), false), vec![0x0d]);
+        // Pure legacy pane: degrade to the base key (tmux strips the
+        // modifier) rather than eating the keystroke.
+        assert_eq!(encode(&shift_enter, KeyboardTarget::Legacy, false), vec![0x0d]);
+        let ctrl_backspace = KeyEvent::new(Key::Backspace, Modifiers::CTRL);
+        assert_eq!(encode(&ctrl_backspace, KeyboardTarget::Legacy, false), vec![0x7f]);
     }
 
     #[test]
