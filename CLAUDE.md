@@ -268,7 +268,12 @@ updated as part of each feature, per **User documentation**. Workflows
 
 Not yet built (future work): pipe-pane; cross-window **swap**-pane
 and the choose-tree filter/collapse + session rename (deferred in their specs);
-silence monitoring + bell/activity alert messages; set/save/load paste buffers.
+silence monitoring + bell/activity alert messages; set/save/load paste buffers;
+**modified Enter/Tab/Backspace re-encode** — `Shift+Enter` etc. from a rich
+outer is still eaten for panes without the kitty all-keys flag (kitty sends
+`\e[13;2u` under disambiguate; our early legacy return at encode.rs drops it —
+same eaten-key class as the fixed helix Shift+I bug, found in its review;
+only reachable from a rich-protocol outer terminal).
 Declarative-session v1 boundaries left for later: split ratios + active
 window/pane selection in the template, per-pane env maps, re-reading templates on
 `Ctrl+a R` reload, and `switch_session` auto-creating a not-yet-running declared
