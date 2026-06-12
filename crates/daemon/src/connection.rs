@@ -120,6 +120,35 @@ impl Connection {
                 send_msg(&mut writer, &reply).await?;
                 Ok(())
             }
+            ClientMsg::CaptureLastCommand { session } => {
+                // Response-type asymmetry by design: success replies
+                // `PaneCapture`, every error (no session, no pane, no completed
+                // block) replies `CommandResult{ok:false}`, and the CLI client
+                // matches on either.
+                let reply = match resolve_session(&registry, session).await {
+                    Err(msg) => ServerMsg::CommandResult { ok: false, message: Some(msg) },
+                    Ok(sess) => {
+                        let text = {
+                            let manager = sess.window_manager.lock().await;
+                            manager.input_target_pane().and_then(|p| {
+                                p.with_screen(|s| {
+                                    plexy_glass_mux::last_completed_block(s)
+                                        .map(|range| plexy_glass_mux::block_text(s, range))
+                                })
+                            })
+                        };
+                        match text {
+                            Some(text) => ServerMsg::PaneCapture { text },
+                            None => ServerMsg::CommandResult {
+                                ok: false,
+                                message: Some(NO_BLOCKS_MSG.into()),
+                            },
+                        }
+                    }
+                };
+                send_msg(&mut writer, &reply).await?;
+                Ok(())
+            }
             other => {
                 send_msg(
                     &mut writer,
@@ -3155,5 +3184,101 @@ mod tests {
 
         // Kill the popup child so it doesn't outlive the test.
         session.handle_command(plexy_glass_mux::Command::ClosePopup).await.unwrap();
+    }
+
+    // `CaptureLastCommand` with no completed block returns `CommandResult{ok:false}`
+    // carrying the standard no-blocks message.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_last_command_no_blocks_returns_error() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        registry
+            .attach_or_create("noblk".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::CaptureLastCommand { session: Some("noblk".into()) },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok, "CaptureLastCommand with no blocks must return ok:false");
+        let msg = message.expect("no-blocks path must carry a message");
+        assert!(
+            msg.contains("no command blocks"),
+            "unexpected no-blocks text: {msg}"
+        );
+    }
+
+    // `CaptureLastCommand` finds the last completed block and returns its
+    // output text via `PaneCapture`. The block is planted directly in the
+    // pane's screen (same pattern as `copy_output_pushes_buffer_and_sets_status`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_last_command_returns_block_text() {
+        use plexy_glass_emulator::RowMark;
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("blk".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+
+        // Plant a completed block in the pane's screen:
+        // row 0: PROMPT_START ("$ echo hi")
+        // row 1: OUTPUT_START ("out1")
+        // row 2: PROMPT_START + BLOCK_END ("$ next"), the common D+A flow
+        {
+            let m = session.window_manager.lock().await;
+            let pane = m.active_window().active_pane().unwrap();
+            pane.with_screen_mut(|s| {
+                write_grid_row(s, 0, "$ echo hi");
+                s.active.rows[0].mark.set(RowMark::PROMPT_START);
+                write_grid_row(s, 1, "out1");
+                s.active.rows[1].mark.set(RowMark::OUTPUT_START);
+                write_grid_row(s, 2, "$ next");
+                s.active.rows[2].mark.set(RowMark::PROMPT_START);
+                s.active.rows[2].mark.set(RowMark::BLOCK_END);
+                s.active.rows[2].mark.set_exit(Some(0));
+            });
+        }
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::CaptureLastCommand { session: Some("blk".into()) },
+        )
+        .await;
+        let text = match reply {
+            ServerMsg::PaneCapture { text } => text,
+            other => panic!("expected PaneCapture, got {other:?}"),
+        };
+        // The output range covers the OUTPUT_START row ("out1") through the
+        // row before the next PROMPT_START, which is row 1. Row 2 belongs to
+        // the NEXT block's prompt and must NOT appear in the capture.
+        assert!(text.contains("out1"), "block text must include output: {text}");
+        assert!(!text.contains("$ next"), "next-prompt row must not appear in capture: {text}");
+        assert!(!text.contains("$ echo hi"), "prompt row must not appear (output range only): {text}");
+    }
+
+    // `CaptureLastCommand` for a non-existent session returns `CommandResult{ok:false}`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_last_command_unknown_session_returns_error() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::CaptureLastCommand { session: Some("nosuchsession".into()) },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok, "missing session must return ok:false");
+        let msg = message.expect("session-miss must carry a message");
+        assert!(
+            msg.contains("no session"),
+            "unexpected session-miss text: {msg}"
+        );
     }
 }

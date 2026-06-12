@@ -53,9 +53,17 @@ enum Subcommands {
         text: Vec<String>,
     },
     /// Print the focused pane's visible screen text (popup-aware).
+    ///
+    /// With --last-command, prints the output of the last completed OSC 133
+    /// command block (scrollback-inclusive) instead of the full screen.
+    /// Exits 1 when no completed block exists (shell integration not active).
     Capture {
         #[arg(short = 'n', long = "name")]
         name: Option<String>,
+        /// Capture the last completed command block's output (requires shell
+        /// integration via OSC 133).
+        #[arg(long = "last-command")]
+        last_command: bool,
     },
     /// Start the daemon (used internally by auto-spawn; `--foreground` for dev).
     Daemon(plexy_glass_daemon::DaemonArgs),
@@ -136,8 +144,8 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Subcommands::Capture { name } => {
-            match plexy_glass_client::client_capture(name).await {
+        Subcommands::Capture { name, last_command } => {
+            match plexy_glass_client::client_capture(name, last_command).await {
                 Ok(true) => {}
                 Ok(false) => std::process::exit(1),
                 Err(e) => {

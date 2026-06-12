@@ -396,18 +396,26 @@ pub async fn client_send_input(
     }
 }
 
-/// Capture the focused pane's visible screen text (popup-aware) and print to
-/// stdout.
+/// Capture the focused pane's screen text and print to stdout.
+///
+/// - `last_command = false`: captures the full visible screen (popup-aware).
+/// - `last_command = true`: captures the last completed OSC 133 command
+///   block's output text (scrollback-inclusive). Exits 1 when no completed
+///   block exists (shell integration not active).
 ///
 /// Returns `Ok(true)` on success, `Ok(false)` when the daemon reports an error
 /// (message on stderr). No daemon → `Err`.
-pub async fn client_capture(name: Option<String>) -> Result<bool, ClientError> {
+pub async fn client_capture(name: Option<String>, last_command: bool) -> Result<bool, ClientError> {
     let socket = default_socket_path()?;
     let stream = connect_only(&socket).await?;
     let (mut reader, mut writer) = tokio::io::split(stream);
     client_handshake(&mut reader, &mut writer).await?;
 
-    let msg = ClientMsg::CapturePane { session: name };
+    let msg = if last_command {
+        ClientMsg::CaptureLastCommand { session: name }
+    } else {
+        ClientMsg::CapturePane { session: name }
+    };
     let payload = postcard::to_allocvec(&msg)
         .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
     Codec::write_frame(&mut writer, &payload).await?;

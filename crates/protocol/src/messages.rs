@@ -60,7 +60,8 @@ pub enum ExitStatus {
 /// - v5: keyboard-protocol negotiation, colored underlines
 /// - v6: scripting messages: `RunCommand`, `SendInput`, `CapturePane` /
 ///   `CommandResult`, `PaneCapture`
-pub const PROTOCOL_VERSION: u16 = 6;
+/// - v7: `CaptureLastCommand`: block-scoped scripting read via OSC 133 marks
+pub const PROTOCOL_VERSION: u16 = 7;
 
 /// Which keyboard protocol a client negotiated with its *outer* terminal. The
 /// daemon decodes that client's input bytes in this protocol.
@@ -124,6 +125,12 @@ pub enum ClientMsg {
     SendInput { session: Option<String>, bytes: Bytes },
     /// Capture the focused pane's visible screen text (CLI `capture`).
     CapturePane { session: Option<String> },
+    /// Capture the last completed OSC 133 command block's output text
+    /// (scrollback-inclusive). Replies with `PaneCapture` on success or
+    /// `CommandResult { ok: false }` when no completed block exists.
+    ///
+    /// **Postcard-positional**: always appended at the end of the enum.
+    CaptureLastCommand { session: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,6 +329,33 @@ mod tests {
         for m in outs {
             let enc = postcard::to_allocvec(&m).unwrap();
             assert_eq!(postcard::from_bytes::<ServerMsg>(&enc).unwrap(), m);
+        }
+    }
+
+    #[test]
+    fn capture_last_command_round_trips() {
+        // New variant in v7; appended at the end of the enum (postcard is positional).
+        let cases = [
+            ClientMsg::CaptureLastCommand { session: Some("work".into()) },
+            ClientMsg::CaptureLastCommand { session: None },
+        ];
+        for m in cases {
+            let enc = postcard::to_allocvec(&m).unwrap();
+            assert_eq!(postcard::from_bytes::<ClientMsg>(&enc).unwrap(), m);
+        }
+        // Daemon replies reuse `PaneCapture` (success) and `CommandResult` (failure).
+        for reply in [
+            ServerMsg::PaneCapture { text: "out1\nout2".into() },
+            ServerMsg::CommandResult {
+                ok: false,
+                message: Some(
+                    "no command blocks — shell integration not active? see docs/command-blocks.md"
+                        .into(),
+                ),
+            },
+        ] {
+            let enc = postcard::to_allocvec(&reply).unwrap();
+            assert_eq!(postcard::from_bytes::<ServerMsg>(&enc).unwrap(), reply);
         }
     }
 }
