@@ -92,7 +92,9 @@ pub fn last_completed_block(screen: &Screen) -> Option<(u32, u32)> {
 }
 
 /// Render the absolute-line range `(start, end)` (inclusive, scrollback rows
-/// included) as plain text: one line per row, trailing whitespace trimmed.
+/// included) as plain text: one line per row, trailing whitespace trimmed,
+/// trailing blank lines dropped (a block that ends at the bottom of the grid
+/// would otherwise carry the unused rows below the output).
 /// Wide-spacer cells carry an empty grapheme, so `push_str("")` skips them
 /// naturally, same rendering rule as [`crate::selection::screen_text`].
 pub fn block_text(screen: &Screen, (start, end): (u32, u32)) -> String {
@@ -105,6 +107,9 @@ pub fn block_text(screen: &Screen, (start, end): (u32, u32)) -> String {
         }
         let trimmed = text.trim_end();
         lines.push(trimmed.to_string());
+    }
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
     }
     lines.join("\n")
 }
@@ -263,6 +268,26 @@ mod tests {
         // invariant: two_blocks always has a completed block (D on line 3)
         let range = last_completed_block(&s).expect("completed block");
         assert_eq!(block_text(&s, range), "out1\nout2");
+    }
+
+    #[test]
+    fn block_text_drops_trailing_blank_lines() {
+        let s = two_blocks();
+        // Block 2's range runs to the last grid line (4..=7); lines 5..7 are
+        // the unused rows below "out3" and must not appear in the text.
+        assert_eq!(block_output_range(&s, 4), Some((4, 7)));
+        assert_eq!(block_text(&s, (4, 7)), "out3");
+    }
+
+    #[test]
+    fn block_text_keeps_interior_blank_lines() {
+        // Output with a blank line in the middle: only TRAILING blanks drop.
+        let s = screen_from(
+            8,
+            20,
+            b"\x1b]133;A\x07$ a\r\n\x1b]133;C\x07one\r\n\r\ntwo\r\n\x1b]133;A\x07$ b",
+        );
+        assert_eq!(block_text(&s, (1, 3)), "one\n\ntwo");
     }
 
     #[test]
