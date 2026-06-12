@@ -246,7 +246,7 @@ verbs (detach/switch/help/sessions/tree/buffers) refused with
 `"<verb>: requires an attached client"`; `reload`/`paste` work headless;
 honest exit codes (0 all-ok, 1 any-failure, stop-at-first for multi-line cmd,
 exit-code passthrough for `run`, 124 for `run` timeout);
-`send`/`capture`/`run` are popup-aware by design (same input-target-pane path);
+`send`/`capture`/`run` are popup-aware by design (same input-target-pane path); `send` fans out to all sync-panes-synchronized panes; `run` deliberately bypasses sync-panes (writes only to the input target pane — a synchronized multi-pane run has no single answer);
 no auto-spawn (distinct from list/reload); and a **configurable prefix** —
 `keymap.prefix` is consumed for real: binding strings accept a `prefix` chord
 token (case-insensitive, any position; `parse_chord_seq_with_prefix` in

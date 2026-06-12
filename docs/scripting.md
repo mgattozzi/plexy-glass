@@ -105,8 +105,11 @@ message on stderr:
 | No command already running (pane is at a prompt) | `pane is busy: a command is running` |
 | Not in a full-screen application | `pane is busy: alternate screen is active` |
 
-All three are checked atomically in a single screen snapshot, so there is no
-window between the check and the injection.
+All three are checked atomically in a single screen snapshot, and that single
+closure also closes the window between the precondition check and the
+completion-counter baseline read. Note that a residual PTY-backlog window
+remains (the spec's fencing-honesty note explains it), which `run`'s contract
+already disclaims.
 
 ### Exit codes
 
@@ -117,9 +120,11 @@ window between the check and the injection.
 | 1 | A plexy-glass failure (no session, precondition rejected, pane child exited mid-run, pane was reset mid-command, or any other daemon refusal). |
 
 **Disambiguating 1 vs. 124**: exit code 1 could be the command's own exit
-status or a plexy-glass failure. The stderr output disambiguates: a plexy
-failure always prints a message starting with `plexy-glass run:` or `run:`
-before exiting 1; a command that exits 1 cleanly prints nothing on stderr from
+status or a plexy-glass failure, and the stderr output is what tells them
+apart. A refusal (no session, precondition rejected, etc.) prints a message
+prefixed with `run:` (e.g. `run: pane is busy: a command is running`), a
+transport failure before the daemon is reached prints `plexy-glass: <err>`,
+and a command that exits 1 cleanly prints nothing on stderr from
 `plexy-glass run`.
 
 **D without exit payload**: if the shell emits `OSC 133;D` with no exit-code
@@ -165,10 +170,15 @@ plexy-glass run --timeout 600 "cargo build --release" || echo "build broke or st
 
 ## Popup-aware write and read
 
-`send` and `capture` both target the *input target pane*: the popup's child
-when a popup is open, otherwise the focused pane. So a script's write→read
-pair (`send` then `capture`) always addresses the same pane, even when a
-popup is active.
+`send`, `capture`, and `run` all target the *input target pane*: the popup's
+child when a popup is open, otherwise the focused pane, so a script's
+write→read sequence always addresses the same pane even when a popup is
+active.
+
+`run` deliberately bypasses the sync-panes fan-out and writes only to the
+input target pane, not to every pane in a synchronized group. `send` fans out
+to all synchronized panes; `run` does not, because a synchronized multi-pane
+run has no single answer (each pane has its own block counter and output).
 
 ## No auto-spawn
 

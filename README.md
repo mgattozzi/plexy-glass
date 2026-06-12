@@ -97,9 +97,11 @@ plexy-glass run -n work "cargo test" && plexy-glass run -n work "jj commit -m wi
 ```
 
 `cmd` reuses the command-prompt grammar verbatim. `run` injects a command and
-waits for the OSC 133 completion mark (requires shell integration). All verbs
-exit 0 on success and 1 on any failure; `-n NAME` targets a session, and
-without `-n` the sole running session is used (error if zero or more than one).
+waits for the OSC 133 completion mark (requires shell integration). `cmd`,
+`send`, and `capture` exit 0 on success and 1 on any failure; `run` exits
+with the command's own exit code (0–255), 124 on timeout, and 1 for
+plexy-glass failures. `-n NAME` targets a session, and without `-n` the sole
+running session is used (error if zero or more than one).
 See [docs/scripting.md](docs/scripting.md) for the full reference.
 
 ## Default keybindings

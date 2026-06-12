@@ -3855,4 +3855,132 @@ mod tests {
             .expect("serve task never completed after client drop");
         result.unwrap().unwrap();
     }
+
+    // A mid-command RIS (`\x1bc`) echoed back by cat causes the emulator to
+    // rebuild Screen::new, resetting blocks_completed to 0. With baseline=1
+    // (one completed block seeded beforehand), 0 < 1 → ExecTick::Reset →
+    // CommandResult { ok: false, "run: pane was reset mid-command" }.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_command_reset_mid_command_refused() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("execris".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+
+        // Seed a FULLY completed block: A, C, D;0, A.
+        // Counter becomes 1; pane lands at a fresh prompt.
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::SendInput {
+                session: Some("execris".into()),
+                bytes: bytes::Bytes::from_static(
+                    b"\x1b]133;A\x07\n\x1b]133;C\x07ris_seed\n\x1b]133;D;0\x07\x1b]133;A\x07\n",
+                ),
+            },
+        )
+        .await;
+        assert!(expect_command_result(reply).0, "seeding completed block failed");
+        let pane = session
+            .window_manager
+            .lock()
+            .await
+            .input_target_pane()
+            .expect("session has a pane")
+            .clone();
+        // Poll until the counter is >= 1 AND the pane is at a prompt (D;0 and the
+        // second A are processed).
+        wait_screen_state(&pane, "completed block + at-prompt processed", |s| {
+            s.blocks_completed >= 1 && plexy_glass_mux::blocks::pane_at_prompt(s)
+        })
+        .await;
+
+        // Start exec with a non-completing text; the wait is underway.
+        let (server, mut cr, _cw) = start_exec(
+            &registry,
+            &ClientMsg::ExecCommand {
+                session: Some("execris".into()),
+                text: "EXEC_RIS_HOLD".into(),
+                timeout_ms: None,
+            },
+        )
+        .await;
+        // Wait until the injected text is visible (preconditions passed and
+        // the `ExecCommand`'s input was written to the pane).
+        wait_screen_contains(&pane, "EXEC_RIS_HOLD").await;
+
+        // Send RIS via a second connection: cat echoes \x1bc back; the
+        // emulator processes ESC c as RIS and rebuilds Screen::new →
+        // blocks_completed resets to 0 < baseline (1).
+        let ris_reply = one_shot(
+            &registry,
+            &ClientMsg::SendInput {
+                session: Some("execris".into()),
+                bytes: bytes::Bytes::from_static(b"\x1bc\n"),
+            },
+        )
+        .await;
+        assert!(expect_command_result(ris_reply).0, "RIS SendInput failed");
+
+        // The exec serve task must observe the reset and reply with a refusal.
+        let frame = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Codec::read_frame(&mut cr),
+        )
+        .await
+        .expect("no reply after RIS reset")
+        .unwrap()
+        .expect("server closed without replying");
+        let reply: ServerMsg = postcard::from_bytes(&frame).unwrap();
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok);
+        assert_eq!(message.as_deref(), Some("run: pane was reset mid-command"));
+        server.await.unwrap().unwrap();
+    }
+
+    // A second ClientMsg on the same connection while `serve_exec` is waiting
+    // must produce CommandResult { ok: false, "run: unexpected message during
+    // wait" }, since the connection is exclusively serving a single `run`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_command_unexpected_frame_refused() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let pane = exec_fixture(&registry, "execuf").await;
+
+        let (server, mut cr, mut cw) = start_exec(
+            &registry,
+            &ClientMsg::ExecCommand {
+                session: Some("execuf".into()),
+                text: "EXEC_UF_HOLD".into(),
+                timeout_ms: None,
+            },
+        )
+        .await;
+        // Wait until the injected text is visible so the exec wait is underway.
+        wait_screen_contains(&pane, "EXEC_UF_HOLD").await;
+
+        // Write a second frame on the same connection (any `ClientMsg` will do).
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::ListSessions).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let frame = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Codec::read_frame(&mut cr),
+        )
+        .await
+        .expect("no reply after unexpected frame")
+        .unwrap()
+        .expect("server closed without replying");
+        let reply: ServerMsg = postcard::from_bytes(&frame).unwrap();
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok);
+        assert_eq!(message.as_deref(), Some("run: unexpected message during wait"));
+        server.await.unwrap().unwrap();
+    }
 }
