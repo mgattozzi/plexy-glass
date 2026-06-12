@@ -1696,6 +1696,334 @@ fn cli_no_daemon_exits_nonzero() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Command-blocks e2e (B6)
+// ---------------------------------------------------------------------------
+// All four tests plant OSC 133 marks via printf inside the pane's /bin/sh, so
+// the emulator sees the real wire bytes and the genuine mark path gets
+// exercised.
+//
+// Marker naming: quote-concatenation (`OUT_'LN'_1` → OUT_LN_1) ensures the
+// contiguous needle only appears in the printf OUTPUT, not in the echoed
+// command text.
+
+/// `capture --last-command` returns exactly the block output (OUTPUT_START row
+/// through block end), not the prompt or the next prompt's text.
+#[test]
+fn capture_last_command_returns_block_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Emit two synthetic OSC 133 blocks in one printf. Marker names use
+    // quote-concatenation so the echoed command text shows `OUT_'LN'_1` while
+    // the executed printf OUTPUT shows the plain `OUT_LN_1`.
+    //
+    // Block structure after the emulator processes these bytes:
+    //   row N:   PROMPT_START  "PONE"
+    //   row N+1: OUTPUT_START  "OUT_LN_1"
+    //   row N+2:              "OUT_LN_2"
+    //   row N+3: BLOCK_END + PROMPT_START  "PTWO"
+    //
+    // last_completed_block → (OUTPUT_START row .. row before PTWO) → rows N+1..N+2
+    // block_text → "OUT_LN_1\nOUT_LN_2"
+    //
+    // The D;0 and A markers land on the same row (common shell flow);
+    // that row is excluded from the output range by last_completed_block.
+    let (send_status, _, send_err) = run_cli(
+        &env,
+        &[
+            "send",
+            "--enter",
+            "printf '\\033]133;A\\007PONE\\r\\n\\033]133;C\\007OUT_'LN'_1\\nOUT_'LN'_2\\n\\033]133;D;0\\007\\033]133;A\\007PTWO\\n'",
+        ],
+    );
+    assert!(send_status.success(), "send failed: {send_err}");
+
+    // Wait until the output lines appear in the plain capture (proves the
+    // emulator processed the OSC sequences and the marks are set).
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut marks_set = false;
+    while Instant::now() < deadline {
+        let (_, stdout, _) = run_cli(&env, &["capture"]);
+        if stdout.contains("OUT_LN_1") {
+            marks_set = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(marks_set, "OUT_LN_1 never appeared in plain capture (marks not set). pane: {}", sess.snapshot_str());
+
+    // Now fetch via --last-command.
+    let deadline2 = Instant::now() + Duration::from_secs(10);
+    let mut last_cmd_out = String::new();
+    let mut last_cmd_ok = false;
+    while Instant::now() < deadline2 {
+        let (status, stdout, _) = run_cli(&env, &["capture", "--last-command"]);
+        if status.success() {
+            last_cmd_out = stdout;
+            last_cmd_ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(last_cmd_ok, "capture --last-command never succeeded. pane: {}", sess.snapshot_str());
+    assert!(
+        last_cmd_out.contains("OUT_LN_1"),
+        "block output must contain OUT_LN_1. got: {last_cmd_out:?}"
+    );
+    assert!(
+        last_cmd_out.contains("OUT_LN_2"),
+        "block output must contain OUT_LN_2. got: {last_cmd_out:?}"
+    );
+    // The next prompt's text (PTWO) must not bleed into the output range.
+    assert!(
+        !last_cmd_out.contains("PTWO"),
+        "block output must not contain the next prompt text (PTWO). got: {last_cmd_out:?}"
+    );
+    // The prompt text (PONE) must also be excluded, since the output range
+    // starts at the OUTPUT_START row, not the prompt row.
+    assert!(
+        !last_cmd_out.contains("PONE"),
+        "block output must not contain the prompt text (PONE). got: {last_cmd_out:?}"
+    );
+}
+
+/// `prev-prompt` scrolls the viewport so the previous prompt is visible;
+/// `next-prompt` scrolls back toward the live content.
+///
+/// The plain `capture` verb reads only the live grid (not the scroll
+/// viewport), so the assertion surface for the viewport position is the
+/// rendered frame accumulated in the TestSession buffer. After `prev-prompt`
+/// the daemon re-renders and emits the scrolled viewport to the client PTY;
+/// `wait_for_from` detects the old prompt text arriving in that new render.
+#[test]
+fn prev_prompt_and_next_prompt_scroll_viewport() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    // 10-row terminal (8 usable rows after status + frame); printing more than
+    // 8 lines after the first prompt pushes it into scrollback.
+    let mut sess = TestSession::builder(&env).size(10, 60).start();
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Emit a single OSC 133 block with NO second A marker. This gives exactly
+    // one PROMPT_START row ("BLKPROMPT"), so `prev-prompt` from the live
+    // viewport always targets it unambiguously.
+    //
+    // Block structure emitted:
+    //   row 0: PROMPT_START  "BLKPROMPT"
+    //   row 1: OUTPUT_START  "BLKOUT"
+    //   row 2: BLOCK_END     (empty, D;0 alone, no text)
+    //
+    // Quote-concat: pane echo shows `BLK'PROMPT'` while printf output
+    // emits `BLKPROMPT`. Since we assert on the rendered frame (not plain
+    // capture), this avoids matching the typed echo.
+    let mark_before = sess.buffer_len();
+    sess.send_str("printf '\\033]133;A\\007BLK'PROMPT'\\r\\n\\033]133;C\\007BLKOUT\\n\\033]133;D;0\\007'\n");
+    // Wait for the block output to appear (marks are set by the time the
+    // output is visible in the frame).
+    assert!(
+        sess.wait_for_from(mark_before, b"BLKOUT", Duration::from_secs(10)),
+        "BLKOUT never appeared: {}",
+        sess.snapshot_str()
+    );
+
+    // Flood the pane with 20 lines so the first prompt scrolls off-screen.
+    // Use a sentinel so we wait only for the seq output, not a cursor-movement
+    // sequence that happens to contain "20" (e.g. ESC[row;20H).
+    let mark_seq = sess.buffer_len();
+    sess.send_str("seq 1 20; printf 'SEQ_''DONE\\n'\n");
+    assert!(
+        sess.wait_for_from(mark_seq, b"SEQ_DONE", Duration::from_secs(10)),
+        "seq+sentinel output never appeared: {}",
+        sess.snapshot_str()
+    );
+
+    // Confirm that BLKPROMPT has scrolled into scrollback and is no longer
+    // in the live grid. Poll `capture` (reads only the live viewport) until
+    // BLKPROMPT disappears, which proves the prompt is in scrollback before
+    // prev-prompt fires, the precondition the test relies on.
+    let blkprompt_gone = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut gone = false;
+        while Instant::now() < deadline {
+            let (_s, cap_out, _e) = run_cli(&env, &["capture"]);
+            if !cap_out.contains("BLKPROMPT") {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        gone
+    };
+    assert!(
+        blkprompt_gone,
+        "BLKPROMPT never left the live viewport after seq 1 20 — \
+         precondition for prev-prompt test not met. capture: {}",
+        run_cli(&env, &["capture"]).1
+    );
+
+    // At this point BLKPROMPT is in scrollback (invisible in the live
+    // viewport). Issue `prev-prompt` via the headless cmd verb (allowed
+    // headless: it maps to `Command::PrevPrompt` through
+    // `session.handle_prompt_command`).
+    let mark_after_cmd = sess.buffer_len();
+    let (cmd_status, _, cmd_err) = run_cli(&env, &["cmd", "prev-prompt"]);
+    assert!(cmd_status.success(), "cmd prev-prompt failed: {cmd_err}");
+
+    // The daemon re-renders with the scrolled viewport; BLKPROMPT must now
+    // appear in the rendered frame output (from new output after mark_after_cmd).
+    assert!(
+        sess.wait_for_from(mark_after_cmd, b"BLKPROMPT", Duration::from_secs(8)),
+        "BLKPROMPT did not appear in rendered frame after prev-prompt. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // `next-prompt` should scroll forward (back toward live content); after
+    // that the scrollback view recedes. We verify liveness by confirming the
+    // pane still responds to input after the nav.
+    let (cmd2_status, _, cmd2_err) = run_cli(&env, &["cmd", "next-prompt"]);
+    assert!(cmd2_status.success(), "cmd next-prompt failed: {cmd2_err}");
+
+    // Liveness: the shell must still respond to input after the viewport ops.
+    let mark_live = sess.buffer_len();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut live = false;
+    while Instant::now() < deadline {
+        sess.send_str("printf 'LIVE_'MARK'\\n'\n");
+        if sess.wait_for_from(mark_live, b"LIVE_MARK", Duration::from_millis(500)) {
+            live = true;
+            break;
+        }
+    }
+    assert!(live, "shell not live after next-prompt: {}", sess.snapshot_str());
+}
+
+/// No-blocks error path: `capture --last-command` on a fresh session (no OSC
+/// 133 output ever seen) must exit with status 1 and mention "no command
+/// blocks" on stderr.
+#[test]
+fn no_blocks_capture_last_command_exits_nonzero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // No OSC 133 output, the pane has never seen any block markers.
+    let (status, _stdout, stderr) = run_cli(&env, &["capture", "--last-command"]);
+    assert!(
+        !status.success(),
+        "capture --last-command with no blocks must exit non-zero; session: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        stderr.contains("no command blocks"),
+        "expected 'no command blocks' in stderr, got: {stderr:?}"
+    );
+}
+
+/// Copy-mode block navigation: `[` jumps to the previous prompt, `o` selects
+/// the block's output region, `y` yanks. The yanked text is pushed onto the
+/// paste-buffer stack; `prefix ]` pastes it into a `cat` child which echoes
+/// it back, giving us an observable frame-level signal.
+///
+/// macOS only: the yank path also calls `pbcopy`; we don't stub it here (the
+/// paste buffer is the observable surface), but the test needs the daemon's
+/// yank path to not error out, and on Linux `write_clipboard` is a no-op so
+/// the paste buffer still gets pushed.
+#[test]
+fn copy_mode_bracket_o_y_yanks_block_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Emit a completed OSC 133 block. Output text uses quote-concat so the
+    // echoed command shows `YANK_'OUT'_A` while the printf emits `YANK_OUT_A`.
+    sess.send_str("printf '\\033]133;A\\007YPROMPT\\r\\n\\033]133;C\\007YANK_'OUT'_A\\nYANK_'OUT'_B\\n\\033]133;D;0\\007\\033]133;A\\007YNEXT\\n'\n");
+    // Wait for the output to appear (marks set).
+    assert!(
+        sess.wait_for(b"YANK_OUT_A", Duration::from_secs(10)),
+        "YANK_OUT_A never appeared: {}",
+        sess.snapshot_str()
+    );
+
+    // Start `cat` so that future paste goes to cat's stdin and is echoed.
+    // Cat echoes its stdin verbatim; the readiness probe is a plain token
+    // (no quote-concat needed: cat does not interpret shell escapes, so
+    // `CATREADY` appears TWICE, once from line-discipline echo and once from
+    // cat's output, but `wait_for` fires on the first occurrence either way).
+    sess.send_str("cat\n");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut cat_ready = false;
+    while Instant::now() < deadline {
+        sess.send_str("CATREADY\n");
+        if sess.wait_for(b"CATREADY", Duration::from_millis(500)) {
+            cat_ready = true;
+            break;
+        }
+    }
+    assert!(cat_ready, "cat child never came up: {}", sess.snapshot_str());
+
+    // Enter copy mode: prefix [ (0x01 then '[').
+    sess.send_prefix(b'['); // enters copy mode
+    // Brief warmup: no observable marker for copy-mode entry.
+    std::thread::sleep(Duration::from_millis(150));
+
+    // `[` in copy mode = jump to previous PROMPT_START line. Starting from the
+    // live bottom (cursor initialised there by CopyMode::new), this jumps to
+    // the YNEXT prompt (from the D+A row), then one more `[` reaches YPROMPT.
+    // We press `[` twice to ensure we land at the first block's prompt.
+    sess.send(b"[");
+    std::thread::sleep(Duration::from_millis(80));
+    sess.send(b"[");
+    std::thread::sleep(Duration::from_millis(80));
+
+    // `o` selects the output region (anchor = `OUTPUT_START`, cursor = block end).
+    sess.send(b"o");
+    std::thread::sleep(Duration::from_millis(80));
+
+    // `y` yanks the selection and exits copy mode. The text is pushed onto
+    // the paste-buffer stack (`registry.push_paste_buffer`).
+    sess.send(b"y");
+    // Wait briefly for the yank to process and copy mode to exit.
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Paste the top buffer (prefix ]) into the cat child.
+    sess.send_prefix(b']');
+
+    // `cat` echoes the pasted text, so wait for it in the frame from this point.
+    let mark_after_paste = sess.buffer_len();
+    assert!(
+        sess.wait_for_from(mark_after_paste, b"YANK_OUT_A", Duration::from_secs(8)),
+        "YANK_OUT_A not echoed by cat after paste — copy-mode yank or paste failed. raw: {}",
+        sess.snapshot_str()
+    );
+    // YANK_OUT_B is the second line of the block output and must also appear,
+    // confirming the full output region (not just its first line) was yanked.
+    assert!(
+        sess.wait_for_from(mark_after_paste, b"YANK_OUT_B", Duration::from_secs(8)),
+        "YANK_OUT_B not echoed by cat — only partial output was yanked. raw: {}",
+        sess.snapshot_str()
+    );
+    // Negative: the prompt text (YPROMPT) must NOT appear in the post-paste
+    // frame output.  If `o` wrongly selected from the prompt row, YPROMPT
+    // would be pasted too; this assertion catches that.
+    //
+    // Snapshot raw bytes, slice from mark_after_paste, then lossy-decode the
+    // slice, which avoids a byte/char offset mismatch from multi-byte
+    // sequences in buffer positions before the mark.
+    let raw = sess.snapshot();
+    let post_paste_raw = &raw[mark_after_paste.min(raw.len())..];
+    let post_paste = String::from_utf8_lossy(post_paste_raw);
+    assert!(
+        !post_paste.contains("YPROMPT"),
+        "YPROMPT appeared in post-paste output — `o` selected the prompt row, \
+         not just the block output. post-mark slice: {post_paste:?}"
+    );
+}
+
 // Regression for the helix Shift+I bug. The pane child pushes Kitty keyboard
 // flags 5 (disambiguate|alternates, exactly what helix pushes), then execs
 // `cat -v`, which renders every byte it receives visibly (escape sequences
