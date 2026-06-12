@@ -934,6 +934,7 @@ impl ClientCtx<'_> {
                 }
                 self.session.notify.notify_one();
             }
+            TreeAction::RenameSession { .. } => {} // T2 wires this
         }
     }
 }

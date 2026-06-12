@@ -1,8 +1,8 @@
 use super::{COMMAND_HISTORY_CAP, WindowManager};
 use plexy_glass_mux::{
     BufferAction, BufferEntry, BufferOutcome, BufferPickerState, KeyEvent, Overlay, OverlayAction,
-    OverlayHandler, PickerEntry, RenameTarget, TreeAction, TreeMode, TreeNode, TreeOutcome,
-    TreeState, handle_buffers, handle_tree,
+    OverlayHandler, PickerEntry, RenameTarget, TreeAction, TreeNode, TreeOutcome, TreeState,
+    handle_buffers, handle_tree,
 };
 
 /// How the caller should follow up after feeding a key to the active overlay.
@@ -85,11 +85,7 @@ impl WindowManager {
     /// driven by `tree::handle_tree`; cross-session effects are dispatched at the
     /// connection layer.
     pub fn open_tree(&mut self, nodes: Vec<TreeNode>) {
-        self.overlay = Some(Overlay::Tree(TreeState {
-            nodes,
-            selected: 0,
-            mode: TreeMode::Navigate,
-        }));
+        self.overlay = Some(Overlay::Tree(TreeState::new(nodes)));
         self.rename_pane_target = None;
     }
 

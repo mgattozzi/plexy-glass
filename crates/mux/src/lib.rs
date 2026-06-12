@@ -50,7 +50,7 @@ pub use rect::Rect;
 pub use selection::{Selection, SelectionKind, extract_text, line_at, screen_text, word_at};
 pub use status::StatusLine;
 pub use tree::{
-    TreeAction, TreeKind, TreeMode, TreeNode, TreeOutcome, TreeState, handle_tree, pane_label,
-    window_label,
+    NodeKey, TreeAction, TreeKind, TreeMode, TreeNode, TreeOutcome, TreeState, handle_tree,
+    pane_label, session_label, window_label,
 };
 pub use virtual_screen::VirtualScreen;

@@ -624,9 +624,11 @@ fn paint_session_picker(
     }
 }
 
-/// Draw the centered choose-tree box: depth-indented rows (session → window →
-/// pane), the current-path nodes marked `*`, the selected row REVERSE, scrolled
-/// to keep the selection visible, with a mode-dependent footer.
+/// Draw the centered choose-tree box: depth-indented VISIBLE rows (collapsed
+/// subtrees and filtered-out rows are skipped), the current-path nodes marked
+/// `*`, the selected row REVERSE, scrolled by the selection's visible index,
+/// with a mode-dependent footer (`/{filter}` while filtering, a `(filtered)`
+/// hint in navigate mode when a filter is active).
 fn paint_tree(
     screen: &mut VirtualScreen,
     state: &crate::tree::TreeState,
@@ -638,15 +640,12 @@ fn paint_tree(
     let title = " Tree ";
     let footer: String = match &state.mode {
         TreeMode::Navigate => {
-            let session_selected = state
-                .nodes
-                .get(state.selected)
-                .map(|n| n.kind() == TreeKind::Session)
-                .unwrap_or(false);
-            if session_selected {
-                " \u{2191}/\u{2193} move \u{b7} enter switch \u{b7} x kill \u{b7} esc close ".into()
+            let base =
+                " \u{2191}/\u{2193} move \u{b7} enter switch \u{b7} x kill \u{b7} r rename \u{b7} esc close ";
+            if state.filter.is_empty() {
+                base.into()
             } else {
-                " \u{2191}/\u{2193} move \u{b7} enter switch \u{b7} x kill \u{b7} r rename \u{b7} esc close ".into()
+                format!("{base}(filtered) ")
             }
         }
         TreeMode::ConfirmKill => match state.nodes.get(state.selected) {
@@ -661,12 +660,16 @@ fn paint_tree(
             None => " Kill?  y / n ".into(),
         },
         TreeMode::Rename { buf } => format!(" rename: {buf}\u{2588}  enter ok \u{b7} esc cancel "),
+        TreeMode::Filter => {
+            format!(" /{}\u{2588}  enter keep \u{b7} esc clear ", state.filter)
+        }
     };
 
-    let rows: Vec<String> = state
-        .nodes
+    let vis = state.visible_indices();
+    let rows: Vec<String> = vis
         .iter()
-        .map(|n| {
+        .map(|&i| {
+            let n = &state.nodes[i];
             let indent = " ".repeat((n.depth as usize) * 2);
             let marker = if n.is_current { '*' } else { ' ' };
             format!("{indent}{marker} {}", n.label)
@@ -691,7 +694,8 @@ fn paint_tree(
         return;
     }
 
-    let sel = state.selected.min(rows.len().saturating_sub(1));
+    // Scroll math runs over the selection's VISIBLE position, not its raw index.
+    let sel = vis.iter().position(|&i| i == state.selected).unwrap_or(0);
     let top = if sel >= visible { sel - visible + 1 } else { 0 };
 
     let row0 = pane_row_offset + (pane_area_rows.saturating_sub(box_h)) / 2;
@@ -712,8 +716,8 @@ fn paint_tree(
     let inner_left = col0 + 1;
     let inner_right = col0 + box_w - 1; // exclusive max_col for put_str
 
-    // Empty tree (last session just killed): blank interior for the one frame
-    // before the client tears down.
+    // No visible rows (last session just killed, or a filter matching
+    // nothing): blank interior.
     if rows.is_empty() {
         return;
     }
@@ -1851,7 +1855,7 @@ mod tests {
                 tree_node("main", Some(0), Some(1), 2, "pane 2", false),
             ],
             selected: 1,
-            mode: crate::tree::TreeMode::Navigate,
+            ..Default::default()
         };
         let ov = OverlayView::Tree { state: &state };
         let vs = Compositor::compose(&[view], (12, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
@@ -2010,6 +2014,7 @@ mod tests {
             nodes: vec![tree_node("main", Some(0), None, 1, "1: shell", false)],
             selected: 0,
             mode: crate::tree::TreeMode::ConfirmKill,
+            ..Default::default()
         };
         let ov = OverlayView::Tree { state: &state };
         let vs = Compositor::compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
@@ -2020,6 +2025,79 @@ mod tests {
             }
         }
         assert!(text.contains("Kill window"), "confirm-kill footer shown: {text}");
+    }
+
+    /// Compose the tree overlay over a blank pane and return the frame text.
+    fn tree_frame(state: &crate::tree::TreeState, rows: u16, cols: u16) -> String {
+        let mut e = Emulator::new(rows, cols);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, rows, cols),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+            marked: false,
+        };
+        let ov = OverlayView::Tree { state };
+        let vs = Compositor::compose(&[view], (rows, cols), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let mut text = String::new();
+        for r in 0..rows {
+            for c in 0..cols {
+                text.push_str(vs.cell(r, c).unwrap().grapheme.as_str());
+            }
+        }
+        text
+    }
+
+    fn tree_v2_nodes() -> Vec<crate::tree::TreeNode> {
+        vec![
+            tree_node("main", None, None, 0, "main — 1 win, 2 panes", true),
+            tree_node("main", Some(0), None, 1, "1: shell", true),
+            tree_node("main", Some(0), Some(0), 2, "pane 1", false),
+            tree_node("main", Some(0), Some(1), 2, "pane 2", false),
+        ]
+    }
+
+    #[test]
+    fn tree_overlay_hides_collapsed_rows() {
+        let state = crate::tree::TreeState {
+            nodes: tree_v2_nodes(),
+            collapsed: [crate::tree::NodeKey::Session("main".into())].into_iter().collect(),
+            ..Default::default()
+        };
+        let text = tree_frame(&state, 12, 50);
+        assert!(text.contains("1 win"), "session row still rendered: {text}");
+        assert!(!text.contains("shell"), "collapsed window row hidden: {text}");
+        assert!(!text.contains("pane 1"), "collapsed pane rows hidden: {text}");
+    }
+
+    #[test]
+    fn tree_overlay_filter_mode_footer() {
+        let state = crate::tree::TreeState {
+            nodes: tree_v2_nodes(),
+            selected: 1,
+            mode: crate::tree::TreeMode::Filter,
+            filter: "she".into(),
+            ..Default::default()
+        };
+        let text = tree_frame(&state, 12, 60);
+        assert!(text.contains("/she"), "filter footer shows the live pattern: {text}");
+        assert!(!text.contains("pane 1"), "non-matching rows hidden while filtering: {text}");
+    }
+
+    #[test]
+    fn tree_overlay_navigate_footer_flags_active_filter() {
+        let state = crate::tree::TreeState {
+            nodes: tree_v2_nodes(),
+            selected: 1,
+            filter: "shell".into(),
+            ..Default::default()
+        };
+        let text = tree_frame(&state, 12, 90);
+        assert!(text.contains("(filtered)"), "navigate footer flags the kept filter: {text}");
     }
 
     // ── Block exit-status compositor tests ───────────────────────────────────
