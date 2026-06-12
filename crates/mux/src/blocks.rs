@@ -214,6 +214,48 @@ pub fn viewport_block_status(screen: &Screen, top: u32, rows: u16) -> Vec<Option
     result
 }
 
+/// Returns `true` when the pane's active shell is waiting at a prompt and
+/// ready to accept a new command.
+///
+/// The rule: find the newest `PROMPT_START` line anywhere in the unified
+/// scrollback + active-grid space; the pane is at a prompt iff no
+/// `OUTPUT_START` mark exists on a line **strictly after** (i.e. with a higher
+/// index than) that newest-prompt line.
+///
+/// Returns `false` when no `PROMPT_START` has been seen at all.
+///
+/// **Alt screen is deliberately not checked here.** The caller
+/// (`connection.rs` `ExecCommand` arm) must test `screen.alt.is_some()`
+/// separately and refuse before calling this function, since the alt-screen
+/// pane belongs to a full-screen application, not the shell prompt cycle.
+///
+/// # Accepted edges (documented in the spec)
+///
+/// - **A-without-C integrations** (shell emits `133;A` but never `133;C`):
+///   the pane looks at-prompt even mid-command. This is a *fails-open* trade-
+///   off: full integration (A+C+D) avoids it; the alternative (fails-closed)
+///   would permanently refuse panes with prompt-only integration.
+/// - **C on the newest-prompt row itself** (e.g. `\x1b]133;A\x07$ \x1b]133;C\x07`
+///   with no newline between): returns `true` because the `OUTPUT_START` is
+///   not *strictly after* the prompt line. Chosen deliberately, because the
+///   inclusive alternative would treat a shared C+D+A row as permanently busy.
+pub fn pane_at_prompt(screen: &Screen) -> bool {
+    let total = total_lines(screen);
+    if total == 0 {
+        return false;
+    }
+    // Find the newest PROMPT_START by scanning backwards.
+    let newest_prompt = match (0..total).rev().find(|&l| is_prompt(screen, l)) {
+        Some(l) => l,
+        None => return false,
+    };
+    // The pane is at a prompt iff no OUTPUT_START exists strictly after it.
+    let has_output_after = (newest_prompt + 1..total).any(|l| {
+        row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::OUTPUT_START))
+    });
+    !has_output_after
+}
+
 /// Render the absolute-line range `(start, end)` (inclusive, scrollback rows
 /// included) as plain text: one line per row, trailing whitespace trimmed,
 /// trailing blank lines dropped (a block that ends at the bottom of the grid
@@ -680,5 +722,74 @@ mod tests {
         // total_lines = 4; top = 4 → at end → all None
         let status = viewport_block_status(&s, 4, 4);
         assert!(status.iter().all(|s| s.is_none()), "top at total_lines → all None");
+    }
+
+    // ── pane_at_prompt tests ─────────────────────────────────────────────────
+
+    /// Fresh prompt: A only, no C anywhere → at prompt → true.
+    #[test]
+    fn pap_fresh_prompt_a_only() {
+        let s = screen_from(4, 20, b"\x1b]133;A\x07$ ");
+        assert!(pane_at_prompt(&s), "fresh A-only prompt → true");
+    }
+
+    /// No prompts at all → false.
+    #[test]
+    fn pap_no_prompts_at_all() {
+        let s = screen_from(4, 20, b"just some text");
+        assert!(!pane_at_prompt(&s), "no prompts → false");
+    }
+
+    /// A then C (command running, no D yet) → false.
+    #[test]
+    fn pap_running_a_then_c() {
+        let s = screen_from(4, 20, b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07output");
+        assert!(!pane_at_prompt(&s), "A then C (running) → false");
+    }
+
+    /// Full cycle A, C, D, A, a completed block then a fresh prompt → true.
+    #[test]
+    fn pap_full_cycle_a_c_d_a() {
+        // D on line 2, A (new prompt) on line 3: newest A is at line 3, no C after it.
+        let s = screen_from(
+            6,
+            20,
+            b"\x1b]133;A\x07$ first\r\n\
+              \x1b]133;C\x07output\r\n\
+              \x1b]133;D;0\x07\x1b]133;A\x07$ ",
+        );
+        assert!(pane_at_prompt(&s), "A,C,D,A full cycle → true");
+    }
+
+    /// Shared D+A row newest (A…C…D+A flow) → true.
+    /// The newest PROMPT_START is on the D+A row; no C exists after it.
+    #[test]
+    fn pap_shared_da_row_newest() {
+        // two_blocks: line 3 = D;0+A (block 2's prompt), line 4 = C (block 2 running)
+        // But we want the state JUST after the D+A row, before the C.
+        // Build: A line0, C line1, out line2, D+A line3 (no further C).
+        let s = screen_from(
+            6,
+            20,
+            b"\x1b]133;A\x07$ one\r\n\
+              \x1b]133;C\x07out1\r\n\
+              out2\r\n\
+              \x1b]133;D;0\x07\x1b]133;A\x07$ two",
+        );
+        // Newest A is on line 3 (D+A). No C after line 3 → at prompt.
+        assert!(pane_at_prompt(&s), "shared D+A row newest, no C after → true");
+    }
+
+    /// C on the SAME ROW as the newest A (no newline between A and C) → true.
+    /// This pins the documented "fails-open" edge: strictly-after means
+    /// C on the same row as A does NOT count as output-started.
+    #[test]
+    fn pap_c_on_same_row_as_newest_a() {
+        // A and C on the same row, no newline → C is on the newest A's row, not strictly after.
+        let s = screen_from(4, 20, b"\x1b]133;A\x07$ \x1b]133;C\x07x");
+        assert!(
+            pane_at_prompt(&s),
+            "C on same row as newest A → true (fails-open edge)"
+        );
     }
 }
