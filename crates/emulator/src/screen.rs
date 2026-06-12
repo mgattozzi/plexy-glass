@@ -74,7 +74,9 @@ pub struct Screen {
     /// click-to-position (cursor-row lookup). `A`/`C`/`D` live on the rows
     /// themselves (`Row.mark`). Entries shift with scrolls and are dropped
     /// when their row leaves the grid; resize clears the list; pushes are
-    /// capped at `PROMPT_MARKS_MAX`.
+    /// capped at `PROMPT_MARKS_MAX`. ED/2J does NOT prune the list, a stale
+    /// entry is harmless to the newest-wins cursor-row consumer and the cap
+    /// bounds the list regardless.
     pub prompt_marks: Vec<PromptMark>,
     /// OSC 52 clipboard payloads queued for the daemon to flush via
     /// `pbcopy` / `xclip`. Drained by `take_clipboard_writes`.
@@ -1816,6 +1818,63 @@ mod tests {
         let s = parse(b"\x1b]133;B\x07\x1b[T");
         assert_eq!(s.prompt_marks.len(), 1, "got {:?}", s.prompt_marks);
         assert_eq!(s.prompt_marks[0].row, 1);
+    }
+
+    #[test]
+    fn row_marks_ride_into_scrollback() {
+        // A marked row that scrolls off the top keeps its flags and exit code
+        // in scrollback, the mark lives ON the Row so no transfer code is needed.
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(2, 8);
+        p.advance(&mut s, b"\x1b]133;A\x07\x1b]133;D;7\x07a\r\nb\r\nc\r\nd");
+        p.flush(&mut s);
+        assert!(s.scrollback.len() >= 2, "row 'a' must have scrolled away");
+        let mark = s.scrollback.rows()[0].mark;
+        assert!(mark.contains(RowMark::PROMPT_START));
+        assert!(mark.contains(RowMark::BLOCK_END));
+        assert_eq!(mark.exit(), Some(7));
+    }
+
+    #[test]
+    fn scrollback_eviction_drops_marks_with_their_rows() {
+        // At the scrollback cap, evicted rows take their marks with them, so
+        // nothing retains a reference to an evicted block.
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(2, 8);
+        s.scrollback = crate::scrollback::Scrollback::with_cap(1);
+        // Mark row 'a', then scroll enough that 'a' is evicted (cap 1 keeps
+        // only the most recent scrolled-out row).
+        p.advance(&mut s, b"\x1b]133;A\x07\x1b]133;D;7\x07a\r\nb\r\nc\r\nd\r\ne");
+        p.flush(&mut s);
+        assert_eq!(s.scrollback.len(), 1);
+        assert!(
+            s.scrollback.rows()[0].mark.is_empty(),
+            "the surviving (unmarked) row must not have inherited the evicted mark"
+        );
+    }
+
+    #[test]
+    fn ed2_clears_row_marks() {
+        // Ctrl-L style full clear (ED 2): the blocks are gone from the screen,
+        // so the marks must go too, otherwise blank rows read as phantom blocks.
+        let s = parse(b"\x1b]133;A\x07\x1b]133;D;0\x07hi\x1b[2J");
+        for (i, row) in s.active.rows.iter().enumerate() {
+            assert!(row.mark.is_empty(), "row {i} must be markless after 2J");
+        }
+    }
+
+    #[test]
+    fn partial_erase_keeps_row_marks() {
+        // EL (erase line) and ED 0 (erase below) blank cells but do not unmake
+        // the block: the prompt row keeps its mark.
+        let s = parse(b"\x1b]133;A\x07abc\x1b[2K");
+        assert!(s.active.rows[0].mark.contains(RowMark::PROMPT_START));
+
+        let s = parse(b"\x1b]133;A\x07abc\x1b[H\x1b[J");
+        assert!(
+            s.active.rows[0].mark.contains(RowMark::PROMPT_START),
+            "ED 0 (clear_rect path) must not clear marks"
+        );
     }
 
     #[test]

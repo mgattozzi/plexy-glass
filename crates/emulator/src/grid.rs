@@ -81,6 +81,20 @@ impl RowMark {
     pub fn is_empty(self) -> bool {
         self.flags == 0
     }
+
+    /// Fold another row's mark into this one: flags are OR-ed; an exit code on
+    /// `other` wins. Used by reflow when a logical line's physical rows are
+    /// merged. Today at most one row of a line carries a mark (133 marks land
+    /// at the cursor row), but a mark CAN land on a soft continuation row
+    /// (cursor mid-wrapped-line when the OSC arrives), so merge defensively.
+    /// "Other's exit wins" is the natural order: callers merge first→last row,
+    /// so a later `133;D` supersedes an earlier one.
+    pub fn merge(&mut self, other: RowMark) {
+        self.flags |= other.flags;
+        if other.flags & Self::HAS_EXIT != 0 {
+            self.exit_code = other.exit_code;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,10 +160,17 @@ impl Grid {
                 *c = Cell::default();
             }
             r.wrap_origin = WrapOrigin::Hard;
+            // Full-grid clear (ED 2/3J, e.g. ctrl-L) erases the blocks from
+            // view; stale marks on now-blank rows would read as phantom blocks.
+            r.mark = RowMark::default();
         }
     }
 
     /// Clear an inclusive rectangle (clamped to grid).
+    ///
+    /// Deliberately leaves `Row.mark` alone: partial erases (EL, ED 0/1)
+    /// blank cells on a line without unmaking the command block whose
+    /// boundary that line is. Only a full-grid [`Grid::clear`] wipes marks.
     pub fn clear_rect(&mut self, start_row: u16, start_col: u16, end_row: u16, end_col: u16) {
         let end_row = end_row.min(self.num_rows().saturating_sub(1));
         let end_col = end_col.min(self.cols.saturating_sub(1));
@@ -271,6 +292,23 @@ mod tests {
                 assert!(g.get_cell(r, c).unwrap().is_blank());
             }
         }
+    }
+
+    #[test]
+    fn clear_resets_row_marks() {
+        let mut g = Grid::new(2, 2);
+        g.rows[0].mark.set(RowMark::PROMPT_START);
+        g.rows[0].mark.set_exit(Some(0));
+        g.clear();
+        assert!(g.rows.iter().all(|r| r.mark.is_empty()));
+    }
+
+    #[test]
+    fn clear_rect_keeps_row_marks() {
+        let mut g = Grid::new(2, 2);
+        g.rows[0].mark.set(RowMark::PROMPT_START);
+        g.clear_rect(0, 0, 1, 1);
+        assert!(g.rows[0].mark.contains(RowMark::PROMPT_START));
     }
 
     #[test]
