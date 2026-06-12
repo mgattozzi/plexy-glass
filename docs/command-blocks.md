@@ -208,6 +208,10 @@ when no block exists.
 Popup-aware: with a popup open it targets the popup's pane, same as plain
 `capture`.
 
+If you want a synchronous alternative that also injects the command and waits
+for it to finish, that's `plexy-glass run`, see
+[docs/scripting.md](scripting.md#run--synchronous-command-execution).
+
 **Example** (grab the last build output):
 
 ```sh
@@ -222,11 +226,8 @@ We track the following as future work:
 
 - **No `--json` flag** on `capture --last-command`: the flag that would return
   `{ text, exit_code, command_line }` as JSON is deferred.
-- **No synchronous `run` verb**: a `run "cmd"` that sends input and blocks until
-  the block closes is the next step in the scripting arc, but we haven't built
-  it yet.
 - **No block-aware mouse**: clicking on a prompt does not jump to it.
-- **No mark persistence**: marks are not saved to disk, so a restored pane
-  starts without block history.
+- **No mark persistence**: marks are not saved on disk; a restored pane starts
+  without block history.
 - **Alt-screen marks ignored**: full-screen programs that emit 133 sequences
   while on the alt screen are not tracked.

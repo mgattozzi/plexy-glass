@@ -76,26 +76,31 @@ Other subcommands:
 | `plexy-glass cmd [-n NAME] <LINE>...` | Run one or more command-prompt lines against a session |
 | `plexy-glass send [-n NAME] [--enter] <TEXT>...` | Type text into the focused pane (popup-aware) |
 | `plexy-glass capture [-n NAME]` | Print the focused pane's visible screen text (popup-aware) |
+| `plexy-glass run [-n NAME] [--timeout SECS] <COMMAND>...` | Type a command into the focused pane, wait for OSC 133 completion, print the output, and exit with the command's exit code (requires shell integration) |
 
 (`plexy-glass daemon` exists but auto-spawn runs it for you internally, so
 the only time you'd type it is with `--foreground` for development.)
 
 ### Scripting
 
-The `cmd`, `send`, and `capture` verbs let you drive a running session from a
-script or another tool, no terminal attachment required:
+The `cmd`, `send`, `capture`, and `run` verbs let you drive a running session
+from a script or another tool, no terminal attachment required:
 
 ```sh
 # Apply a structural command, then run a test and check the output
 plexy-glass cmd -n work "split v" "layout main-vertical"
 plexy-glass send -n work --enter "cargo test"
 plexy-glass capture -n work | grep "test result: ok"
+
+# Gate a commit on the test suite — synchronous, exit code passthrough
+plexy-glass run -n work "cargo test" && plexy-glass run -n work "jj commit -m wip"
 ```
 
-`cmd` reuses the command-prompt grammar verbatim. All three verbs exit 0 on
-success and 1 on any failure; `-n NAME` targets a session, and without `-n`
-the sole running session is used (error if zero or more than one). See
-[docs/scripting.md](docs/scripting.md) for the full reference.
+`cmd` reuses the command-prompt grammar verbatim. `run` injects a command and
+waits for the OSC 133 completion mark (requires shell integration). All verbs
+exit 0 on success and 1 on any failure; `-n NAME` targets a session, and
+without `-n` the sole running session is used (error if zero or more than one).
+See [docs/scripting.md](docs/scripting.md) for the full reference.
 
 ## Default keybindings
 
@@ -186,10 +191,10 @@ reload`) so you don't have to restart the daemon to see a change. See
 [docs/configuration.md](docs/configuration.md) for the full reference.
 
 Other topic docs:
-- [docs/scripting.md](docs/scripting.md) covers the `cmd`, `send`, and
-  `capture` CLI verbs
-- [docs/command-blocks.md](docs/command-blocks.md) covers OSC 133
-  command-block navigation and capture
+- [docs/scripting.md](docs/scripting.md): the `cmd`, `send`, `capture`, and
+  `run` CLI verbs
+- [docs/command-blocks.md](docs/command-blocks.md): OSC 133 command-block
+  navigation and capture
 
 ## Status
 

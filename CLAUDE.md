@@ -70,7 +70,7 @@ the index (intro, quick start, keybindings, links). Current topics:
 
 - `docs/configuration.md` — the `config.kdl` reference (palette, status bar,
   keymap + verb vocabulary, declarative sessions, the command prompt).
-- `docs/scripting.md` — the `cmd` / `send` / `capture` CLI surface.
+- `docs/scripting.md` — the `cmd` / `send` / `capture` / `run` CLI surface.
 
 Any change to the user-visible surface — commands, command-prompt verbs,
 keybinding verbs, default bindings, the config schema, CLI subcommands, or
@@ -230,15 +230,23 @@ restore (saved split ratios are re-applied on restore — fixing the old 50/50
 limitation); and **CLI scripting** — `plexy-glass cmd [-n NAME] <LINE>...` runs
 command-prompt lines headlessly reusing the prompt grammar verbatim
 (`command_prompt::parse`), `plexy-glass send [-n NAME] [--enter] <TEXT>...` injects
-bytes into the input path (popup- and sync-panes-aware), and
+bytes into the input path (popup- and sync-panes-aware),
 `plexy-glass capture [-n NAME]` reads the focused pane's visible grid as plain
-text (`screen_text` in `crates/mux/src/selection.rs`); protocol v6
-(`RunCommand`/`SendInput`/`CapturePane` + `CommandResult`/`PaneCapture`);
-sole-or-explicit session resolution with exact error texts; interactive-only
+text (`screen_text` in `crates/mux/src/selection.rs`), and `plexy-glass run
+[-n NAME] [--timeout SECS] <COMMAND>...` injects a command into the
+input-target pane, waits for the OSC 133 `D` completion mark (fenced by
+`Screen::blocks_completed`, a monotonic counter incremented per block in the
+emulator's D branch), prints the block output, and exits with the command's
+exit code — using `pane_at_prompt` (`crates/mux/src/blocks.rs`) to detect the
+at-prompt precondition; protocol v8 (`ExecCommand`/`ExecDone` appended to
+their enums, `serve_exec` in `crates/daemon/src/connection.rs`,
+`client_exec` in `crates/client/src/lib.rs`); sole-or-explicit session
+resolution with exact error texts; interactive-only
 verbs (detach/switch/help/sessions/tree/buffers) refused with
 `"<verb>: requires an attached client"`; `reload`/`paste` work headless;
-honest exit codes (0 all-ok, 1 any-failure, stop-at-first for multi-line cmd);
-`send`/`capture` are popup-aware by design (same input-target-pane path);
+honest exit codes (0 all-ok, 1 any-failure, stop-at-first for multi-line cmd,
+exit-code passthrough for `run`, 124 for `run` timeout);
+`send`/`capture`/`run` are popup-aware by design (same input-target-pane path);
 no auto-spawn (distinct from list/reload); and a **configurable prefix** —
 `keymap.prefix` is consumed for real: binding strings accept a `prefix` chord
 token (case-insensitive, any position; `parse_chord_seq_with_prefix` in
@@ -286,10 +294,10 @@ updated as part of each feature, per **User documentation**. Workflows
 Not yet built (future work): pipe-pane; cross-window **swap**-pane
 and the choose-tree filter/collapse + session rename (deferred in their specs);
 silence monitoring + bell/activity alert messages; set/save/load paste buffers;
-`capture --last-command --json` (text + exit code + command line); a synchronous
-`run` verb (send input, wait for block close); block-aware mouse (click a prompt
-to jump); mark persistence across daemon restart; block exit-status border on
-popup panes (deferred in the 2026-06-12 spec).
+`capture --last-command --json` (text + exit code + command line); block-aware
+mouse (click a prompt to jump); mark persistence across daemon restart; block
+exit-status border on popup panes (deferred in the 2026-06-12 spec); `run`
+--json output; push notifications on run completion.
 Declarative-session v1 boundaries left for later: split ratios + active
 window/pane selection in the template, per-pane env maps, re-reading templates on
 `Ctrl+a R` reload, and `switch_session` auto-creating a not-yet-running declared
@@ -308,4 +316,7 @@ command-block awareness — OSC 133 row marks, copy-mode block navigation,
 viewport prompt verbs, copy-output, capture --last-command, protocol v7 —
 shipped 2026-06-11 spec/plan; block exit-status border — left-border coloring
 per block exit status, viewport-tracked, blocks config node — shipped
+2026-06-12 spec/plan; `run` verb — synchronous command execution,
+blocks_completed counter, pane_at_prompt, protocol v8, ExecCommand/ExecDone,
+serve_exec/client_exec, exit-code passthrough, timeout 124 — shipped
 2026-06-12 spec/plan.)

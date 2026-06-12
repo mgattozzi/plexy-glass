@@ -1,8 +1,8 @@
 # Scripting from the CLI
 
-The `cmd`, `send`, and `capture` verbs let scripts and agents drive a running
-session over the daemon socket without attaching a terminal. They act on the
-session's focused window and pane, the same target that an attached client
+The `cmd`, `send`, `capture`, and `run` verbs let scripts and agents drive a
+running session over the daemon socket without attaching a terminal. They act
+on the session's focused window and pane, the same target an attached client
 would affect.
 
 ```sh
@@ -20,6 +20,7 @@ plexy-glass capture -n work | grep "test result: ok"
 | `plexy-glass send [-n NAME] [--enter] <TEXT>...` | `--enter` appends `\r` | Join the TEXT fragments with single spaces and write them to the session's input path. |
 | `plexy-glass capture [-n NAME]` | (none) | Print the focused pane's visible screen text to stdout (per-line trailing whitespace trimmed, trailing blank lines dropped). |
 | `plexy-glass capture --last-command [-n NAME]` | `--last-command` | Print the last completed OSC 133 command block's output (scrollback-inclusive) to stdout. Exits 1 with `"no command blocks…"` when the pane has no completed block (shell integration not active). |
+| `plexy-glass run [-n NAME] [--timeout SECS] <COMMAND>...` | `--timeout SECS` | Type COMMAND + Enter into the input-target pane, wait for the OSC 133 completion mark, print the block output to stdout, and exit with the command's exit code. Requires OSC 133 shell integration. |
 
 ## Session resolution
 
@@ -76,6 +77,91 @@ Exit 0 means a completed block was found and printed; exit 1 with
 means no block exists (integration not configured, or the pane was just
 restored). See [docs/command-blocks.md](command-blocks.md) for shell-integration
 setup.
+
+## `run` — synchronous command execution
+
+```sh
+plexy-glass run [-n NAME] [--timeout SECS] <COMMAND>...
+```
+
+Types `COMMAND` (fragments joined with single spaces) followed by Enter into
+the session's input-target pane (popup-aware), waits for the shell to emit an
+OSC 133 `D` completion mark, prints the command's output to stdout, and exits
+with the command's exit code. Unlike `send` + `capture`, the whole
+send→wait→print sequence is atomic from the script's point of view.
+
+**Requires OSC 133 shell integration.** See [docs/command-blocks.md](command-blocks.md)
+for setup.
+
+### Preconditions
+
+`run` checks three conditions before injecting anything, so a busy pane never
+gets bytes typed into it blind. If any fails it exits 1 with the matching
+message on stderr:
+
+| Condition | Stderr message |
+|---|---|
+| Shell integration active (any OSC 133 mark in the pane) | `no command blocks — shell integration not active? see docs/command-blocks.md` |
+| No command already running (pane is at a prompt) | `pane is busy: a command is running` |
+| Not in a full-screen application | `pane is busy: alternate screen is active` |
+
+All three are checked atomically in a single screen snapshot, so there is no
+window between the check and the injection.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0–255 | The command's own exit code, passed through directly. |
+| 124 | `--timeout SECS` expired before the command finished. The command is **not** killed, it keeps running in the pane. |
+| 1 | A plexy-glass failure (no session, precondition rejected, pane child exited mid-run, pane was reset mid-command, or any other daemon refusal). |
+
+**Disambiguating 1 vs. 124**: exit code 1 could be the command's own exit
+status or a plexy-glass failure. The stderr output disambiguates: a plexy
+failure always prints a message starting with `plexy-glass run:` or `run:`
+before exiting 1; a command that exits 1 cleanly prints nothing on stderr from
+`plexy-glass run`.
+
+**D without exit payload**: if the shell emits `OSC 133;D` with no exit-code
+field, `run` prints the output, emits `run: shell integration reported no exit
+code` on stderr, and exits 0.
+
+**No default timeout.** Without `--timeout`, `run` waits indefinitely for the
+completion mark. Press `Ctrl-C` to abandon the wait (the command keeps running
+in the pane).
+
+### Accepted limitations
+
+These are constraints we've accepted, not bugs:
+
+- **Don't type in the pane while `run` is waiting.** Anything you type goes
+  to the running command, and that can make the next `D` mark land
+  unexpectedly early or late.
+- **Nested shells and SSH sessions.** If the pane is running a shell inside
+  another shell (e.g. `ssh`, `docker exec -it`), and that inner shell also
+  emits OSC 133 marks, a `D` from the inner shell satisfies the wait early.
+- **Backgrounded work.** `run "make &"` returns as soon as the shell emits
+  its own `D` for the job submission, not when the background job finishes.
+- **A-without-C shells.** Some shell integrations emit `A` (prompt start) but
+  omit `C` (output start). The busy-check can't tell "mid-command" apart for
+  these shells and fails open, so it may inject a second command while one is
+  running.
+- **Output after `clear`.** If the command clears the screen, the captured
+  output is best-effort (whatever survives in the grid); the exit code is
+  always exact.
+
+### Examples
+
+```sh
+# Gate a commit on the test suite — in your real session
+plexy-glass run -n work "cargo test" && plexy-glass run -n work "jj commit -m wip"
+
+# Capture a value
+rev=$(plexy-glass run -n api "git rev-parse HEAD")
+
+# Bound a long build
+plexy-glass run --timeout 600 "cargo build --release" || echo "build broke or stalled"
+```
 
 ## Popup-aware write and read
 
