@@ -2223,8 +2223,8 @@ fn block_border_disabled_by_config_no_half_block() {
     );
 
     // Snapshot the bytes from mark_before (entire render since the block was
-    // emitted) and assert `▌` is NOT there. The ok_color SGR also must not
-    // appear (feature is fully disabled).
+    // emitted) and assert `▌` is NOT there, and neither status SGR appears
+    // (feature is fully disabled).
     let raw = sess.snapshot();
     let post_mark = &raw[mark_before.min(raw.len())..];
     assert!(
@@ -2233,6 +2233,14 @@ fn block_border_disabled_by_config_no_half_block() {
          post-mark raw bytes (lossy): {}",
         String::from_utf8_lossy(post_mark)
     );
+    let fail_sgr = b"\x1b[38;2;196;116;110m"; // palette `alert` #c4746e
+    let ok_sgr = b"\x1b[38;2;135;169;135m"; // palette `ok` #87a987
+    for (sgr, name) in [(&fail_sgr[..], "fail"), (&ok_sgr[..], "ok")] {
+        assert!(
+            !post_mark.windows(sgr.len()).any(|w| w == sgr),
+            "{name}-color SGR must NOT appear when blocks.enabled = false"
+        );
+    }
 }
 
 // Regression for the helix Shift+I bug. The pane child pushes Kitty keyboard

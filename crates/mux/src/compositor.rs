@@ -2159,6 +2159,67 @@ mod tests {
         }
     }
 
+    /// Status bar on TOP shifts every pane down by one physical row
+    /// (`pane_row_offset = 1`), and the block segment must shift WITH the pane:
+    /// fail color at `offset + rect.row + r`, not one row off, and never on
+    /// the status row.
+    #[test]
+    fn compose_status_top_offsets_block_segment_with_the_pane() {
+        use plexy_glass_emulator::Emulator;
+        // Same fixture as the scrolled test: block 1 (lines 0..2) Failed.
+        let mut e = Emulator::new(3, 20);
+        e.advance(
+            b"\x1b]133;A\x07$ fail\r\n\
+              \x1b]133;C\x07out1\r\n\
+              out2\r\n\
+              \x1b]133;D;1\x07\x1b]133;A\x07$ next\r\n\
+              \x1b]133;C\x07x\r\n\
+              y",
+        );
+        e.advance(b"\x1b[m");
+        let screen = e.screen().clone();
+        let colors = block_colors();
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(1, 1, 3, 18),
+            screen: &screen,
+            is_active: false,
+            scroll_offset: 3, // viewport = lines 0..2, all Failed
+            copy_mode: None,
+            title: None,
+            marked: false,
+        };
+        let status = status_with_left("AB");
+        let vs = Compositor::compose(
+            &[view],
+            (6, 20),
+            Some(&status),
+            StatusPlacement::Top,
+            None,
+            None,
+            None,
+            None,
+            Some(&colors),
+        );
+        // Logical pane rows 1..=3 paint physically at rows 2..=4 (offset 1).
+        for r in 2..=4u16 {
+            let cell = vs.cell(r, 0).unwrap();
+            assert_eq!(
+                cell.fg, colors.fail,
+                "top placement: fail color at physical row {r} col 0"
+            );
+        }
+        // The unshifted positions: row 1 is the band's top frame line and row 0
+        // the status bar, so neither may carry the segment color.
+        for r in 0..=1u16 {
+            let cell = vs.cell(r, 0).unwrap();
+            assert_ne!(
+                cell.fg, colors.fail,
+                "top placement: row {r} col 0 must not take the segment color"
+            );
+        }
+    }
+
     /// Copy-mode viewport uses the copy-mode top for block status.
     #[test]
     fn compose_copy_mode_viewport_uses_copy_mode_top() {
