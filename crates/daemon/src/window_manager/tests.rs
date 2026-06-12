@@ -1867,3 +1867,252 @@ async fn open_popup_clears_in_flight_resize_drag() {
     assert!(m.resize_drag.is_none(), "popup open must drop the frozen drag");
     assert!(m.selection().is_none());
 }
+
+// ----- J4: block-aware mouse (prompt-row click-to-jump) -----
+//
+// Viewport geometry (24×80 WM, status bar at bottom):
+//   host_viewport → Rect { row: 1, col: 1, rows: 21, cols: 78 }
+//   single pane gets the full viewport rect.
+//   pane_at_coord requires physical row ∈ [1, 22) and col ∈ [1, 79).
+//   local_row = physical_row - pane_rect.row = physical_row - 1.
+//   local_col = physical_col - pane_rect.col = physical_col - 1.
+//   So physical row = pane_local_row + 1; use col >= 2 for safety.
+
+/// Plain (unmodified) left press. `row` and `col` are PHYSICAL coords.
+fn plain_left_press(row: u16, col: u16) -> MouseEvent {
+    MouseEvent {
+        kind: MouseKind::Press,
+        button: MouseButton::Left,
+        modifiers: plexy_glass_mux::MouseModifiers::default(),
+        row,
+        col,
+    }
+}
+
+/// Shift+left press. `row` and `col` are PHYSICAL coords.
+fn shift_left_press(row: u16, col: u16) -> MouseEvent {
+    MouseEvent {
+        kind: MouseKind::Press,
+        button: MouseButton::Left,
+        modifiers: plexy_glass_mux::MouseModifiers { shift: true, alt: false, ctrl: false },
+        row,
+        col,
+    }
+}
+
+// J4-T1: scrolled pane + left press on a viewport row showing a PROMPT_START
+// line → scroll_offset becomes scrollback_len - that_line (row at top).
+//
+// sb=10, offset=8 → top=2. pane-local row 1 → abs line 3 (the prompt).
+// Expected: offset = 10 - 3 = 7 (prompt at viewport top).
+#[tokio::test]
+async fn prompt_click_while_scrolled_jumps_to_viewport_top() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    // 10 scrollback rows; prompt at absolute line 3.
+    inject_scrollback_prompts(&m, 10, &[3]);
+    // Scroll so top visible absolute line = 2 (offset = 10 - 2 = 8).
+    // Pane-local row 1 → abs line 3 (the prompt).
+    let pane = m.active_window().active_pane().unwrap().clone();
+    pane.set_scroll_offset(8, 10);
+    assert_eq!(pane.scroll_offset(), 8);
+
+    // Physical row 2 → pane-local row 1 → abs line 3 (the prompt).
+    m.handle_mouse(plain_left_press(2, 5)).await.unwrap();
+
+    // Expected new offset: sb - abs_line = 10 - 3 = 7.
+    assert_eq!(pane.scroll_offset(), 7, "prompt row should be at viewport top (offset 7)");
+}
+
+// J4-T2: same setup, press on a non-prompt row → behavior unchanged (selection
+// starts; offset does not change).
+//
+// sb=10, offset=8 → top=2. pane-local row 0 → abs line 2 (NOT a prompt).
+#[tokio::test]
+async fn non_prompt_click_while_scrolled_leaves_offset_unchanged() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    // 10 scrollback rows; prompt at absolute line 3 only.
+    inject_scrollback_prompts(&m, 10, &[3]);
+    let pane = m.active_window().active_pane().unwrap().clone();
+    pane.set_scroll_offset(8, 10);
+
+    // Physical row 1 → pane-local row 0 → abs line 2 (NOT a prompt).
+    m.handle_mouse(plain_left_press(1, 5)).await.unwrap();
+
+    // Offset must be unchanged; a selection started instead.
+    assert_eq!(pane.scroll_offset(), 8, "offset unchanged on non-prompt click");
+    assert!(m.selection().is_some(), "selection started on non-prompt click");
+}
+
+// J4-T3: offset 0 (live view) + prompt row under cursor → untouched (no
+// scroll change; existing live behavior, the scroll_offset > 0 guard fires).
+#[tokio::test]
+async fn prompt_click_at_live_view_does_not_change_offset() {
+    use plexy_glass_emulator::RowMark;
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    // Set PROMPT_START on active grid row 0 (= abs line scrollback_len + 0).
+    m.active_window()
+        .active_pane()
+        .unwrap()
+        .with_screen_mut(|s| s.active.rows[0].mark.set(RowMark::PROMPT_START));
+    // offset is already 0 (live view).
+    assert_eq!(active_scroll_offset(&m), 0);
+
+    // Physical row 1 → pane-local row 0 → abs line 0 (grid prompt).
+    // `scroll_offset` == 0 so the prompt-jump guard is not entered.
+    m.handle_mouse(plain_left_press(1, 5)).await.unwrap();
+
+    // No scroll change (the `scroll_offset > 0` guard was false).
+    assert_eq!(active_scroll_offset(&m), 0, "live view: offset stays 0");
+}
+
+// J4-T4: shift+left-press on a scrolled prompt row with an active selection →
+// selection extends (shift+click precedence wins), offset unchanged.
+#[tokio::test]
+async fn shift_click_on_scrolled_prompt_row_extends_selection_not_jumps() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    inject_scrollback_prompts(&m, 10, &[3]);
+    let pane = m.active_window().active_pane().unwrap().clone();
+    pane.set_scroll_offset(8, 10);
+
+    // Seed a selection with a plain click (physical row 1 → local row 0 →
+    // abs line 2, non-prompt) so the selection starts.
+    m.handle_mouse(plain_left_press(1, 2)).await.unwrap();
+    assert!(m.selection().is_some(), "premise: selection seeded");
+    // Reset the offset so we're still scrolled back for the next step.
+    pane.set_scroll_offset(8, 10);
+
+    // Shift+click on physical row 2 → local row 1 → abs line 3 (the prompt).
+    m.handle_mouse(shift_left_press(2, 5)).await.unwrap();
+
+    // Shift+click fires the extend branch BEFORE the prompt-jump rung.
+    assert_eq!(pane.scroll_offset(), 8, "shift+click: offset unchanged");
+    assert!(m.selection().is_some(), "shift+click: selection still active");
+}
+
+// J4-T5: prompt line in the GRID portion of a scrolled view → offset saturates
+// to 0 (snaps to live, accepted).
+//
+// sb=5, offset=2 → top=3.
+// Grid row 0 is abs line 5.  Pane-local row 2 → abs line 5.
+// New offset = sb.saturating_sub(5) = 5 - 5 = 0 → snaps live.
+#[tokio::test]
+async fn prompt_click_on_grid_portion_snaps_to_live() {
+    use plexy_glass_emulator::RowMark;
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    // 5 scrollback rows; a prompt is on active grid row 0 (abs line 5).
+    inject_scrollback_prompts(&m, 5, &[]);
+    m.active_window()
+        .active_pane()
+        .unwrap()
+        .with_screen_mut(|s| s.active.rows[0].mark.set(RowMark::PROMPT_START));
+    let pane = m.active_window().active_pane().unwrap().clone();
+    // Scroll so top = abs line 3 (offset = 5 - 3 = 2).
+    // Pane-local row 2 → abs line 5 (grid row 0, the prompt).
+    pane.set_scroll_offset(2, 5);
+
+    // Physical row 3 → pane-local row 2 → abs line 5.
+    m.handle_mouse(plain_left_press(3, 5)).await.unwrap();
+
+    // sb.saturating_sub(5) = 0 → snaps to live.
+    assert_eq!(pane.scroll_offset(), 0, "grid-portion prompt click saturates to live");
+}
+
+// J4-T6: pane with app mouse mode on → passthrough unaffected (event forwarded
+// to child, no scroll change). Rule 5 fires before J4's rung.
+#[tokio::test]
+async fn app_mouse_mode_passthrough_unaffected_by_prompt_jump() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    inject_scrollback_prompts(&m, 10, &[3]);
+    let pane = m.active_window().active_pane().unwrap().clone();
+    pane.set_scroll_offset(8, 10);
+
+    // Turn on app mouse mode so Rule 5 (passthrough) fires.
+    pane.with_screen_mut(|s| s.modes.insert(plexy_glass_emulator::Modes::MOUSE_BTN));
+    assert!(m.pane_has_any_mouse_mode(m.active_window().active()));
+
+    // Physical row 2 → pane-local row 1 → abs line 3 (the prompt row).
+    m.handle_mouse(plain_left_press(2, 5)).await.unwrap();
+
+    // Rule 5 forwarded the event, so J4's rung never ran and the offset is unchanged.
+    assert_eq!(pane.scroll_offset(), 8, "app mouse mode: passthrough, no offset change");
+}
+
+// J4-T7: double-click on the now-relocated content is just another click
+// (no panic, sane state). First click jumps; second press at the same physical
+// position now sees a different abs line → falls through to selection logic.
+#[tokio::test]
+async fn double_click_after_prompt_jump_does_not_panic() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    inject_scrollback_prompts(&m, 10, &[3]);
+    let pane = m.active_window().active_pane().unwrap().clone();
+    pane.set_scroll_offset(8, 10);
+
+    // First click: physical row 2 → local row 1 → abs line 3 (prompt) →
+    // jumps to offset 7 (prompt at top).
+    m.handle_mouse(plain_left_press(2, 5)).await.unwrap();
+    assert_eq!(pane.scroll_offset(), 7, "first click: offset updated to 7");
+
+    // Second click at the same physical position: offset is now 7, top = 3,
+    // local row 1 → abs line 4 (NOT a prompt) → falls through to selection.
+    // Must not panic.
+    m.handle_mouse(plain_left_press(2, 5)).await.unwrap();
+    // State is sane (no panic). Offset unchanged from 7; selection started.
+    assert_eq!(pane.scroll_offset(), 7, "second click: offset unchanged");
+    assert!(m.selection().is_some(), "second click: selection started");
+}

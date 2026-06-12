@@ -2,7 +2,7 @@ use super::WindowManager;
 use crate::error::DaemonError;
 use plexy_glass_mux::{
     BorderHit, BorderSide, Command, MouseButton, MouseEncoding, MouseEvent, MouseKind, PaneId,
-    Rect, Selection, SelectionKind, encode_for_child, extract_text,
+    Rect, Selection, SelectionKind, encode_for_child, extract_text, prev_prompt_line,
 };
 use std::time::Instant;
 
@@ -434,6 +434,44 @@ impl WindowManager {
                 sel.extend(local_row, local_col, pane_rect);
             }
             return Ok(());
+        }
+
+        // Block-aware prompt jump: plain (unmodified) left press on a scrolled
+        // viewport, clicking a row that maps to a PROMPT_START absolute line →
+        // snap that prompt to the viewport top. Inserted AFTER shift+click
+        // selection-extend (extends across prompt rows correctly) and BEFORE
+        // the hyperlink lookup and click_to_position (both are scroll-unaware
+        // and read the live grid regardless of the displayed scrollback).
+        if event.modifiers == plexy_glass_mux::MouseModifiers::default()
+            && let Some(pane) = self.active_window().pane(pane_id)
+        {
+            let scroll_offset = pane.scroll_offset();
+            if scroll_offset > 0 {
+                let jumped = pane.with_screen(|s| {
+                    let sb = s.scrollback.len() as u32;
+                    let top = sb.saturating_sub(scroll_offset);
+                    let abs_line = top + u32::from(local_row);
+                    // is_prompt is private; use the public prev_prompt_line:
+                    // prev_prompt_line(s, abs_line + 1) == Some(abs_line) iff
+                    // abs_line itself carries PROMPT_START.
+                    let is_prompt =
+                        prev_prompt_line(s, abs_line.saturating_add(1)) == Some(abs_line);
+                    if is_prompt {
+                        // Put the prompt at the viewport top.
+                        // For a grid-portion line (abs_line >= sb) the math
+                        // saturates to 0 (snaps to live, and that's accepted).
+                        let new_offset = sb.saturating_sub(abs_line);
+                        Some((new_offset, sb))
+                    } else {
+                        None
+                    }
+                });
+                if let Some((new_offset, max)) = jumped {
+                    pane.set_scroll_offset(new_offset, max);
+                    self.notify.notify_one();
+                    return Ok(());
+                }
+            }
         }
 
         // OSC 8 hyperlink under the cell? Open in the OS browser; suppress
