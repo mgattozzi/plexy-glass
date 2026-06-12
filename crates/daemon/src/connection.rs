@@ -149,6 +149,9 @@ impl Connection {
                 send_msg(&mut writer, &reply).await?;
                 Ok(())
             }
+            ClientMsg::ExecCommand { session, text, timeout_ms } => {
+                serve_exec(&mut reader, &mut writer, &registry, session, text, timeout_ms).await
+            }
             other => {
                 send_msg(
                     &mut writer,
@@ -1095,6 +1098,185 @@ async fn resolve_session(
             }
         }
     }
+}
+
+/// Precondition snapshot for [`serve_exec`], read in ONE `with_screen`
+/// closure: the pane's emulator mutex is the fence between the at-prompt
+/// check and the counter baseline, so the reader thread cannot process a `D`
+/// in between (the spec's fencing-honesty note).
+enum ExecPre {
+    AltScreen,
+    NoMarks,
+    Busy,
+    Ready { baseline: u64 },
+}
+
+/// One counter poll against the injection baseline during the exec wait.
+enum ExecTick {
+    Pending,
+    /// Counter went backwards: the screen was rebuilt (RIS) mid-command.
+    Reset,
+    Done { exit: Option<i32>, output: String },
+}
+
+/// Serve one `ExecCommand` (CLI `run`): check preconditions and read the
+/// completed-block baseline in a single screen closure, inject `text` + `\r`
+/// directly into the input target pane, then wait for the pane's
+/// completed-block counter to pass the baseline, racing the pane child's
+/// exit, the optional timeout, and the client connection itself (a dropped
+/// client abandons the wait silently; no reply).
+///
+/// Response-type asymmetry by design (like `CaptureLastCommand`): completion
+/// and timeout reply `ExecDone`; every refusal (no session, no pane, no
+/// blocks, busy, alt screen, child exit, mid-command reset, unexpected frame)
+/// replies `CommandResult { ok: false }`, and the CLI client matches on
+/// either.
+async fn serve_exec<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    registry: &Arc<SessionRegistry>,
+    session: Option<String>,
+    text: String,
+    timeout_ms: Option<u64>,
+) -> Result<(), DaemonError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let refuse =
+        |message: String| ServerMsg::CommandResult { ok: false, message: Some(message) };
+
+    let sess = match resolve_session(registry, session).await {
+        Err(msg) => return send_msg(writer, &refuse(msg)).await,
+        Ok(s) => s,
+    };
+    let pane = {
+        let manager = sess.window_manager.lock().await;
+        manager.input_target_pane().cloned()
+    };
+    let Some(pane) = pane else {
+        // Unreachable in practice: a session with no panes tears itself down.
+        return send_msg(writer, &refuse("no focused pane".into())).await;
+    };
+
+    // Preconditions AND baseline in one closure (see `ExecPre`).
+    let pre = pane.with_screen(|s| {
+        if s.alt.is_some() {
+            return ExecPre::AltScreen;
+        }
+        // Any PROMPT_START anywhere (scrollback + grid)? Without shell
+        // integration no `D` will ever arrive, so refuse fast instead of
+        // hanging. (`pane_at_prompt` alone can't distinguish this case.)
+        if plexy_glass_mux::prev_prompt_line(s, u32::MAX).is_none() {
+            return ExecPre::NoMarks;
+        }
+        if !plexy_glass_mux::blocks::pane_at_prompt(s) {
+            return ExecPre::Busy;
+        }
+        ExecPre::Ready { baseline: s.blocks_completed }
+    });
+    let baseline = match pre {
+        ExecPre::AltScreen => {
+            return send_msg(writer, &refuse("pane is busy: alternate screen is active".into()))
+                .await;
+        }
+        ExecPre::NoMarks => return send_msg(writer, &refuse(NO_BLOCKS_MSG.into())).await,
+        ExecPre::Busy => {
+            return send_msg(writer, &refuse("pane is busy: a command is running".into())).await;
+        }
+        ExecPre::Ready { baseline } => baseline,
+    };
+
+    // Inject directly to the target pane, NOT `Session::handle_input_bytes`
+    // (that is the sync-panes fan-out, and a synchronized multi-pane run has
+    // no single answer), then wake the render coordinator the same way
+    // `handle_input_bytes` does.
+    let mut bytes = text.into_bytes();
+    bytes.push(b'\r');
+    if pane.send_input(bytes::Bytes::from(bytes)).await.is_err() {
+        return send_msg(writer, &refuse("run: pane input channel closed".into())).await;
+    }
+    sess.notify.notify_one();
+
+    // The wait. Every long-lived future is created ONCE and polled across
+    // loop iterations: `Codec::read_frame` is `read_exact`-based (NOT
+    // cancel-safe, dropping it mid-frame loses buffered bytes), so it is
+    // pinned outside the loop instead of recreated per tick. That is
+    // sufficient because every way it completes ends the wait.
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(25));
+    let exit_fut = pane.wait();
+    tokio::pin!(exit_fut);
+    let timeout_fut = async {
+        match timeout_ms {
+            Some(ms) => tokio::time::sleep(std::time::Duration::from_millis(ms)).await,
+            // No timeout requested: this arm never fires.
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(timeout_fut);
+    let read_fut = plexy_glass_protocol::Codec::read_frame(reader);
+    tokio::pin!(read_fut);
+
+    // One closure for counter + exit + output so there's no gap between
+    // observing completion and reading the block text. It's also the FINAL
+    // check in the child-exit and timeout arms, because a command whose D
+    // was processed just before its pane died (or the deadline fired) is a
+    // completion, not a failure; without this a finished command could be
+    // misreported within one poll interval.
+    let check = || {
+        pane.with_screen(|s| {
+            if s.blocks_completed > baseline {
+                // Output is best-effort from surviving rows: the command
+                // may have cleared the screen (empty is fine).
+                let output = plexy_glass_mux::last_completed_block(s)
+                    .map(|range| plexy_glass_mux::block_text(s, range))
+                    .unwrap_or_default();
+                ExecTick::Done { exit: s.last_block_exit, output }
+            } else if s.blocks_completed < baseline {
+                ExecTick::Reset
+            } else {
+                ExecTick::Pending
+            }
+        })
+    };
+
+    let reply = loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                match check() {
+                    ExecTick::Pending => {}
+                    ExecTick::Reset => break refuse("run: pane was reset mid-command".into()),
+                    ExecTick::Done { exit, output } => {
+                        break ServerMsg::ExecDone { exit, output, timed_out: false };
+                    }
+                }
+            }
+            _ = &mut exit_fut => match check() {
+                ExecTick::Done { exit, output } => {
+                    break ServerMsg::ExecDone { exit, output, timed_out: false };
+                }
+                _ => break refuse("run: pane child exited".into()),
+            },
+            _ = &mut timeout_fut => match check() {
+                ExecTick::Done { exit, output } => {
+                    break ServerMsg::ExecDone { exit, output, timed_out: false };
+                }
+                // Structural timeout, so the CLI maps it to exit 124. The
+                // command is NOT killed; it is the user's session.
+                _ => break ServerMsg::ExecDone {
+                    exit: None,
+                    output: String::new(),
+                    timed_out: true,
+                },
+            },
+            frame = &mut read_fut => match frame {
+                // Client gone (e.g. Ctrl-C'd CLI): abandon the wait silently.
+                Ok(None) | Err(_) => return Ok(()),
+                Ok(Some(_)) => break refuse("run: unexpected message during wait".into()),
+            },
+        }
+    };
+    send_msg(writer, &reply).await
 }
 
 /// Run one command-prompt line headlessly (CLI `cmd`). Returns `(ok, message)`
@@ -3257,5 +3439,420 @@ mod tests {
             msg.contains("no session"),
             "unexpected session-miss text: {msg}"
         );
+    }
+
+    // ── ExecCommand (CLI `run`) ──────────────────────────────────────────────
+    //
+    // All against a `cat` child: injected bytes are echoed back verbatim and
+    // the emulator parses the embedded OSC 133 sequences as pane output. Note
+    // that the tty's own echo mangles ESC into ^[ alongside cat's copy, so
+    // screen asserts are contains-style, never exact.
+
+    /// Poll `pane`'s screen until `pred` holds (e.g. "a prompt mark landed").
+    async fn wait_screen_state<F>(pane: &crate::pane::Pane, desc: &str, pred: F)
+    where
+        F: Fn(&plexy_glass_emulator::Screen) -> bool,
+    {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if pane.with_screen(&pred) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "screen never reached state: {desc}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Whether any PROMPT_START exists anywhere in the unified line space.
+    fn has_prompt(s: &plexy_glass_emulator::Screen) -> bool {
+        plexy_glass_mux::prev_prompt_line(s, u32::MAX).is_some()
+    }
+
+    /// Create a cat-backed session, seed a `133;A` prompt mark over the wire,
+    /// and poll until the pane is observably at a prompt (the mark must be
+    /// *processed*, not merely sent, because the tty echo races cat's verbatim copy).
+    async fn exec_fixture(
+        registry: &Arc<crate::SessionRegistry>,
+        name: &str,
+    ) -> crate::pane::Pane {
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create(name.into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+        let reply = one_shot(
+            registry,
+            &ClientMsg::SendInput {
+                session: Some(name.into()),
+                bytes: bytes::Bytes::from_static(b"\x1b]133;A\x07\n"),
+            },
+        )
+        .await;
+        assert!(expect_command_result(reply).0, "seeding the prompt mark failed");
+        let pane = session
+            .window_manager
+            .lock()
+            .await
+            .input_target_pane()
+            .expect("session has a pane")
+            .clone();
+        wait_screen_state(&pane, "seeded prompt mark processed", |s| {
+            has_prompt(s) && plexy_glass_mux::blocks::pane_at_prompt(s)
+        })
+        .await;
+        pane
+    }
+
+    fn expect_exec_done(reply: ServerMsg) -> (Option<i32>, String, bool) {
+        match reply {
+            ServerMsg::ExecDone { exit, output, timed_out } => (exit, output, timed_out),
+            other => panic!("expected ExecDone, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_command_happy_path() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let _pane = exec_fixture(&registry, "exec1").await;
+
+        // `cat` echoes the injected text; the emulator parses the embedded
+        // C / output / D;3 / A sequence as a completing command block.
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::ExecCommand {
+                session: Some("exec1".into()),
+                text: "\x1b]133;C\x07EXEC_OUT_1\r\n\x1b]133;D;3\x07\x1b]133;A\x07".into(),
+                timeout_ms: None,
+            },
+        )
+        .await;
+        let (exit, output, timed_out) = expect_exec_done(reply);
+        assert_eq!(exit, Some(3));
+        assert!(!timed_out);
+        assert!(output.contains("EXEC_OUT_1"), "block output missing: {output:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_command_exit_zero() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let _pane = exec_fixture(&registry, "exec0").await;
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::ExecCommand {
+                session: Some("exec0".into()),
+                text: "\x1b]133;C\x07EXEC_OUT_OK\r\n\x1b]133;D;0\x07\x1b]133;A\x07".into(),
+                timeout_ms: None,
+            },
+        )
+        .await;
+        let (exit, output, timed_out) = expect_exec_done(reply);
+        assert_eq!(exit, Some(0));
+        assert!(!timed_out);
+        assert!(output.contains("EXEC_OUT_OK"), "block output missing: {output:?}");
+    }
+
+    // A bare `133;D` (no exit payload) completes the wait with exit None,
+    // NOT a timeout.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_command_bare_d_reports_no_exit() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let _pane = exec_fixture(&registry, "execnd").await;
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::ExecCommand {
+                session: Some("execnd".into()),
+                text: "\x1b]133;C\x07EXEC_OUT_ND\r\n\x1b]133;D\x07\x1b]133;A\x07".into(),
+                timeout_ms: None,
+            },
+        )
+        .await;
+        let (exit, output, timed_out) = expect_exec_done(reply);
+        assert_eq!(exit, None);
+        assert!(!timed_out);
+        assert!(output.contains("EXEC_OUT_ND"), "block output missing: {output:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_command_no_marks_refused() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        registry.attach_or_create("nomark".into(), script_cat(), script_size(), cfg).await.unwrap();
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::ExecCommand {
+                session: Some("nomark".into()),
+                text: "echo hi".into(),
+                timeout_ms: None,
+            },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok);
+        assert_eq!(message.as_deref(), Some(NO_BLOCKS_MSG));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_command_busy_refused() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let pane = exec_fixture(&registry, "busy").await;
+
+        // Open a block without closing it: A then C → mid-command.
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::SendInput {
+                session: Some("busy".into()),
+                bytes: bytes::Bytes::from_static(b"\x1b]133;C\x07\n"),
+            },
+        )
+        .await;
+        assert!(expect_command_result(reply).0);
+        wait_screen_state(&pane, "C mark processed (pane busy)", |s| {
+            has_prompt(s) && !plexy_glass_mux::blocks::pane_at_prompt(s)
+        })
+        .await;
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::ExecCommand {
+                session: Some("busy".into()),
+                text: "echo hi".into(),
+                timeout_ms: None,
+            },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok);
+        assert_eq!(message.as_deref(), Some("pane is busy: a command is running"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_command_alt_screen_refused() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("altscr".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+
+        // Enter the alt screen; poll the screen STATE (not text, the alt
+        // screen shows nothing useful) until the switch is processed.
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::SendInput {
+                session: Some("altscr".into()),
+                bytes: bytes::Bytes::from_static(b"\x1b[?1049h\n"),
+            },
+        )
+        .await;
+        assert!(expect_command_result(reply).0);
+        let pane = session
+            .window_manager
+            .lock()
+            .await
+            .input_target_pane()
+            .expect("session has a pane")
+            .clone();
+        wait_screen_state(&pane, "alt screen active", |s| s.alt.is_some()).await;
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::ExecCommand {
+                session: Some("altscr".into()),
+                text: "echo hi".into(),
+                timeout_ms: None,
+            },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok);
+        assert_eq!(message.as_deref(), Some("pane is busy: alternate screen is active"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_command_unknown_session_refused() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::ExecCommand {
+                session: Some("nope".into()),
+                text: "echo hi".into(),
+                timeout_ms: None,
+            },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok);
+        assert!(message.unwrap_or_default().contains("no session \"nope\""));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_command_timeout_is_structural() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let _pane = exec_fixture(&registry, "exectmo").await;
+
+        // The text never emits a D; the 50 ms timeout must fire.
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::ExecCommand {
+                session: Some("exectmo".into()),
+                text: "NO_COMPLETION_HERE".into(),
+                timeout_ms: Some(50),
+            },
+        )
+        .await;
+        let (exit, output, timed_out) = expect_exec_done(reply);
+        assert!(timed_out, "50 ms timeout with no D must be structural timed_out");
+        assert_eq!(exit, None);
+        assert_eq!(output, "");
+    }
+
+    // The achievable stale-D guarantee (spec's fencing-honesty note): a `D`
+    // PROCESSED before the baseline read never satisfies the wait. Seed a
+    // fully completed block, poll it processed, then exec a never-completing
+    // text, so the reply must be a timeout, never the stale block's exit 9.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_command_stale_d_never_satisfies_wait() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("stale".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+
+        // A, C, D;9, then the next prompt's A: a complete historical block.
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::SendInput {
+                session: Some("stale".into()),
+                bytes: bytes::Bytes::from_static(
+                    b"\x1b]133;A\x07\n\x1b]133;C\x07stale_out\n\x1b]133;D;9\x07\x1b]133;A\x07\n",
+                ),
+            },
+        )
+        .await;
+        assert!(expect_command_result(reply).0);
+        let pane = session
+            .window_manager
+            .lock()
+            .await
+            .input_target_pane()
+            .expect("session has a pane")
+            .clone();
+        wait_screen_state(&pane, "seeded block completed (D;9 processed)", |s| {
+            s.blocks_completed >= 1 && plexy_glass_mux::blocks::pane_at_prompt(s)
+        })
+        .await;
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::ExecCommand {
+                session: Some("stale".into()),
+                text: "NEVER_COMPLETES".into(),
+                timeout_ms: Some(100),
+            },
+        )
+        .await;
+        let (exit, _output, timed_out) = expect_exec_done(reply);
+        assert!(timed_out, "the stale D;9 must not satisfy the new run's wait");
+        assert_ne!(exit, Some(9), "stale exit code leaked into the reply");
+    }
+
+    /// Open a connection, handshake, and send `msg` WITHOUT reading the reply,
+    /// for tests that interfere with the wait (child kill, client drop).
+    async fn start_exec(
+        registry: &Arc<crate::SessionRegistry>,
+        msg: &ClientMsg,
+    ) -> (
+        tokio::task::JoinHandle<Result<(), crate::error::DaemonError>>,
+        tokio::io::ReadHalf<tokio::io::DuplexStream>,
+        tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    ) {
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(registry);
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg).await });
+        let (mut cr, mut cw) = tokio::io::split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(msg).unwrap()).await.unwrap();
+        (server, cr, cw)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_command_child_exit_mid_wait() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let pane = exec_fixture(&registry, "execkill").await;
+
+        let (server, mut cr, _cw) = start_exec(
+            &registry,
+            &ClientMsg::ExecCommand {
+                session: Some("execkill".into()),
+                text: "EXEC_HOLD_1".into(),
+                timeout_ms: None,
+            },
+        )
+        .await;
+        // The marker on screen proves the daemon injected: preconditions
+        // passed, the wait is (or is about to be) underway. Killing earlier
+        // would still be correct (exit_rx is a watch), but this pins the
+        // mid-wait shape.
+        wait_screen_contains(&pane, "EXEC_HOLD_1").await;
+        pane.kill_child();
+
+        let frame = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Codec::read_frame(&mut cr),
+        )
+        .await
+        .expect("no reply after child exit")
+        .unwrap()
+        .expect("server closed without replying");
+        let reply: ServerMsg = postcard::from_bytes(&frame).unwrap();
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok);
+        assert_eq!(message.as_deref(), Some("run: pane child exited"));
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_command_client_drop_abandons_wait() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let pane = exec_fixture(&registry, "execdrop").await;
+
+        let (server, cr, cw) = start_exec(
+            &registry,
+            &ClientMsg::ExecCommand {
+                session: Some("execdrop".into()),
+                text: "EXEC_HOLD_2".into(),
+                timeout_ms: None,
+            },
+        )
+        .await;
+        wait_screen_contains(&pane, "EXEC_HOLD_2").await;
+
+        // Drop the client mid-wait: the serve task must observe EOF on its
+        // reader and abandon the wait, no immortal 25 ms poll task left behind.
+        drop(cr);
+        drop(cw);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("serve task never completed after client drop");
+        result.unwrap().unwrap();
     }
 }

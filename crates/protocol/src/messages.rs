@@ -61,7 +61,8 @@ pub enum ExitStatus {
 /// - v6: scripting messages: `RunCommand`, `SendInput`, `CapturePane` /
 ///   `CommandResult`, `PaneCapture`
 /// - v7: `CaptureLastCommand`: block-scoped scripting read via OSC 133 marks
-pub const PROTOCOL_VERSION: u16 = 7;
+/// - v8: `ExecCommand` / `ExecDone`: synchronous `run` over OSC 133 completion
+pub const PROTOCOL_VERSION: u16 = 8;
 
 /// Which keyboard protocol a client negotiated with its *outer* terminal. The
 /// daemon decodes that client's input bytes in this protocol.
@@ -131,6 +132,14 @@ pub enum ClientMsg {
     ///
     /// **Postcard-positional**: always appended at the end of the enum.
     CaptureLastCommand { session: Option<String> },
+    /// Execute `text` synchronously in a session's input target pane (CLI
+    /// `run`): the daemon injects `text` + `\r`, waits for the OSC 133
+    /// completion mark, and replies `ExecDone`, or
+    /// `CommandResult { ok: false }` on any refusal (no session, no blocks,
+    /// busy pane, alt screen, child exit, mid-command reset).
+    ///
+    /// **Postcard-positional**: always appended at the end of the enum.
+    ExecCommand { session: Option<String>, text: String, timeout_ms: Option<u64> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +158,14 @@ pub enum ServerMsg {
     CommandResult { ok: bool, message: Option<String> },
     /// `CapturePane` response.
     PaneCapture { text: String },
+    /// `ExecCommand` outcome: the command's recorded exit code (`None` when the
+    /// `133;D` mark carried no payload), the completed block's output text,
+    /// and whether the daemon-side wait timed out. Timeout is **structural**
+    /// (this flag), never inferred from message text, so the CLI maps it to
+    /// exit 124.
+    ///
+    /// **Postcard-positional**: always appended at the end of the enum.
+    ExecDone { exit: Option<i32>, output: String, timed_out: bool },
 }
 
 #[cfg(test)]
@@ -356,6 +373,39 @@ mod tests {
         ] {
             let enc = postcard::to_allocvec(&reply).unwrap();
             assert_eq!(postcard::from_bytes::<ServerMsg>(&enc).unwrap(), reply);
+        }
+    }
+
+    #[test]
+    fn exec_messages_round_trip() {
+        // New pair in v8; appended at the end of their enums (postcard is positional).
+        let requests = [
+            ClientMsg::ExecCommand {
+                session: Some("work".into()),
+                text: "cargo test".into(),
+                timeout_ms: Some(600_000),
+            },
+            ClientMsg::ExecCommand {
+                session: None,
+                text: "git rev-parse HEAD".into(),
+                timeout_ms: None,
+            },
+        ];
+        for m in requests {
+            let enc = postcard::to_allocvec(&m).unwrap();
+            assert_eq!(postcard::from_bytes::<ClientMsg>(&enc).unwrap(), m);
+        }
+        let replies = [
+            ServerMsg::ExecDone { exit: Some(0), output: "ok\n".into(), timed_out: false },
+            ServerMsg::ExecDone { exit: Some(124), output: "partial".into(), timed_out: false },
+            // D mark with no exit payload.
+            ServerMsg::ExecDone { exit: None, output: "out".into(), timed_out: false },
+            // Structural timeout: no exit, empty output.
+            ServerMsg::ExecDone { exit: None, output: String::new(), timed_out: true },
+        ];
+        for m in replies {
+            let enc = postcard::to_allocvec(&m).unwrap();
+            assert_eq!(postcard::from_bytes::<ServerMsg>(&enc).unwrap(), m);
         }
     }
 }
