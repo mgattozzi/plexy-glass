@@ -10,7 +10,7 @@
 //! from its first `OUTPUT_START` row (falling back to the prompt row when
 //! `133;C` never arrived) through the block's last row.
 
-use plexy_glass_emulator::{Row, RowMark, Screen};
+use plexy_glass_emulator::{Row, RowMark, Screen, WrapOrigin};
 
 /// Row at absolute `line` (scrollback rows first, then the active grid).
 fn row_at(screen: &Screen, line: u32) -> Option<&Row> {
@@ -70,6 +70,52 @@ pub fn block_output_range(screen: &Screen, line: u32) -> Option<(u32, u32)> {
     Some((start, end))
 }
 
+/// First `BLOCK_END` strictly after `prompt_line`, up to and including the
+/// next prompt row (attribution rule: a `BLOCK_END` on the NEXT block's
+/// `PROMPT_START` row still closes this block). Returns `None` when no such
+/// row exists (running block or a `D` that would be attributed to a different
+/// block).
+///
+/// This is the canonical location of the attribution rule, and
+/// `viewport_block_status` and `last_completed_block` / `closing_exit` all
+/// delegate to it.
+fn closing_block_end_line(screen: &Screen, prompt_line: u32) -> Option<u32> {
+    let total = total_lines(screen);
+    let next_p = next_prompt_line(screen, prompt_line);
+    // Search range: (prompt_line, next_p], including the next prompt row so a
+    // shared D+A row still counts.
+    let search_end = next_p
+        .map(|np| np.min(total.saturating_sub(1)))
+        .unwrap_or_else(|| total.saturating_sub(1));
+    (prompt_line + 1..=search_end).find(|&l| {
+        l < total && row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::BLOCK_END))
+    })
+}
+
+/// Prompt line of the most recent **completed** block (internal helper).
+///
+/// The newest `BLOCK_END` row is located; if it falls on a `PROMPT_START` row
+/// (shared D+A), the block above is the one being closed (attributed above).
+/// Returns the governing `PROMPT_START` line for that block, or `None` when no
+/// completed block survives (no `D` seen, or its prompt was evicted).
+pub fn last_completed_prompt(screen: &Screen) -> Option<u32> {
+    let end_mark = (0..total_lines(screen))
+        .rev()
+        .find(|&l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::BLOCK_END)))?;
+    // Attribution: D on a PROMPT_START row closes the block ABOVE it.
+    let line_in_block = if is_prompt(screen, end_mark) {
+        end_mark.checked_sub(1)?
+    } else {
+        end_mark
+    };
+    // Find the governing PROMPT_START at or above `line_in_block`.
+    if is_prompt(screen, line_in_block) {
+        Some(line_in_block)
+    } else {
+        prev_prompt_line(screen, line_in_block)
+    }
+}
+
 /// Output range of the most recent **completed** block, the newest block
 /// closed by a `BLOCK_END` (`133;D`) row. `None` when no completed block
 /// survives (no `D` seen yet, or its block's prompt was evicted).
@@ -89,6 +135,117 @@ pub fn last_completed_block(screen: &Screen) -> Option<(u32, u32)> {
         end_mark
     };
     block_output_range(screen, line_in_block)
+}
+
+/// Exit code of the `BLOCK_END` (`133;D`) that closes the block anchored at
+/// `prompt_line`, or `None` when the block is still running or its `D` row
+/// carried no parseable code.
+///
+/// Uses `closing_block_end_line` for attribution so that the exit always
+/// matches the specific block identified by `prompt_line`, which diverges from
+/// `Screen::last_block_exit` when the newest block's rows have been evicted
+/// from scrollback.
+pub fn closing_exit(screen: &Screen, prompt_line: u32) -> Option<i32> {
+    closing_block_end_line(screen, prompt_line)
+        .and_then(|d| row_at(screen, d)?.mark.exit())
+}
+
+/// Text of the command line typed at `prompt_line`.
+///
+/// The command line is the text between the prompt-end mark (`OSC 133;B`) and
+/// the output-start mark (`OSC 133;C`) for the block anchored at `prompt_line`.
+///
+/// Returns `None` when:
+/// - The block has no `PROMPT_END` row (no `133;B` emitted).
+/// - The block has no `OUTPUT_START` row (no `133;C` emitted).
+/// - The `PROMPT_END` and `OUTPUT_START` rows are the same (command and output
+///   on the same physical row, indistinguishable; honest null beats a guess).
+/// - The extracted text is empty after trimming.
+///
+/// **Wrap-aware join**: a row whose SUCCESSOR carries
+/// `WrapOrigin::SoftFrom(_)` was broken by the terminal at the right margin
+/// (the user typed one long line). Such rows are joined WITHOUT a `\n`. Hard
+/// row boundaries (the successor is `WrapOrigin::Hard`) join WITH `\n`,
+/// representing a real newline the user pressed (e.g. a here-doc continuation).
+///
+/// **Cell-index == display-column invariant**: each cell in `row.cells`
+/// occupies exactly one display column (wide characters are stored as a
+/// grapheme cell followed by a `Cell::wide_spacer()` in the next column).
+/// `PROMPT_END`'s col is therefore a direct cell-vector index, and slicing at
+/// that index gives the cells from the command-start column onward.
+///
+/// Trailing whitespace is trimmed per physical row before joining. A typed
+/// space at a soft-wrap boundary may be lost, which is rare and documented.
+pub fn block_command_line(screen: &Screen, prompt_line: u32) -> Option<String> {
+    // Use block_output_range only for the block boundary (block_end), then find
+    // the true OUTPUT_START row (C) ourselves with a mark scan. block_output_range
+    // falls back to the prompt line when no C exists, so we can't trust the start
+    // it returns.
+    let (_fallback_start, block_end) = block_output_range(screen, prompt_line)?;
+
+    // Find the OUTPUT_START row (C): first row with the flag at-or-after
+    // prompt_line within the block. Returns None when no C mark exists.
+    let c_row = (prompt_line..=block_end)
+        .find(|&l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::OUTPUT_START)))?;
+
+    // Find the PROMPT_END row (B): first row at-or-after prompt_line with the
+    // flag, strictly before the C row.
+    let b_row = (prompt_line..c_row)
+        .find(|&l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::PROMPT_END)))?;
+
+    // b_row is always < c_row here (the range excludes c_row), but the spec
+    // asks for an explicit B-and-C-same-row guard, so we keep it for clarity.
+    if b_row == c_row {
+        return None;
+    }
+
+    // B col: the cell index at which command text begins on the B row.
+    // Cell index == display column (invariant: each cell occupies one column,
+    // wide chars are grapheme cell + spacer cell, so `cells[col]` == column col).
+    let b_col = row_at(screen, b_row)
+        .and_then(|r| r.mark.prompt_end_col())
+        .unwrap_or(0) as usize;
+
+    // Collect rows from `b_row` through `c_row - 1`.
+    let mut parts: Vec<String> = Vec::new();
+    for line in b_row..c_row {
+        let Some(row) = row_at(screen, line) else {
+            continue;
+        };
+
+        // Render this row's cells as text, starting from `b_col` on the first
+        // row (offset 0 on continuation rows, so the full row content).
+        let cell_start = if line == b_row { b_col } else { 0 };
+        let mut text = String::new();
+        for cell in row.cells.iter().skip(cell_start) {
+            // Wide spacers have an empty grapheme, so `push_str("")` is a no-op and
+            // they get skipped naturally without any special-casing.
+            text.push_str(cell.grapheme.as_str());
+        }
+        parts.push(text.trim_end().to_string());
+    }
+
+    // Join rows: check if each row's SUCCESSOR is a soft continuation
+    // (WrapOrigin::SoftFrom). If the successor is SoftFrom, omit the `\n`,
+    // since the row break is just the terminal's margin wrap, not a real newline.
+    let mut result = String::new();
+    let n = parts.len();
+    for (i, part) in parts.into_iter().enumerate() {
+        result.push_str(&part);
+        if i + 1 < n {
+            // Look at the successor row's `wrap_origin`.
+            let successor_line = b_row + i as u32 + 1;
+            let is_soft = row_at(screen, successor_line)
+                .is_some_and(|r| matches!(r.wrap_origin, WrapOrigin::SoftFrom(_)));
+            if !is_soft {
+                result.push('\n');
+            }
+            // Soft wrap: no separator (the long command continues on the next row).
+        }
+    }
+
+    let trimmed = result.trim().to_string();
+    if trimmed.is_empty() { None } else { Some(trimmed) }
 }
 
 /// Per-visible-row block exit status for a viewport slice.
@@ -163,14 +320,10 @@ pub fn viewport_block_status(screen: &Screen, top: u32, rows: u16) -> Vec<Option
         let next_p = next_prompt_line(screen, prompt);
         let block_end_incl: u32 = next_p.map_or(total - 1, |np| np - 1);
 
-        // Search for BLOCK_END in (prompt, search_end]: includes the next
-        // prompt row so a shared D+A row closes this block.
-        let search_end = block_end_incl.saturating_add(1);
+        // Delegate to closing_block_end_line for the attribution rule (first
+        // BLOCK_END strictly after prompt, up to and including the next prompt row).
         let status: Option<BlockLineStatus> = {
-            // Find first BLOCK_END in (prompt, search_end] (strictly after prompt)
-            let d_row = (prompt + 1..=search_end)
-                .find(|&l| l < total && row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::BLOCK_END)));
-            match d_row {
+            match closing_block_end_line(screen, prompt) {
                 None => None, // no BLOCK_END → running
                 Some(d) => {
                     let exit = row_at(screen, d).and_then(|r| r.mark.exit());
@@ -791,5 +944,246 @@ mod tests {
             pane_at_prompt(&s),
             "C on same row as newest A → true (fails-open edge)"
         );
+    }
+
+    // ── block_command_line tests ─────────────────────────────────────────────
+
+    /// Simple: A "$ " B "cargo test" \r\n C out → Some("cargo test").
+    /// Prompt prefix "$ " is excluded (text starts at B col = 2).
+    #[test]
+    fn bcl_simple_command() {
+        // Line 0: A, "$ " prompt, B (cursor now at col 2), "cargo test"
+        // Line 1: C, output
+        let s = screen_from(
+            4,
+            20,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07cargo test\r\n\x1b]133;C\x07output",
+        );
+        assert_eq!(block_command_line(&s, 0), Some("cargo test".to_string()));
+    }
+
+    /// Prompt prefix is excluded: text before the B col is not included.
+    #[test]
+    fn bcl_prompt_prefix_excluded() {
+        // ">>>" then B at col 3, then "cmd"
+        let s = screen_from(
+            4,
+            20,
+            b"\x1b]133;A\x07>>>\x1b]133;B\x07cmd\r\n\x1b]133;C\x07out",
+        );
+        let result = block_command_line(&s, 0);
+        assert_eq!(result, Some("cmd".to_string()), "prefix '>>>' must be excluded");
+    }
+
+    /// Soft-wrapped long command in a narrow screen → joined WITHOUT \\n.
+    #[test]
+    fn bcl_soft_wrapped_command_no_newline() {
+        // Screen 10 cols wide; "$ " then B (col 2), then a 16-char command
+        // that wraps at col 10 onto the next physical row.
+        // Command: "abcdefghijklmnop" (16 chars); first row has "abcdefgh" (8 chars,
+        // from col 2 to col 9), second row has "ijklmnop".
+        let s = screen_from(
+            4,
+            10,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07abcdefghijklmnop\r\n\x1b]133;C\x07out",
+        );
+        // The command wraps: row 0 has "$ abcdefgh" (10 cols), row 1 has "ijklmnop".
+        // block_command_line should join them without \n.
+        let result = block_command_line(&s, 0);
+        assert!(result.is_some(), "should extract wrapped command");
+        let text = result.unwrap();
+        assert!(!text.contains('\n'), "soft-wrapped command must not contain newline: {:?}", text);
+        assert!(text.contains("abcdefgh"), "first segment present");
+        assert!(text.contains("ijklmnop"), "second segment present");
+    }
+
+    /// Hard multi-row command (real newline between B and C) → joined WITH \\n.
+    /// We emit \r\n between two command rows to force a Hard wrap boundary.
+    #[test]
+    fn bcl_hard_multirow_joined_with_newline() {
+        // Line 0: A, "$ " B, "line1"
+        // Line 1: "line2" (hard newline from the \r\n above)
+        // Line 2: C, output
+        let s = screen_from(
+            6,
+            20,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07line1\r\nline2\r\n\x1b]133;C\x07out",
+        );
+        let result = block_command_line(&s, 0);
+        assert_eq!(result, Some("line1\nline2".to_string()),
+            "hard rows must be joined with newline");
+    }
+
+    /// No B row → None.
+    #[test]
+    fn bcl_no_b_row_is_none() {
+        // A and C but no B: shell did not emit 133;B.
+        let s = screen_from(
+            4,
+            20,
+            b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07out",
+        );
+        assert_eq!(block_command_line(&s, 0), None, "no B → None");
+    }
+
+    /// No C row → None.
+    #[test]
+    fn bcl_no_c_row_is_none() {
+        // A and B but no C.
+        let s = screen_from(
+            4,
+            20,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07cmd",
+        );
+        assert_eq!(block_command_line(&s, 0), None, "no C → None");
+    }
+
+    /// B and C on the same row → None (command and output indistinguishable).
+    ///
+    /// This is the degenerate case where 133;B and 133;C land on the same physical
+    /// line; the normal tests emit a newline before C to put them on different rows,
+    /// but here we test the same-row edge.
+    /// Note that `block_command_line` searches for B in `prompt_line..c_row`, and
+    /// c_row is found first, so a B that appears after C on the same row would
+    /// never be found. If 133;B and 133;C are both on row 0, `block_output_range`
+    /// finds C at prompt_line = row 0 and the B search over `0..0` is empty, so it
+    /// returns None via the B search.
+    /// To force B == C we need B on the same row as C, with C strictly after the
+    /// prompt. Build: A on row 0, newline, B then C on row 1.
+    #[test]
+    fn bcl_b_and_c_same_row_is_none() {
+        // Row 0: A "prompt"
+        // Row 1: B immediately followed by C (same physical row)
+        let s = screen_from(
+            4,
+            20,
+            b"\x1b]133;A\x07prompt\r\n\x1b]133;B\x07\x1b]133;C\x07out",
+        );
+        // B row == C row == 1 → None
+        assert_eq!(block_command_line(&s, 0), None, "B and C same row → None");
+    }
+
+    /// Block in scrollback → still extracted.
+    #[test]
+    fn bcl_block_in_scrollback() {
+        // 3-row screen, feed 6 rows so the first block scrolls into scrollback.
+        // Block 1: A row 0 (scrollback), B at col 2, "cmd1", C at row 1, output.
+        // Then enough newlines to push block 1 into scrollback.
+        let s = screen_from(
+            3,
+            20,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07cmd1\r\n\x1b]133;C\x07out1\r\n\
+              \x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07cmd2\r\n\x1b]133;C\x07out2",
+        );
+        // Block 1's prompt should be in scrollback.
+        assert!(!s.scrollback.rows().is_empty(), "setup: rows in scrollback");
+        // Find the prompt line for block 1 (should be line 0 in scrollback).
+        assert_eq!(
+            block_command_line(&s, 0),
+            Some("cmd1".to_string()),
+            "command in scrollback must be extracted"
+        );
+    }
+
+    /// Wide grapheme before the `B` col: CJK in the prompt occupies 2 cells,
+    /// so col slicing at the cell index must still be correct.
+    #[test]
+    fn bcl_wide_grapheme_before_b_col() {
+        // "中" is a CJK wide char occupying 2 cells (grapheme + spacer).
+        // Prompt: "中 " = 3 cells (wide grapheme, spacer, space), then B at col 3.
+        // Command: "hello"
+        // The cell-index == display-column invariant means `cells[3]` = 'h'.
+        let s = screen_from(
+            4,
+            20,
+            b"\x1b]133;A\x07\xe4\xb8\xad \x1b]133;B\x07hello\r\n\x1b]133;C\x07out",
+        );
+        let result = block_command_line(&s, 0);
+        assert_eq!(result, Some("hello".to_string()),
+            "wide grapheme in prompt must not corrupt col slicing");
+    }
+
+    // ── closing_exit tests ───────────────────────────────────────────────────
+
+    /// D on its own row (not shared with A): closing_exit returns the code.
+    #[test]
+    fn ce_own_row_d() {
+        // A line0, C line1, D;42 line2, A line3.
+        let s = screen_from(
+            6,
+            20,
+            b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07out\r\n\x1b]133;D;42\x07\r\n\x1b]133;A\x07$ b",
+        );
+        assert_eq!(closing_exit(&s, 0), Some(42));
+    }
+
+    /// Shared D+A row: D on a PROMPT_START row still closes the block ABOVE.
+    #[test]
+    fn ce_shared_da_row() {
+        // two_blocks: D;0 on line 3 which also has A for block 2.
+        // closing_exit for block 1 (prompt_line=0) should find D on line 3.
+        let s = two_blocks();
+        assert_eq!(closing_exit(&s, 0), Some(0));
+        // Block 2 (prompt_line=3) has no D yet → None.
+        assert_eq!(closing_exit(&s, 3), None);
+    }
+
+    /// No D → None.
+    #[test]
+    fn ce_no_d_is_none() {
+        let s = screen_from(4, 20, b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07out");
+        assert_eq!(closing_exit(&s, 0), None);
+    }
+
+    /// Divergence case: two blocks; the FIRST block's D has a DIFFERENT exit
+    /// code from the second block's D. `closing_exit(first_prompt)` returns the
+    /// first block's exit, NOT the `last_block_exit`.
+    #[test]
+    fn ce_divergence_from_last_block_exit() {
+        // Block 1: A(0), C(1), D;7(2), A(3)
+        // Block 2: A(3), C(4), D;0(5), A(6)
+        let s = screen_from(
+            8,
+            20,
+            b"\x1b]133;A\x07$ one\r\n\
+              \x1b]133;C\x07out1\r\n\
+              \x1b]133;D;7\x07\x1b]133;A\x07$ two\r\n\
+              \x1b]133;C\x07out2\r\n\
+              \x1b]133;D;0\x07\x1b]133;A\x07$ three",
+        );
+        // Block 1's prompt is at line 0, D;7 is on line 2 (shared with block 2's A).
+        assert_eq!(closing_exit(&s, 0), Some(7), "block 1 exit must be 7");
+        // Block 2's prompt is at line 2 (the D+A row), D;0 is on line 4.
+        assert_eq!(closing_exit(&s, 2), Some(0), "block 2 exit must be 0");
+    }
+
+    // ── last_completed_prompt tests ──────────────────────────────────────────
+
+    /// `last_completed_prompt` returns the prompt line of the newest completed block.
+    #[test]
+    fn lcp_returns_prompt_of_newest_completed() {
+        // two_blocks: D on line 3 (shared with A for block 2) → block 1's prompt = 0.
+        let s = two_blocks();
+        assert_eq!(last_completed_prompt(&s), Some(0));
+    }
+
+    /// `last_completed_prompt` with `D` on its own row: the prompt is the
+    /// `PROMPT_START` at or above the `D` row.
+    #[test]
+    fn lcp_d_on_own_row() {
+        // A line0, C line1, D line2, A line3.
+        let s = screen_from(
+            6,
+            20,
+            b"\x1b]133;A\x07$ a\r\nout\r\n\x1b]133;D;0\x07done\r\n\x1b]133;A\x07$ b",
+        );
+        assert_eq!(last_completed_prompt(&s), Some(0));
+    }
+
+    /// `last_completed_prompt` returns `None` when no `D` has been seen.
+    #[test]
+    fn lcp_none_without_block_end() {
+        let s = screen_from(4, 20, b"\x1b]133;A\x07$ running");
+        assert_eq!(last_completed_prompt(&s), None);
     }
 }
