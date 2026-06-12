@@ -27,8 +27,10 @@ pub mod tree;
 pub mod virtual_screen;
 
 pub use blocks::{
-    block_output_range, block_text, last_completed_block, next_prompt_line, prev_prompt_line,
+    BlockLineStatus, block_output_range, block_text, last_completed_block, next_prompt_line,
+    prev_prompt_line, viewport_block_status,
 };
+pub use borders::BlockBorderColors;
 pub use buffer::{BufferAction, BufferEntry, BufferOutcome, BufferPickerState, handle_buffers};
 pub use command_prompt::{Completion, FocusTarget, ParseError, PromptCommand, SwapTarget};
 pub use compositor::{Compositor, OverlayView, PaneView, PopupView, StatusPlacement, popup_rect};

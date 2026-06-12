@@ -243,6 +243,7 @@ pub(super) async fn render_coordinator(
                 overlay_view.as_ref(),
                 message.as_deref(),
                 popup_view.as_ref(),
+                None, // S4 wires real colors
             )
         };
         let _ = frame_tx.send(Arc::new(frame));

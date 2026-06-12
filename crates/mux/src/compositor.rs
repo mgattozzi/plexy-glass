@@ -2,7 +2,8 @@
 //! and an optional status-bar row.
 
 use crate::{
-    borders,
+    blocks::viewport_block_status,
+    borders::{self, BlockBorderColors},
     pane_id::PaneId,
     rect::Rect,
     status::StatusLine,
@@ -99,7 +100,7 @@ pub struct Compositor;
 
 impl Compositor {
     // One optional layer per frame element (status/selection/overlay/message/
-    // popup); a params struct would just rename the same eight positions.
+    // popup/blocks); a params struct would just rename the same nine positions.
     #[allow(clippy::too_many_arguments)]
     pub fn compose(
         panes: &[PaneView<'_>],
@@ -110,6 +111,8 @@ impl Compositor {
         overlay: Option<&OverlayView<'_>>,
         message: Option<&str>,
         popup: Option<&PopupView<'_>>,
+        // blocks: None = feature disabled (no block work per frame).
+        blocks: Option<&BlockBorderColors>,
     ) -> VirtualScreen {
         let (host_rows, host_cols) = host_size;
         let host_rows = host_rows.max(1);
@@ -134,17 +137,10 @@ impl Compositor {
 
         // Copy each pane's emulator cells into its rect, mixing in scrollback
         // when scroll_offset > 0 (or when copy-mode overrides the viewport).
+        // `effective_scroll` is hoisted so the block-status scan (below) uses
+        // the exact same value as the content copy.
         for view in panes {
-            let effective_scroll = match view.copy_mode {
-                Some(cm) => {
-                    let total_lines = view.screen.scrollback.len() as u32
-                        + view.screen.active.num_rows() as u32;
-                    total_lines
-                        .saturating_sub(cm.viewport_top)
-                        .saturating_sub(u32::from(view.rect.rows))
-                }
-                None => view.scroll_offset,
-            };
+            let effective_scroll = effective_scroll_for(view);
             let max_r = view.rect.rows;
             let max_c = view.rect.cols.min(view.screen.active.num_cols());
             for r in 0..max_r {
@@ -280,10 +276,26 @@ impl Compositor {
             .map(|v| {
                 let mut r = v.rect;
                 r.row = r.row.saturating_add(pane_row_offset);
-                borders::PaneFrame { rect: r, active: v.is_active, marked: v.marked, title: v.title }
+                // Per-viewport block status, computed from the same
+                // `effective_scroll` as the content copy so they always agree.
+                let block_rows = if blocks.is_some() {
+                    let es = effective_scroll_for(v);
+                    let sb_len = v.screen.scrollback.len() as u32;
+                    let top = sb_len.saturating_sub(es);
+                    viewport_block_status(v.screen, top, v.rect.rows)
+                } else {
+                    vec![]
+                };
+                borders::PaneFrame {
+                    rect: r,
+                    active: v.is_active,
+                    marked: v.marked,
+                    title: v.title,
+                    block_rows,
+                }
             })
             .collect();
-        borders::draw(&frames, band, &mut screen);
+        borders::draw(&frames, band, &mut screen, blocks);
 
         // Status bar.
         if let Some(s) = status {
@@ -369,6 +381,22 @@ impl Compositor {
         }
 
         screen
+    }
+}
+
+/// Compute the effective scroll offset for a pane view. This is the single
+/// source of truth used by both the content copy and the block-status scan so
+/// both always show the same viewport.
+fn effective_scroll_for(view: &PaneView<'_>) -> u32 {
+    match view.copy_mode {
+        Some(cm) => {
+            let total_lines = view.screen.scrollback.len() as u32
+                + view.screen.active.num_rows() as u32;
+            total_lines
+                .saturating_sub(cm.viewport_top)
+                .saturating_sub(u32::from(view.rect.rows))
+        }
+        None => view.scroll_offset,
     }
 }
 
@@ -1077,7 +1105,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None, None, None);
+        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
         assert_eq!(vs.cursor, Some((0, 2)));
     }
@@ -1135,6 +1163,7 @@ mod tests {
             None,
             None,
             Some(&pv),
+            None,
         );
         // Corners of the border frame.
         assert_eq!(vs.cell(2, 10).unwrap().grapheme.as_str(), "┌");
@@ -1183,6 +1212,7 @@ mod tests {
             None,
             None,
             Some(&pv),
+            None,
         );
         // Top status row occupies physical row 0; the popup's logical row 2
         // paints at physical row 3 (pane_row_offset = 1).
@@ -1213,7 +1243,7 @@ mod tests {
         };
         let mut sel = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
         sel.extend(0, 4, Rect::new(0, 0, 4, 6));
-        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel), None, None, None);
+        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel), None, None, None, None);
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -1253,7 +1283,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None, None, None);
+        let vs = Compositor::compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "L");
         assert_eq!(vs.cell(0, 4).unwrap().grapheme.as_str(), "R");
         // Border column.
@@ -1283,7 +1313,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None, None, None);
+        let vs = Compositor::compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None, None, None, None);
         // Row 0 should be the last scrollback row (BBBB), not CCCC.
         let r0: String = (0..4)
             .map(|c| vs.cell(0, c).unwrap().grapheme.as_str().to_string())
@@ -1316,7 +1346,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None);
+        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
         assert_eq!(vs.cursor, Some((3, 7)));
     }
 
@@ -1344,7 +1374,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None);
+        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -1398,7 +1428,7 @@ mod tests {
             marked: false,
         };
         let status = status_with_left("中B");
-        let vs = Compositor::compose(&[view], (3, 8), Some(&status), StatusPlacement::Bottom, None, None, None, None);
+        let vs = Compositor::compose(&[view], (3, 8), Some(&status), StatusPlacement::Bottom, None, None, None, None, None);
         assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "中");
         assert!(vs.cell(2, 1).unwrap().grapheme.is_empty(), "wide spacer after 中");
         assert_eq!(vs.cell(2, 2).unwrap().grapheme.as_str(), "B");
@@ -1421,7 +1451,7 @@ mod tests {
             marked: false,
         };
         let status = status_with_left("AB");
-        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None, None, None);
+        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "A", "status at row 0");
         assert_eq!(vs.cell(0, 1).unwrap().grapheme.as_str(), "B");
         assert_eq!(vs.cell(1, 0).unwrap().grapheme.as_str(), "X", "pane shifted to row 1");
@@ -1443,7 +1473,7 @@ mod tests {
             marked: false,
         };
         let status = status_with_left("AB");
-        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None, None, None);
+        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "X", "pane stays at row 0");
         assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "A", "status at last row");
     }
@@ -1464,7 +1494,7 @@ mod tests {
             marked: false,
         };
         let ov = OverlayView::RenamePrompt { label: "rename window", buf: "hi" };
-        let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
+        let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         // Bottom row (3) is a REVERSE prompt bar.
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "prompt bar is REVERSE");
         // Text " rename window \u{25b8} hi", with 'r' at col 1.
@@ -1487,7 +1517,7 @@ mod tests {
             marked: false,
         };
         let ov = OverlayView::Command { buf: "spl" };
-        let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
+        let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "command bar is REVERSE");
         // Text " :spl": ':' at col 1, 's' at col 2.
         assert_eq!(vs.cell(3, 1).unwrap().grapheme.as_str(), ":");
@@ -1517,6 +1547,7 @@ mod tests {
             None,
             None,
             Some("no session: foo"),
+            None,
             None,
         );
         // Bottom row (3) is a REVERSE message bar; text rendered after a space.
@@ -1550,6 +1581,7 @@ mod tests {
             Some(&ov),
             Some("this message must not show"),
             None,
+            None,
         );
         // The overlay owns the bottom row: 'r' of "rename window" is at col 1,
         // proving the message did not overwrite it.
@@ -1573,7 +1605,7 @@ mod tests {
         };
         let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
-        let vs = Compositor::compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
+        let vs = Compositor::compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut found_corner = false;
         let mut found_text = false;
         for r in 0..10 {
@@ -1619,7 +1651,7 @@ mod tests {
             picker_view("work", "work - 2 win", false),
         ];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "", selected: 1 };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
 
         let mut found_corner = false;
         let mut found_marker = false;
@@ -1658,7 +1690,7 @@ mod tests {
         // A CJK session name must be sized and placed as one cell + a spacer.
         let entries = vec![picker_view("中文", "中文", false)];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "", selected: 0 };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut found = false;
         for r in 0..10 {
             for c in 0..49 {
@@ -1691,7 +1723,7 @@ mod tests {
         };
         let entries = vec![picker_view("main", "main", true)];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "zzz", selected: 0 };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut text = String::new();
         for r in 0..10 {
             for c in 0..50 {
@@ -1722,7 +1754,7 @@ mod tests {
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
         let status = status_with_left("S");
         let vs =
-            Compositor::compose(&[view], (4, 40), Some(&status), StatusPlacement::Bottom, None, Some(&ov), None, None);
+            Compositor::compose(&[view], (4, 40), Some(&status), StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut found_corner = false;
         for r in 0..4 {
             for c in 0..40 {
@@ -1780,7 +1812,7 @@ mod tests {
             mode: crate::tree::TreeMode::Navigate,
         };
         let ov = OverlayView::Tree { state: &state };
-        let vs = Compositor::compose(&[view], (12, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
+        let vs = Compositor::compose(&[view], (12, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
 
         let mut found_corner = false;
         let mut found_marker = false;
@@ -1846,7 +1878,7 @@ mod tests {
             selected: 1,
         };
         let ov = OverlayView::Buffer { state: &state };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut text = String::new();
         let mut selected_reverse = false;
         for r in 0..10 {
@@ -1880,7 +1912,7 @@ mod tests {
         };
         let state = crate::buffer::BufferPickerState { entries: vec![], selected: 0 };
         let ov = OverlayView::Buffer { state: &state };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
+        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut text = String::new();
         for r in 0..10 {
             for c in 0..50 {
@@ -1906,7 +1938,7 @@ mod tests {
             title: None,
             marked: true,
         };
-        let vs = Compositor::compose(&[view], (3, 8), None, StatusPlacement::Bottom, None, None, None, None);
+        let vs = Compositor::compose(&[view], (3, 8), None, StatusPlacement::Bottom, None, None, None, None, None);
         let mut magenta = false;
         for r in 0..3 {
             for c in 0..8 {
@@ -1938,7 +1970,7 @@ mod tests {
             mode: crate::tree::TreeMode::ConfirmKill,
         };
         let ov = OverlayView::Tree { state: &state };
-        let vs = Compositor::compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None, None);
+        let vs = Compositor::compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut text = String::new();
         for r in 0..12 {
             for c in 0..60 {
@@ -1946,5 +1978,243 @@ mod tests {
             }
         }
         assert!(text.contains("Kill window"), "confirm-kill footer shown: {text}");
+    }
+
+    // ── Block exit-status compositor tests ───────────────────────────────────
+
+    fn block_colors() -> BlockBorderColors {
+        BlockBorderColors {
+            ok: plexy_glass_emulator::Color::Rgb(135, 169, 135),
+            fail: plexy_glass_emulator::Color::Rgb(196, 116, 110),
+        }
+    }
+
+    /// `blocks: None` suppresses all block painting even when block marks exist.
+    /// Build a screen WITH a completed failed block, compose with `blocks: None`
+    /// → output must contain no `▌` and no fail-color cell.
+    #[test]
+    fn compose_blocks_none_no_block_rows() {
+        use plexy_glass_emulator::Emulator as RawEmulator;
+        // Feed a completed failed block so viewport_block_status would fire if enabled.
+        let mut e = RawEmulator::new(3, 20);
+        e.advance(
+            b"\x1b]133;A\x07$ fail\r\n\
+              \x1b]133;C\x07output\r\n\
+              \x1b]133;D;1\x07done",
+        );
+        e.advance(b"\x1b[m");
+        let screen = e.screen().clone();
+        let colors = block_colors();
+        let fail_color = colors.fail;
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(1, 1, 1, 18),
+            screen: &screen,
+            is_active: false,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+            marked: false,
+        };
+        let vs = Compositor::compose(
+            &[view],
+            (3, 20),
+            None,
+            StatusPlacement::Bottom,
+            None, None, None, None,
+            None, // blocks disabled
+        );
+        // No ▌ anywhere and no fail-color cell.
+        for r in 0..3u16 {
+            for c in 0..20u16 {
+                let cell = vs.cell(r, c).unwrap();
+                assert_ne!(
+                    cell.grapheme.as_str(), "\u{258c}",
+                    "no ▌ with blocks=None at ({r},{c})"
+                );
+                assert_ne!(
+                    cell.fg, fail_color,
+                    "no fail-color with blocks=None at ({r},{c})"
+                );
+            }
+        }
+    }
+
+    /// No-marks regression: a pane with no block marks composed with
+    /// `Some(colors)` is cell-identical to one composed with `None`.
+    #[test]
+    fn compose_markless_pane_identical_with_and_without_blocks() {
+        let mut e = Emulator::new(4, 6);
+        pane(&mut e, b"hi ");
+        // Use a pane inset so a border exists.
+        let view_fn = || PaneView {
+            id: PaneId(0),
+            rect: Rect::new(1, 1, 2, 4),
+            screen: e.screen(),
+            is_active: false,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+            marked: false,
+        };
+        let colors = block_colors();
+        let vs_some = Compositor::compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors));
+        let vs_none = Compositor::compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None);
+        for r in 0..4u16 {
+            for c in 0..6u16 {
+                let c1 = vs_some.cell(r, c).unwrap().clone();
+                let c2 = vs_none.cell(r, c).unwrap().clone();
+                assert_eq!(c1, c2, "cell mismatch at ({r},{c})");
+            }
+        }
+    }
+
+    /// Scrolled viewport (scroll_offset > 0) shifts which rows get status.
+    /// Build a screen with a failed block that spans the first 3 lines (all in
+    /// scrollback after scrolling). With scroll_offset = 0, those rows are not
+    /// visible; with scroll_offset = 3 they are visible and should be colored.
+    #[test]
+    fn compose_scrolled_viewport_shifts_block_rows() {
+        use plexy_glass_emulator::Emulator;
+        // 3-row pane; feed 6 lines so lines 0..2 go to scrollback.
+        // Block: A at line 0, D;1 on line 3 (shared with A of block 2).
+        let mut e = Emulator::new(3, 20);
+        e.advance(
+            b"\x1b]133;A\x07$ fail\r\n\
+              \x1b]133;C\x07out1\r\n\
+              out2\r\n\
+              \x1b]133;D;1\x07\x1b]133;A\x07$ next\r\n\
+              \x1b]133;C\x07x\r\n\
+              y",
+        );
+        e.advance(b"\x1b[m");
+        let screen = e.screen().clone();
+        // scrollback should have 3 rows (lines 0..2), active grid = lines 3..5.
+        assert_eq!(screen.scrollback.rows().len(), 3, "setup: 3 scrollback rows");
+
+        let colors = block_colors();
+
+        // scroll_offset = 3: viewport shows lines 0..2 (all in scrollback).
+        // Block 1 (lines 0..2) is Failed → left-segment cells should be colored.
+        let view_scrolled = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(1, 1, 3, 18),
+            screen: &screen,
+            is_active: false,
+            scroll_offset: 3,
+            copy_mode: None,
+            title: None,
+            marked: false,
+        };
+        let vs_scrolled = Compositor::compose(
+            &[view_scrolled],
+            (5, 20),
+            None,
+            StatusPlacement::Bottom,
+            None,
+            None,
+            None,
+            None,
+            Some(&colors),
+        );
+        // Left-segment column = pane.rect.col - 1 = 0. Pane rows 1..=3 map to
+        // block rows 0..2. All should be Failed (fail color / ▌).
+        for r in 1..=3u16 {
+            let cell = vs_scrolled.cell(r, 0).unwrap();
+            assert_eq!(
+                cell.fg, colors.fail,
+                "scrolled viewport row {r}: expected fail color on left segment"
+            );
+        }
+
+        // scroll_offset = 0: viewport shows lines 3..5 (active grid, block 2
+        // running) → left-segment should NOT be fail colored.
+        let view_live = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(1, 1, 3, 18),
+            screen: &screen,
+            is_active: false,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+            marked: false,
+        };
+        let vs_live = Compositor::compose(
+            &[view_live],
+            (5, 20),
+            None,
+            StatusPlacement::Bottom,
+            None,
+            None,
+            None,
+            None,
+            Some(&colors),
+        );
+        for r in 1..=3u16 {
+            let cell = vs_live.cell(r, 0).unwrap();
+            assert_ne!(
+                cell.fg, colors.fail,
+                "live viewport row {r}: should not have fail color (block 2 running)"
+            );
+        }
+    }
+
+    /// Copy-mode viewport uses the copy-mode top for block status.
+    #[test]
+    fn compose_copy_mode_viewport_uses_copy_mode_top() {
+        use plexy_glass_emulator::Emulator;
+        // Same screen as above: block 1 (lines 0..2) Failed, block 2 (lines 3..5) running.
+        let mut e = Emulator::new(3, 20);
+        e.advance(
+            b"\x1b]133;A\x07$ fail\r\n\
+              \x1b]133;C\x07out1\r\n\
+              out2\r\n\
+              \x1b]133;D;1\x07\x1b]133;A\x07$ next\r\n\
+              \x1b]133;C\x07x\r\n\
+              y",
+        );
+        e.advance(b"\x1b[m");
+        let screen = e.screen().clone();
+
+        let colors = block_colors();
+
+        // Copy-mode with viewport_top = 0: shows lines 0..2 (block 1, Failed).
+        let cm = crate::CopyMode {
+            cursor: (0, 0),
+            anchor: None,
+            search: crate::SearchState::default(),
+            viewport_top: 0,
+            pane_rows: 3,
+            total_lines: 6,
+        };
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(1, 1, 3, 18),
+            screen: &screen,
+            is_active: false,
+            scroll_offset: 0, // copy-mode overrides this
+            copy_mode: Some(&cm),
+            title: None,
+            marked: false,
+        };
+        let vs = Compositor::compose(
+            &[view],
+            (5, 20),
+            None,
+            StatusPlacement::Bottom,
+            None,
+            None,
+            None,
+            None,
+            Some(&colors),
+        );
+        // Lines 0..2 visible → block 1 (Failed) → left-segment cells colored.
+        for r in 1..=3u16 {
+            let cell = vs.cell(r, 0).unwrap();
+            assert_eq!(
+                cell.fg, colors.fail,
+                "copy-mode top=0, row {r}: expected fail color"
+            );
+        }
     }
 }

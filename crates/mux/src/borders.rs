@@ -8,9 +8,18 @@
 //! neighbours are also border cells, which yields correct corners, tees, and
 //! crosses uniformly for the frame and the separators.
 
-use crate::{rect::Rect, virtual_screen::VirtualScreen};
+use crate::{blocks::BlockLineStatus, rect::Rect, virtual_screen::VirtualScreen};
 use plexy_glass_emulator::{Attrs, Cell, Color, graphemes_with_width};
 use smol_str::SmolStr;
+
+/// Colors used to paint block exit-status segments on a pane's left border.
+pub struct BlockBorderColors {
+    /// Foreground color for a successfully completed block row (exit code 0).
+    pub ok: Color,
+    /// Foreground color for a failed block row (nonzero exit code). Also
+    /// triggers a `│` → `▌` glyph replacement on plain vertical segments.
+    pub fail: Color,
+}
 
 /// One pane to frame: its content `rect` (in the same physical coordinate
 /// space as `band`), whether it is the active pane, and an optional title to
@@ -23,12 +32,31 @@ pub struct PaneFrame<'a> {
     /// pane has a `title`, so an unnamed marked pane is still clearly indicated.
     pub marked: bool,
     pub title: Option<&'a str>,
+    /// Per-viewport-row block exit status, indexed by `r` in `0..rect.rows`.
+    /// An empty vec means no block painting for this pane (feature disabled or
+    /// not yet computed). Length must equal `rect.rows` when non-empty.
+    pub block_rows: Vec<Option<BlockLineStatus>>,
 }
 
 /// Paint the frame, separators, and titles for `frames` within `band` (the
 /// physical rectangle enclosing every pane). Border cells adjacent to the
 /// active pane get a brighter attribute.
-pub fn draw(frames: &[PaneFrame<'_>], band: Rect, screen: &mut VirtualScreen) {
+///
+/// `blocks` enables block exit-status coloring on each pane's **left segment**
+/// (`c == rect.col - 1`, `rect.row <= r < rect.row + rect.rows`).
+/// Passing `None` skips all block work for this frame (zero cost; feature
+/// disabled or `enabled #false`).
+///
+/// Precedence per cell (highest wins):
+///   1. Marked ring (color + glyph; no `▌` ever on a marked ring)
+///   2. Block status (ok/fail fg; fail replaces `│` → `▌` when plain vertical)
+///   3. Active ring (bright blue)
+pub fn draw(
+    frames: &[PaneFrame<'_>],
+    band: Rect,
+    screen: &mut VirtualScreen,
+    blocks: Option<&BlockBorderColors>,
+) {
     let rects: Vec<Rect> = frames.iter().map(|f| f.rect).collect();
     let active_rect = frames.iter().find(|f| f.active).map(|f| f.rect);
     let marked_rect = frames.iter().find(|f| f.marked).map(|f| f.rect);
@@ -44,13 +72,33 @@ pub fn draw(frames: &[PaneFrame<'_>], band: Rect, screen: &mut VirtualScreen) {
             let e = c < band.right_edge_col() && is_border(r, c + 1, band, &rects);
             let glyph = box_glyph(n, s, e, w);
             let mut cell = Cell { grapheme: SmolStr::new(glyph), ..Cell::default() };
-            // Marked takes precedence over active so a marked pane always reads as
-            // marked (a shared separator cell may touch both rings).
+
+            // Precedence: marked > block status > active.
+            // Marked ring: color + glyph unchanged (no ▌ ever).
             if let Some(mr) = marked_rect
                 && touches(r, c, mr)
             {
                 cell.attrs = Attrs::BOLD;
                 cell.fg = Color::Indexed(13); // bright magenta
+            } else if let Some(colors) = blocks
+                && let Some(status) = left_segment_status(r, c, frames)
+            {
+                // Block status takes precedence over the active ring.
+                match status {
+                    BlockLineStatus::Ok => {
+                        cell.fg = colors.ok;
+                    }
+                    BlockLineStatus::Failed => {
+                        cell.fg = colors.fail;
+                        // Replace a plain vertical `│` with the half-block `▌`.
+                        // A `┤` keeps its glyph (it's the only other glyph possible on the
+                        // left segment, since its east neighbour is always pane content).
+                        if glyph == "\u{2502}" {
+                            // │ → ▌
+                            cell.grapheme = SmolStr::new_static("\u{258c}");
+                        }
+                    }
+                }
             } else if let Some(ar) = active_rect
                 && touches(r, c, ar)
             {
@@ -76,6 +124,39 @@ pub fn draw(frames: &[PaneFrame<'_>], band: Rect, screen: &mut VirtualScreen) {
         let active = active_rect == Some(f.rect);
         paint_title(screen, title_row, start, max_col, title, active);
     }
+}
+
+/// Returns the `BlockLineStatus` for cell `(r, c)` if it lies in exactly one
+/// pane's **left segment** and that pane's `block_rows` has a status for the
+/// corresponding row.
+///
+/// The left segment of pane P is the column `P.rect.col - 1` for rows
+/// `P.rect.row .. P.rect.row + P.rect.rows`. At most one pane can claim any
+/// cell (rects don't overlap).
+fn left_segment_status(
+    r: u16,
+    c: u16,
+    frames: &[PaneFrame<'_>],
+) -> Option<BlockLineStatus> {
+    for f in frames {
+        if f.block_rows.is_empty() {
+            continue;
+        }
+        // Left segment column is rect.col - 1; skip this frame if the pane is
+        // flush against the left edge (col=0 means no border column to the left).
+        let Some(left_col) = f.rect.col.checked_sub(1) else {
+            continue;
+        };
+        if c != left_col {
+            continue;
+        }
+        if r < f.rect.row || r >= f.rect.row.saturating_add(f.rect.rows) {
+            continue;
+        }
+        let row_idx = (r - f.rect.row) as usize;
+        return f.block_rows.get(row_idx).and_then(|s| *s);
+    }
+    None
 }
 
 /// A cell is a border cell when it is inside the band but not inside any pane.
@@ -153,13 +234,30 @@ fn paint_title(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocks::BlockLineStatus;
 
     fn frame(rect: Rect, active: bool, title: Option<&str>) -> PaneFrame<'_> {
-        PaneFrame { rect, active, marked: false, title }
+        PaneFrame { rect, active, marked: false, title, block_rows: vec![] }
     }
 
     fn marked_frame(rect: Rect, active: bool, title: Option<&str>) -> PaneFrame<'_> {
-        PaneFrame { rect, active, marked: true, title }
+        PaneFrame { rect, active, marked: true, title, block_rows: vec![] }
+    }
+
+    fn frame_with_blocks(
+        rect: Rect,
+        active: bool,
+        marked: bool,
+        block_rows: Vec<Option<BlockLineStatus>>,
+    ) -> PaneFrame<'static> {
+        PaneFrame { rect, active, marked, title: None, block_rows }
+    }
+
+    fn test_colors() -> BlockBorderColors {
+        BlockBorderColors {
+            ok: Color::Rgb(135, 169, 135),   // #87a987
+            fail: Color::Rgb(196, 116, 110),  // #c4746e
+        }
     }
 
     #[test]
@@ -168,7 +266,7 @@ mod tests {
         let band = Rect::new(0, 0, 5, 7);
         let pane = Rect::new(1, 1, 3, 5);
         let mut screen = VirtualScreen::blank(5, 7);
-        draw(&[frame(pane, false, None)], band, &mut screen);
+        draw(&[frame(pane, false, None)], band, &mut screen, None);
         assert_eq!(screen.cell(0, 0).unwrap().grapheme.as_str(), "\u{250c}"); // ┌
         assert_eq!(screen.cell(0, 6).unwrap().grapheme.as_str(), "\u{2510}"); // ┐
         assert_eq!(screen.cell(4, 0).unwrap().grapheme.as_str(), "\u{2514}"); // └
@@ -184,7 +282,7 @@ mod tests {
         let left = Rect::new(1, 1, 3, 3); // cols 1..=3
         let right = Rect::new(1, 5, 3, 3); // cols 5..=7, gap at col 4
         let mut screen = VirtualScreen::blank(5, 9);
-        draw(&[frame(left, false, None), frame(right, false, None)], band, &mut screen);
+        draw(&[frame(left, false, None), frame(right, false, None)], band, &mut screen, None);
         // Top of the separator meets the top frame as a ┬.
         assert_eq!(screen.cell(0, 4).unwrap().grapheme.as_str(), "\u{252c}");
         // Middle of the separator is a vertical line.
@@ -198,7 +296,7 @@ mod tests {
         let band = Rect::new(0, 0, 5, 12);
         let pane = Rect::new(1, 1, 3, 10);
         let mut screen = VirtualScreen::blank(5, 12);
-        draw(&[frame(pane, false, Some("ed"))], band, &mut screen);
+        draw(&[frame(pane, false, Some("ed"))], band, &mut screen, None);
         // Title " ed " starts two cells in (col 2): space, e, d, space.
         assert_eq!(screen.cell(0, 3).unwrap().grapheme.as_str(), "e");
         assert_eq!(screen.cell(0, 4).unwrap().grapheme.as_str(), "d");
@@ -210,7 +308,7 @@ mod tests {
         let band = Rect::new(0, 0, 5, 7);
         let pane = Rect::new(1, 1, 3, 5);
         let mut screen = VirtualScreen::blank(5, 7);
-        draw(&[frame(pane, true, None)], band, &mut screen);
+        draw(&[frame(pane, true, None)], band, &mut screen, None);
         // The active pane's frame is bold all the way around, corners included.
         for (r, c) in [(0u16, 0u16), (0, 6), (4, 0), (4, 6)] {
             assert!(
@@ -227,7 +325,7 @@ mod tests {
         let band = Rect::new(0, 0, 5, 7);
         let pane = Rect::new(1, 1, 3, 5);
         let mut screen = VirtualScreen::blank(5, 7);
-        draw(&[marked_frame(pane, false, None)], band, &mut screen);
+        draw(&[marked_frame(pane, false, None)], band, &mut screen, None);
         // Corners are still correct box glyphs...
         assert_eq!(screen.cell(0, 0).unwrap().grapheme.as_str(), "\u{250c}");
         assert_eq!(screen.cell(4, 6).unwrap().grapheme.as_str(), "\u{2518}");
@@ -244,7 +342,313 @@ mod tests {
         let band = Rect::new(0, 0, 5, 7);
         let pane = Rect::new(1, 1, 3, 5);
         let mut screen = VirtualScreen::blank(5, 7);
-        draw(&[frame(pane, false, None)], band, &mut screen);
+        draw(&[frame(pane, false, None)], band, &mut screen, None);
         assert_eq!(screen.cell(0, 3).unwrap().grapheme.as_str(), "\u{2500}");
+    }
+
+    // ── Block exit-status border segment tests ────────────────────────────────────
+
+    /// Ok status row: left-segment cell gets ok fg, glyph is `│`.
+    #[test]
+    fn block_ok_segment_fg_and_glyph() {
+        // Band 5x7; pane inset at (1,1) sized 3x5.
+        // Left segment is col 0, rows 1..=3.
+        let band = Rect::new(0, 0, 5, 7);
+        let pane = Rect::new(1, 1, 3, 5);
+        let block_rows = vec![Some(BlockLineStatus::Ok); 3];
+        let colors = test_colors();
+        let mut screen = VirtualScreen::blank(5, 7);
+        let f = frame_with_blocks(pane, false, false, block_rows);
+        draw(&[f], band, &mut screen, Some(&colors));
+        // Row 2 (mid-pane), col 0 is the plain left-segment `│`.
+        let cell = screen.cell(2, 0).unwrap();
+        assert_eq!(cell.fg, colors.ok, "ok segment: fg = ok color");
+        assert_eq!(cell.grapheme.as_str(), "\u{2502}", "ok segment: glyph unchanged (│)");
+    }
+
+    /// Failed status row: left-segment `│` becomes `▌` with fail fg.
+    #[test]
+    fn block_failed_segment_replaces_pipe_with_half_block() {
+        let band = Rect::new(0, 0, 5, 7);
+        let pane = Rect::new(1, 1, 3, 5);
+        let block_rows = vec![Some(BlockLineStatus::Failed); 3];
+        let colors = test_colors();
+        let mut screen = VirtualScreen::blank(5, 7);
+        let f = frame_with_blocks(pane, false, false, block_rows);
+        draw(&[f], band, &mut screen, Some(&colors));
+        // Mid-pane left-segment cell: fail fg + ▌ glyph.
+        let cell = screen.cell(2, 0).unwrap();
+        assert_eq!(cell.fg, colors.fail, "failed segment: fg = fail color");
+        assert_eq!(cell.grapheme.as_str(), "\u{258c}", "failed segment: │ → ▌");
+    }
+
+    /// A `┤` at the exact left-segment position: glyph kept, fail color applied.
+    ///
+    /// Layout: band 5x10; left pane (1,1,3,2) with no blocks; right pane
+    /// (1,5,3,4) with all-Failed rows. The right pane's left segment is col 4.
+    /// A gap (col 3) between the two panes' content areas gives col 4 a western
+    /// border neighbour, so the mid-height cell at (2,4) receives connectivity
+    /// (N=T, S=T, W=T, E=F) → ┤ rather than │. The `│` → `▌` substitution must
+    /// not fire on ┤.
+    #[test]
+    fn block_failed_tee_at_left_segment_col_keeps_glyph() {
+        let band = Rect::new(0, 0, 5, 10);
+        let left_pane = Rect::new(1, 1, 3, 2); // cols 1..=2
+        let right_pane = Rect::new(1, 5, 3, 4); // cols 5..=8; left segment = col 4
+        let colors = test_colors();
+        let f_left = frame_with_blocks(left_pane, false, false, vec![]);
+        let f_right = frame_with_blocks(right_pane, false, false, vec![
+            Some(BlockLineStatus::Failed),
+            Some(BlockLineStatus::Failed),
+            Some(BlockLineStatus::Failed),
+        ]);
+        let mut screen = VirtualScreen::blank(5, 10);
+        draw(&[f_left, f_right], band, &mut screen, Some(&colors));
+        // Check the ┤ at mid-height of the right pane's left segment.
+        let cell = screen.cell(2, 4).unwrap();
+        assert_eq!(
+            cell.grapheme.as_str(),
+            "\u{2524}",
+            "expected ┤ at (2,4); got {}",
+            cell.grapheme.as_str()
+        );
+        // ┤ takes the fail color but keeps its glyph (no ▌ replacement).
+        assert_eq!(cell.fg, colors.fail, "┤ cell: fail fg");
+        assert_ne!(cell.grapheme.as_str(), "\u{258c}", "┤ must not become ▌");
+    }
+
+    /// None rows: frame drawn with `Some(colors)` and all-None block_rows is
+    /// byte-identical to a frame drawn with `None`.
+    #[test]
+    fn none_rows_identical_to_blocks_disabled() {
+        let band = Rect::new(0, 0, 5, 7);
+        let pane = Rect::new(1, 1, 3, 5);
+        let colors = test_colors();
+        // Frame with Some(colors) but all-None block_rows.
+        let block_rows = vec![None; 3];
+        let f1 = frame_with_blocks(pane, false, false, block_rows);
+        let mut s1 = VirtualScreen::blank(5, 7);
+        draw(&[f1], band, &mut s1, Some(&colors));
+        // Frame with None (feature disabled).
+        let f2 = frame(pane, false, None);
+        let mut s2 = VirtualScreen::blank(5, 7);
+        draw(&[f2], band, &mut s2, None);
+        // Both screens must be cell-identical (full Cell equality, not just grapheme+fg).
+        for r in 0..5u16 {
+            for c in 0..7u16 {
+                let c1 = s1.cell(r, c).unwrap().clone();
+                let c2 = s2.cell(r, c).unwrap().clone();
+                assert_eq!(c1, c2, "cell mismatch at ({r},{c}): Some(all-None) vs None");
+            }
+        }
+    }
+
+    /// Marked pane: ring color + glyph win over Failed (no ▌ on a marked ring).
+    #[test]
+    fn marked_pane_beats_failed_block_status() {
+        let band = Rect::new(0, 0, 5, 7);
+        let pane = Rect::new(1, 1, 3, 5);
+        let colors = test_colors();
+        let block_rows = vec![Some(BlockLineStatus::Failed); 3];
+        let f = frame_with_blocks(pane, false, true, block_rows);
+        let mut screen = VirtualScreen::blank(5, 7);
+        draw(&[f], band, &mut screen, Some(&colors));
+        // Left-segment cells (col 0, rows 1..=3) must be magenta (marked), not fail color.
+        for r in 1..=3u16 {
+            let cell = screen.cell(r, 0).unwrap();
+            assert_eq!(
+                cell.fg,
+                Color::Indexed(13),
+                "marked ring at ({r},0) must beat fail status (got {:?})",
+                cell.fg
+            );
+            // No ▌ on a marked ring.
+            assert_ne!(
+                cell.grapheme.as_str(),
+                "\u{258c}",
+                "marked ring at ({r},0) must not have ▌"
+            );
+        }
+    }
+
+    /// Active pane: Failed beats active blue on the status row; None rows keep blue.
+    #[test]
+    fn failed_beats_active_ring_on_status_rows() {
+        // Pane is active. Row 0 of block_rows = Failed, rows 1..2 = None.
+        let band = Rect::new(0, 0, 5, 7);
+        let pane = Rect::new(1, 1, 3, 5);
+        let colors = test_colors();
+        let block_rows = vec![
+            Some(BlockLineStatus::Failed),
+            None,
+            None,
+        ];
+        let f = frame_with_blocks(pane, true, false, block_rows);
+        let mut screen = VirtualScreen::blank(5, 7);
+        draw(&[f], band, &mut screen, Some(&colors));
+        // Row 1 (block_rows[0] = Failed): fail color, not blue.
+        let failed_cell = screen.cell(1, 0).unwrap();
+        assert_eq!(
+            failed_cell.fg, colors.fail,
+            "failed row beats active blue"
+        );
+        assert_eq!(failed_cell.grapheme.as_str(), "\u{258c}", "failed row: │ → ▌");
+        // Rows 2..=3 (block_rows[1..2] = None): active blue.
+        for r in 2..=3u16 {
+            let cell = screen.cell(r, 0).unwrap();
+            assert_eq!(
+                cell.fg,
+                Color::Indexed(12),
+                "none row at ({r},0) keeps active blue"
+            );
+        }
+    }
+
+    /// Shared separator: two side-by-side panes, LEFT active, RIGHT has a failed
+    /// block row → that shared cell shows fail color/▌; left pane's other ring
+    /// cells stay blue.
+    #[test]
+    fn shared_separator_right_status_beats_left_active_ring() {
+        // Band 5x9; left (1,1,3,3) active, right (1,5,3,3) inactive with Failed.
+        // Separator column = col 4 (right pane's left segment, rows 1..=3).
+        let band = Rect::new(0, 0, 5, 9);
+        let left_rect = Rect::new(1, 1, 3, 3);
+        let right_rect = Rect::new(1, 5, 3, 3);
+        let colors = test_colors();
+        let f_left = frame_with_blocks(left_rect, true, false, vec![]);
+        let f_right = frame_with_blocks(
+            right_rect,
+            false,
+            false,
+            vec![Some(BlockLineStatus::Failed); 3],
+        );
+        let mut screen = VirtualScreen::blank(5, 9);
+        draw(&[f_left, f_right], band, &mut screen, Some(&colors));
+        // The separator (col 4, rows 1..=3) is in right pane's left segment.
+        // It should show fail color / ▌, not left pane's active blue.
+        for r in 1..=3u16 {
+            let cell = screen.cell(r, 4).unwrap();
+            assert_eq!(
+                cell.fg, colors.fail,
+                "shared separator at ({r},4): right fail beats left active"
+            );
+            assert_eq!(
+                cell.grapheme.as_str(),
+                "\u{258c}",
+                "shared separator at ({r},4): │ → ▌"
+            );
+        }
+        // Left pane's other ring cells (top, bottom, right side) stay blue.
+        // Top-left corner (0,0) touches both panes' rings, marked? No.
+        // The left pane's own non-separator border cells: e.g. col 0 rows 1..=3
+        // (the true left outer edge of the left pane, but that's the outer border,
+        // not the pane's own separator side). The LEFT pane's ring includes col 0
+        // (outer left border), so those cells are only touched by the left pane's
+        // active ring (no block status from the right pane applies there).
+        for r in 1..=3u16 {
+            let outer_left = screen.cell(r, 0).unwrap();
+            assert_eq!(
+                outer_left.fg,
+                Color::Indexed(12),
+                "left pane outer-left ring at ({r},0) stays active blue"
+            );
+        }
+    }
+
+    /// Marked LEFT pane + Failed RIGHT pane: the shared separator (right pane's
+    /// left segment) is also on the marked ring of the LEFT pane. Marked takes
+    /// precedence over block status → cell keeps magenta (Indexed 13) and the
+    /// `│` glyph (no `▌`).
+    #[test]
+    fn marked_left_pane_beats_failed_right_on_shared_separator() {
+        // Band 5x9; left (1,1,3,3) marked, right (1,5,3,3) inactive with Failed.
+        // Separator column = col 4 (right pane's left segment AND left pane's ring).
+        let band = Rect::new(0, 0, 5, 9);
+        let left_rect = Rect::new(1, 1, 3, 3);
+        let right_rect = Rect::new(1, 5, 3, 3);
+        let colors = test_colors();
+        let f_left = frame_with_blocks(left_rect, false, true, vec![]);
+        let f_right = frame_with_blocks(
+            right_rect,
+            false,
+            false,
+            vec![Some(BlockLineStatus::Failed); 3],
+        );
+        let mut screen = VirtualScreen::blank(5, 9);
+        draw(&[f_left, f_right], band, &mut screen, Some(&colors));
+        // The separator (col 4, rows 1..=3) is the marked ring: magenta + │.
+        for r in 1..=3u16 {
+            let cell = screen.cell(r, 4).unwrap();
+            assert_eq!(
+                cell.fg,
+                Color::Indexed(13),
+                "shared separator at ({r},4): marked magenta beats right fail"
+            );
+            assert_eq!(
+                cell.grapheme.as_str(),
+                "\u{2502}",
+                "shared separator at ({r},4): marked ring must keep │, not ▌"
+            );
+        }
+    }
+
+    /// Segment confinement: the pane's right border and other panes' borders
+    /// are untouched by its block status.
+    #[test]
+    fn segment_confined_to_left_border_col() {
+        // Single pane. All-Failed block rows.
+        // The right border (col = rect.right_edge_col() + 1 = col 6) should NOT
+        // be colored; only col 0 (the left segment) should be.
+        let band = Rect::new(0, 0, 5, 7);
+        let pane = Rect::new(1, 1, 3, 5);
+        let colors = test_colors();
+        let block_rows = vec![Some(BlockLineStatus::Failed); 3];
+        let f = frame_with_blocks(pane, false, false, block_rows);
+        let mut screen = VirtualScreen::blank(5, 7);
+        draw(&[f], band, &mut screen, Some(&colors));
+        // Right border (col 6): NOT fail colored.
+        for r in 1..=3u16 {
+            let cell = screen.cell(r, 6).unwrap();
+            assert_ne!(
+                cell.fg, colors.fail,
+                "right border col 6 row {r} must not have fail color"
+            );
+            assert_ne!(
+                cell.grapheme.as_str(),
+                "\u{258c}",
+                "right border col 6 row {r} must not have ▌"
+            );
+        }
+        // Left segment (col 0) IS fail colored.
+        for r in 1..=3u16 {
+            let cell = screen.cell(r, 0).unwrap();
+            assert_eq!(cell.fg, colors.fail, "left segment col 0 row {r} = fail");
+        }
+    }
+
+    /// Status-row safety: with the pane rect hitting the band bottom, the
+    /// band-bounded loop must not paint past `band.bottom_edge_row()`.
+    #[test]
+    fn status_row_safety_band_bounded() {
+        // Simulate a tight layout: band 4 rows, pane uses 3 content rows (1..=3),
+        // block_rows length = 3. Band bottom = row 3. The pane's left segment
+        // spans rows 1..=3 which is within the band, so no overflow.
+        let band = Rect::new(0, 0, 4, 7);
+        let pane = Rect::new(1, 1, 2, 5); // content rows 1..=2 only
+        let colors = test_colors();
+        let block_rows = vec![Some(BlockLineStatus::Failed); 2];
+        let f = frame_with_blocks(pane, false, false, block_rows);
+        // Screen has 5 rows; band is 4; band.bottom_edge_row() = 3.
+        let mut screen = VirtualScreen::blank(5, 7);
+        draw(&[f], band, &mut screen, Some(&colors));
+        // Row 4 (outside the band) must be untouched (blank default).
+        for c in 0..7u16 {
+            let cell = screen.cell(4, c).unwrap();
+            assert_eq!(
+                cell.grapheme.as_str(),
+                " ",
+                "row 4 (outside band) col {c} must be blank"
+            );
+        }
     }
 }
