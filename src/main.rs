@@ -65,6 +65,18 @@ enum Subcommands {
         #[arg(long = "last-command")]
         last_command: bool,
     },
+    /// Run a command in the focused pane and wait for it to finish (requires
+    /// OSC 133 shell integration).
+    Run {
+        #[arg(short = 'n', long = "name")]
+        name: Option<String>,
+        /// Give up after SECS seconds (exit 124; the command keeps running).
+        #[arg(long = "timeout", value_name = "SECS")]
+        timeout: Option<u64>,
+        /// Command text fragments, joined with single spaces.
+        #[arg(required = true)]
+        text: Vec<String>,
+    },
     /// Start the daemon (used internally by auto-spawn; `--foreground` for dev).
     Daemon(plexy_glass_daemon::DaemonArgs),
 }
@@ -148,6 +160,18 @@ async fn main() -> anyhow::Result<()> {
             match plexy_glass_client::client_capture(name, last_command).await {
                 Ok(true) => {}
                 Ok(false) => std::process::exit(1),
+                Err(e) => {
+                    eprintln!("plexy-glass: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Subcommands::Run { name, timeout, text } => {
+            match plexy_glass_client::client_exec(name, text.join(" "), timeout).await {
+                // 0 falls through to the normal `Ok(())` return; any other code
+                // (command exit passthrough, 124 timeout, 1 refusal) exits now.
+                Ok(0) => {}
+                Ok(code) => std::process::exit(code),
                 Err(e) => {
                     eprintln!("plexy-glass: {e}");
                     std::process::exit(1);

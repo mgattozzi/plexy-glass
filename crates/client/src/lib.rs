@@ -431,6 +431,74 @@ pub async fn client_capture(name: Option<String>, last_command: bool) -> Result<
     }
 }
 
+/// Run a command in a session's input target pane and wait for its OSC 133
+/// completion mark (CLI `run`).
+///
+/// Prints the completed block's output to stdout (trailing newline iff
+/// non-empty) and returns the process exit code for `main` to apply:
+/// - the command's recorded exit code (i32 passthrough; the OS truncates);
+/// - 0 with a stderr note when the `D` mark carried no exit payload;
+/// - 124 on a structural timeout (`ExecDone { timed_out: true }`), with the
+///   GNU-`timeout`-style message on stderr (the command keeps running);
+/// - 1 on any daemon refusal (`CommandResult { ok: false }`, message on
+///   stderr: no session, no blocks, busy pane, alt screen, child exit, …).
+///
+/// No daemon → `Err` (run never auto-spawns, like the other scripting verbs).
+pub async fn client_exec(
+    name: Option<String>,
+    text: String,
+    timeout_secs: Option<u64>,
+) -> Result<i32, ClientError> {
+    let socket = default_socket_path()?;
+    let stream = connect_only(&socket).await?;
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    client_handshake(&mut reader, &mut writer).await?;
+
+    let msg = ClientMsg::ExecCommand {
+        session: name,
+        text,
+        timeout_ms: timeout_secs.map(|s| s.saturating_mul(1000)),
+    };
+    let payload = postcard::to_allocvec(&msg)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
+    Codec::write_frame(&mut writer, &payload).await?;
+
+    let frame = Codec::read_frame(&mut reader)
+        .await?
+        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
+    let reply: ServerMsg = postcard::from_bytes(&frame)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    match reply {
+        ServerMsg::ExecDone { timed_out: true, .. } => {
+            // The daemon only times out when the client supplied a timeout,
+            // so `timeout_secs` is Some here; 0 is an unreachable fallback.
+            let secs = timeout_secs.unwrap_or(0);
+            eprintln!("run: timed out after {secs}s — the command may still be running");
+            Ok(124)
+        }
+        ServerMsg::ExecDone { exit, output, .. } => {
+            if !output.is_empty() {
+                println!("{output}");
+            }
+            match exit {
+                Some(n) => Ok(n),
+                None => {
+                    eprintln!("run: shell integration reported no exit code");
+                    Ok(0)
+                }
+            }
+        }
+        ServerMsg::CommandResult { ok: false, message } => {
+            eprintln!("plexy-glass run: {}", message.as_deref().unwrap_or("run failed"));
+            Ok(1)
+        }
+        ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
+        other => Err(ClientError::Io(std::io::Error::other(format!(
+            "unexpected reply from daemon: {other:?}"
+        )))),
+    }
+}
+
 fn default_spawn_spec() -> SpawnSpec {
     let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     SpawnSpec { program, args: vec![], env: vec![], cwd: None }

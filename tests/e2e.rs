@@ -2288,3 +2288,213 @@ fn capital_letter_reaches_kitty_flags5_pane_as_text() {
         "capital I leaked to the pane as a CSI-u event: {txt}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The `run` verb (R4)
+// ---------------------------------------------------------------------------
+// `run` requires the pane to be at an OSC 133 prompt, so each test first seeds
+// a PROMPT_START mark via `send --enter` of a printf that emits the raw `A`
+// bytes (the pane's /bin/sh has no real shell integration, so the commands ARE
+// the integration). Quoting layers: run_cli passes args directly (no shell),
+// so single quotes inside the text are interpreted by the PANE's sh, and the
+// `\033`/`\007` escapes by the pane's printf. Quote-concatenated needles
+// (RUN_'OK'_OUT → RUN_OK_OUT) appear contiguously only in executed output,
+// never in the pane's echo of the typed command text.
+
+/// Seed an OSC 133 PROMPT_START mark in the session's pane and poll `capture`
+/// until the marker text is visible, which proves the emulator processed the
+/// mark (the precondition every successful `run` needs).
+fn seed_prompt_mark(env: &TestEnv, sess: &TestSession) {
+    let (status, _stdout, stderr) =
+        run_cli(env, &["send", "--enter", "printf '\\033]133;A\\007SEED'PROMPT'\\n'"]);
+    assert!(status.success(), "seed send failed: {stderr}");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut seeded = false;
+    while Instant::now() < deadline {
+        let (_, stdout, _) = run_cli(env, &["capture"]);
+        if stdout.contains("SEEDPROMPT") {
+            seeded = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(seeded, "SEEDPROMPT never appeared in capture (mark not seeded). pane: {}", sess.snapshot_str());
+}
+
+/// Happy path: `run` a command that emits C, real output, then D;0 + A, so
+/// stdout contains the output needle and the exit code is 0.
+#[test]
+fn run_ok_prints_output_and_exits_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    seed_prompt_mark(&env, &sess);
+
+    let (status, stdout, stderr) = run_cli(
+        &env,
+        &[
+            "run",
+            "printf '\\033]133;C\\007'; echo RUN_'OK'_OUT; printf '\\033]133;D;0\\007\\033]133;A\\007'",
+        ],
+    );
+    assert!(
+        status.success(),
+        "run should exit 0 (status={status:?}). stdout: {stdout:?} stderr: {stderr:?} pane: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        stdout.contains("RUN_OK_OUT"),
+        "run stdout must contain the block output. got: {stdout:?} stderr: {stderr:?}"
+    );
+}
+
+/// A command whose D mark carries exit 5 → `run` exits 5.
+#[test]
+fn run_failed_propagates_exit_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    seed_prompt_mark(&env, &sess);
+
+    let (status, stdout, stderr) = run_cli(
+        &env,
+        &[
+            "run",
+            "printf '\\033]133;C\\007'; echo RUN_'FAIL'_OUT; printf '\\033]133;D;5\\007\\033]133;A\\007'",
+        ],
+    );
+    assert_eq!(
+        status.code(),
+        Some(5),
+        "run must propagate the command's exit code 5. stdout: {stdout:?} stderr: {stderr:?} pane: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        stdout.contains("RUN_FAIL_OUT"),
+        "run stdout must contain the block output. got: {stdout:?}"
+    );
+}
+
+/// Two runs back-to-back: the second run's at-prompt check must accept the
+/// fresh `A` the first run's command emitted (the headline `&&` chain).
+#[test]
+fn run_chained_back_to_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    seed_prompt_mark(&env, &sess);
+
+    let (status, stdout, stderr) = run_cli(
+        &env,
+        &[
+            "run",
+            "printf '\\033]133;C\\007'; echo RUN_'ONE'_OUT; printf '\\033]133;D;0\\007\\033]133;A\\007'",
+        ],
+    );
+    assert!(status.success(), "first run failed (status={status:?}): {stderr:?}");
+    assert!(stdout.contains("RUN_ONE_OUT"), "first run output missing. got: {stdout:?}");
+
+    let (status, stdout, stderr) = run_cli(
+        &env,
+        &[
+            "run",
+            "printf '\\033]133;C\\007'; echo RUN_'TWO'_OUT; printf '\\033]133;D;0\\007\\033]133;A\\007'",
+        ],
+    );
+    assert!(
+        status.success(),
+        "second (chained) run failed (status={status:?}). stderr: {stderr:?} pane: {}",
+        sess.snapshot_str()
+    );
+    assert!(stdout.contains("RUN_TWO_OUT"), "second run output missing. got: {stdout:?}");
+}
+
+/// `run --timeout 1` with a command that never emits a D mark → exit 124 with
+/// the timeout message on stderr (the command is not killed).
+#[test]
+fn run_timeout_exits_124() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    seed_prompt_mark(&env, &sess);
+
+    // `true` emits no OSC 133 marks (no real shell integration in the pane),
+    // so the wait can only end via the timeout.
+    let (status, stdout, stderr) = run_cli(&env, &["run", "--timeout", "1", "true"]);
+    assert_eq!(
+        status.code(),
+        Some(124),
+        "run --timeout must exit 124. stdout: {stdout:?} stderr: {stderr:?} pane: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        stderr.contains("timed out after 1s"),
+        "expected the timeout message on stderr, got: {stderr:?}"
+    );
+}
+
+/// Fresh pane with no OSC 133 marks at all → refused fast with the no-blocks
+/// message, exit 1.
+#[test]
+fn run_no_blocks_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // No seeding, the pane has never seen a PROMPT_START mark.
+    let (status, _stdout, stderr) = run_cli(&env, &["run", "echo hi"]);
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "run with no blocks must exit 1. stderr: {stderr:?} pane: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        stderr.contains("no command blocks"),
+        "expected the no-blocks message on stderr, got: {stderr:?}"
+    );
+}
+
+/// Busy pane (the newest A has a C after it but no D yet, so a command is
+/// mid-flight) → refused with the busy message, exit 1.
+#[test]
+fn run_busy_pane_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    seed_prompt_mark(&env, &sess);
+
+    // Emit a C mark after the seeded A (no D): the pane now looks mid-command.
+    let (status, _stdout, stderr) =
+        run_cli(&env, &["send", "--enter", "printf '\\033]133;C\\007MID'FLIGHT'\\n'"]);
+    assert!(status.success(), "busy-seed send failed: {stderr}");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut busy_set = false;
+    while Instant::now() < deadline {
+        let (_, stdout, _) = run_cli(&env, &["capture"]);
+        if stdout.contains("MIDFLIGHT") {
+            busy_set = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(busy_set, "MIDFLIGHT never appeared (C mark not set). pane: {}", sess.snapshot_str());
+
+    let (status, _stdout, stderr) = run_cli(&env, &["run", "echo hi"]);
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "run against a busy pane must exit 1. stderr: {stderr:?} pane: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        stderr.contains("a command is running"),
+        "expected the busy message on stderr, got: {stderr:?}"
+    );
+}
