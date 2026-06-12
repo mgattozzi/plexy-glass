@@ -34,7 +34,8 @@ is designed alongside Ghostty-style terminal integration.
 - A visual session picker (`Ctrl+a w`) and a choose-tree
   (session → window → pane drill-down, `Ctrl+a W`)
 - Pane mobility: break a pane to its own window, join it elsewhere, swap
-  panes, and a marked pane for cross-window moves
+  panes (including cross-window swap with the marked pane), and a marked pane
+  for cross-window moves; focus and zoom follow the slot, mark is preserved
 - Keyboard-protocol negotiation: Kitty keyboard protocol and modifyOtherKeys,
   per pane, with graceful fallback and clean teardown of the outer terminal
 - Colored underlines (SGR 58/59), advertised to applications

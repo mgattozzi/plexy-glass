@@ -1711,6 +1711,105 @@ fn cli_cmd_structural_and_errors() {
     );
 }
 
+/// Cross-window swap-with-marked: `Ctrl+a m` marks a pane in window 2; after
+/// switching back to window 1 and running `:swap-pane`, the two panes exchange
+/// slots, so window 1 holds the former window-2 pane and vice versa.
+///
+/// Marker scheme: `printf 'SWAP_''W1\n'` → `SWAP_W1` appears only when the
+/// shell *executes* the line, not from PTY echo; `exec tail -f /dev/null` keeps
+/// the pane alive so the marker stays visible on screen through the swap.
+#[test]
+fn cross_window_swap_pane_exchanges_panes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Window 1 (index 0, name "shell"): print a unique needle then keep alive.
+    sess.send_str("printf 'SWAP_''W1\\n'; exec tail -f /dev/null\n");
+    assert!(
+        sess.wait_for(b"SWAP_W1", Duration::from_secs(10)),
+        "SWAP_W1 never appeared in window 1. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // Create window 2 (index 1, status bar shows "shell1").
+    sess.send_prefix(b'c');
+    assert!(
+        sess.wait_for(b"shell1", Duration::from_secs(10)),
+        "window 2 never appeared in status bar. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // Window 2: print a unique needle then keep alive.
+    sess.send_str("printf 'SWAP_''W2\\n'; exec tail -f /dev/null\n");
+    assert!(
+        sess.wait_for(b"SWAP_W2", Duration::from_secs(10)),
+        "SWAP_W2 never appeared in window 2. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // Mark window 2's pane (Ctrl+a m).
+    sess.send_prefix(b'm');
+
+    // Switch back to window 1 (Ctrl+a p = prev_window).
+    sess.send_prefix(b'p');
+    // Wait for the status bar to reflect window 1 as active (its name "shell"
+    // re-appears as the highlighted entry). A brief liveness probe via capture
+    // would also work, but watching the status bar is simpler and avoids the
+    // need for a shell that responds in the `tail` pane.
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Headless swap-pane: the marked pane (window 2) swaps into window 1's slot.
+    let (status, _stdout, stderr) = run_cli(&env, &["cmd", "swap-pane"]);
+    assert!(status.success(), "cmd 'swap-pane' failed: {stderr}");
+
+    // After the swap, window 1's active pane is the former window-2 pane
+    // (which printed SWAP_W2).  Poll capture until the content is visible.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut w1_ok = false;
+    while Instant::now() < deadline {
+        let (st, stdout, _) = run_cli(&env, &["capture"]);
+        if st.success() && stdout.contains("SWAP_W2") {
+            w1_ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        w1_ok,
+        "window 1's active pane should contain SWAP_W2 after cross-window swap. capture: {}",
+        {
+            let (_, s, _) = run_cli(&env, &["capture"]);
+            s
+        }
+    );
+
+    // Switch the session's active window to window 2 (index 1) via headless cmd.
+    let (status, _stdout, stderr) = run_cli(&env, &["cmd", "win 2"]);
+    assert!(status.success(), "cmd 'win 2' failed: {stderr}");
+
+    // Window 2 now holds the former window-1 pane (which printed SWAP_W1).
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut w2_ok = false;
+    while Instant::now() < deadline {
+        let (st, stdout, _) = run_cli(&env, &["capture"]);
+        if st.success() && stdout.contains("SWAP_W1") {
+            w2_ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        w2_ok,
+        "window 2's active pane should contain SWAP_W1 after cross-window swap. capture: {}",
+        {
+            let (_, s, _) = run_cli(&env, &["capture"]);
+            s
+        }
+    );
+}
+
 /// With no daemon running, `plexy-glass capture` must exit with a non-zero
 /// status (the daemon socket doesn't exist; connect_only returns an error which
 /// main maps to exit 1).

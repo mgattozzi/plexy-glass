@@ -199,7 +199,10 @@ keyboard passthrough; interactive overlays (window/pane rename, help); a
 (`switch_session`); a `Ctrl+a w` **visual session picker**; a `Ctrl+a W`
 **choose-tree** (session→window→pane drill-down with switch/kill/rename across
 sessions); **pane mobility** — break (`Ctrl+a !`), a marked pane (`Ctrl+a m`),
-join (`:join-pane`), and swap (`Ctrl+a {`/`}`, `:swap-pane`); **paste buffers** —
+join (`:join-pane`), swap (`Ctrl+a {`/`}`, `:swap-pane`; `:swap-pane` with no
+argument also works cross-window: the marked pane's slot and the active pane's
+slot exchange occupants via `replace_leaf`/`swap_occupant`, focus and zoom
+follow the slot, mark is preserved); **paste buffers** —
 copy-mode yanks push a bounded named-buffer stack, `Ctrl+a ]` pastes the newest,
 `Ctrl+a =` opens a choose-buffer overlay; **popup panes** — `Ctrl+a P` /
 `:popup [cmd]` / `bind "…" "popup:lazygit"` opens a transient PTY-backed
@@ -291,8 +294,7 @@ implementation; user-facing docs (README / the configuration reference) are
 updated as part of each feature, per **User documentation**. Workflows
 (`Workflow` tool) drive the review fan-outs.
 
-Not yet built (future work): pipe-pane; cross-window **swap**-pane
-and the choose-tree filter/collapse + session rename (deferred in their specs);
+Not yet built (future work): pipe-pane; choose-tree filter/collapse + session rename (deferred in their specs);
 silence monitoring + bell/activity alert messages; set/save/load paste buffers;
 mark persistence across daemon restart; push notifications on run completion.
 Declarative-session v1 boundaries left for later: split ratios + active
@@ -322,4 +324,7 @@ deletion, `block_command_line` / `closing_exit` helpers, `--json` for
 "command_line"}`), scrolled prompt-click-to-jump (while scrolled back, plain
 left-press on a prompt row scrolls that command to viewport top), popup border
 exit-status coloring (left border of popup boxes takes the same per-block
-status as regular panes) — shipped 2026-06-12 spec/plan.)
+status as regular panes) — shipped 2026-06-12 spec/plan; cross-window
+swap-with-marked — `:swap-pane` with no argument works when the marked pane is
+in another window of the same session, via `replace_leaf`/`swap_occupant`,
+focus/zoom follow the slot, mark preserved — shipped 2026-06-12 spec/plan.)

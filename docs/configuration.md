@@ -405,7 +405,7 @@ themselves contain colons and spaces.
 | `break_pane` | Break the active pane out to its own window |
 | `join_pane` | Join the marked pane into the active window (side-by-side) |
 | `swap_pane_next` / `swap_pane_prev` | Swap the active pane with its layout neighbor |
-| `swap_marked_pane` | Swap the active pane with the marked pane |
+| `swap_marked_pane` | Swap the active pane with the marked pane (works across windows of the same session; focus and zoom follow the slot, mark is preserved) |
 
 **Popups**
 
@@ -564,7 +564,7 @@ cancels. Parse errors appear as a transient status-line message.
 | `mark` | nothing | Mark / unmark the active pane |
 | `break` | nothing | Break the active pane to its own window |
 | `join` (alias `join-pane`) | nothing \| `h` \| `v` | Join the marked pane here (default `v`, side-by-side) |
-| `swap` (alias `swap-pane`) | nothing \| `prev` \| `next` | Swap with the marked pane, or a neighbor |
+| `swap` (alias `swap-pane`) | nothing \| `prev` \| `next` | Swap with the marked pane (across windows of the same session), or with a layout neighbor |
 | `prev-prompt` | nothing | Scroll viewport back to the previous prompt |
 | `next-prompt` | nothing | Scroll viewport forward to the next prompt |
 | `copy-output` | nothing | Yank the last completed command block's output |
