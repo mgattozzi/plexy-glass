@@ -152,6 +152,53 @@ impl Connection {
             ClientMsg::ExecCommand { session, text, timeout_ms } => {
                 serve_exec(&mut reader, &mut writer, &registry, session, text, timeout_ms).await
             }
+            ClientMsg::CaptureLastBlock { session } => {
+                // Response-type asymmetry by design: success replies
+                // `BlockCapture`, every error (no session, no pane, no completed
+                // block) replies `CommandResult{ok:false}`, and the CLI client
+                // matches on either.
+                let reply = match resolve_session(&registry, session).await {
+                    Err(msg) => ServerMsg::CommandResult { ok: false, message: Some(msg) },
+                    Ok(sess) => {
+                        let parts = {
+                            let manager = sess.window_manager.lock().await;
+                            manager.input_target_pane().and_then(|p| {
+                                p.with_screen(|s| {
+                                    plexy_glass_mux::blocks::last_completed_prompt(s).map(
+                                        |prompt| {
+                                            // `block_output_range` only returns None when no
+                                            // `PROMPT_START` exists at or above the line, and
+                                            // `prompt` IS a `PROMPT_START` line, so the fallback is
+                                            // unreachable. Kept defensive per the no-unwrap rule.
+                                            let range =
+                                                plexy_glass_mux::block_output_range(s, prompt)
+                                                    .unwrap_or((prompt, prompt));
+                                            (
+                                                plexy_glass_mux::block_text(s, range),
+                                                plexy_glass_mux::blocks::closing_exit(s, prompt),
+                                                plexy_glass_mux::blocks::block_command_line(
+                                                    s, prompt,
+                                                ),
+                                            )
+                                        },
+                                    )
+                                })
+                            })
+                        };
+                        match parts {
+                            Some((text, exit, command_line)) => {
+                                ServerMsg::BlockCapture { text, exit, command_line }
+                            }
+                            None => ServerMsg::CommandResult {
+                                ok: false,
+                                message: Some(NO_BLOCKS_MSG.into()),
+                            },
+                        }
+                    }
+                };
+                send_msg(&mut writer, &reply).await?;
+                Ok(())
+            }
             other => {
                 send_msg(
                     &mut writer,
@@ -3439,6 +3486,150 @@ mod tests {
             msg.contains("no session"),
             "unexpected session-miss text: {msg}"
         );
+    }
+
+    // `CaptureLastBlock` returns the block's parts: output text, the closing
+    // D's exit code, and the command line between the B and C marks. Seeded
+    // over the wire through cat (the tty echo mangles ESC to ^[, so only
+    // cat's verbatim copy sets marks; asserts are contains-style).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_last_block_returns_structured_parts() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("lblk".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+
+        // A "$ " B "demo_cmd" newline C "OUT_J3" newline D;4 A, the common
+        // shell flow with a shared D+A row. Trailing \n so the canonical-mode
+        // line discipline delivers the final partial line to cat.
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::SendInput {
+                session: Some("lblk".into()),
+                bytes: bytes::Bytes::from_static(
+                    b"\x1b]133;A\x07$ \x1b]133;B\x07demo_cmd\r\n\x1b]133;C\x07OUT_J3\r\n\x1b]133;D;4\x07\x1b]133;A\x07\n",
+                ),
+            },
+        )
+        .await;
+        assert!(expect_command_result(reply).0, "seeding the block failed");
+
+        let pane = session
+            .window_manager
+            .lock()
+            .await
+            .input_target_pane()
+            .expect("session has a pane")
+            .clone();
+        wait_screen_state(&pane, "seeded block completed with exit 4", |s| {
+            plexy_glass_mux::blocks::last_completed_prompt(s)
+                .is_some_and(|p| plexy_glass_mux::blocks::closing_exit(s, p) == Some(4))
+        })
+        .await;
+
+        let reply =
+            one_shot(&registry, &ClientMsg::CaptureLastBlock { session: Some("lblk".into()) })
+                .await;
+        let (text, exit, command_line) = match reply {
+            ServerMsg::BlockCapture { text, exit, command_line } => (text, exit, command_line),
+            other => panic!("expected BlockCapture, got {other:?}"),
+        };
+        assert!(text.contains("OUT_J3"), "block output missing: {text:?}");
+        assert_eq!(exit, Some(4));
+        let cmd = command_line.expect("B and C marks present — command_line must be Some");
+        assert!(cmd.contains("demo_cmd"), "command line missing: {cmd:?}");
+    }
+
+    // Without a `133;B` the command line is unextractable: `BlockCapture`
+    // carries `command_line: None` while text/exit still work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_last_block_without_b_mark_has_no_command_line() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("noB".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::SendInput {
+                session: Some("noB".into()),
+                bytes: bytes::Bytes::from_static(
+                    b"\x1b]133;A\x07$ demo_cmd\r\n\x1b]133;C\x07OUT_J3\r\n\x1b]133;D;4\x07\x1b]133;A\x07\n",
+                ),
+            },
+        )
+        .await;
+        assert!(expect_command_result(reply).0, "seeding the block failed");
+
+        let pane = session
+            .window_manager
+            .lock()
+            .await
+            .input_target_pane()
+            .expect("session has a pane")
+            .clone();
+        wait_screen_state(&pane, "seeded no-B block completed with exit 4", |s| {
+            plexy_glass_mux::blocks::last_completed_prompt(s)
+                .is_some_and(|p| plexy_glass_mux::blocks::closing_exit(s, p) == Some(4))
+        })
+        .await;
+
+        let reply =
+            one_shot(&registry, &ClientMsg::CaptureLastBlock { session: Some("noB".into()) })
+                .await;
+        let (text, exit, command_line) = match reply {
+            ServerMsg::BlockCapture { text, exit, command_line } => (text, exit, command_line),
+            other => panic!("expected BlockCapture, got {other:?}"),
+        };
+        assert!(text.contains("OUT_J3"), "block output missing: {text:?}");
+        assert_eq!(exit, Some(4));
+        assert_eq!(command_line, None, "no 133;B — command_line must be None");
+    }
+
+    // `CaptureLastBlock` with no completed block returns `CommandResult{ok:false}`
+    // carrying the standard no-blocks message (same asymmetry as the siblings).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_last_block_no_blocks_returns_error() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        registry
+            .attach_or_create("noblk2".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::CaptureLastBlock { session: Some("noblk2".into()) },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok, "CaptureLastBlock with no blocks must return ok:false");
+        let msg = message.expect("no-blocks path must carry a message");
+        assert!(msg.contains("no command blocks"), "unexpected no-blocks text: {msg}");
+    }
+
+    // `CaptureLastBlock` for a non-existent session returns `CommandResult{ok:false}`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_last_block_unknown_session_returns_error() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::CaptureLastBlock { session: Some("nosuchsession".into()) },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok, "missing session must return ok:false");
+        let msg = message.expect("session-miss must carry a message");
+        assert!(msg.contains("no session"), "unexpected session-miss text: {msg}");
     }
 
     // ── ExecCommand (CLI `run`) ──────────────────────────────────────────────

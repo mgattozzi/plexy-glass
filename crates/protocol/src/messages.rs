@@ -62,7 +62,9 @@ pub enum ExitStatus {
 ///   `CommandResult`, `PaneCapture`
 /// - v7: `CaptureLastCommand`: block-scoped scripting read via OSC 133 marks
 /// - v8: `ExecCommand` / `ExecDone`: synchronous `run` over OSC 133 completion
-pub const PROTOCOL_VERSION: u16 = 8;
+/// - v9: `CaptureLastBlock` / `BlockCapture`: structured last-block capture
+///   (output text + exit code + command line)
+pub const PROTOCOL_VERSION: u16 = 9;
 
 /// Which keyboard protocol a client negotiated with its *outer* terminal. The
 /// daemon decodes that client's input bytes in this protocol.
@@ -140,6 +142,13 @@ pub enum ClientMsg {
     ///
     /// **Postcard-positional**: always appended at the end of the enum.
     ExecCommand { session: Option<String>, text: String, timeout_ms: Option<u64> },
+    /// Capture the last completed OSC 133 command block as structured parts
+    /// (CLI `capture --last-command --json`). Replies with `BlockCapture` on
+    /// success or `CommandResult { ok: false }` when no completed block
+    /// exists.
+    ///
+    /// **Postcard-positional**: always appended at the end of the enum.
+    CaptureLastBlock { session: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +175,13 @@ pub enum ServerMsg {
     ///
     /// **Postcard-positional**: always appended at the end of the enum.
     ExecDone { exit: Option<i32>, output: String, timed_out: bool },
+    /// `CaptureLastBlock` response: the block's output text (same region as
+    /// `CaptureLastCommand`), the closing `133;D` exit code (`None` when the
+    /// mark carried no payload), and the command line typed at the prompt
+    /// (`None` when the shell never emitted `133;B`/`133;C`).
+    ///
+    /// **Postcard-positional**: always appended at the end of the enum.
+    BlockCapture { text: String, exit: Option<i32>, command_line: Option<String> },
 }
 
 #[cfg(test)]
@@ -374,6 +390,52 @@ mod tests {
             let enc = postcard::to_allocvec(&reply).unwrap();
             assert_eq!(postcard::from_bytes::<ServerMsg>(&enc).unwrap(), reply);
         }
+    }
+
+    #[test]
+    fn capture_last_block_round_trips() {
+        // New pair in v9; appended at the end of their enums (postcard is positional).
+        let requests = [
+            ClientMsg::CaptureLastBlock { session: Some("work".into()) },
+            ClientMsg::CaptureLastBlock { session: None },
+        ];
+        for m in requests {
+            let enc = postcard::to_allocvec(&m).unwrap();
+            assert_eq!(postcard::from_bytes::<ClientMsg>(&enc).unwrap(), m);
+        }
+        // All field shapes: exit Some/None × command_line Some/None.
+        let replies = [
+            ServerMsg::BlockCapture {
+                text: "out1\nout2".into(),
+                exit: Some(0),
+                command_line: Some("cargo test".into()),
+            },
+            ServerMsg::BlockCapture {
+                text: "boom".into(),
+                exit: Some(127),
+                command_line: None,
+            },
+            ServerMsg::BlockCapture {
+                text: String::new(),
+                exit: None,
+                command_line: Some("true".into()),
+            },
+            ServerMsg::BlockCapture { text: String::new(), exit: None, command_line: None },
+        ];
+        for m in replies {
+            let enc = postcard::to_allocvec(&m).unwrap();
+            assert_eq!(postcard::from_bytes::<ServerMsg>(&enc).unwrap(), m);
+        }
+        // No-blocks refusal reuses `CommandResult` (same asymmetry as the siblings).
+        let refusal = ServerMsg::CommandResult {
+            ok: false,
+            message: Some(
+                "no command blocks — shell integration not active? see docs/command-blocks.md"
+                    .into(),
+            ),
+        };
+        let enc = postcard::to_allocvec(&refusal).unwrap();
+        assert_eq!(postcard::from_bytes::<ServerMsg>(&enc).unwrap(), refusal);
     }
 
     #[test]

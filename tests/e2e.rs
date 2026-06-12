@@ -2498,3 +2498,153 @@ fn run_busy_pane_refused() {
         "expected the busy message on stderr, got: {stderr:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// --json structured output (J3)
+// ---------------------------------------------------------------------------
+
+/// `capture --last-command --json` prints one JSON object with the block's
+/// output, exit code, and command line (extracted from the B/C marks).
+#[test]
+fn capture_last_command_json_returns_structured_object() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Full A / B / command / C / output / D;7 / A block. Quote-concatenation
+    // keeps the echoed *typed* line distinct from the executed printf output.
+    let (send_status, _, send_err) = run_cli(
+        &env,
+        &[
+            "send",
+            "--enter",
+            "printf '\\033]133;A\\007P$ \\033]133;B\\007demo_'cmd'_j3\\r\\n\\033]133;C\\007OUT_'J3'_LINE\\n\\033]133;D;7\\007\\033]133;A\\007PTWO\\n'",
+        ],
+    );
+    assert!(send_status.success(), "send failed: {send_err}");
+
+    // Wait until the executed output appears in plain capture (the emulator
+    // processed the OSC bytes), then poll the JSON capture until the seeded
+    // block (exit 7) is the last completed one.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut parsed: Option<serde_json::Value> = None;
+    while Instant::now() < deadline {
+        let (status, stdout, _) = run_cli(&env, &["capture", "--last-command", "--json"]);
+        if status.success()
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&stdout)
+            && v["exit_code"] == 7
+        {
+            parsed = Some(v);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let v = parsed.unwrap_or_else(|| {
+        panic!("capture --last-command --json never returned exit 7. pane: {}", sess.snapshot_str())
+    });
+    let output = v["output"].as_str().expect("output must be a string");
+    assert!(output.contains("OUT_J3_LINE"), "JSON output missing the block text: {v}");
+    assert_eq!(v["exit_code"], 7, "JSON exit_code must be the D payload: {v}");
+    let cmd = v["command_line"].as_str().expect("command_line must be a string here");
+    assert!(cmd.contains("demo_cmd_j3"), "JSON command_line missing the typed text: {v}");
+}
+
+/// `capture --json` without `--last-command` is a clap usage error (exit 2).
+#[test]
+fn capture_json_without_last_command_is_clap_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    // No session needed: clap rejects the flag combination before any I/O.
+    let (status, _stdout, stderr) = run_cli(&env, &["capture", "--json"]);
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "capture --json without --last-command must be a clap error. stderr: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("--last-command"),
+        "clap error must mention the missing --last-command flag: {stderr:?}"
+    );
+}
+
+/// `run --json`: happy path prints {"output", "exit_code": 0, "timed_out":
+/// false, "command_line": <sent text>} with exit 0; a D;5 command exits 5
+/// with JSON exit_code 5 (chained in one session, like run_chained).
+#[test]
+fn run_json_ok_and_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    seed_prompt_mark(&env, &sess);
+
+    let ok_cmd =
+        "printf '\\033]133;C\\007'; echo RUNJ_'OK'_OUT; printf '\\033]133;D;0\\007\\033]133;A\\007'";
+    let (status, stdout, stderr) = run_cli(&env, &["run", "--json", ok_cmd]);
+    assert!(
+        status.success(),
+        "run --json should exit 0 (status={status:?}). stdout: {stdout:?} stderr: {stderr:?} pane: {}",
+        sess.snapshot_str()
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout).expect("run --json stdout must be one JSON object");
+    assert!(
+        v["output"].as_str().expect("output is a string").contains("RUNJ_OK_OUT"),
+        "JSON output missing the needle: {v}"
+    );
+    assert_eq!(v["exit_code"], 0, "JSON exit_code must be 0: {v}");
+    assert_eq!(v["timed_out"], false, "JSON timed_out must be false: {v}");
+    assert_eq!(
+        v["command_line"].as_str(),
+        Some(ok_cmd),
+        "JSON command_line must echo the sent text: {v}"
+    );
+
+    let fail_cmd =
+        "printf '\\033]133;C\\007'; echo RUNJ_'FAIL'_OUT; printf '\\033]133;D;5\\007\\033]133;A\\007'";
+    let (status, stdout, stderr) = run_cli(&env, &["run", "--json", fail_cmd]);
+    assert_eq!(
+        status.code(),
+        Some(5),
+        "run --json must propagate exit 5. stdout: {stdout:?} stderr: {stderr:?} pane: {}",
+        sess.snapshot_str()
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout).expect("failed run --json stdout must be one JSON object");
+    assert_eq!(v["exit_code"], 5, "JSON exit_code must be 5: {v}");
+    assert_eq!(v["timed_out"], false, "JSON timed_out must be false: {v}");
+    assert!(
+        v["output"].as_str().expect("output is a string").contains("RUNJ_FAIL_OUT"),
+        "JSON output missing the needle: {v}"
+    );
+}
+
+/// `run --json --timeout 1` with a command that never emits D → exit 124 and
+/// the JSON carries `"timed_out": true` (the stderr note stays plain).
+#[test]
+fn run_json_timeout_exits_124_with_timed_out_true() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    seed_prompt_mark(&env, &sess);
+
+    // `true` emits no OSC 133 marks, so the wait can only end via the timeout.
+    let (status, stdout, stderr) = run_cli(&env, &["run", "--json", "--timeout", "1", "true"]);
+    assert_eq!(
+        status.code(),
+        Some(124),
+        "run --json --timeout must exit 124. stdout: {stdout:?} stderr: {stderr:?} pane: {}",
+        sess.snapshot_str()
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout).expect("timed-out run --json stdout must be one JSON object");
+    assert_eq!(v["timed_out"], true, "JSON timed_out must be true: {v}");
+    assert_eq!(v["exit_code"], serde_json::Value::Null, "no exit code on timeout: {v}");
+    assert_eq!(v["command_line"].as_str(), Some("true"), "command_line must echo: {v}");
+    assert!(
+        stderr.contains("timed out after 1s"),
+        "the plain timeout note must stay on stderr: {stderr:?}"
+    );
+}

@@ -23,6 +23,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 assert_cmd = "2.2"
 tempfile = "3.27"
 portable-pty = "0.9"
+serde_json = { workspace = true }
 
 [workspace.dependencies]
 tokio = { version = "1.52", features = [

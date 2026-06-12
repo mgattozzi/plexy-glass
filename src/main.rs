@@ -64,6 +64,10 @@ enum Subcommands {
         /// integration via OSC 133).
         #[arg(long = "last-command")]
         last_command: bool,
+        /// Print one JSON object {"output", "exit_code", "command_line"}
+        /// instead of plain text (only with --last-command).
+        #[arg(long = "json", requires = "last_command")]
+        json: bool,
     },
     /// Run a command in the focused pane and wait for it to finish (requires
     /// OSC 133 shell integration).
@@ -73,6 +77,10 @@ enum Subcommands {
         /// Give up after SECS seconds (exit 124; the command keeps running).
         #[arg(long = "timeout", value_name = "SECS")]
         timeout: Option<u64>,
+        /// Print one JSON object {"output", "exit_code", "timed_out",
+        /// "command_line"} instead of plain output (exit codes unchanged).
+        #[arg(long = "json")]
+        json: bool,
         /// Command text fragments, joined with single spaces.
         #[arg(required = true)]
         text: Vec<String>,
@@ -156,8 +164,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Subcommands::Capture { name, last_command } => {
-            match plexy_glass_client::client_capture(name, last_command).await {
+        Subcommands::Capture { name, last_command, json } => {
+            let result = if json {
+                plexy_glass_client::client_capture_block(name).await
+            } else {
+                plexy_glass_client::client_capture(name, last_command).await
+            };
+            match result {
                 Ok(true) => {}
                 Ok(false) => std::process::exit(1),
                 Err(e) => {
@@ -166,8 +179,8 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Subcommands::Run { name, timeout, text } => {
-            match plexy_glass_client::client_exec(name, text.join(" "), timeout).await {
+        Subcommands::Run { name, timeout, json, text } => {
+            match plexy_glass_client::client_exec(name, text.join(" "), timeout, json).await {
                 // 0 falls through to the normal `Ok(())` return; any other code
                 // (command exit passthrough, 124 timeout, 1 refusal) exits now.
                 Ok(0) => {}

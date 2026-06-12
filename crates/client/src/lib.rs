@@ -431,6 +431,59 @@ pub async fn client_capture(name: Option<String>, last_command: bool) -> Result<
     }
 }
 
+/// Capture the last completed OSC 133 command block as structured JSON
+/// (`capture --last-command --json`).
+///
+/// Prints exactly one compact JSON object + newline to stdout:
+/// `{"output": <block output text>, "exit_code": <number|null>,
+/// "command_line": <string|null>}`. Popup-aware by the same
+/// input-target-pane path as plain capture.
+///
+/// Returns `Ok(true)` on success, `Ok(false)` when the daemon reports an error
+/// (plain message on stderr, since errors are not results they are never JSON).
+/// No daemon → `Err`.
+pub async fn client_capture_block(name: Option<String>) -> Result<bool, ClientError> {
+    let socket = default_socket_path()?;
+    let stream = connect_only(&socket).await?;
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    client_handshake(&mut reader, &mut writer).await?;
+
+    let msg = ClientMsg::CaptureLastBlock { session: name };
+    let payload = postcard::to_allocvec(&msg)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
+    Codec::write_frame(&mut writer, &payload).await?;
+
+    let frame = Codec::read_frame(&mut reader)
+        .await?
+        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
+    let reply: ServerMsg = postcard::from_bytes(&frame)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    match reply {
+        ServerMsg::BlockCapture { text, exit, command_line } => {
+            // The user-facing JSON key is `output` (unified with `run --json`);
+            // the wire field name `text` is internal.
+            let obj = serde_json::json!({
+                "output": text,
+                "exit_code": exit,
+                "command_line": command_line,
+            });
+            println!("{obj}");
+            Ok(true)
+        }
+        ServerMsg::CommandResult { ok: false, message } => {
+            eprintln!(
+                "plexy-glass capture: {}",
+                message.as_deref().unwrap_or("capture failed")
+            );
+            Ok(false)
+        }
+        ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
+        other => Err(ClientError::Io(std::io::Error::other(format!(
+            "unexpected reply from daemon: {other:?}"
+        )))),
+    }
+}
+
 /// Run a command in a session's input target pane and wait for its OSC 133
 /// completion mark (CLI `run`).
 ///
@@ -443,17 +496,25 @@ pub async fn client_capture(name: Option<String>, last_command: bool) -> Result<
 /// - 1 on any daemon refusal (`CommandResult { ok: false }`, message on
 ///   stderr: no session, no blocks, busy pane, alt screen, child exit, …).
 ///
+/// With `json` set, an `ExecDone` prints one compact JSON object + newline to
+/// stdout, `{"output": …, "exit_code": <number|null>, "timed_out": <bool>,
+/// "command_line": <the text sent>}`, instead of the plain output. The exit
+/// codes and stderr notes are EXACTLY as above (the JSON carries data, not
+/// diagnostics); refusals stay plain stderr + 1 (errors are not results).
+///
 /// No daemon → `Err` (run never auto-spawns, like the other scripting verbs).
 pub async fn client_exec(
     name: Option<String>,
     text: String,
     timeout_secs: Option<u64>,
+    json: bool,
 ) -> Result<i32, ClientError> {
     let socket = default_socket_path()?;
     let stream = connect_only(&socket).await?;
     let (mut reader, mut writer) = tokio::io::split(stream);
     client_handshake(&mut reader, &mut writer).await?;
 
+    let command_line = text.clone();
     let msg = ClientMsg::ExecCommand {
         session: name,
         text,
@@ -469,15 +530,24 @@ pub async fn client_exec(
     let reply: ServerMsg = postcard::from_bytes(&frame)
         .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
     match reply {
-        ServerMsg::ExecDone { timed_out: true, .. } => {
-            // The daemon only times out when the client supplied a timeout,
-            // so `timeout_secs` is Some here; 0 is an unreachable fallback.
-            let secs = timeout_secs.unwrap_or(0);
-            eprintln!("run: timed out after {secs}s — the command may still be running");
-            Ok(124)
-        }
-        ServerMsg::ExecDone { exit, output, .. } => {
-            if !output.is_empty() {
+        ServerMsg::ExecDone { exit, output, timed_out } => {
+            if json {
+                let obj = serde_json::json!({
+                    "output": output,
+                    "exit_code": exit,
+                    "timed_out": timed_out,
+                    "command_line": command_line,
+                });
+                println!("{obj}");
+            }
+            if timed_out {
+                // The daemon only times out when the client supplied a timeout,
+                // so `timeout_secs` is Some here; 0 is an unreachable fallback.
+                let secs = timeout_secs.unwrap_or(0);
+                eprintln!("run: timed out after {secs}s — the command may still be running");
+                return Ok(124);
+            }
+            if !json && !output.is_empty() {
                 println!("{output}");
             }
             match exit {
