@@ -263,6 +263,36 @@ impl LayoutTree {
         found_a && found_b
     }
 
+    /// Replace the occupant of leaf `old` with `new`. One-way and
+    /// shape-preserving: the tree structure, every other leaf, and `old`'s
+    /// rect are untouched; only the leaf's pane id changes. Returns `false`
+    /// (tree unchanged) when `old` is not a leaf. NOT the atomic two-way
+    /// `swap_panes`: a cross-window swap does one `replace_leaf` per window.
+    /// The caller is responsible for `new` not already being a leaf (pane
+    /// ids are unique per window).
+    pub fn replace_leaf(&mut self, old: PaneId, new: PaneId) -> bool {
+        fn walk(node: &mut LayoutNode, old: PaneId, new: PaneId) -> bool {
+            match node {
+                LayoutNode::Leaf(p) => {
+                    if *p == old {
+                        *p = new;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                // `||` short-circuits, so the walk stops at the first match.
+                LayoutNode::Split { first, second, .. } => {
+                    walk(first, old, new) || walk(second, old, new)
+                }
+            }
+        }
+        match self.root.as_mut() {
+            Some(root) => walk(root, old, new),
+            None => false,
+        }
+    }
+
     /// DFS-order list of pane IDs. Used by callers building on-disk pane
     /// indices (persistence), and the order is stable for a given tree.
     pub fn dfs_leaves(&self) -> Vec<PaneId> {
@@ -932,6 +962,50 @@ mod tests {
         let before = t.panes();
         assert!(!t.swap_panes(PaneId(0), PaneId(99)));
         assert_eq!(t.panes(), before, "tree unchanged on a missing id");
+    }
+
+    #[test]
+    fn replace_leaf_swaps_occupant_at_same_rect() {
+        let mut t = build_two_pane_vertical(); // PaneId(0) left, PaneId(1) right
+        let vp = Rect::new(0, 0, 24, 21);
+        let r0 = t.rect_of(PaneId(0), vp).unwrap();
+        let r1 = t.rect_of(PaneId(1), vp).unwrap();
+        assert!(t.replace_leaf(PaneId(0), PaneId(5)));
+        assert_eq!(t.rect_of(PaneId(5), vp), Some(r0), "new id occupies the old slot");
+        assert_eq!(t.rect_of(PaneId(0), vp), None, "old id is gone");
+        assert_eq!(t.rect_of(PaneId(1), vp), Some(r1), "other leaf untouched");
+        let mut panes = t.panes();
+        panes.sort();
+        assert_eq!(panes, vec![PaneId(1), PaneId(5)]);
+    }
+
+    #[test]
+    fn replace_leaf_absent_returns_false_and_leaves_tree_unchanged() {
+        let mut t = build_two_pane_vertical();
+        let vp = Rect::new(0, 0, 24, 21);
+        let r0 = t.rect_of(PaneId(0), vp).unwrap();
+        let r1 = t.rect_of(PaneId(1), vp).unwrap();
+        assert!(!t.replace_leaf(PaneId(99), PaneId(5)));
+        assert_eq!(t.panes(), vec![PaneId(0), PaneId(1)]);
+        assert_eq!(t.rect_of(PaneId(0), vp), Some(r0));
+        assert_eq!(t.rect_of(PaneId(1), vp), Some(r1));
+    }
+
+    #[test]
+    fn replace_leaf_in_nested_tree_leaves_others_put() {
+        // L | (TR / BR): vertical split, then horizontal split on the right.
+        let mut t = LayoutTree::single(PaneId(0));
+        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After).unwrap();
+        t.split(PaneId(1), SplitDir::Horizontal, PaneId(2), SplitPosition::After).unwrap();
+        let vp = Rect::new(0, 0, 24, 80);
+        let r0 = t.rect_of(PaneId(0), vp).unwrap();
+        let r1 = t.rect_of(PaneId(1), vp).unwrap();
+        let r2 = t.rect_of(PaneId(2), vp).unwrap();
+        assert!(t.replace_leaf(PaneId(1), PaneId(7)));
+        assert_eq!(t.rect_of(PaneId(7), vp), Some(r1), "replacement keeps the slot's rect");
+        assert_eq!(t.rect_of(PaneId(1), vp), None);
+        assert_eq!(t.rect_of(PaneId(0), vp), Some(r0));
+        assert_eq!(t.rect_of(PaneId(2), vp), Some(r2));
     }
 
     #[test]

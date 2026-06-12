@@ -201,10 +201,39 @@ impl WindowManager {
                             let w = self.active_window_mut();
                             w.layout_mut().swap_panes(a, marked);
                             w.resize(viewport)?;
+                        } else if let Some(other_idx) =
+                            self.windows.iter().position(|w| w.pane(marked).is_some())
+                        {
+                            // Cross-window: exchange the slot occupants. Both
+                            // layout shapes are preserved; focus/zoom follow
+                            // the slot (the window helpers rewrite them) and
+                            // the mark stays on M. Choreography: a map-only
+                            // take of A breaks the ownership cycle, then one
+                            // slot-replace per window, so no `Pane` is dropped
+                            // on any path.
+                            let act_idx = self.active;
+                            // invariant: the active pane is always in its window.
+                            let pane_a = self.windows[act_idx]
+                                .take_pane(a)
+                                .expect("active pane present");
+                            match self.windows[other_idx].swap_occupant(marked, pane_a) {
+                                Ok(pane_m) => {
+                                    self.windows[act_idx].install_in_slot(a, pane_m);
+                                    // The slots' rects differ, so size both
+                                    // windows' PTYs to their new rects now.
+                                    self.windows[act_idx].resize(viewport)?;
+                                    self.windows[other_idx].resize(viewport)?;
+                                }
+                                Err(pane_a) => {
+                                    // Unreachable single-threaded: the scan
+                                    // above just found `marked` in that
+                                    // window. Restore A's slot rather than
+                                    // drop the pane.
+                                    self.windows[act_idx].install_in_slot(a, pane_a);
+                                }
+                            }
                         } else {
-                            self.set_status_message(
-                                "marked pane is in another window — use join".into(),
-                            );
+                            self.marked_pane = None; // marked pane vanished
                         }
                     }
                 } else {

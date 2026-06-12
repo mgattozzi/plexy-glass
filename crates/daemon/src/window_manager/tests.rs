@@ -1300,7 +1300,7 @@ async fn join_pane_source_survives_when_multipane() {
 }
 
 #[tokio::test]
-async fn swap_marked_pane_same_window_then_cross_window_status() {
+async fn swap_marked_pane_same_window_then_cross_window_swaps() {
     let mut m = mk_mgr();
     m.handle_command(Command::SplitV).unwrap(); // W0 panes 0,1; active 1
     let vp = m.viewport();
@@ -1312,13 +1312,151 @@ async fn swap_marked_pane_same_window_then_cross_window_status() {
     assert_ne!(before, after, "same-window swap exchanged slots");
     assert_eq!(m.marked_pane(), Some(PaneId(1)), "mark preserved across swap");
 
-    // Cross-window: marked stays in W0; move active to a new window → status.
-    m.handle_command(Command::NewWindow).unwrap();
+    // Cross-window: marked stays in W0; move active to a new window → the
+    // panes exchange slots across windows (the old "use join" refusal is gone).
+    m.handle_command(Command::NewWindow).unwrap(); // W1: pane 2, active
+    m.handle_command(Command::SwapMarkedPane).unwrap();
+    assert_eq!(m.take_active_message(), None);
+    assert!(m.windows()[1].pane(PaneId(1)).is_some(), "M moved into the active window");
+    assert!(m.windows()[0].pane(PaneId(2)).is_some(), "A moved into the other window");
+    assert_eq!(m.marked_pane(), Some(PaneId(1)), "mark preserved across the cross-window swap");
+}
+
+#[tokio::test]
+async fn swap_marked_cross_window_exchanges_slots() {
+    let mut m = mk_mgr(); // W0: pane 0
+    m.handle_command(Command::SplitV).unwrap(); // W0 {0,1}, active 1
+    m.handle_command(Command::NewWindow).unwrap(); // W1: pane 2, active
+    m.handle_command(Command::SplitV).unwrap(); // W1 {2,3}, active 3
+    m.handle_command(Command::MarkPane).unwrap(); // marked = 3
+    m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0, pane 1
+    let vp = m.viewport();
+    let slot_a = m.windows()[0].layout().rect_of(PaneId(1), vp).unwrap();
+    let slot_m = m.windows()[1].layout().rect_of(PaneId(3), vp).unwrap();
+    m.handle_command(Command::SwapMarkedPane).unwrap();
+    // Occupants exchanged: W0 now holds {0,3}, W1 holds {2,1}.
+    assert!(m.windows()[0].pane(PaneId(3)).is_some());
+    assert!(m.windows()[0].pane(PaneId(1)).is_none());
+    assert!(m.windows()[1].pane(PaneId(1)).is_some());
+    assert!(m.windows()[1].pane(PaneId(3)).is_none());
+    let w0_panes = m.windows()[0].layout().panes();
+    assert!(w0_panes.contains(&PaneId(0)) && w0_panes.contains(&PaneId(3)));
+    let w1_panes = m.windows()[1].layout().panes();
+    assert!(w1_panes.contains(&PaneId(2)) && w1_panes.contains(&PaneId(1)));
+    // Each pane sits in the other's old slot (shape preserved).
+    assert_eq!(m.windows()[0].layout().rect_of(PaneId(3), vp), Some(slot_a));
+    assert_eq!(m.windows()[1].layout().rect_of(PaneId(1), vp), Some(slot_m));
+    // The mark is preserved and points at M, now in the active window.
+    assert_eq!(m.marked_pane(), Some(PaneId(3)));
+    assert!(m.active_window().pane(PaneId(3)).is_some());
+    assert_eq!(m.take_active_message(), None, "no refusal message");
+}
+
+#[tokio::test]
+async fn swap_marked_cross_window_focus_follows_slot() {
+    let mut m = mk_mgr(); // W0: pane 0
+    m.handle_command(Command::NewWindow).unwrap(); // W1: pane 1, active
+    m.handle_command(Command::MarkPane).unwrap(); // marked = 1 (W1's active)
+    m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0, pane 0
+    m.handle_command(Command::SwapMarkedPane).unwrap();
+    // W0's active slot now holds M; W1's active slot (was M) now holds A.
+    assert_eq!(m.windows()[0].active(), PaneId(1), "active window focuses M");
+    assert_eq!(m.windows()[1].active(), PaneId(0), "other window's focus follows the slot");
+}
+
+#[tokio::test]
+async fn swap_marked_cross_window_zoom_follows_slot_in_other_window() {
+    let mut m = mk_mgr(); // W0: pane 0
+    m.handle_command(Command::NewWindow).unwrap(); // W1: pane 1, active
+    m.handle_command(Command::MarkPane).unwrap(); // marked = 1
+    m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0
+    // Zoom the OTHER window on M directly (chords can't: leaving a window
+    // clears its zoom). The active window's zoom is pre-cleared by
+    // `command_clears_zoom`, so only the other window's remap is reachable.
+    m.windows[1].zoomed = Some(PaneId(1));
     m.handle_command(Command::SwapMarkedPane).unwrap();
     assert_eq!(
-        m.take_active_message(),
-        Some("marked pane is in another window — use join")
+        m.windows()[1].zoomed,
+        Some(PaneId(0)),
+        "the zoomed SLOT keeps showing its occupant"
     );
+    assert_eq!(m.windows()[0].zoomed, None, "active window zoom stays cleared");
+}
+
+#[tokio::test]
+async fn swap_marked_cross_window_then_close_falls_back_sanely() {
+    let mut m = mk_mgr(); // W0: pane 0
+    m.handle_command(Command::SplitV).unwrap(); // W0 {0,1}, active 1
+    m.handle_command(Command::NewWindow).unwrap(); // W1: pane 2, active
+    m.handle_command(Command::MarkPane).unwrap(); // marked = 2
+    m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0, pane 1
+    m.handle_command(Command::SwapMarkedPane).unwrap(); // W0 {0,2}, active 2
+    assert_eq!(m.active_window().active(), PaneId(2));
+    // Close the new active: focus must fall back to a live pane (the
+    // rewritten history must not resurrect the departed pane 1).
+    m.handle_command(Command::KillPane).unwrap();
+    let active = m.active_window().active();
+    assert!(
+        m.active_window().layout().panes().contains(&active),
+        "fallback focus {active:?} must be a live pane"
+    );
+    assert_eq!(active, PaneId(0));
+    assert_eq!(m.marked_pane(), None, "killing the marked pane clears the mark");
+}
+
+#[tokio::test]
+async fn swap_marked_cross_window_resizes_both_windows() {
+    let mut m = mk_mgr(); // W0: pane 0 (full viewport)
+    m.handle_command(Command::NewWindow).unwrap(); // W1: pane 1
+    m.handle_command(Command::SplitV).unwrap(); // W1 {1,2}, active 2 (half width)
+    m.handle_command(Command::MarkPane).unwrap(); // marked = 2
+    m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0, pane 0
+    let vp = m.viewport();
+    m.handle_command(Command::SwapMarkedPane).unwrap();
+    // M (pane 2) now fills W0's full-viewport slot; A (pane 0) sits in W1's
+    // half-width slot. Both PTYs must match their new rects immediately.
+    let r2 = m.windows()[0].layout().rect_of(PaneId(2), vp).unwrap();
+    let c2 = m.windows()[0].pane(PaneId(2)).unwrap().with_screen(|s| s.active.num_cols());
+    assert_eq!(c2, r2.cols, "M resized to the full-viewport slot");
+    assert_eq!(c2, vp.cols);
+    let r0 = m.windows()[1].layout().rect_of(PaneId(0), vp).unwrap();
+    let c0 = m.windows()[1].pane(PaneId(0)).unwrap().with_screen(|s| s.active.num_cols());
+    assert_eq!(c0, r0.cols, "A resized to the half-width slot");
+    assert!(c0 < vp.cols);
+}
+
+#[tokio::test]
+async fn swap_marked_no_mark_is_status_noop() {
+    let mut m = mk_mgr();
+    m.handle_command(Command::SplitV).unwrap();
+    m.handle_command(Command::SwapMarkedPane).unwrap();
+    assert_eq!(m.take_active_message(), Some("no marked pane"));
+}
+
+#[tokio::test]
+async fn swap_marked_equals_active_is_noop() {
+    let mut m = mk_mgr();
+    m.handle_command(Command::SplitV).unwrap(); // panes 0,1; active 1
+    m.handle_command(Command::MarkPane).unwrap(); // marked = active = 1
+    let vp = m.viewport();
+    let before = m.active_window().layout().rect_of(PaneId(1), vp);
+    m.handle_command(Command::SwapMarkedPane).unwrap();
+    assert_eq!(m.active_window().layout().rect_of(PaneId(1), vp), before);
+    assert_eq!(m.marked_pane(), Some(PaneId(1)), "mark untouched");
+    assert_eq!(m.take_active_message(), None);
+}
+
+#[tokio::test]
+async fn swap_marked_vanished_mark_is_cleared_silently() {
+    let mut m = mk_mgr();
+    m.handle_command(Command::SplitV).unwrap(); // panes 0,1; active 1
+    // Force a dangling mark (the kill paths normally clear it first).
+    m.marked_pane = Some(PaneId(77));
+    let before = m.active_window().layout().panes();
+    m.handle_command(Command::SwapMarkedPane).unwrap();
+    assert_eq!(m.marked_pane(), None, "vanished mark cleared");
+    assert_eq!(m.active_window().layout().panes(), before, "no structural change");
+    assert_eq!(m.take_active_message(), None, "cleared silently");
 }
 
 #[tokio::test]
@@ -1439,10 +1577,12 @@ async fn mark_survives_break_then_swap_is_cross_window() {
     assert_eq!(m.marked_pane(), Some(PaneId(1)), "mark survives a break (pane still lives)");
     m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0 (pane 0)
     m.handle_command(Command::SwapMarkedPane).unwrap();
-    assert_eq!(
-        m.take_active_message(),
-        Some("marked pane is in another window — use join")
-    );
+    // Cross-window swap: the broken-out pane comes back to W0's slot and
+    // pane 0 takes its place in the new window.
+    assert_eq!(m.take_active_message(), None);
+    assert_eq!(m.windows()[0].layout().panes(), vec![PaneId(1)]);
+    assert_eq!(m.windows()[1].layout().panes(), vec![PaneId(0)]);
+    assert_eq!(m.marked_pane(), Some(PaneId(1)));
 }
 
 #[tokio::test]

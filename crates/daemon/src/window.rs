@@ -269,6 +269,58 @@ impl Window {
         Some(pane)
     }
 
+    /// Slot-preserving occupant swap: the layout leaf that held `old` now
+    /// holds `new_pane`, and every piece of bookkeeping that pointed at `old`
+    /// (`active`, every `focus_history` entry, the zoom overlay) is rewritten
+    /// to the new pane's id, so focus and zoom follow the SLOT. Contrast
+    /// `detach_pane`, which removes the slot (sibling promotion) and moves
+    /// focus away; here the tree shape never changes. Returns the displaced
+    /// `Pane` (live, not killed). When `old` is not in this window, returns
+    /// `Err(new_pane)` with the window untouched, so no `Pane` is ever dropped
+    /// on any path: each one is either returned or inserted into the pane map.
+    /// Does not resize (the caller resizes, as with `detach_pane`).
+    pub fn swap_occupant(&mut self, old: PaneId, new_pane: Pane) -> Result<Pane, Pane> {
+        match self.take_pane(old) {
+            Some(old_pane) => {
+                self.install_in_slot(old, new_pane);
+                Ok(old_pane)
+            }
+            None => Err(new_pane),
+        }
+    }
+
+    /// Map-only removal of `id`'s `Pane`: the layout leaf, `active`, the
+    /// focus history, and zoom still reference `id` afterwards. This is the
+    /// first half of the cross-window swap choreography, so the caller MUST
+    /// follow with `install_in_slot(id, …)` (directly or via `swap_occupant`)
+    /// to fill the hole before the window is observed again.
+    pub(crate) fn take_pane(&mut self, id: PaneId) -> Option<Pane> {
+        self.panes.remove(&id)
+    }
+
+    /// Second half of the slot swap: install `pane` in the slot that holds
+    /// `old_slot` (whose map entry was already removed by `take_pane` /
+    /// `swap_occupant`): replace the layout leaf and rewrite `active`,
+    /// every `focus_history` entry, and `zoomed` from `old_slot` to the new
+    /// pane's id. Slot-preserving: the tree shape never changes.
+    pub(crate) fn install_in_slot(&mut self, old_slot: PaneId, pane: Pane) {
+        let new_id = pane.id();
+        let replaced = self.layout.replace_leaf(old_slot, new_id);
+        debug_assert!(replaced, "install_in_slot: no leaf for {old_slot:?}");
+        self.panes.insert(new_id, pane);
+        if self.active == old_slot {
+            self.active = new_id;
+        }
+        for p in self.focus_history.iter_mut() {
+            if *p == old_slot {
+                *p = new_id;
+            }
+        }
+        if self.zoomed == Some(old_slot) {
+            self.zoomed = Some(new_id);
+        }
+    }
+
     /// Split `target` in `dir` and place an EXISTING `pane` (keeping its id) in
     /// the new slot; insert it, make it active, and resize. Errors if `target`
     /// is not in the layout.
@@ -672,6 +724,89 @@ mod tests {
         assert_eq!(w.name, "broken");
         assert_eq!(w.active(), PaneId(1));
         assert_eq!(w.layout().panes(), vec![PaneId(1)]);
+    }
+
+    /// A live standalone `Pane` (detached from a throwaway window) for
+    /// `swap_occupant` tests.
+    fn donor_pane(id: PaneId) -> Pane {
+        let viewport = Rect::new(0, 0, 24, 80);
+        let mut w = Window::spawn_first(
+            WindowId(99),
+            "donor".into(),
+            id,
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+        )
+        .unwrap();
+        w.detach_pane(id).expect("donor pane present")
+    }
+
+    #[tokio::test]
+    async fn swap_occupant_replaces_slot_and_returns_old_pane() {
+        let mut w = two_pane_window(); // panes {0,1}, active 1
+        let viewport = Rect::new(0, 0, 24, 80);
+        let r0 = w.layout().rect_of(PaneId(0), viewport).unwrap();
+        let Ok(old) = w.swap_occupant(PaneId(0), donor_pane(PaneId(9))) else {
+            panic!("pane 0 present")
+        };
+        assert_eq!(old.id(), PaneId(0), "displaced pane returned live");
+        assert!(w.pane(PaneId(9)).is_some() && w.pane(PaneId(0)).is_none());
+        assert_eq!(
+            w.layout().rect_of(PaneId(9), viewport),
+            Some(r0),
+            "new pane occupies the old slot's rect"
+        );
+        assert_eq!(w.active(), PaneId(1), "active untouched when swapping a non-active slot");
+        old.kill_child();
+    }
+
+    #[tokio::test]
+    async fn swap_occupant_rewrites_active_and_zoom() {
+        let mut w = two_pane_window(); // active 1
+        assert!(w.toggle_zoom()); // zoomed = Some(1)
+        let Ok(old) = w.swap_occupant(PaneId(1), donor_pane(PaneId(9))) else {
+            panic!("pane 1 present")
+        };
+        assert_eq!(old.id(), PaneId(1));
+        assert_eq!(w.active(), PaneId(9), "focus follows the slot");
+        assert_eq!(w.zoomed, Some(PaneId(9)), "zoom follows the slot");
+        old.kill_child();
+    }
+
+    #[tokio::test]
+    async fn swap_occupant_rewrites_focus_history_observable_via_close() {
+        // Build h = [0, 1, 2, 0] with active 2: the NEWEST history entry is
+        // pane 0, the slot being swapped. After the swap (0 → 9) the close of
+        // the active pane must fall back to 9; without the rewrite the dead
+        // entry 0 would be filtered and focus would fall to 1 instead.
+        let viewport = Rect::new(0, 0, 24, 80);
+        let mut w = two_pane_window(); // h=[0], active 1
+        w.split(SplitDir::Vertical, PaneId(2), shell_spec(), viewport, notify(), None, cfg())
+            .unwrap(); // h=[0,1], active 2
+        w.focus(PaneId(0)); // h=[0,1,2], active 0
+        w.focus(PaneId(2)); // h=[0,1,2,0], active 2
+        let Ok(old) = w.swap_occupant(PaneId(0), donor_pane(PaneId(9))) else {
+            panic!("pane 0 present")
+        };
+        w.close_pane(PaneId(2)).unwrap();
+        assert_eq!(w.active(), PaneId(9), "fallback focus uses the rewritten history entry");
+        old.kill_child();
+    }
+
+    #[tokio::test]
+    async fn swap_occupant_absent_old_returns_new_pane_untouched() {
+        let mut w = two_pane_window();
+        let Err(back) = w.swap_occupant(PaneId(42), donor_pane(PaneId(9))) else {
+            panic!("absent old pane → Err")
+        };
+        assert_eq!(back.id(), PaneId(9), "new pane handed back, not dropped");
+        assert!(w.pane(PaneId(9)).is_none(), "window untouched");
+        assert_eq!(w.layout().panes(), vec![PaneId(0), PaneId(1)]);
+        assert_eq!(w.active(), PaneId(1));
+        back.kill_child();
     }
 
     #[tokio::test]
