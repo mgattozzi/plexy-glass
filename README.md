@@ -38,6 +38,10 @@ is designed alongside Ghostty-style terminal integration.
 - Keyboard-protocol negotiation: Kitty keyboard protocol and modifyOtherKeys,
   per pane, with graceful fallback and clean teardown of the outer terminal
 - Colored underlines (SGR 58/59), advertised to applications
+- Command-block awareness (OSC 133): navigate scrollback by prompt with
+  `Ctrl+a <` / `>`, jump prompts in copy mode with `[` / `]`, select a
+  command's output with `o` then `y`, yank it with `:copy-output`, or capture
+  it from a script with `plexy-glass capture --last-command`
 
 ## Quick start
 
@@ -149,6 +153,17 @@ rebindable via the `keymap` block in `config.kdl` (see the
 | `Ctrl+a P` | Popup (scratch shell) |
 | `Ctrl+a q` | Close popup |
 
+### Command blocks
+
+| Keys | Action |
+|---|---|
+| `Ctrl+a <` | Previous prompt (scroll back one command) |
+| `Ctrl+a >` | Next prompt (scroll forward one command) |
+
+These work outside copy mode. Inside copy mode: `[` / `]` jump to the
+previous / next prompt; `o` selects the current block's output region (then
+`y` to yank). See [docs/command-blocks.md](docs/command-blocks.md).
+
 ### Modes and buffers
 
 | Keys | Action |
@@ -167,6 +182,12 @@ the color palette, the status bar and its widgets, the keymap, and declarative
 session templates. The config reloads live (`Ctrl+a R` or `plexy-glass
 reload`) so you don't have to restart the daemon to see a change. See
 [docs/configuration.md](docs/configuration.md) for the full reference.
+
+Other topic docs:
+- [docs/scripting.md](docs/scripting.md) covers the `cmd`, `send`, and
+  `capture` CLI verbs
+- [docs/command-blocks.md](docs/command-blocks.md) covers OSC 133
+  command-block navigation and capture
 
 ## Status
 

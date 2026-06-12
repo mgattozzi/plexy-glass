@@ -415,6 +415,14 @@ themselves contain colons and spaces.
 | `popup:<command line>` | Open a popup running that command (e.g. `popup:lazygit`) |
 | `close_popup` | Close the popup |
 
+**Command blocks**
+
+| Command | Action |
+|---|---|
+| `prev_prompt` | Scroll the viewport back to the previous prompt (default `prefix <`) |
+| `next_prompt` | Scroll the viewport forward to the next prompt (default `prefix >`) |
+| `copy_output` | Yank the last completed block's output to clipboard + paste buffer (no default chord) |
+
 **Copy and paste**
 
 | Command | Action |
@@ -521,6 +529,9 @@ cancels. Parse errors appear as a transient status-line message.
 | `break` | nothing | Break the active pane to its own window |
 | `join` (alias `join-pane`) | nothing \| `h` \| `v` | Join the marked pane here (default `v`, side-by-side) |
 | `swap` (alias `swap-pane`) | nothing \| `prev` \| `next` | Swap with the marked pane, or a neighbor |
+| `prev-prompt` | nothing | Scroll viewport back to the previous prompt |
+| `next-prompt` | nothing | Scroll viewport forward to the next prompt |
+| `copy-output` | nothing | Yank the last completed command block's output |
 | `copy` | nothing | Enter copy mode |
 | `paste` | nothing | Paste the newest buffer |
 | `buffers` | nothing | Choose-buffer overlay |
