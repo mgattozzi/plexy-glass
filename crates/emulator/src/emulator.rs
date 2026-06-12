@@ -46,6 +46,10 @@ impl Emulator {
                 cols,
             );
         }
+        // Reflow remapped every row; rather than recompute the
+        // click-to-position list, drop it (the shell re-emits 133;B on its
+        // post-SIGWINCH prompt redraw).
+        self.screen.prompt_marks.clear();
         // Also resize tab stops.
         self.screen.tabs.resize(cols);
         // Reset scroll region to full screen.
@@ -112,6 +116,18 @@ mod tests {
         e.resize(4, 16);
         assert_eq!(e.screen().active.num_cols(), 16);
         assert_eq!(e.screen().active.get_cell(0, 0).unwrap().grapheme.as_str(), "h");
+    }
+
+    #[test]
+    fn resize_clears_prompt_end_marks() {
+        // Reflow remaps every row; rather than remap the click-to-position
+        // list, resize clears it (the shell re-emits 133;B on its
+        // post-SIGWINCH prompt redraw).
+        let mut e = Emulator::new(4, 8);
+        e.advance(b"\x1b]133;B\x07");
+        assert_eq!(e.screen().prompt_marks.len(), 1);
+        e.resize(4, 16);
+        assert!(e.screen().prompt_marks.is_empty());
     }
 
     #[test]

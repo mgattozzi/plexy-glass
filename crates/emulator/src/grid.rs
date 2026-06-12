@@ -11,10 +11,84 @@ pub enum WrapOrigin {
     SoftFrom(u32),
 }
 
+/// OSC 133 block annotation carried by a row. Kept tiny (8 bytes, since rows
+/// are cloned per frame): the exit code is stored inline with a presence bit
+/// in `flags` instead of an `Option<i32>` (which has no niche and would pad
+/// the struct to 12 bytes).
+///
+/// Marks live ON the row, so they travel with it into scrollback, vanish on
+/// eviction, and survive reflow by the same mechanism as `wrap_origin`.
+/// `Default` is the empty (unmarked) state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RowMark {
+    /// Bitwise OR of [`RowMark::PROMPT_START`], [`RowMark::OUTPUT_START`],
+    /// [`RowMark::BLOCK_END`] (plus the private exit-presence bit). 0 = unmarked.
+    flags: u8,
+    /// Exit code payload; meaningful only while the `HAS_EXIT` bit is set
+    /// (kept 0 otherwise so the derived `PartialEq` stays well-defined).
+    exit_code: i32,
+}
+
+impl RowMark {
+    /// An `OSC 133;A` landed on this row: a prompt (block boundary) starts here.
+    pub const PROMPT_START: u8 = 1;
+    /// An `OSC 133;C` landed on this row: command output begins here.
+    pub const OUTPUT_START: u8 = 2;
+    /// An `OSC 133;D` landed on this row: a block completed here (see
+    /// [`RowMark::exit`]; it may still be `None` when `D` carried no
+    /// parseable code).
+    pub const BLOCK_END: u8 = 4;
+    /// Private presence bit for `exit_code`.
+    const HAS_EXIT: u8 = 1 << 7;
+
+    /// Set a flag (one of the public associated consts). `|=`, so re-marking
+    /// the same row is idempotent (shells redraw prompts).
+    pub fn set(&mut self, flag: u8) {
+        self.flags |= flag;
+    }
+
+    /// True when `flag` (one of the public associated consts) is set.
+    pub fn contains(self, flag: u8) -> bool {
+        self.flags & flag != 0
+    }
+
+    /// Record (or clear) the exit code from `OSC 133;D;code`.
+    pub fn set_exit(&mut self, exit: Option<i32>) {
+        match exit {
+            Some(code) => {
+                self.flags |= Self::HAS_EXIT;
+                self.exit_code = code;
+            }
+            None => {
+                self.flags &= !Self::HAS_EXIT;
+                self.exit_code = 0;
+            }
+        }
+    }
+
+    /// The exit code recorded by `OSC 133;D;code`, if any. `None` when `D`
+    /// arrived without a parseable code (the row is still a block end via
+    /// [`RowMark::BLOCK_END`]).
+    pub fn exit(self) -> Option<i32> {
+        if self.flags & Self::HAS_EXIT != 0 {
+            Some(self.exit_code)
+        } else {
+            None
+        }
+    }
+
+    /// True when the row carries no block annotation at all.
+    pub fn is_empty(self) -> bool {
+        self.flags == 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub cells: Vec<Cell>,
     pub wrap_origin: WrapOrigin,
+    /// OSC 133 block annotations for this row, if any.
+    pub mark: RowMark,
 }
 
 impl Row {
@@ -22,6 +96,7 @@ impl Row {
         Self {
             cells: vec![Cell::default(); cols as usize],
             wrap_origin: WrapOrigin::Hard,
+            mark: RowMark::default(),
         }
     }
 }
@@ -139,6 +214,44 @@ mod tests {
             grapheme: SmolStr::new("X"),
             ..Cell::default()
         }
+    }
+
+    #[test]
+    fn row_mark_stays_small() {
+        // Rows are cloned per frame, so the annotation must stay cheap.
+        assert!(std::mem::size_of::<RowMark>() <= 8);
+    }
+
+    #[test]
+    fn row_mark_default_is_empty() {
+        let m = RowMark::default();
+        assert!(m.is_empty());
+        assert!(!m.contains(RowMark::PROMPT_START));
+        assert!(!m.contains(RowMark::OUTPUT_START));
+        assert!(!m.contains(RowMark::BLOCK_END));
+        assert_eq!(m.exit(), None);
+    }
+
+    #[test]
+    fn row_mark_set_and_exit_round_trip() {
+        let mut m = RowMark::default();
+        m.set(RowMark::BLOCK_END);
+        m.set_exit(Some(0));
+        assert!(m.contains(RowMark::BLOCK_END));
+        assert_eq!(m.exit(), Some(0));
+        // Idempotent re-set.
+        m.set(RowMark::BLOCK_END);
+        assert_eq!(m.exit(), Some(0));
+        m.set_exit(None);
+        assert_eq!(m.exit(), None);
+        assert!(m.contains(RowMark::BLOCK_END), "clearing exit keeps the flag");
+    }
+
+    #[test]
+    fn blank_rows_are_markless() {
+        assert!(Row::blank(4).mark.is_empty());
+        let g = Grid::new(2, 2);
+        assert!(g.rows.iter().all(|r| r.mark.is_empty()));
     }
 
     #[test]

@@ -32,7 +32,7 @@ pub use cell::Cell;
 pub use color::Color;
 pub use cursor::{Cursor, CursorShape};
 pub use emulator::Emulator;
-pub use grid::{Grid, Row, WrapOrigin};
+pub use grid::{Grid, Row, RowMark, WrapOrigin};
 pub use hyperlinks::HyperlinkTable;
 pub use keyboard::KeyboardState;
 pub use modes::Modes;

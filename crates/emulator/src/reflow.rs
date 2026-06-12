@@ -191,7 +191,13 @@ fn push_row(
     } else {
         WrapOrigin::SoftFrom(line_idx as u32)
     };
-    buf.push(Row { cells, wrap_origin });
+    buf.push(Row {
+        cells,
+        wrap_origin,
+        // B1 scaffolding: B2 threads the original first-row mark through the
+        // logical-line rebuild; until then reflow drops marks.
+        mark: crate::grid::RowMark::default(),
+    });
 }
 
 #[cfg(test)]
@@ -210,6 +216,7 @@ mod tests {
         Row {
             cells: cells.iter().map(|s| cell(s)).collect(),
             wrap_origin: origin,
+            mark: crate::grid::RowMark::default(),
         }
     }
 
