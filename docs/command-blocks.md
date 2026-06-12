@@ -159,40 +159,17 @@ keymap {
 }
 ```
 
-## Exit status on the border
+## Scrolled-view mouse: click a prompt to jump
 
-When shell integration is active, each pane's **left border line** is
-color-coded per visible row by the command block the row belongs to:
+While scrolled back (the viewport is showing history, not the live shell), a
+**plain left-click on a prompt row** scrolls the viewport so that prompt sits
+at the top. It's the fastest way to re-center a command you spotted in the
+history.
 
-| Border | Meaning |
-|---|---|
-| Colored `│` in the ok color (default: `#87a987`) | Row belongs to a block that exited with code 0 |
-| Colored `▌` in the fail color (default: `#c4746e`) | Row belongs to a block that exited with a nonzero code |
-| Plain `│` | Row before the first prompt, a running block (no exit code yet), or a block end (`133;D`) that arrived without an exit code |
-
-The entire block (prompt row through the row before the next prompt) takes the
-same status, so a glance at the border shows which commands succeeded and which
-failed, even after scrolling back.
-
-**Viewport-tracked**: the coloring always matches what is on screen, whether
-you are at the live view, scrolled back with the mouse wheel, or in copy mode.
-
-**Alternate screen** (`hx`, `less`, and other full-screen programs): while the
-alternate screen is active the border reverts to plain. Status coloring comes
-back on its own when the program exits.
-
-**Precedence**: a marked pane's ring (bright magenta) beats block status, so a
-`▌` will never appear on a marked-pane border. Block status beats the active
-pane's blue ring on the colored rows; plain (None) rows still show the active
-ring as usual.
-
-**Requires OSC 133 shell integration**, same as all the other block features.
-
-### Configuration
-
-The `blocks` node in `config.kdl` controls this feature. See the
-[`blocks` section of docs/configuration.md](configuration.md#blocks) for the
-full reference (colors, `enabled` flag, defaults, and live-reload behavior).
+The jump only fires while scrolled back (`scroll_offset > 0`). At the live view
+(no scroll), a click on a prompt row behaves as a normal click. We deliberately
+keep the jump this narrow, since at offset 0 the prompt row is already in view
+and the jump would have no visible effect.
 
 ## Scripting: `capture --last-command`
 
@@ -220,14 +197,95 @@ plexy-glass send -n work --enter "cargo build 2>&1"
 plexy-glass capture --last-command -n work > /tmp/build.log
 ```
 
-## Limitations (v1)
+### `--json` — structured output
 
-We track the following as future work:
+```sh
+plexy-glass capture --last-command --json [-n NAME]
+```
 
-- **No `--json` flag** on `capture --last-command`: the flag that would return
-  `{ text, exit_code, command_line }` as JSON is deferred.
-- **No block-aware mouse**: clicking on a prompt does not jump to it.
-- **No mark persistence**: marks are not saved on disk; a restored pane starts
-  without block history.
-- **Alt-screen marks ignored**: full-screen programs that emit 133 sequences
-  while on the alt screen are not tracked.
+Prints one compact JSON object + newline to stdout instead of plain text:
+
+```json
+{"command_line":"cargo test 2>&1","exit_code":0,"output":"running 42 tests\n..."}
+```
+
+Keys (`serde_json` sorts them alphabetically):
+
+| Key | Type | Notes |
+|---|---|---|
+| `output` | string | The block's output text, same as the plain `capture --last-command` output |
+| `exit_code` | number or null | The closing `133;D` exit code; null when the D mark carried no code |
+| `command_line` | string or null | The command the user typed, recovered from the prompt-end (`133;B`) mark; null when the shell omitted `B`/`C` or when B and C share a row |
+
+**`jq` example**:
+
+```sh
+# Fail the script if the last command did not exit 0
+plexy-glass capture --last-command --json -n work \
+  | jq -e '.exit_code == 0' > /dev/null
+```
+
+**Accepted edges on `command_line`**:
+
+- **PS2 / heredoc prefixes**: if the command spans multiple lines (e.g. a
+  here-doc), the shell's secondary-prompt string (`> `) appears on continuation
+  rows, because the emulator sees the rendered prompt characters. The result
+  includes those prefixes, so what you get is the recorded screen-scraping
+  approximation.
+- **RPROMPT**: some shells render a right-prompt on the `133;B` row. Because
+  trailing whitespace is trimmed per physical row, the RPROMPT tail survives
+  trimming (it is not at the true trailing edge of the command text). Rare in
+  practice.
+- **Soft-wrapped commands**: a command that wraps at the terminal margin is
+  joined WITHOUT a newline, because it was one logical line the user typed. A
+  typed space at the exact wrap boundary may be dropped (the terminal trims
+  the trailing space from the physical row).
+- **Hard line boundaries** (the user pressed Enter in a multi-line construct,
+  e.g. `for`/`do`/`done`): those rows join WITH `\n`, a real newline in the
+  user's input.
+
+## Exit status on the border
+
+When shell integration is active, each pane's **left border line** is
+color-coded per visible row by the command block the row belongs to:
+
+| Border | Meaning |
+|---|---|
+| Colored `│` in the ok color (default: `#87a987`) | Row belongs to a block that exited with code 0 |
+| Colored `▌` in the fail color (default: `#c4746e`) | Row belongs to a block that exited with a nonzero code |
+| Plain `│` | Row before the first prompt, a running block (no exit code yet), or a block end (`133;D`) that arrived without an exit code |
+
+The entire block (prompt row through the row before the next prompt) takes the
+same status, so a glance at the border shows which commands succeeded and which
+failed, even after scrolling back.
+
+**Viewport-tracked**: the coloring always matches what is on screen, whether
+you are at the live view, scrolled back with the mouse wheel, or in copy mode.
+
+**Popup panes**: the popup box's left border takes the same per-block exit-status
+coloring. Popups always show the live grid, so the coloring reflects the popup
+pane's current shell state.
+
+**Alternate screen** (`hx`, `less`, and other full-screen programs): while the
+alternate screen is active the border reverts to plain, because we deliberately
+don't record marks on the alternate screen. Full-screen programs are not
+command-block flows, so this is correct behavior, not a limitation. Status
+coloring returns automatically when the program exits.
+
+**Precedence**: a marked pane's ring (bright magenta) beats block status, so a
+`▌` will never appear on a marked-pane border. Block status beats the active
+pane's blue ring on the colored rows; plain (None) rows still show the active
+ring as usual.
+
+**Requires OSC 133 shell integration**, same as all the other block features.
+
+### Configuration
+
+The `blocks` node in `config.kdl` controls this feature. See the
+[`blocks` section of docs/configuration.md](configuration.md#blocks) for the
+full reference (colors, `enabled` flag, defaults, and live-reload behavior).
+
+## Limitations
+
+- **No mark persistence**: marks are not saved to disk, so a restored pane
+  starts without block history.

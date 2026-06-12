@@ -294,10 +294,7 @@ updated as part of each feature, per **User documentation**. Workflows
 Not yet built (future work): pipe-pane; cross-window **swap**-pane
 and the choose-tree filter/collapse + session rename (deferred in their specs);
 silence monitoring + bell/activity alert messages; set/save/load paste buffers;
-`capture --last-command --json` (text + exit code + command line); block-aware
-mouse (click a prompt to jump); mark persistence across daemon restart; block
-exit-status border on popup panes (deferred in the 2026-06-12 spec); `run`
---json output; push notifications on run completion.
+mark persistence across daemon restart; push notifications on run completion.
 Declarative-session v1 boundaries left for later: split ratios + active
 window/pane selection in the template, per-pane env maps, re-reading templates on
 `Ctrl+a R` reload, and `switch_session` auto-creating a not-yet-running declared
@@ -319,4 +316,10 @@ per block exit status, viewport-tracked, blocks config node — shipped
 2026-06-12 spec/plan; `run` verb — synchronous command execution,
 blocks_completed counter, pane_at_prompt, protocol v8, ExecCommand/ExecDone,
 serve_exec/client_exec, exit-code passthrough, timeout 124 — shipped
-2026-06-12 spec/plan.)
+2026-06-12 spec/plan; blocks completion bundle — PROMPT_END row marks + side-list
+deletion, `block_command_line` / `closing_exit` helpers, `--json` for
+`capture --last-command` and `run` (protocol v9, `{"output","exit_code",
+"command_line"}`), scrolled prompt-click-to-jump (while scrolled back, plain
+left-press on a prompt row scrolls that command to viewport top), popup border
+exit-status coloring (left border of popup boxes takes the same per-block
+status as regular panes) — shipped 2026-06-12 spec/plan.)

@@ -39,11 +39,16 @@ is designed alongside Ghostty-style terminal integration.
   per pane, with graceful fallback and clean teardown of the outer terminal
 - Colored underlines (SGR 58/59), advertised to applications
 - Command-block awareness (OSC 133): navigate scrollback by prompt with
-  `Ctrl+a <` / `>`, jump prompts in copy mode with `[` / `]`, select a
-  command's output with `o` then `y`, yank it with `:copy-output`, or capture
-  it from a script with `plexy-glass capture --last-command`; each pane's left
-  border is color-coded per row by block exit status (ok color `│` / fail color
-  `▌`), viewport-tracked and live-reloading with the `blocks` config node
+  `Ctrl+a <` / `>`, jump prompts in copy mode with `[` / `]`, click a prompt
+  row while scrolled back to jump there, select a command's output with `o`
+  then `y`, yank it with `:copy-output`, or capture it from a script with
+  `plexy-glass capture --last-command` (plain text) or
+  `plexy-glass capture --last-command --json` (structured `{"output",
+  "exit_code", "command_line"}`); `plexy-glass run --json` returns the same
+  structure for synchronous runs; each pane's left border (popup pane borders
+  included) is color-coded per row by block exit status (ok color `│` /
+  fail color `▌`), viewport-tracked and live-reloading with the `blocks`
+  config node
 
 ## Quick start
 
@@ -97,11 +102,13 @@ plexy-glass run -n work "cargo test" && plexy-glass run -n work "jj commit -m wi
 ```
 
 `cmd` reuses the command-prompt grammar verbatim. `run` injects a command and
-waits for the OSC 133 completion mark (requires shell integration). `cmd`,
-`send`, and `capture` exit 0 on success and 1 on any failure; `run` exits
+waits for the OSC 133 completion mark (so it needs shell integration). `cmd`,
+`send`, and `capture` exit 0 on success and 1 on any failure. `run` exits
 with the command's own exit code (0–255), 124 on timeout, and 1 for
 plexy-glass failures. `-n NAME` targets a session, and without `-n` the sole
-running session is used (error if zero or more than one).
+running session is used (error if zero or more than one). Both
+`capture --last-command` and `run` accept `--json` to print a structured
+`{"output", "exit_code", "command_line", …}` object instead of plain text.
 See [docs/scripting.md](docs/scripting.md) for the full reference.
 
 ## Default keybindings

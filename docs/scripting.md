@@ -19,8 +19,8 @@ plexy-glass capture -n work | grep "test result: ok"
 | `plexy-glass cmd [-n NAME] <LINE>...` | one or more prompt lines | Run each line through the command-prompt grammar in order; stop at the first failure (exit 1). Confirmation messages print to stdout; errors print to stderr. |
 | `plexy-glass send [-n NAME] [--enter] <TEXT>...` | `--enter` appends `\r` | Join the TEXT fragments with single spaces and write them to the session's input path. |
 | `plexy-glass capture [-n NAME]` | (none) | Print the focused pane's visible screen text to stdout (per-line trailing whitespace trimmed, trailing blank lines dropped). |
-| `plexy-glass capture --last-command [-n NAME]` | `--last-command` | Print the last completed OSC 133 command block's output (scrollback-inclusive) to stdout. Exits 1 with `"no command blocks…"` when the pane has no completed block (shell integration not active). |
-| `plexy-glass run [-n NAME] [--timeout SECS] <COMMAND>...` | `--timeout SECS` | Type COMMAND + Enter into the input-target pane, wait for the OSC 133 completion mark, print the block output to stdout, and exit with the command's exit code. Requires OSC 133 shell integration. |
+| `plexy-glass capture --last-command [-n NAME]` | `--last-command`, `--json` | Print the last completed OSC 133 command block's output (scrollback-inclusive) to stdout. Add `--json` for `{"output", "exit_code", "command_line"}`. Exits 1 when no block exists. |
+| `plexy-glass run [-n NAME] [--timeout SECS] <COMMAND>...` | `--timeout SECS`, `--json` | Type COMMAND + Enter into the input-target pane, wait for the OSC 133 completion mark, print the block output to stdout (or JSON with `--json`), and exit with the command's exit code. Requires OSC 133 shell integration. |
 
 ## Session resolution
 
@@ -77,6 +77,35 @@ Exit 0 means a completed block was found and printed; exit 1 with
 means no block exists (integration not configured, or the pane was just
 restored). See [docs/command-blocks.md](command-blocks.md) for shell-integration
 setup.
+
+### `--json` — structured capture output
+
+Add `--json` to get a compact JSON object instead of plain text:
+
+```sh
+plexy-glass capture --last-command --json [-n NAME]
+```
+
+Output (one object + newline; `serde_json` sorts keys alphabetically):
+
+```json
+{"command_line":"cargo test 2>&1","exit_code":0,"output":"running 42 tests\n..."}
+```
+
+| Key | Type | Notes |
+|---|---|---|
+| `output` | string | Block output text (same as plain `capture --last-command`) |
+| `exit_code` | number or null | `133;D` exit code; null when D carried no code |
+| `command_line` | string or null | Typed command, from the `133;B` mark; null when the shell omitted B/C |
+
+Popup-aware: targets the popup's child pane when a popup is open (same
+input-target path as plain capture).
+
+```sh
+# Assert the last command succeeded
+plexy-glass capture --last-command --json -n work \
+  | jq -e '.exit_code == 0'
+```
 
 ## `run` — synchronous command execution
 
@@ -135,6 +164,41 @@ code` on stderr, and exits 0.
 completion mark. Press `Ctrl-C` to abandon the wait (the command keeps running
 in the pane).
 
+### `--json` — structured run output
+
+Pass `--json` and you get a compact JSON object on stdout instead of the
+plain command output:
+
+```sh
+plexy-glass run --json [-n NAME] [--timeout SECS] <COMMAND>...
+```
+
+Output (one object + newline; `serde_json` sorts keys alphabetically):
+
+```json
+{"command_line":"cargo test","exit_code":0,"output":"running 42 tests\n...","timed_out":false}
+```
+
+| Key | Type | Notes |
+|---|---|---|
+| `output` | string | Block output text (same as a non-JSON run) |
+| `exit_code` | number or null | The `133;D` exit code; null when the D carried no payload |
+| `timed_out` | bool | `true` when `--timeout` expired (exit code 124) |
+| `command_line` | string | The command text passed to `run` (client-side, so always present) |
+
+The JSON carries data, not diagnostics, so `--json` doesn't change exit-code
+semantics or stderr notes. Refusals (`CommandResult` errors) stay plain
+stderr + exit 1.
+
+**`duration` deliberately omitted**: `ExecDone` doesn't carry timing, so if
+you need it, wall-clock the invocation yourself.
+
+```sh
+# Gate a commit on a passing test suite, check via JSON
+result=$(plexy-glass run --json -n work "cargo test")
+echo "$result" | jq -e '.exit_code == 0 and .timed_out == false'
+```
+
 ### Accepted limitations
 
 These are constraints we've accepted, not bugs:
@@ -170,10 +234,10 @@ plexy-glass run --timeout 600 "cargo build --release" || echo "build broke or st
 
 ## Popup-aware write and read
 
-`send`, `capture`, and `run` all target the *input target pane*: the popup's
-child when a popup is open, otherwise the focused pane, so a script's
-write→read sequence always addresses the same pane even when a popup is
-active.
+`send`, `capture` (including `--last-command` and `--last-command --json`),
+and `run` all target the *input target pane*: the popup's child when a popup
+is open, otherwise the focused pane. So a script's write→read sequence always
+addresses the same pane, even when a popup is active.
 
 `run` deliberately bypasses the sync-panes fan-out and writes only to the
 input target pane, not to every pane in a synchronized group. `send` fans out
