@@ -268,6 +268,28 @@ impl CopyModeHandler {
             (m, Key::Char('$')) if m == Modifiers::SHIFT => {
                 state.cursor.1 = cols.saturating_sub(1);
             }
+            (m, Key::Char('[')) if m.is_empty() => {
+                if let Some(line) = crate::blocks::prev_prompt_line(screen, state.cursor.0) {
+                    state.cursor = (line, 0);
+                    ensure_visible(state);
+                }
+            }
+            (m, Key::Char(']')) if m.is_empty() => {
+                if let Some(line) = crate::blocks::next_prompt_line(screen, state.cursor.0) {
+                    state.cursor = (line, 0);
+                    ensure_visible(state);
+                }
+            }
+            (m, Key::Char('o')) if m.is_empty() => {
+                // Select the current block's output region; `y` then yanks it.
+                if let Some((start, end)) =
+                    crate::blocks::block_output_range(screen, state.cursor.0)
+                {
+                    state.anchor = Some((start, 0));
+                    state.cursor = (end, cols.saturating_sub(1));
+                    ensure_visible(state);
+                }
+            }
             (m, Key::Char('v')) if m.is_empty() => {
                 state.anchor = if state.anchor.is_some() {
                     None
@@ -823,6 +845,160 @@ mod tests {
         let scr = screen(5, 80);
         let action = CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Escape), &mut s, &scr);
         assert!(matches!(action, CopyModeAction::Exit));
+    }
+
+    /// Feed raw bytes (text + OSC 133 marks) through a real emulator; the
+    /// trailing SGR-reset flushes the pending grapheme into the grid.
+    fn screen_from_bytes(rows: u16, cols: u16, bytes: &[u8]) -> Screen {
+        let mut e = Emulator::new(rows, cols);
+        e.advance(bytes);
+        e.advance(b"\x1b[m");
+        e.screen().clone()
+    }
+
+    /// 8-row grid: A "$ one" line 0, C "hello" line 1, "world" line 2,
+    /// A "$ two" line 3 (rest blank). No scrollback.
+    fn marked_screen() -> Screen {
+        screen_from_bytes(
+            8,
+            20,
+            b"\x1b]133;A\x07$ one\r\n\x1b]133;C\x07hello\r\nworld\r\n\x1b]133;A\x07$ two",
+        )
+    }
+
+    /// 3-row grid fed 6 lines: lines 0..2 scrolled into scrollback.
+    /// Prompts at absolute lines 0 (scrollback) and 4 (grid).
+    fn marked_screen_with_scrollback() -> Screen {
+        let s = screen_from_bytes(
+            3,
+            20,
+            b"\x1b]133;A\x07p1\r\no1\r\no2\r\no3\r\n\x1b]133;A\x07p2\r\nx",
+        );
+        assert_eq!(s.scrollback.rows().len(), 3, "setup: 3 rows scrolled");
+        s
+    }
+
+    fn total(s: &Screen) -> u32 {
+        s.scrollback.rows().len() as u32 + s.active.rows.len() as u32
+    }
+
+    #[test]
+    fn open_bracket_jumps_to_prev_prompt_col_zero() {
+        let scr = marked_screen();
+        let mut s = CopyMode::new(total(&scr), 8, 6, 5);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('[')), &mut s, &scr);
+        assert_eq!(s.cursor, (3, 0));
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('[')), &mut s, &scr);
+        assert_eq!(s.cursor, (0, 0));
+    }
+
+    #[test]
+    fn open_bracket_at_oldest_prompt_is_a_noop() {
+        let scr = marked_screen();
+        let mut s = CopyMode::new(total(&scr), 8, 0, 4);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('[')), &mut s, &scr);
+        assert_eq!(s.cursor, (0, 4), "no wrap, cursor untouched");
+    }
+
+    #[test]
+    fn close_bracket_jumps_to_next_prompt_col_zero() {
+        let scr = marked_screen();
+        let mut s = CopyMode::new(total(&scr), 8, 0, 5);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char(']')), &mut s, &scr);
+        assert_eq!(s.cursor, (3, 0));
+    }
+
+    #[test]
+    fn close_bracket_at_newest_prompt_is_a_noop() {
+        let scr = marked_screen();
+        let mut s = CopyMode::new(total(&scr), 8, 3, 2);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char(']')), &mut s, &scr);
+        assert_eq!(s.cursor, (3, 2), "no wrap, cursor untouched");
+    }
+
+    #[test]
+    fn brackets_cross_the_scrollback_boundary_and_scroll_the_viewport() {
+        let scr = marked_screen_with_scrollback();
+        let mut s = CopyMode::new(total(&scr), 3, 5, 0);
+        assert_eq!(s.viewport_top, 3);
+        // Grid prompt first, then the scrollback one.
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('[')), &mut s, &scr);
+        assert_eq!(s.cursor, (4, 0));
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('[')), &mut s, &scr);
+        assert_eq!(s.cursor, (0, 0), "prompt found in scrollback");
+        assert_eq!(s.viewport_top, 0, "ensure_visible scrolled up");
+        // And back down across the boundary.
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char(']')), &mut s, &scr);
+        assert_eq!(s.cursor, (4, 0));
+        assert!(s.viewport_top + 2 >= 4, "ensure_visible scrolled down");
+    }
+
+    #[test]
+    fn o_selects_the_output_region_of_the_current_block() {
+        let scr = marked_screen();
+        let mut s = CopyMode::new(total(&scr), 8, 2, 3);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
+        // Output of block 1: C line 1 col 0 → block end line 2, last col.
+        assert_eq!(s.anchor, Some((1, 0)));
+        assert_eq!(s.cursor, (2, 19));
+    }
+
+    #[test]
+    fn o_is_idempotent_on_repress() {
+        let scr = marked_screen();
+        let mut s = CopyMode::new(total(&scr), 8, 1, 0);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
+        let (anchor, cursor) = (s.anchor, s.cursor);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
+        assert_eq!((s.anchor, s.cursor), (anchor, cursor));
+    }
+
+    #[test]
+    fn o_falls_back_to_the_prompt_line_without_output_start() {
+        // No 133;C: selection starts at the prompt row itself.
+        let scr = screen_from_bytes(6, 20, b"\x1b]133;A\x07$ a\r\nout\r\n\x1b]133;A\x07$ b");
+        let mut s = CopyMode::new(total(&scr), 6, 1, 0);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
+        assert_eq!(s.anchor, Some((0, 0)));
+        assert_eq!(s.cursor, (1, 19));
+    }
+
+    #[test]
+    fn o_is_a_noop_when_no_block_contains_the_cursor() {
+        let scr = screen_from_bytes(6, 20, b"plain\r\n\x1b]133;A\x07$ a");
+        let mut s = CopyMode::new(total(&scr), 6, 0, 2);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
+        assert_eq!(s.anchor, None);
+        assert_eq!(s.cursor, (0, 2));
+    }
+
+    #[test]
+    fn o_then_y_yanks_the_block_output_text() {
+        let scr = marked_screen();
+        let mut s = CopyMode::new(total(&scr), 8, 2, 3);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
+        let action =
+            CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
+        match action {
+            CopyModeAction::Yank(text) => assert_eq!(text, "hello\nworld"),
+            other => panic!("expected Yank, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn o_then_y_spans_the_scrollback_boundary() {
+        let scr = marked_screen_with_scrollback();
+        // Cursor inside block 1 (lines 0..=3, no C → starts at the prompt).
+        let mut s = CopyMode::new(total(&scr), 3, 2, 0);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
+        assert_eq!(s.anchor, Some((0, 0)));
+        assert_eq!(s.cursor, (3, 19));
+        let action =
+            CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
+        match action {
+            CopyModeAction::Yank(text) => assert_eq!(text, "p1\no1\no2\no3"),
+            other => panic!("expected Yank, got {other:?}"),
+        }
     }
 
     #[test]
