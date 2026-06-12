@@ -371,7 +371,7 @@ impl Compositor {
         // Floating popup pane: above panes/borders/status/cursor, below any
         // static overlay (mutually exclusive with overlays in practice).
         if let Some(p) = popup {
-            paint_popup(&mut screen, p, pane_row_offset, pane_area_rows, host_cols);
+            paint_popup(&mut screen, p, pane_row_offset, pane_area_rows, host_cols, blocks);
         }
 
         // Interactive overlay (rename prompt / help), painted last so it sits
@@ -807,12 +807,20 @@ fn paint_buffers(
 /// Paint the floating popup: a bordered, titled box at `popup.rect` whose
 /// interior shows the popup pane's live grid. The popup is focused, so its
 /// child's cursor replaces whatever the active layout pane set above.
+///
+/// When `blocks` is `Some(colors)`, the left border cells for interior rows
+/// are colored per block exit-status (same rules as regular panes, but without
+/// active/marked rings, so precedence is just status-or-plain). Popups always
+/// render the live grid, so `top = scrollback.len()` (no scrollback offset).
+/// Alt screen → `viewport_block_status` returns all-None already; no separate
+/// guard is needed here.
 fn paint_popup(
     screen: &mut VirtualScreen,
     popup: &PopupView<'_>,
     pane_row_offset: u16,
     pane_area_rows: u16,
     cols: u16,
+    blocks: Option<&crate::borders::BlockBorderColors>,
 ) {
     let rect = popup.rect;
     if rect.rows < 3 || rect.cols < 3 {
@@ -850,6 +858,40 @@ fn paint_popup(
                     rect.col + 1 + c,
                     cell.clone(),
                 );
+            }
+        }
+    }
+    // Block exit-status coloring on the left border cells (interior rows only).
+    // Popups always show the live grid: top = scrollback length (no offset).
+    // Alt screen → `viewport_block_status` already returns all-None, so no extra
+    // guard is needed here.
+    if let Some(colors) = blocks {
+        let interior_rows = rect.rows - 2;
+        let top = popup.screen.scrollback.len() as u32;
+        let statuses = viewport_block_status(popup.screen, top, interior_rows);
+        for (r, status) in statuses.into_iter().enumerate() {
+            let Some(status) = status else { continue };
+            let border_row = pane_row_offset + rect.row + 1 + r as u16;
+            let border_col = rect.col;
+            // Clip: don't paint outside the box or the screen.
+            if border_row >= pane_area_rows.saturating_add(pane_row_offset)
+                || border_col >= cols
+            {
+                continue;
+            }
+            let Some(cell) = screen.cell_mut(border_row, border_col) else { continue };
+            match status {
+                crate::blocks::BlockLineStatus::Ok => {
+                    cell.fg = colors.ok;
+                    // Glyph stays │ (or whatever border_glyph placed there).
+                }
+                crate::blocks::BlockLineStatus::Failed => {
+                    cell.fg = colors.fail;
+                    // Replace a plain vertical │ with the half-block ▌.
+                    if cell.grapheme.as_str() == "\u{2502}" {
+                        cell.grapheme = smol_str::SmolStr::new_static("\u{258c}");
+                    }
+                }
             }
         }
     }
@@ -2275,6 +2317,199 @@ mod tests {
             assert_eq!(
                 cell.fg, colors.fail,
                 "copy-mode top=0, row {r}: expected fail color"
+            );
+        }
+    }
+
+    // ── Popup border block exit-status tests ─────────────────────────────────
+
+    /// Build a popup emulator screen seeded with OSC 133 sequences.
+    /// A trailing SGR-reset flushes the last pending grapheme into the grid.
+    fn popup_screen_from(rows: u16, cols: u16, bytes: &[u8]) -> plexy_glass_emulator::Screen {
+        let mut e = Emulator::new(rows, cols);
+        e.advance(bytes);
+        e.advance(b"\x1b[m");
+        e.screen().clone()
+    }
+
+    /// Construct a minimal compose call with a popup and optional block colors.
+    /// Layout: host 12x40, one background pane (full host), popup rect (2,10,8,22)
+    /// so the popup box has 6 interior rows and 20 interior cols. The left border
+    /// of the popup is at col 10, rows 3..=8 (pane_row_offset=0, rect.row=2, rows=8).
+    fn compose_with_popup(
+        popup_screen: &plexy_glass_emulator::Screen,
+        blocks: Option<&crate::borders::BlockBorderColors>,
+    ) -> VirtualScreen {
+        let mut bg = Emulator::new(12, 40);
+        bg.advance(b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 12, 40),
+            screen: bg.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            title: None,
+            marked: false,
+        };
+        // Outer box 8 rows × 22 cols at (2, 10); interior = 6 rows × 20 cols.
+        let rect = Rect::new(2, 10, 8, 22);
+        let pv = PopupView { rect, screen: popup_screen, title: "test" };
+        Compositor::compose(
+            &[view],
+            (12, 40),
+            None,
+            StatusPlacement::Bottom,
+            None,
+            None,
+            None,
+            Some(&pv),
+            blocks,
+        )
+    }
+
+    /// Popup with a failed block → left border rows colored fail + ▌ glyph.
+    ///
+    /// Popup screen: 6 rows × 20 cols; one completed failed block.
+    ///   row 0: A "$ fail"
+    ///   row 1: C output
+    ///   row 2..5: D;1 + A on row 2
+    ///
+    /// The popup's live viewport top = scrollback.len() = 0 (popup is live).
+    /// Interior rows 0..5 → absolute lines 0..5 in the popup screen.
+    /// Block 1 (lines 0..1) is closed with D;1 on line 2 (D+A shared) → Failed.
+    /// The left border cells at host (rect.row+1+r, rect.col) = (3+r, 10)
+    /// for r in 0..1 should be fail-colored with ▌.
+    #[test]
+    fn popup_failed_block_left_border_colored() {
+        let screen = popup_screen_from(
+            6,
+            20,
+            b"\x1b]133;A\x07$ fail\r\n\
+              \x1b]133;C\x07output\r\n\
+              \x1b]133;D;1\x07\x1b]133;A\x07$ next",
+        );
+        let colors = block_colors();
+        let vs = compose_with_popup(&screen, Some(&colors));
+        // Popup left border col = rect.col = 10.
+        // Interior rows 0 and 1 (host rows 3 and 4) map to block 1 (Failed).
+        // Row 2 (host row 5) is the shared D+A row (block 2 prompt, running) → None.
+        let fail_row_0 = vs.cell(3, 10).unwrap();
+        assert_eq!(fail_row_0.fg, colors.fail, "popup left border row 3: fail color");
+        assert_eq!(fail_row_0.grapheme.as_str(), "\u{258c}", "popup left border row 3: │ → ▌");
+        let fail_row_1 = vs.cell(4, 10).unwrap();
+        assert_eq!(fail_row_1.fg, colors.fail, "popup left border row 4: fail color");
+        assert_eq!(fail_row_1.grapheme.as_str(), "\u{258c}", "popup left border row 4: │ → ▌");
+        // Row 5 (shared D+A, block 2 running) → plain border (no fail color, no ▌).
+        let plain_row_2 = vs.cell(5, 10).unwrap();
+        assert_ne!(plain_row_2.fg, colors.fail, "popup left border row 5: not fail (running block)");
+        assert_ne!(plain_row_2.grapheme.as_str(), "\u{258c}", "popup left border row 5: no ▌");
+    }
+
+    /// Popup with an ok block → left border rows colored ok, glyph stays │.
+    ///
+    /// Popup screen: 6 rows × 20 cols; block closed with D;0.
+    ///   row 0: A "$ ok"
+    ///   row 1: C output
+    ///   row 2: D;0 + A (shared D+A)
+    #[test]
+    fn popup_ok_block_left_border_colored() {
+        let screen = popup_screen_from(
+            6,
+            20,
+            b"\x1b]133;A\x07$ ok\r\n\
+              \x1b]133;C\x07output\r\n\
+              \x1b]133;D;0\x07\x1b]133;A\x07$ next",
+        );
+        let colors = block_colors();
+        let vs = compose_with_popup(&screen, Some(&colors));
+        // Interior rows 0 and 1 (host rows 3 and 4) → block 1 (Ok).
+        let ok_row_0 = vs.cell(3, 10).unwrap();
+        assert_eq!(ok_row_0.fg, colors.ok, "popup left border row 3: ok color");
+        assert_eq!(ok_row_0.grapheme.as_str(), "\u{2502}", "popup left border row 3: │ unchanged (ok)");
+        let ok_row_1 = vs.cell(4, 10).unwrap();
+        assert_eq!(ok_row_1.fg, colors.ok, "popup left border row 4: ok color");
+        assert_eq!(ok_row_1.grapheme.as_str(), "\u{2502}", "popup left border row 4: │ unchanged (ok)");
+        // Row 2 (shared D+A, next block running) → plain border.
+        let plain_row_2 = vs.cell(5, 10).unwrap();
+        assert_ne!(plain_row_2.fg, colors.ok, "popup left border row 5: not ok (running)");
+    }
+
+    /// Popup with no block marks: compose WITH Some(colors) → left border cells
+    /// are cell-identical to a compose WITHOUT colors (plain border).
+    #[test]
+    fn popup_no_marks_identical_with_and_without_blocks() {
+        let screen = popup_screen_from(6, 20, b"plain text ");
+        let colors = block_colors();
+        let vs_with = compose_with_popup(&screen, Some(&colors));
+        let vs_without = compose_with_popup(&screen, None);
+        // Left border column = 10, rows 3..=8 (interior + top/bottom borders).
+        // All cells in the popup box's left column must be cell-identical.
+        for r in 2..=9u16 {
+            let c1 = vs_with.cell(r, 10).unwrap().clone();
+            let c2 = vs_without.cell(r, 10).unwrap().clone();
+            assert_eq!(
+                c1, c2,
+                "popup left col 10 row {r}: with/without blocks must be identical (no marks)"
+            );
+        }
+    }
+
+    /// blocks=None with a marked popup screen → left border plain (not colored).
+    #[test]
+    fn popup_blocks_none_screen_with_marks_is_plain() {
+        // Screen has a completed failed block, but blocks=None.
+        let screen = popup_screen_from(
+            6,
+            20,
+            b"\x1b]133;A\x07$ fail\r\n\
+              \x1b]133;C\x07output\r\n\
+              \x1b]133;D;1\x07done",
+        );
+        let colors = block_colors();
+        let vs = compose_with_popup(&screen, None);
+        // No cell on the popup's left border should have fail color or ▌.
+        for r in 2..=9u16 {
+            let cell = vs.cell(r, 10).unwrap();
+            assert_ne!(
+                cell.fg, colors.fail,
+                "blocks=None row {r}: no fail color on popup border"
+            );
+            assert_ne!(
+                cell.grapheme.as_str(), "\u{258c}",
+                "blocks=None row {r}: no ▌ on popup border"
+            );
+        }
+    }
+
+    /// Alt-screen popup: `viewport_block_status` returns all-None for alt screen;
+    /// the left border stays plain even if block marks exist on the primary screen.
+    #[test]
+    fn popup_alt_screen_left_border_plain() {
+        // Feed a completed failed block, then enter alt screen.
+        let screen = popup_screen_from(
+            6,
+            20,
+            b"\x1b]133;A\x07$ fail\r\n\
+              \x1b]133;C\x07output\r\n\
+              \x1b]133;D;1\x07done\r\n\
+              \x1b[?1049h\
+              \x1b]133;A\x07$ alt",
+        );
+        // Confirm alt screen is active.
+        assert!(screen.alt.is_some(), "setup: alt screen must be active");
+        let colors = block_colors();
+        let vs = compose_with_popup(&screen, Some(&colors));
+        // viewport_block_status returns all-None on alt screen → no coloring.
+        for r in 3..=8u16 {
+            let cell = vs.cell(r, 10).unwrap();
+            assert_ne!(
+                cell.fg, colors.fail,
+                "alt-screen popup left border row {r}: no fail color"
+            );
+            assert_ne!(
+                cell.grapheme.as_str(), "\u{258c}",
+                "alt-screen popup left border row {r}: no ▌"
             );
         }
     }
