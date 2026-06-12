@@ -159,6 +159,8 @@ pub fn built_in_keymap() -> KeymapConfig {
             binding("prefix P", "popup"),
             binding("prefix q", "close_popup"),
             binding("prefix Space", "next_layout"),
+            binding("prefix <", "prev_prompt"),
+            binding("prefix >", "next_prompt"),
         ],
     }
 }

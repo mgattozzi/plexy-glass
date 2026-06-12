@@ -822,6 +822,8 @@ keymap {
     bind "prefix P" "popup"
     bind "prefix q" "close_popup"
     bind "prefix Space" "next_layout"
+    bind "prefix <" "prev_prompt"
+    bind "prefix >" "next_prompt"
 }
 "##;
 

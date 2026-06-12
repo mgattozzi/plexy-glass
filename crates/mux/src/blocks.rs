@@ -91,6 +91,24 @@ pub fn last_completed_block(screen: &Screen) -> Option<(u32, u32)> {
     block_output_range(screen, line_in_block)
 }
 
+/// Render the absolute-line range `(start, end)` (inclusive, scrollback rows
+/// included) as plain text: one line per row, trailing whitespace trimmed.
+/// Wide-spacer cells carry an empty grapheme, so `push_str("")` skips them
+/// naturally, same rendering rule as [`crate::selection::screen_text`].
+pub fn block_text(screen: &Screen, (start, end): (u32, u32)) -> String {
+    let mut lines: Vec<String> = Vec::with_capacity((end.saturating_sub(start) + 1) as usize);
+    for line in start..=end {
+        let Some(row) = row_at(screen, line) else { continue };
+        let mut text = String::new();
+        for cell in &row.cells {
+            text.push_str(cell.grapheme.as_str());
+        }
+        let trimmed = text.trim_end();
+        lines.push(trimmed.to_string());
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +255,28 @@ mod tests {
     fn last_completed_block_none_without_block_end() {
         let s = screen_from(6, 20, b"\x1b]133;A\x07$ a\r\nrunning");
         assert_eq!(last_completed_block(&s), None);
+    }
+
+    #[test]
+    fn block_text_renders_output_rows_trimmed() {
+        let s = two_blocks();
+        // invariant: two_blocks always has a completed block (D on line 3)
+        let range = last_completed_block(&s).expect("completed block");
+        assert_eq!(block_text(&s, range), "out1\nout2");
+    }
+
+    #[test]
+    fn block_text_spans_the_scrollback_boundary() {
+        let s = across_boundary();
+        // Block 1 = lines 0..=3: line 0 in scrollback, line 3 in the grid.
+        assert_eq!(block_text(&s, (0, 3)), "p1\no1\no2\no3");
+    }
+
+    #[test]
+    fn block_text_emits_wide_graphemes_once() {
+        let s = screen_from(4, 20, b"\x1b]133;A\x07$ a\r\n\x1b]133;C\x07\xe4\xb8\xad x");
+        // 中 occupies two cells (grapheme + spacer); it must appear once.
+        assert_eq!(block_text(&s, (1, 1)), "中 x");
     }
 
     #[test]

@@ -389,15 +389,30 @@ where
                                 }
                                 continue;
                             }
-                            // Snap scrollback to live on any keystroke.
-                            {
+                            let action = keymap.consume(ke, raw_bytes);
+                            store_prefix_armed(&prefix_active, &keymap, &session);
+                            // Snap scrollback to live on any keystroke,
+                            // EXCEPT the block-scroll verbs (they SET the
+                            // offset; resetting first would pin every press
+                            // to the newest prompt) and a pending prefix
+                            // chord (resetting on the prefix key itself
+                            // would break the second `prefix <` the same
+                            // way; the chord's final command decides).
+                            let keeps_scroll = matches!(
+                                action,
+                                KeymapAction::Pending
+                                    | KeymapAction::Command(
+                                        Command::PrevPrompt
+                                            | Command::NextPrompt
+                                            | Command::CopyOutput
+                                    )
+                            );
+                            if !keeps_scroll {
                                 let manager = session.window_manager.lock().await;
                                 if let Some(p) = manager.active_window().active_pane() {
                                     p.reset_scroll();
                                 }
                             }
-                            let action = keymap.consume(ke, raw_bytes);
-                            store_prefix_armed(&prefix_active, &keymap, &session);
                             match action {
                                 KeymapAction::PassThrough(event_ke, bytes_back) => {
                                     // If the active pane is in copy mode, route the key event
@@ -882,6 +897,7 @@ enum ConnVerb {
     ChooseTree,
     PasteBuffer,
     ChooseBuffer,
+    CopyOutput,
 }
 
 impl ConnVerb {
@@ -897,6 +913,7 @@ impl ConnVerb {
             Command::ChooseTree => Ok(Self::ChooseTree),
             Command::PasteBuffer => Ok(Self::PasteBuffer),
             Command::ChooseBuffer => Ok(Self::ChooseBuffer),
+            Command::CopyOutput => Ok(Self::CopyOutput),
             other => Err(other),
         }
     }
@@ -914,6 +931,7 @@ impl ConnVerb {
             PromptCommand::ChooseTree => Ok(Self::ChooseTree),
             PromptCommand::PasteBuffer => Ok(Self::PasteBuffer),
             PromptCommand::ChooseBuffer => Ok(Self::ChooseBuffer),
+            PromptCommand::CopyOutput => Ok(Self::CopyOutput),
             other => Err(other),
         }
     }
@@ -956,6 +974,10 @@ async fn run_connection_verb(
         }
         ConnVerb::ChooseBuffer => {
             open_buffer_picker_overlay(ctx.session, ctx.registry).await;
+        }
+        ConnVerb::CopyOutput => {
+            // Status messages (success and no-blocks) are set inside.
+            let _ = copy_last_output(ctx.session, ctx.registry).await;
         }
     }
     false
@@ -1095,6 +1117,13 @@ async fn run_prompt_line(
             paste_top_buffer(session, registry).await;
             (true, None)
         }
+        PromptCommand::CopyOutput => {
+            if copy_last_output(session, registry).await {
+                (true, None)
+            } else {
+                (false, Some(NO_BLOCKS_MSG.to_string()))
+            }
+        }
         PromptCommand::Detach => refuse("detach"),
         PromptCommand::Switch(_) => refuse("switch"),
         PromptCommand::Help => refuse("help"),
@@ -1105,6 +1134,43 @@ async fn run_prompt_line(
             Ok(message) => (true, message),
             Err(e) => (false, Some(e.to_string())),
         },
+    }
+}
+
+/// Status text when `copy-output` finds no completed OSC 133 block. Shared
+/// by the interactive status line and the headless `cmd` result.
+const NO_BLOCKS_MSG: &str =
+    "no command blocks — shell integration not active? see docs/command-blocks.md";
+
+/// Copy the last completed command block's output (scrollback included) to
+/// the clipboard and push it onto the paste-buffer stack. Reads the
+/// input-target pane (the popup's child while one is open, otherwise the
+/// active pane) for consistency with every other read/write surface
+/// (paste, capture); interactively the distinction is moot because a popup
+/// swallows the chord, but headless `cmd "copy-output"` can run while a
+/// popup is open. Returns whether a block was found; sets the status message
+/// either way. Shared by the `copy_output` binding verb and `:copy-output`.
+async fn copy_last_output(session: &Arc<Session>, registry: &Arc<SessionRegistry>) -> bool {
+    let text = {
+        let manager = session.window_manager.lock().await;
+        manager.input_target_pane().and_then(|p| {
+            p.with_screen(|s| {
+                plexy_glass_mux::last_completed_block(s)
+                    .map(|range| plexy_glass_mux::block_text(s, range))
+            })
+        })
+    };
+    match text {
+        Some(text) => {
+            let _ = crate::osc_actions::write_clipboard(text.as_bytes()).await;
+            registry.push_paste_buffer(text.into_bytes()).await;
+            session.set_status_message("copied output of last command".into()).await;
+            true
+        }
+        None => {
+            session.set_status_message(NO_BLOCKS_MSG.into()).await;
+            false
+        }
     }
 }
 
@@ -2716,15 +2782,16 @@ mod tests {
 
     /// Lockstep guard for the headless verb policy.
     /// `Session::handle_prompt_command` carries a defensive `Ok(None)` arm for
-    /// the connection-level verbs, currently seven: Detach, Reload, Switch,
-    /// ChooseSession, ChooseTree, PasteBuffer, ChooseBuffer. If a future verb
-    /// is added to that arm (and `ConnVerb::from_prompt`) but NOT to
-    /// `run_prompt_line`'s intercept, `cmd "<verb>"` would fall through to the
-    /// defensive arm and silently exit 0 doing nothing. This test hardcodes
-    /// the current seven (plus `help`, refused for its modal overlay) and
-    /// asserts each is either refused with a message or specially handled
-    /// with a real effect, never a silent no-op. If you add a
-    /// connection-level verb, extend BOTH `run_prompt_line` and this test.
+    /// the connection-level verbs, currently eight: Detach, Reload, Switch,
+    /// ChooseSession, ChooseTree, PasteBuffer, ChooseBuffer, CopyOutput. If a
+    /// future verb is added to that arm (and `ConnVerb::from_prompt`) but NOT
+    /// to `run_prompt_line`'s intercept, `cmd "<verb>"` would fall through to
+    /// the defensive arm and silently exit 0 doing nothing. This test
+    /// hardcodes the current eight (plus `help`, refused for its modal
+    /// overlay) and asserts each is either refused with a message or
+    /// specially handled with a real effect, never a silent no-op. If you
+    /// add a connection-level verb, extend BOTH `run_prompt_line` and this
+    /// test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_prompt_line_never_silently_noops_connection_verbs() {
         let _g = crate::test_env::isolate();
@@ -2756,6 +2823,84 @@ mod tests {
             let (ok, message) = run_prompt_line(&session, &registry, line).await;
             assert!(ok, "headless `{line}` failed: {message:?}");
         }
+
+        // `copy-output` is specially handled too: with no OSC 133 blocks in
+        // the cat pane it must FAIL with the no-blocks message, a real
+        // effect, never the silent defensive no-op.
+        let (ok, message) = run_prompt_line(&session, &registry, "copy-output").await;
+        assert!(!ok, "copy-output with no blocks must not claim success");
+        let msg = message.unwrap_or_default();
+        assert!(msg.contains("no command blocks"), "wrong no-blocks text: {msg}");
+    }
+
+    /// Write ASCII `text` into grid row `row` of a screen (test fixture: the
+    /// cat child never produces marked output, so block tests paint the grid
+    /// and set the row marks the real OSC 133 handlers would).
+    fn write_grid_row(s: &mut plexy_glass_emulator::Screen, row: usize, text: &str) {
+        for (i, ch) in text.chars().enumerate() {
+            s.active.rows[row].cells[i].grapheme = ch.to_string().into();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn copy_output_pushes_buffer_and_sets_status() {
+        use plexy_glass_emulator::RowMark;
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("blocks".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+        {
+            let m = session.window_manager.lock().await;
+            let pane = m.active_window().active_pane().unwrap();
+            pane.with_screen_mut(|s| {
+                // Block 1: prompt row 0, output "ok" on row 1; row 2 carries
+                // the D (closing block 1) plus the next prompt's A, the
+                // common shell flow.
+                write_grid_row(s, 0, "$ make");
+                s.active.rows[0].mark.set(RowMark::PROMPT_START);
+                write_grid_row(s, 1, "ok");
+                s.active.rows[1].mark.set(RowMark::OUTPUT_START);
+                write_grid_row(s, 2, "$ next");
+                s.active.rows[2].mark.set(RowMark::PROMPT_START);
+                s.active.rows[2].mark.set(RowMark::BLOCK_END);
+                s.active.rows[2].mark.set_exit(Some(0));
+            });
+        }
+
+        let (ok, message) = run_prompt_line(&session, &registry, "copy-output").await;
+        assert!(ok, "copy-output with a completed block failed: {message:?}");
+        assert_eq!(
+            registry.paste_buffer_top().await.as_deref(),
+            Some(b"ok".as_slice()),
+            "the block's output text must be pushed as a paste buffer"
+        );
+        let mut m = session.window_manager.lock().await;
+        assert_eq!(m.take_active_message(), Some("copied output of last command"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn copy_output_no_blocks_over_the_wire_is_not_ok() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        registry.attach_or_create("s1".into(), script_cat(), script_size(), cfg).await.unwrap();
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::RunCommand { session: Some("s1".into()), line: "copy-output".into() },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(!ok, "copy-output with no blocks must exit non-zero");
+        let msg = message.expect("no-blocks failure must carry a message");
+        assert!(msg.contains("no command blocks"), "wrong text: {msg}");
+        assert!(
+            registry.paste_buffer_top().await.is_none(),
+            "no buffer may be pushed on the no-blocks path"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -171,6 +171,9 @@ pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
         },
         "close_popup" => Command::ClosePopup,
         "next_layout" => Command::NextLayout,
+        "prev_prompt" => Command::PrevPrompt,
+        "next_prompt" => Command::NextPrompt,
+        "copy_output" => Command::CopyOutput,
         "layout" => {
             let arg_str = arg.filter(|a| !a.is_empty()).ok_or_else(|| {
                 KeyParseError::MissingArg { command: name.to_string() }
@@ -392,6 +395,13 @@ mod tests {
     fn parses_next_layout() {
         let c = parse_command("next_layout").unwrap();
         assert_eq!(c.command, Command::NextLayout);
+    }
+
+    #[test]
+    fn parses_block_scroll_verbs() {
+        assert_eq!(parse_command("prev_prompt").unwrap().command, Command::PrevPrompt);
+        assert_eq!(parse_command("next_prompt").unwrap().command, Command::NextPrompt);
+        assert_eq!(parse_command("copy_output").unwrap().command, Command::CopyOutput);
     }
 
     // ── prefix token tests ──────────────────────────────────────────

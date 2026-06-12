@@ -148,6 +148,28 @@ mod tests {
     }
 
     #[test]
+    fn default_bindings_include_block_scroll_chords() {
+        let km_cfg = plexy_glass_config::built_in_keymap();
+        let mut km = build_keymap(&km_cfg);
+        // Ctrl+a < → PrevPrompt
+        let e1 = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
+        assert!(matches!(km.consume(e1, vec![0x01]), KeymapAction::Pending));
+        let e2 = KeyEvent::new(Key::Char('<'), Modifiers::empty());
+        assert!(matches!(
+            km.consume(e2, b"<".to_vec()),
+            KeymapAction::Command(Command::PrevPrompt)
+        ));
+        // Ctrl+a > → NextPrompt
+        let e3 = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
+        assert!(matches!(km.consume(e3, vec![0x01]), KeymapAction::Pending));
+        let e4 = KeyEvent::new(Key::Char('>'), Modifiers::empty());
+        assert!(matches!(
+            km.consume(e4, b">".to_vec()),
+            KeymapAction::Command(Command::NextPrompt)
+        ));
+    }
+
+    #[test]
     fn invalid_prefix_falls_back_to_ctrl_a() {
         // "NotAKey", "", "Ctrl+a Ctrl+b", and "prefix" (circular) are all
         // invalid prefix values; each must fall back to Ctrl+a.

@@ -65,6 +65,12 @@ pub enum PromptCommand {
     ClosePopup,
     /// Rearrange the active window's panes into a preset layout.
     Layout(crate::LayoutPreset),
+    /// Scroll the viewport back to the previous OSC 133 prompt.
+    PrevPrompt,
+    /// Scroll the viewport forward to the next OSC 133 prompt (or live).
+    NextPrompt,
+    /// Copy the last completed command block's output.
+    CopyOutput,
 }
 
 /// A human-readable parse failure.
@@ -83,11 +89,11 @@ impl std::error::Error for ParseError {}
 
 /// Static verb names, sorted, for Tab-completion of the first token.
 pub const VERBS: &[&str] = &[
-    "break", "buffers", "close-popup", "copy", "detach", "focus", "help", "join",
-    "kill", "last", "layout", "mark", "monitor-activity", "monitor-bell", "new",
-    "next", "paste", "popup", "prev", "reload", "rename", "rename-pane",
-    "resize", "sessions", "split", "swap", "switch", "sync", "tree", "win",
-    "zoom",
+    "break", "buffers", "close-popup", "copy", "copy-output", "detach", "focus",
+    "help", "join", "kill", "last", "layout", "mark", "monitor-activity",
+    "monitor-bell", "new", "next", "next-prompt", "paste", "popup", "prev",
+    "prev-prompt", "reload", "rename", "rename-pane", "resize", "sessions",
+    "split", "swap", "switch", "sync", "tree", "win", "zoom",
 ];
 
 fn err(msg: impl Into<String>) -> ParseError {
@@ -146,6 +152,9 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
         "buffers" => no_args(PromptCommand::ChooseBuffer),
         "monitor-activity" => no_args(PromptCommand::ToggleMonitorActivity),
         "monitor-bell" => no_args(PromptCommand::ToggleMonitorBell),
+        "prev-prompt" => no_args(PromptCommand::PrevPrompt),
+        "next-prompt" => no_args(PromptCommand::NextPrompt),
+        "copy-output" => no_args(PromptCommand::CopyOutput),
         "join" | "join-pane" => match args.as_slice() {
             [] | ["v"] => Ok(PromptCommand::JoinPane(SplitDir::Vertical)),
             ["h"] => Ok(PromptCommand::JoinPane(SplitDir::Horizontal)),
@@ -460,6 +469,21 @@ mod tests {
         assert_eq!(p("monitor-activity").unwrap(), PromptCommand::ToggleMonitorActivity);
         assert_eq!(p("monitor-bell").unwrap(), PromptCommand::ToggleMonitorBell);
         assert!(p("monitor-activity x").is_err());
+    }
+
+    #[test]
+    fn block_navigation_verbs() {
+        assert_eq!(p("prev-prompt").unwrap(), PromptCommand::PrevPrompt);
+        assert_eq!(p("next-prompt").unwrap(), PromptCommand::NextPrompt);
+        assert_eq!(p("copy-output").unwrap(), PromptCommand::CopyOutput);
+        assert_eq!(
+            p("prev-prompt x").unwrap_err().to_string(),
+            "prev-prompt: takes no arguments"
+        );
+        assert_eq!(
+            p("copy-output x").unwrap_err().to_string(),
+            "copy-output: takes no arguments"
+        );
     }
 
     #[test]

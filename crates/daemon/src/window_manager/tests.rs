@@ -521,6 +521,134 @@ async fn select_layout_single_pane_is_noop_but_remembers() {
     assert_eq!(m.active_window().last_preset, Some(plexy_glass_mux::LayoutPreset::Tiled));
 }
 
+/// Push `n` blank rows into the active pane's scrollback, setting
+/// `PROMPT_START` on the given absolute lines. Marks live on the rows
+/// themselves, so injecting scrollback rows directly exercises the same scan
+/// the real OSC 133 path feeds.
+fn inject_scrollback_prompts(m: &WindowManager, n: usize, prompts: &[usize]) {
+    use plexy_glass_emulator::{Row, RowMark};
+    let pane = m.active_window().active_pane().unwrap();
+    pane.with_screen_mut(|s| {
+        let cols = s.active.num_cols();
+        for i in 0..n {
+            let mut row = Row::blank(cols);
+            if prompts.contains(&i) {
+                row.mark.set(RowMark::PROMPT_START);
+            }
+            s.scrollback.push(row);
+        }
+    });
+}
+
+fn active_scroll_offset(m: &WindowManager) -> u32 {
+    m.active_window().active_pane().unwrap().scroll_offset()
+}
+
+// Offset math, pinned: at offset N the compositor shows N scrollback rows
+// above the grid, so the top visible absolute line is `scrollback_len - N`.
+// With `scrollback_len` = 10 and prompts at absolute lines 2 and 6, putting
+// prompt L at the viewport top means offset = 10 - L.
+#[tokio::test]
+async fn prev_prompt_pins_target_to_viewport_top_and_clamps_at_oldest() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    inject_scrollback_prompts(&m, 10, &[2, 6]);
+    // Live (offset 0, top = 10): prev prompt is 6 → offset 10-6 = 4.
+    m.handle_command(Command::PrevPrompt).unwrap();
+    assert_eq!(active_scroll_offset(&m), 4);
+    // Top = 6: prev prompt strictly above is 2 → offset 8.
+    m.handle_command(Command::PrevPrompt).unwrap();
+    assert_eq!(active_scroll_offset(&m), 8);
+    // Top = 2 (the oldest prompt): nothing above → no-op, no wraparound.
+    m.handle_command(Command::PrevPrompt).unwrap();
+    assert_eq!(active_scroll_offset(&m), 8);
+}
+
+#[tokio::test]
+async fn next_prompt_walks_forward_then_snaps_to_live() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    inject_scrollback_prompts(&m, 10, &[2, 6]);
+    let pane = m.active_window().active_pane().unwrap();
+    pane.set_scroll_offset(8, 10); // top = 2 (the oldest prompt)
+    // Next prompt below 2 is 6 → offset 4.
+    m.handle_command(Command::NextPrompt).unwrap();
+    assert_eq!(active_scroll_offset(&m), 4);
+    // Top = 6 (the newest prompt): past it → live (offset 0).
+    m.handle_command(Command::NextPrompt).unwrap();
+    assert_eq!(active_scroll_offset(&m), 0);
+    // Already live: stays live.
+    m.handle_command(Command::NextPrompt).unwrap();
+    assert_eq!(active_scroll_offset(&m), 0);
+}
+
+#[tokio::test]
+async fn next_prompt_snaps_to_live_when_the_prompt_is_in_the_grid() {
+    use plexy_glass_emulator::RowMark;
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    inject_scrollback_prompts(&m, 10, &[2]);
+    let pane = m.active_window().active_pane().unwrap();
+    // A prompt on grid row 3 = absolute line 13 (> scrollback_len 10): the
+    // target offset would be negative; it saturates to live.
+    pane.with_screen_mut(|s| s.active.rows[3].mark.set(RowMark::PROMPT_START));
+    pane.set_scroll_offset(6, 10); // top = 4: next prompt is the grid one
+    m.handle_command(Command::NextPrompt).unwrap();
+    assert_eq!(active_scroll_offset(&m), 0);
+}
+
+#[tokio::test]
+async fn block_scroll_without_marks_prev_noops_and_next_goes_live() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    inject_scrollback_prompts(&m, 10, &[]); // scrollback, but no prompts
+    m.handle_command(Command::PrevPrompt).unwrap();
+    assert_eq!(active_scroll_offset(&m), 0, "prev with no marks is a no-op");
+    m.active_window().active_pane().unwrap().set_scroll_offset(5, 10);
+    m.handle_command(Command::PrevPrompt).unwrap();
+    assert_eq!(active_scroll_offset(&m), 5, "prev keeps a manual scroll");
+    m.handle_command(Command::NextPrompt).unwrap();
+    assert_eq!(active_scroll_offset(&m), 0, "next past the newest snaps live");
+}
+
+#[tokio::test]
+async fn block_scroll_does_not_clear_zoom() {
+    let mut m = make_two_pane_manager().await;
+    m.handle_command(Command::ZoomToggle).unwrap();
+    assert!(m.active_window().is_zoomed());
+    m.handle_command(Command::PrevPrompt).unwrap();
+    m.handle_command(Command::NextPrompt).unwrap();
+    assert!(m.active_window().is_zoomed(), "view-only verbs keep zoom");
+}
+
 fn gutter_col_for(m: &WindowManager) -> u16 {
     let vp = m.viewport();
     m.active_window()

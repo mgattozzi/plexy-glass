@@ -296,6 +296,55 @@ impl WindowManager {
             Command::NextLayout => {
                 self.next_layout()?;
             }
+            // Block-scroll verbs operate on the wheel-scroll offset of the
+            // ACTIVE pane (a popup swallows these chords at the connection
+            // layer, so input target == active pane whenever they fire). If
+            // the pane is in copy mode the chord still fires, since the
+            // keymap consumes keys BEFORE copy-mode routing (only
+            // PassThrough keys reach the copy-mode handler), but the offset
+            // change is invisible until copy mode exits (the compositor
+            // renders the copy-mode viewport instead; see `effective_scroll`).
+            //
+            // Viewport math (pinned by tests): at offset N the compositor
+            // shows N scrollback rows above the grid, so the top visible
+            // absolute line is `scrollback_len - N` (N=0 → grid row 0, i.e.
+            // line `scrollback_len`).
+            Command::PrevPrompt => {
+                if let Some(pane) = self.active_window().active_pane() {
+                    let offset = pane.scroll_offset();
+                    let target = pane.with_screen(|s| {
+                        let sb = s.scrollback.len() as u32;
+                        let top = sb.saturating_sub(offset);
+                        // prev_prompt_line is strictly above `top`, so the
+                        // target is always < sb and the offset >= 1.
+                        plexy_glass_mux::prev_prompt_line(s, top).map(|t| (sb - t, sb))
+                    });
+                    // No prompt above → no-op (no wraparound).
+                    if let Some((off, max)) = target {
+                        pane.set_scroll_offset(off, max);
+                    }
+                }
+            }
+            Command::NextPrompt => {
+                if let Some(pane) = self.active_window().active_pane() {
+                    let offset = pane.scroll_offset();
+                    let (off, max) = pane.with_screen(|s| {
+                        let sb = s.scrollback.len() as u32;
+                        let top = sb.saturating_sub(offset);
+                        // Past the newest prompt, or a prompt already in the live grid
+                        // (t >= sb, saturating to 0), snaps to live.
+                        let off = plexy_glass_mux::next_prompt_line(s, top)
+                            .map_or(0, |t| sb.saturating_sub(t));
+                        (off, sb)
+                    });
+                    pane.set_scroll_offset(off, max);
+                }
+            }
+            Command::CopyOutput => {
+                // Handled at the connection layer (needs the registry's paste
+                // buffers and the async clipboard write); see
+                // Connection::serve_attach / run_connection_verb.
+            }
         }
         self.notify.notify_one();
         Ok(())
@@ -305,7 +354,9 @@ impl WindowManager {
 /// Whether a command should clear an active zoom overlay before running.
 /// Structural (split/kill/new-window) and navigation (window/pane switch,
 /// resize) commands end zoom; `ZoomToggle`, sync-toggle, copy-mode, detach,
-/// cancel, and reload do not.
+/// cancel, and reload do not. The block verbs (`PrevPrompt`/`NextPrompt`/
+/// `CopyOutput`) are view-only, they scroll or read the zoomed pane itself,
+/// so ending zoom would be hostile (like wheel scrolling, which also keeps it).
 fn command_clears_zoom(cmd: &Command) -> bool {
     matches!(
         cmd,

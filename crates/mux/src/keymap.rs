@@ -65,6 +65,15 @@ pub enum Command {
     SelectLayout(crate::preset::LayoutPreset),
     /// Cycle to the next preset layout (remembered per window).
     NextLayout,
+    /// Scroll the active pane's viewport so the previous OSC 133 prompt row
+    /// sits at the top (wheel-scroll mechanism, not copy mode).
+    PrevPrompt,
+    /// Scroll the active pane's viewport so the next OSC 133 prompt row sits
+    /// at the top; past the newest prompt, snap back to live (offset 0).
+    NextPrompt,
+    /// Copy the last completed command block's output to the clipboard and
+    /// paste-buffer stack without entering copy mode.
+    CopyOutput,
 }
 
 pub type Chord = (Modifiers, Key);

@@ -354,6 +354,9 @@ fn command_label(command: &str) -> String {
         "popup" => "Popup (scratch shell)",
         "close_popup" => "Close popup",
         "next_layout" => "Next layout",
+        "prev_prompt" => "Previous command",
+        "next_prompt" => "Next command",
+        "copy_output" => "Copy last output",
         other => {
             if let Some(n) = other
                 .strip_prefix("select_window:")

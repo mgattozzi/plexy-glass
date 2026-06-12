@@ -736,12 +736,15 @@ impl Session {
             | PromptCommand::ChooseSession
             | PromptCommand::ChooseTree
             | PromptCommand::PasteBuffer
-            | PromptCommand::ChooseBuffer => {
+            | PromptCommand::ChooseBuffer
+            | PromptCommand::CopyOutput => {
                 return Ok(None);
             }
             PromptCommand::Popup(cmd) => Command::OpenPopup { command: cmd },
             PromptCommand::ClosePopup => Command::ClosePopup,
             PromptCommand::Layout(preset) => Command::SelectLayout(preset),
+            PromptCommand::PrevPrompt => Command::PrevPrompt,
+            PromptCommand::NextPrompt => Command::NextPrompt,
         };
         self.handle_command(mapped).await?;
         Ok(None)

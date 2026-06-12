@@ -448,6 +448,13 @@ impl Pane {
         self.inner.scroll_offset.store(0, Ordering::SeqCst);
     }
 
+    /// Set the absolute scroll offset (scrollback rows shown above the live
+    /// grid), clamped to `[0, max_offset]`. The block-scroll verbs compute a
+    /// target offset and need an absolute set; `scroll_by` is relative.
+    pub fn set_scroll_offset(&self, offset: u32, max_offset: u32) {
+        self.inner.scroll_offset.store(offset.min(max_offset), Ordering::SeqCst);
+    }
+
     pub fn scrollback_len(&self) -> u32 {
         // invariant: emulator mutex briefly held to read len.
         let emu = self.inner.emulator.lock().expect("pane emulator mutex poisoned");
@@ -841,6 +848,27 @@ mod tests {
         p.scroll_by(100, 10);
         assert_eq!(p.scroll_offset(), 10);
         p.reset_scroll();
+        assert_eq!(p.scroll_offset(), 0);
+        let _ = p.send_input(bytes::Bytes::from_static(&[0x04])).await;
+    }
+
+    #[tokio::test]
+    async fn set_scroll_offset_is_absolute_and_clamped() {
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
+        p.set_scroll_offset(7, 10);
+        assert_eq!(p.scroll_offset(), 7);
+        // Absolute, not relative: setting 3 lands on 3, not 10.
+        p.set_scroll_offset(3, 10);
+        assert_eq!(p.scroll_offset(), 3);
+        p.set_scroll_offset(99, 10);
+        assert_eq!(p.scroll_offset(), 10, "clamped to max_offset");
+        p.set_scroll_offset(0, 10);
         assert_eq!(p.scroll_offset(), 0);
         let _ = p.send_input(bytes::Bytes::from_static(&[0x04])).await;
     }
