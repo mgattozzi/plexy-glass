@@ -32,7 +32,8 @@ is designed alongside Ghostty-style terminal integration.
 - Declarative sessions: recursive `session → window → split/pane` layouts in
   the config, with per-pane commands and working directories
 - A visual session picker (`Ctrl+a w`) and a choose-tree
-  (session → window → pane drill-down, `Ctrl+a W`)
+  (session → window → pane drill-down with incremental filter `/`,
+  collapse/expand `h`/`l`, and session rename `r`, `Ctrl+a W`)
 - Pane mobility: break a pane to its own window, join it elsewhere, swap
   panes (including cross-window swap with the marked pane), and a marked pane
   for cross-window moves; focus and zoom follow the slot, mark is preserved

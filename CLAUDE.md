@@ -198,7 +198,9 @@ keyboard passthrough; interactive overlays (window/pane rename, help); a
 `Ctrl+a :` **command prompt** with in-place **session switching**
 (`switch_session`); a `Ctrl+a w` **visual session picker**; a `Ctrl+a W`
 **choose-tree** (session→window→pane drill-down with switch/kill/rename across
-sessions); **pane mobility** — break (`Ctrl+a !`), a marked pane (`Ctrl+a m`),
+sessions, incremental filter `/`, collapse/expand `h`/`l`, and session rename
+`r` — registry re-key, `Mutex<String>` name accessor, commit-on-success
+re-stamp of open tree, deferred old-file sweep); **pane mobility** — break (`Ctrl+a !`), a marked pane (`Ctrl+a m`),
 join (`:join-pane`), swap (`Ctrl+a {`/`}`, `:swap-pane`; `:swap-pane` with no
 argument also works cross-window: the marked pane's slot and the active pane's
 slot exchange occupants via `replace_leaf`/`swap_occupant`, focus and zoom
@@ -294,8 +296,7 @@ implementation; user-facing docs (README / the configuration reference) are
 updated as part of each feature, per **User documentation**. Workflows
 (`Workflow` tool) drive the review fan-outs.
 
-Not yet built (future work): pipe-pane; choose-tree filter/collapse + session rename (deferred in their specs);
-silence monitoring + bell/activity alert messages; set/save/load paste buffers;
+Not yet built (future work): pipe-pane; silence monitoring + bell/activity alert messages; set/save/load paste buffers;
 mark persistence across daemon restart; push notifications on run completion.
 Declarative-session v1 boundaries left for later: split ratios + active
 window/pane selection in the template, per-pane env maps, re-reading templates on
@@ -327,4 +328,8 @@ exit-status coloring (left border of popup boxes takes the same per-block
 status as regular panes) — shipped 2026-06-12 spec/plan; cross-window
 swap-with-marked — `:swap-pane` with no argument works when the marked pane is
 in another window of the same session, via `replace_leaf`/`swap_occupant`,
-focus/zoom follow the slot, mark preserved — shipped 2026-06-12 spec/plan.)
+focus/zoom follow the slot, mark preserved — shipped 2026-06-12 spec/plan;
+choose-tree v2 — incremental filter `/`, collapse/expand `h`/`l`, session
+rename `r` via registry re-key + `Mutex<String>` name accessor +
+commit-on-success re-stamp + deferred old-file sweep — shipped 2026-06-12
+spec/plan.)

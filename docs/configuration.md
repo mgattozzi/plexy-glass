@@ -542,6 +542,48 @@ popups are the one exception: a popup spawns at the active pane's **live**
 OSC-7 cwd (falling back to the home base), so that a popup acts on the
 current context.
 
+## Choose-tree (`Ctrl+a W`)
+
+`Ctrl+a W` (or `:tree`) opens a floating session → window → pane drill-down.
+Each row is indented by level; the `*` marker flags the current session path.
+
+### Navigation
+
+| Key | Action |
+|---|---|
+| `j` / `↓` / `Ctrl+n` | Move selection down |
+| `k` / `↑` / `Ctrl+p` | Move selection up |
+| `g` / `Home` | Jump to first row |
+| `G` / `End` | Jump to last row |
+| `Enter` | Switch to the selected session / window / pane |
+| `h` / `←` | Collapse the selected session or window (hides descendants); on a pane row, folds its parent window |
+| `l` / `→` | Expand the selected session or window |
+| `/` | Enter filter mode (incremental search) |
+| `x` | Kill the selected session / window / pane (prompts `y`/`n`) |
+| `r` | Rename the selected session, window, or pane inline |
+| `Esc` | Close the tree |
+
+### Filter mode (`/`)
+
+Pressing `/` enters filter mode. Typed text narrows the tree in real time
+(case-insensitive substring on the row label), and ancestors of matching rows
+stay visible so you can still see the path. `Enter` returns to Navigate
+keeping the active filter (a `(filtered)` hint appears in the footer); `Esc`
+clears the filter and returns to Navigate.
+
+### Session rename
+
+Pressing `r` on a session row opens the same inline editor used for window and
+pane rename. The edit buffer is primed with the current session name; edit it
+and press `Enter` to commit. The rename propagates live everywhere: the
+registry re-keys, and the status bar, `plexy-glass list`, and `-n` resolution
+all follow immediately. `Esc` cancels.
+
+**Declarative sessions note:** renaming a session that was built from a
+`session` template in `config.kdl` decouples it from the template, so at the
+next daemon boot the template name gets built fresh as a new session and the
+renamed session restores from its own saved file under the new name.
+
 ## The command prompt
 
 `Ctrl+a :` opens a one-line command prompt. Type a verb (Tab completes it)

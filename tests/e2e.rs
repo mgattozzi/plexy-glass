@@ -2747,3 +2747,179 @@ fn run_json_timeout_exits_124_with_timed_out_true() {
         "the plain timeout note must stay on stderr: {stderr:?}"
     );
 }
+
+/// Choose-tree v2 happy-path: filter, Enter-to-keep, rename session via `r`.
+///
+/// Two sessions: "main" (the attached client) and "beta" (a second PTY client
+/// in the same daemon). The tree is sorted alphabetically, so beta comes first.
+/// After opening the tree from main:
+///   1. `/` + "bet" → filter narrows to the beta subtree.
+///   2. Enter keeps the filter and returns to Navigate mode with selection on
+///      the beta session row (row 0 alphabetically).
+///   3. `r` → rename mode primed with "beta"; 4× Backspace + "zeta" + Enter.
+///   4. Tree re-stamps the beta row to "zeta — …" and the registry re-keys live.
+///   5. `plexy-glass list` shows "zeta", not "beta".
+///   6. zeta.json eventually exists; beta.json eventually gone.
+///
+/// Note: bare `\x1b` (Escape) isn't used anywhere, because the legacy key parser
+/// holds `\x1b` pending until the NEXT byte and produces Alt+X instead of
+/// standalone Escape. We use `Enter` (`\r`) to exit filter mode (which keeps the
+/// filter) and to commit the rename, since both are unambiguous in the parser.
+#[test]
+fn choose_tree_filter_and_rename_session() {
+    use std::process::Stdio;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // Session "main", the primary attached client.
+    let mut main_sess = TestSession::spawn(&env);
+    assert!(
+        main_sess.wait_ready("main", Duration::from_secs(20)),
+        "main session never rendered"
+    );
+
+    // Session "beta", a second PTY client in the same daemon.
+    let beta_sess =
+        TestSession::builder(&env).args(&["attach", "-n", "beta"]).start();
+    assert!(
+        beta_sess.wait_ready("beta", Duration::from_secs(20)),
+        "beta session never rendered"
+    );
+
+    // Open the choose-tree from main. Sessions are sorted alphabetically, so
+    // the tree is: beta (row 0), beta-window (1), beta-pane (2), main (3), …
+    //
+    // Needle strategy: the diff renderer only writes cells that CHANGED from
+    // the previous frame, so spaces that were already blank get skipped. We
+    // choose word-level tokens with no internal spaces:
+    //   "beta"    is the session-label row (4 consecutive non-space bytes)
+    //   "keep"    is the filter-mode footer "enter keep" (unique to filter mode)
+    //   "switch"  is the navigate-mode footer "enter switch" (unique to nav mode)
+    //   "rename:" is the rename-mode footer (colon follows without space)
+    //   "zeta"    is the re-stamped session-label after a successful rename
+    main_sess.send_prefix(b'W');
+    assert!(
+        main_sess.wait_for(b"beta", Duration::from_secs(15)),
+        "choose-tree never opened (beta label not visible). raw: {}",
+        main_sess.snapshot_str()
+    );
+
+    // Enter filter mode (`/`). The filter footer says "…enter keep…", so wait
+    // for "keep" before typing to make sure the keystroke lands in filter mode.
+    let mark_before_filter = main_sess.buffer_len();
+    main_sess.send_str("/");
+    assert!(
+        main_sess.wait_for_from(mark_before_filter, b"keep", Duration::from_secs(5)),
+        "filter mode never activated. raw: {}",
+        main_sess.snapshot_str()
+    );
+
+    // Type "bet"; the session-row label "beta — 1 win, 1 panes" stays visible
+    // (substring match). Mark before typing so we match only the re-render.
+    let mark_before_bet = main_sess.buffer_len();
+    main_sess.send_str("bet");
+    assert!(
+        main_sess.wait_for_from(mark_before_bet, b"beta", Duration::from_secs(5)),
+        "beta not visible in filtered tree. raw: {}",
+        main_sess.snapshot_str()
+    );
+
+    // Enter keeps the filter and returns to Navigate mode. The navigate footer
+    // re-renders with "…enter switch…"; mark before Enter and look for
+    // "switch" in the new output.
+    let mark_before_enter_filter = main_sess.buffer_len();
+    main_sess.send_str("\r"); // Enter keeps the filter and returns to Navigate
+    assert!(
+        main_sess.wait_for_from(mark_before_enter_filter, b"switch", Duration::from_secs(5)),
+        "nav footer never appeared after Enter-from-filter. raw: {}",
+        main_sess.snapshot_str()
+    );
+
+    // Selection is on the beta session row (row 0 alphabetically: the filter
+    // "bet" matches "beta — 1 win, 1 panes" and "beta" sorts before "main").
+    // Press `r` to enter rename mode. The footer switches to " rename: beta█  enter
+    // ok · esc cancel ". The █ cursor glyph (U+2588, "\xe2\x96\x88") shows up in
+    // the rename-mode footer but was absent from the navigate-mode footer, so
+    // using it as the needle avoids the partial-skip problem where the `r` of
+    // "rename:" coincides with the `r` of "r rename" in the previous nav footer.
+    let mark_before_rename = main_sess.buffer_len();
+    main_sess.send_str("r");
+    assert!(
+        main_sess.wait_for_from(mark_before_rename, b"\xe2\x96\x88", Duration::from_secs(5)),
+        "rename mode never activated (cursor glyph \u{2588} not found). raw: {}",
+        main_sess.snapshot_str()
+    );
+
+    // The edit buf is primed with "beta" (4 chars). Clear with Backspace ×4,
+    // type the new name "zeta", then Enter to commit.
+    main_sess.send_repeat(b"\x7f", 4); // Backspace x4 to clear "beta"
+    main_sess.send_str("zeta");
+    let mark_before_commit = main_sess.buffer_len();
+    main_sess.send_str("\r"); // Enter commits the rename
+
+    // On success the rename mode exits and the tree returns to Navigate mode.
+    // The active filter "bet" no longer matches "zeta — …", so the tree body
+    // is empty and we cannot assert "zeta" in the tree content. Instead, wait
+    // for the Navigate footer to re-appear (confirming the rename committed and
+    // the tree re-rendered): "switch" is in "enter switch" (nav-mode-only text).
+    assert!(
+        main_sess.wait_for_from(mark_before_commit, b"switch", Duration::from_secs(15)),
+        "navigate footer never re-appeared after rename commit. raw: {}",
+        main_sess.snapshot_str()
+    );
+
+    // Headless list: zeta in, beta out.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut list_ok = false;
+    while Instant::now() < deadline {
+        let list_out = std::process::Command::cargo_bin("plexy-glass")
+            .unwrap()
+            .arg("list")
+            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .stdout(Stdio::piped())
+            .output()
+            .expect("list");
+        let stdout = String::from_utf8_lossy(&list_out.stdout);
+        if stdout.contains("zeta") && !stdout.contains("beta") {
+            list_ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(list_ok, "list must show 'zeta' not 'beta'. raw: {}", main_sess.snapshot_str());
+
+    // Persist files: zeta.json must appear (debounced ~1.5 s) and beta.json
+    // must vanish (immediate delete + deferred sweep within ~3 s + margin).
+    let state_dir = tmp.path().join("state/plexy-glass/sessions");
+    let zeta_file = state_dir.join("zeta.json");
+    let beta_file = state_dir.join("beta.json");
+
+    assert!(
+        wait_for_file_exists(&zeta_file, Duration::from_secs(10)),
+        "zeta.json never written after rename"
+    );
+    // `beta.json` should be gone, so poll for absence (the deferred sweep window).
+    let beta_gone = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if !beta_file.exists() {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    assert!(beta_gone, "beta.json still exists after rename + sweep window");
+
+    // Verify the persisted zeta.json carries the new internal name.
+    assert!(
+        wait_for_file_contains(&zeta_file, "\"zeta\"", Duration::from_secs(5)),
+        "zeta.json exists but internal name field is not 'zeta'. contents: {}",
+        std::fs::read_to_string(&zeta_file).unwrap_or_default()
+    );
+
+    drop(beta_sess);
+}
