@@ -2057,6 +2057,184 @@ fn copy_mode_bracket_o_y_yanks_block_output() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Block exit-status border line e2e (S4)
+// ---------------------------------------------------------------------------
+// These tests exercise the block-border paint path end-to-end: synthetic OSC
+// 133 sequences are sent via printf so the emulator records real block marks;
+// the raw PTY output accumulated by `TestSession` is then inspected for the
+// expected Rgb-color SGR sequences and the half-block `▌` glyph (or their
+// absence). All assertions use `wait_for_from` on fresh output after a mark
+// so re-rendered earlier content does not produce false positives.
+//
+// Color constants (from crates/config/src/default.rs):
+//   alert (#c4746e) → decimal 196;116;110 → SGR `\x1b[38;2;196;116;110m`
+//   ok    (#87a987) → decimal 135;169;135 → SGR `\x1b[38;2;135;169;135m`
+// Glyph `▌` (U+258C) → UTF-8 bytes 0xE2 0x96 0x8C.
+
+/// A completed FAILED block (`D;1`) paints `▌` with the alert color on the
+/// pane's left border.
+#[test]
+fn block_border_failed_block_paints_half_block_with_fail_color() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Emit a completed FAILED block: A → output → D;1 → A (next prompt).
+    // Quote-concatenation: `BDR_'FAIL'_OUT` → BDR_FAIL_OUT appears only in
+    // the printf output, not in the echoed command text.
+    let mark_before = sess.buffer_len();
+    sess.send_str("printf '\\033]133;A\\007BDR'PROMPT'\\r\\n\\033]133;C\\007BDR_'FAIL'_OUT\\n\\033]133;D;1\\007\\033]133;A\\007BDR'NEXT'\\n'\n");
+
+    // Wait for the `▌` half-block glyph (UTF-8: 0xE2 0x96 0x8C). The diff renderer
+    // emits this on the FIRST render after the marks are recorded, so it appears
+    // at or after mark_before.
+    assert!(
+        sess.wait_for_from(mark_before, b"\xe2\x96\x8c", Duration::from_secs(10)),
+        "\u{258c} (half-block) never appeared after failed block. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // The fail-color SGR (`\x1b[38;2;196;116;110m` for #c4746e) is emitted
+    // adjacently on the same first-paint; search from mark_before.
+    assert!(
+        sess.wait_for_from(mark_before, b"\x1b[38;2;196;116;110m", Duration::from_secs(10)),
+        "fail-color SGR (\\x1b[38;2;196;116;110m) never appeared after failed block. raw: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// A completed OK block (`D;0`) paints `│` with the ok color; no `▌`.
+#[test]
+fn block_border_ok_block_paints_pipe_with_ok_color_no_half_block() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Emit a completed OK block: A → output → D;0 → A (next prompt).
+    let mark_before = sess.buffer_len();
+    sess.send_str("printf '\\033]133;A\\007BDR'OKPROMPT'\\r\\n\\033]133;C\\007BDR_'OK'_OUT\\n\\033]133;D;0\\007\\033]133;A\\007BDR'OKNEXT'\\n'\n");
+
+    // Wait for the ok-color SGR (`\x1b[38;2;135;169;135m` for #87a987) in
+    // the diff output from mark_before.
+    assert!(
+        sess.wait_for_from(mark_before, b"\x1b[38;2;135;169;135m", Duration::from_secs(10)),
+        "ok-color SGR (\\x1b[38;2;135;169;135m) never appeared after ok block. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // Snapshot the bytes from mark_before and assert `▌` is NOT there.
+    // The ok case must never paint ▌ (only the fail case does).
+    let raw = sess.snapshot();
+    let post_mark = &raw[mark_before.min(raw.len())..];
+    assert!(
+        !post_mark.windows(3).any(|w| w == b"\xe2\x96\x8c"),
+        "\u{258c} (half-block) must NOT appear after an ok block (D;0). \
+         post-mark raw bytes (lossy): {}",
+        String::from_utf8_lossy(post_mark)
+    );
+}
+
+/// Entering the alt screen reverts the border to plain (no new `▌` while in
+/// alt screen); leaving it restores `▌` for the failed block still on the
+/// main grid.
+#[test]
+fn block_border_alt_screen_reverts_and_restores() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Plant a failed block.
+    let mark_before = sess.buffer_len();
+    sess.send_str("printf '\\033]133;A\\007ALT'PROMPT'\\r\\n\\033]133;C\\007ALT_'FAIL'_OUT\\n\\033]133;D;1\\007\\033]133;A\\007ALT'NEXT'\\n'\n");
+
+    // Wait for output visible in frame.
+    assert!(
+        sess.wait_for_from(mark_before, b"ALT_FAIL_OUT", Duration::from_secs(10)),
+        "ALT_FAIL_OUT never appeared: {}",
+        sess.snapshot_str()
+    );
+
+    // Confirm the failed block border painted (▌ appears at or after mark_before).
+    assert!(
+        sess.wait_for_from(mark_before, b"\xe2\x96\x8c", Duration::from_secs(10)),
+        "\u{258c} never appeared before alt-screen enter: {}",
+        sess.snapshot_str()
+    );
+
+    // Enter the alt screen.
+    let mark_alt_enter = sess.buffer_len();
+    sess.send_str("printf '\\033[?1049h'\n");
+
+    // Wait for the frame to be redrawn after alt-screen entry. The compositor
+    // will emit border cells as plain `│` (0xE2 0x94 0x82) because alt-screen
+    // → all-None block status.
+    assert!(
+        sess.wait_for_from(mark_alt_enter, b"\xe2\x94\x82", Duration::from_secs(10)),
+        "plain \u{2502} never appeared after alt-screen enter: {}",
+        sess.snapshot_str()
+    );
+
+    // Assert that no NEW `▌` arrived after the alt-screen enter mark.
+    let raw = sess.snapshot();
+    let post_alt_enter = &raw[mark_alt_enter.min(raw.len())..];
+    assert!(
+        !post_alt_enter.windows(3).any(|w| w == b"\xe2\x96\x8c"),
+        "\u{258c} must NOT appear while in alt screen (alt-screen path should be all-None). \
+         post-mark raw bytes (lossy): {}",
+        String::from_utf8_lossy(post_alt_enter)
+    );
+
+    // Leave the alt screen.  The compositor re-renders the main grid with the
+    // failed block marks still present → `▌` must reappear.
+    let mark_alt_leave = sess.buffer_len();
+    sess.send_str("printf '\\033[?1049l'\n");
+    assert!(
+        sess.wait_for_from(mark_alt_leave, b"\xe2\x96\x8c", Duration::from_secs(10)),
+        "\u{258c} did not reappear after leaving alt screen: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// With `blocks { enabled #false }` in the config, a failed block must NOT
+/// paint `▌` on the border.
+#[test]
+fn block_border_disabled_by_config_no_half_block() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    // Write a config that disables the block-border feature.
+    write_config(&env, "blocks {\n    enabled #false\n}\n");
+
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Emit a completed FAILED block.
+    let mark_before = sess.buffer_len();
+    sess.send_str("printf '\\033]133;A\\007DIS'PROMPT'\\r\\n\\033]133;C\\007DIS_'FAIL'_OUT\\n\\033]133;D;1\\007\\033]133;A\\007DIS'NEXT'\\n'\n");
+
+    // Wait for the block output text to confirm the block was processed.
+    assert!(
+        sess.wait_for_from(mark_before, b"DIS_FAIL_OUT", Duration::from_secs(10)),
+        "DIS_FAIL_OUT never appeared in frame: {}",
+        sess.snapshot_str()
+    );
+
+    // Snapshot the bytes from mark_before (entire render since the block was
+    // emitted) and assert `▌` is NOT there. The ok_color SGR also must not
+    // appear (feature is fully disabled).
+    let raw = sess.snapshot();
+    let post_mark = &raw[mark_before.min(raw.len())..];
+    assert!(
+        !post_mark.windows(3).any(|w| w == b"\xe2\x96\x8c"),
+        "\u{258c} (half-block) must NOT appear when blocks.enabled = false. \
+         post-mark raw bytes (lossy): {}",
+        String::from_utf8_lossy(post_mark)
+    );
+}
+
 // Regression for the helix Shift+I bug. The pane child pushes Kitty keyboard
 // flags 5 (disambiguate|alternates, exactly what helix pushes), then execs
 // `cat -v`, which renders every byte it receives visibly (escape sequences

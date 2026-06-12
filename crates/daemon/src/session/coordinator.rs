@@ -234,6 +234,10 @@ pub(super) async fn render_coordinator(
                 plexy_glass_mux::PopupView { rect: *rect, screen, title }
             });
 
+            // Build the block-border color pair from the session's current config
+            // so that live-reload updates apply for free on the next compose call.
+            let block_colors = block_border_colors(&session.config_snapshot());
+
             Compositor::compose(
                 &views,
                 (host.rows, host.cols),
@@ -243,7 +247,7 @@ pub(super) async fn render_coordinator(
                 overlay_view.as_ref(),
                 message.as_deref(),
                 popup_view.as_ref(),
-                None, // S4 wires real colors
+                block_colors.as_ref(),
             )
         };
         let _ = frame_tx.send(Arc::new(frame));
@@ -377,6 +381,47 @@ fn command_label(command: &str) -> String {
     label.to_string()
 }
 
+// ── Block-border color resolution ─────────────────────────────────────────────
+
+/// Fallback `Rgb` values for "ok" and "alert" from the built-in palette
+/// (crates/config/src/default.rs line 28, 31).
+/// Used when `resolve_color` fails to resolve a user-supplied name/hex.
+const DEFAULT_OK_RGB: (u8, u8, u8) = (0x87, 0xa9, 0x87); // #87a987
+const DEFAULT_ALERT_RGB: (u8, u8, u8) = (0xc4, 0x74, 0x6e); // #c4746e
+
+/// Build an `Option<BlockBorderColors>` from the session's current config.
+///
+/// Returns `None` when `blocks.enabled` is `false`. Otherwise resolves each
+/// color name/hex via `resolve_color`; if resolution fails, falls back to the
+/// built-in palette defaults so the feature stays enabled even when the config
+/// contains an unrecognised color string.
+pub(super) fn block_border_colors(
+    cfg: &plexy_glass_config::Config,
+) -> Option<plexy_glass_mux::BlockBorderColors> {
+    if !cfg.blocks.enabled {
+        return None;
+    }
+    let palette = &cfg.palette;
+    // resolve_color failed (bad palette name or malformed hex) → fall back to
+    // the hard-coded default so the feature keeps painting.
+    let ok_rgb = plexy_glass_status::resolve_color(&cfg.blocks.ok_color, palette)
+        .unwrap_or(plexy_glass_status::Rgb {
+            r: DEFAULT_OK_RGB.0,
+            g: DEFAULT_OK_RGB.1,
+            b: DEFAULT_OK_RGB.2,
+        });
+    let fail_rgb = plexy_glass_status::resolve_color(&cfg.blocks.fail_color, palette)
+        .unwrap_or(plexy_glass_status::Rgb {
+            r: DEFAULT_ALERT_RGB.0,
+            g: DEFAULT_ALERT_RGB.1,
+            b: DEFAULT_ALERT_RGB.2,
+        });
+    Some(plexy_glass_mux::BlockBorderColors {
+        ok: plexy_glass_emulator::Color::Rgb(ok_rgb.r, ok_rgb.g, ok_rgb.b),
+        fail: plexy_glass_emulator::Color::Rgb(fail_rgb.r, fail_rgb.g, fail_rgb.b),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,5 +490,109 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── block_border_colors unit tests ────────────────────────────────────────
+
+    /// `enabled #false` → None regardless of colors.
+    #[test]
+    fn block_border_colors_disabled_returns_none() {
+        let mut cfg = built_in_default();
+        cfg.blocks.enabled = false;
+        assert!(
+            block_border_colors(&cfg).is_none(),
+            "expected None when blocks.enabled = false"
+        );
+    }
+
+    /// Default config resolves "ok" and "alert" from the built-in palette.
+    #[test]
+    fn block_border_colors_defaults_resolve_correctly() {
+        let cfg = built_in_default();
+        let colors = block_border_colors(&cfg).expect("expected Some with default config");
+        assert_eq!(
+            colors.ok,
+            plexy_glass_emulator::Color::Rgb(0x87, 0xa9, 0x87),
+            "ok color should be #87a987"
+        );
+        assert_eq!(
+            colors.fail,
+            plexy_glass_emulator::Color::Rgb(0xc4, 0x74, 0x6e),
+            "fail color should be #c4746e"
+        );
+    }
+
+    /// The hardcoded fallback constants must track the built-in palette's
+    /// `ok`/`alert` entries, so a palette change can't silently desync the
+    /// bad-config fallback path.
+    #[test]
+    fn fallback_constants_match_built_in_palette() {
+        let palette = &built_in_default().palette;
+        let ok = plexy_glass_status::resolve_color("ok", palette).expect("palette has ok");
+        let alert = plexy_glass_status::resolve_color("alert", palette).expect("palette has alert");
+        assert_eq!((ok.r, ok.g, ok.b), DEFAULT_OK_RGB);
+        assert_eq!((alert.r, alert.g, alert.b), DEFAULT_ALERT_RGB);
+    }
+
+    /// A bad `ok_color` falls back to the default ok `Rgb`; the feature stays enabled.
+    #[test]
+    fn block_border_colors_bad_ok_color_falls_back_to_default() {
+        let mut cfg = built_in_default();
+        cfg.blocks.ok_color = "not-a-valid-color".to_string();
+        let colors = block_border_colors(&cfg).expect("expected Some even with bad ok_color");
+        // Falls back to the hard-coded default #87a987.
+        assert_eq!(
+            colors.ok,
+            plexy_glass_emulator::Color::Rgb(0x87, 0xa9, 0x87),
+            "bad ok_color must fall back to default #87a987"
+        );
+    }
+
+    /// A bad `fail_color` falls back to the default alert `Rgb`; the feature stays
+    /// enabled.
+    #[test]
+    fn block_border_colors_bad_fail_color_falls_back_to_default() {
+        let mut cfg = built_in_default();
+        cfg.blocks.fail_color = "##invalid".to_string();
+        let colors = block_border_colors(&cfg).expect("expected Some even with bad fail_color");
+        assert_eq!(
+            colors.fail,
+            plexy_glass_emulator::Color::Rgb(0xc4, 0x74, 0x6e),
+            "bad fail_color must fall back to default #c4746e"
+        );
+    }
+
+    /// A custom hex color resolves correctly.
+    #[test]
+    fn block_border_colors_custom_hex_resolves() {
+        let mut cfg = built_in_default();
+        cfg.blocks.ok_color = "#aabbcc".to_string();
+        cfg.blocks.fail_color = "#001122".to_string();
+        let colors = block_border_colors(&cfg).expect("expected Some with valid hex colors");
+        assert_eq!(
+            colors.ok,
+            plexy_glass_emulator::Color::Rgb(0xaa, 0xbb, 0xcc),
+            "custom ok hex #aabbcc should resolve"
+        );
+        assert_eq!(
+            colors.fail,
+            plexy_glass_emulator::Color::Rgb(0x00, 0x11, 0x22),
+            "custom fail hex #001122 should resolve"
+        );
+    }
+
+    /// A custom palette name resolves via the config's palette.
+    #[test]
+    fn block_border_colors_custom_palette_name_resolves() {
+        let mut cfg = built_in_default();
+        // Add a custom palette entry.
+        cfg.palette.entries.insert("my_green".to_string(), "#00ff00".to_string());
+        cfg.blocks.ok_color = "my_green".to_string();
+        let colors = block_border_colors(&cfg).expect("expected Some with custom palette name");
+        assert_eq!(
+            colors.ok,
+            plexy_glass_emulator::Color::Rgb(0x00, 0xff, 0x00),
+            "custom palette name 'my_green' should resolve to #00ff00"
+        );
     }
 }
