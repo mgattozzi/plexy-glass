@@ -1,8 +1,8 @@
 use super::{COMMAND_HISTORY_CAP, WindowManager};
 use plexy_glass_mux::{
-    BufferAction, BufferEntry, BufferOutcome, BufferPickerState, KeyEvent, Overlay, OverlayAction,
-    OverlayHandler, PickerEntry, RenameTarget, TreeAction, TreeNode, TreeOutcome, TreeState,
-    handle_buffers, handle_tree,
+    BufferAction, BufferEntry, BufferOutcome, BufferPickerState, KeyEvent, NodeKey, Overlay,
+    OverlayAction, OverlayHandler, PickerEntry, RenameTarget, TreeAction, TreeKind, TreeNode,
+    TreeOutcome, TreeState, handle_buffers, handle_tree, session_label,
 };
 
 /// How the caller should follow up after feeding a key to the active overlay.
@@ -100,6 +100,56 @@ impl WindowManager {
         self.rename_pane_target = None;
     }
 
+    /// Re-stamp a still-open choose-tree after a SUCCESSFUL session rename.
+    /// Unlike window/pane renames the tree is not optimistically mutated on
+    /// commit, because session identity is stamped on every descendant row
+    /// (`TreeNode::session`) and inside collapsed [`NodeKey`]s, so the
+    /// connection layer commits here, on registry success only. Rewrites the
+    /// session row (name + label, with win/pane counts re-derived from its
+    /// descendant rows), the descendants' `session` fields, and re-keys the
+    /// affected `collapsed` entries. No-op when the overlay is no longer the
+    /// tree or the row is gone.
+    pub fn rename_tree_session(&mut self, old: &str, new: &str) {
+        let Some(Overlay::Tree(state)) = self.overlay.as_mut() else {
+            return;
+        };
+        // Re-key collapsed entries so existing folds survive the rename.
+        state.collapsed = std::mem::take(&mut state.collapsed)
+            .into_iter()
+            .map(|k| match k {
+                NodeKey::Session(s) if s == old => NodeKey::Session(new.to_string()),
+                NodeKey::Window { session, window } if session == old => {
+                    NodeKey::Window { session: new.to_string(), window }
+                }
+                k => k,
+            })
+            .collect();
+        let Some(start) = state
+            .nodes
+            .iter()
+            .position(|n| n.kind() == TreeKind::Session && n.session == old)
+        else {
+            return;
+        };
+        // The session's subtree is the contiguous deeper run after its row
+        // (pre-order DFS). Rewrite descendants and count them for the label.
+        let (mut windows, mut panes) = (0usize, 0usize);
+        let mut i = start + 1;
+        while i < state.nodes.len() && state.nodes[i].depth > 0 {
+            match state.nodes[i].kind() {
+                TreeKind::Window => windows += 1,
+                TreeKind::Pane => panes += 1,
+                TreeKind::Session => {}
+            }
+            state.nodes[i].session = new.to_string();
+            i += 1;
+        }
+        let row = &mut state.nodes[start];
+        row.session = new.to_string();
+        row.name = new.to_string();
+        row.label = session_label(new, windows, panes);
+    }
+
     /// Feed one key to the active overlay. On commit, applies the rename to the
     /// active window or the captured pane; an empty (whitespace-only) name is a
     /// no-op rename. The return tells the caller how to follow up: `Ignored`
@@ -108,8 +158,10 @@ impl WindowManager {
     pub fn handle_overlay_key(&mut self, event: &KeyEvent) -> OverlayKeyResult {
         // The tree overlay is driven by the pure `handle_tree`; its actions are
         // cross-session and dispatched at the connection layer. `Switch` and
-        // `Cancel` close the overlay here; `Kill*`/`Rename*` keep it open (the
-        // handler already updated the in-memory model optimistically).
+        // `Cancel` close the overlay here; `Kill*`/`Rename*` keep it open.
+        // Window/pane renames update the in-memory model optimistically;
+        // `RenameSession` does NOT. The connection layer commits via
+        // `rename_tree_session` only after the registry rename succeeds.
         if let Some(Overlay::Tree(state)) = self.overlay.as_mut() {
             return match handle_tree(event, state) {
                 TreeOutcome::None => OverlayKeyResult::Ignored,

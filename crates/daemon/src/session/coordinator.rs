@@ -121,7 +121,7 @@ pub(super) async fn render_coordinator(
                 });
 
             // Build event-driven widget context, refresh, snapshot.
-            let session_name = session.name.clone();
+            let session_name = session.name();
             let attached_clients = session.clients.lock().await.len() as u8;
             let windows_data: Vec<plexy_glass_status::WindowSummary> = m
                 .windows()

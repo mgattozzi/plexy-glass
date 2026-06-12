@@ -312,7 +312,7 @@ where
     };
 
     let mut client_id = handle.client_id;
-    let session_name = session.name.clone();
+    let session_name = session.name();
 
     send_msg(
         &mut writer,
@@ -711,7 +711,7 @@ impl ClientCtx<'_> {
             self.session.set_status_message(format!("no session: {name}")).await;
             return false;
         };
-        if target.name == self.session.name {
+        if target.name() == self.session.name() {
             self.session.set_status_message(format!("already on {name}")).await;
             return false;
         }
@@ -746,7 +746,7 @@ impl ClientCtx<'_> {
 /// session picker. Shared by the `Ctrl+a w` keymap arm and the `:sessions`
 /// command-prompt verb.
 async fn open_session_picker_overlay(session: &Arc<Session>, registry: &Arc<SessionRegistry>) {
-    let current = session.name.clone();
+    let current = session.name();
     let mut entries: Vec<plexy_glass_mux::PickerEntry> = registry
         .list()
         .await
@@ -773,7 +773,7 @@ async fn open_session_picker_overlay(session: &Arc<Session>, registry: &Arc<Sess
 /// snapshot is taken via the async `tree_snapshot` (never `blocking_lock` from
 /// this runtime task).
 async fn open_tree_overlay(session: &Arc<Session>, registry: &Arc<SessionRegistry>) {
-    let current = session.name.clone();
+    let current = session.name();
     let mut snaps: Vec<crate::session::SessionTree> = Vec::new();
     for entry in registry.list().await {
         let Some(s) = registry.get(&entry.name).await else {
@@ -797,7 +797,7 @@ fn build_tree_nodes(
     snaps: &[crate::session::SessionTree],
     current: &str,
 ) -> Vec<plexy_glass_mux::TreeNode> {
-    use plexy_glass_mux::{TreeNode, pane_label, window_label};
+    use plexy_glass_mux::{TreeNode, pane_label, session_label, window_label};
     let mut nodes: Vec<TreeNode> = Vec::new();
     for st in snaps {
         let is_cur = st.name == current;
@@ -806,12 +806,7 @@ fn build_tree_nodes(
             window: None,
             pane: None,
             depth: 0,
-            label: format!(
-                "{} \u{2014} {} win, {} panes",
-                st.name,
-                st.windows.len(),
-                st.total_panes
-            ),
+            label: session_label(&st.name, st.windows.len(), st.total_panes),
             name: st.name.clone(),
             index: 0,
             is_current: is_cur,
@@ -861,7 +856,7 @@ impl ClientCtx<'_> {
                 // switch succeeded. On a failed switch the client stays on the
                 // SOURCE, and because ids are not unique across sessions,
                 // applying the target's ids here would mutate the wrong session.
-                let on_target = if tgt == self.session.name {
+                let on_target = if tgt == self.session.name() {
                     true
                 } else {
                     self.switch_session(tgt).await
@@ -934,7 +929,20 @@ impl ClientCtx<'_> {
                 }
                 self.session.notify.notify_one();
             }
-            TreeAction::RenameSession { .. } => {} // T2 wires this
+            TreeAction::RenameSession { old, new } => {
+                match self.registry.rename_session(&old, &new).await {
+                    Ok(()) => {
+                        // Commit-on-success: the tree model was NOT mutated at
+                        // commit time (session identity is stamped on every
+                        // descendant row and in collapsed keys), so re-stamp
+                        // the still-open overlay now.
+                        let mut m = self.session.window_manager.lock().await;
+                        m.rename_tree_session(&old, &new);
+                    }
+                    Err(e) => self.session.set_status_message(e.to_string()).await,
+                }
+                self.session.notify.notify_one();
+            }
         }
     }
 }
@@ -2014,6 +2022,174 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         server.abort();
+    }
+
+    fn tree_key(c: char) -> plexy_glass_mux::KeyEvent {
+        plexy_glass_mux::KeyEvent::plain(plexy_glass_mux::Key::Char(c))
+    }
+
+    // RenameSession success path: the registry re-keys, and the adapter
+    // commits the rename into the STILL-OPEN tree (commit-on-success, the
+    // model was not optimistically mutated): session row label/name,
+    // descendants' `session` fields, and collapsed NodeKeys all re-stamped;
+    // no status message.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tree_rename_session_commits_and_restamps_open_tree() {
+        let _g = crate::test_env::isolate();
+        use plexy_glass_mux::{NodeKey, Overlay, TreeAction, TreeKind, session_label};
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let mut session = registry
+            .attach_or_create("alpha".into(), cat(), size, Arc::clone(&cfg))
+            .await
+            .unwrap();
+        registry
+            .attach_or_create("beta".into(), cat(), size, Arc::clone(&cfg))
+            .await
+            .unwrap();
+        open_tree_overlay(&session, &registry).await;
+        {
+            // Rows (sorted): alpha(0) alpha-win(1) alpha-pane(2) beta(3)
+            // beta-win(4) beta-pane(5). Collapse beta's window AND beta itself
+            // so the rename must re-key both NodeKey shapes.
+            let mut m = session.window_manager.lock().await;
+            for _ in 0..4 {
+                m.handle_overlay_key(&tree_key('j'));
+            }
+            m.handle_overlay_key(&tree_key('h')); // collapse beta's window
+            m.handle_overlay_key(&tree_key('k'));
+            m.handle_overlay_key(&tree_key('h')); // collapse beta
+        }
+
+        let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
+        let mut client_id = 0u64;
+        let prefix_armed = Arc::new(AtomicBool::new(false));
+        let mut ctx = ClientCtx {
+            session: &mut session,
+            client_id: &mut client_id,
+            size,
+            registry: &registry,
+            switch_tx: &switch_tx,
+            prefix_armed: &prefix_armed,
+        };
+        ctx.dispatch_tree_action(TreeAction::RenameSession {
+            old: "beta".into(),
+            new: "gamma".into(),
+        })
+        .await;
+
+        assert!(registry.get("beta").await.is_none(), "registry re-keyed away from old");
+        assert!(registry.get("gamma").await.is_some(), "registry resolves the new name");
+
+        let mut m = session.window_manager.lock().await;
+        assert_eq!(m.take_active_message(), None, "success sets no status message");
+        let Some(Overlay::Tree(state)) = m.overlay() else {
+            panic!("tree overlay must still be open after a rename");
+        };
+        let row = state
+            .nodes
+            .iter()
+            .find(|n| n.kind() == TreeKind::Session && n.session == "gamma")
+            .expect("renamed session row present");
+        assert_eq!(row.name, "gamma");
+        assert_eq!(row.label, session_label("gamma", 1, 1));
+        assert!(
+            state.nodes.iter().all(|n| n.session != "beta"),
+            "no row may keep the old session identity"
+        );
+        assert_eq!(
+            state.nodes.iter().filter(|n| n.session == "gamma").count(),
+            3,
+            "session + window + pane rows all re-stamped"
+        );
+        assert!(state.collapsed.contains(&NodeKey::Session("gamma".into())));
+        assert!(
+            state
+                .collapsed
+                .iter()
+                .any(|k| matches!(k, NodeKey::Window { session, .. } if session == "gamma")),
+            "window NodeKey re-keyed"
+        );
+        assert!(
+            !state.collapsed.iter().any(|k| matches!(
+                k,
+                NodeKey::Session(s) if s == "beta"
+            ) || matches!(
+                k,
+                NodeKey::Window { session, .. } if session == "beta"
+            )),
+            "no collapsed key may keep the old session identity"
+        );
+    }
+
+    // RenameSession failure path (live-name collision): status message set,
+    // tree untouched. Nothing was optimistically mutated, so nothing to revert.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tree_rename_session_collision_sets_status_and_leaves_tree() {
+        let _g = crate::test_env::isolate();
+        use plexy_glass_mux::{Overlay, TreeAction};
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let mut session = registry
+            .attach_or_create("alpha".into(), cat(), size, Arc::clone(&cfg))
+            .await
+            .unwrap();
+        registry
+            .attach_or_create("beta".into(), cat(), size, Arc::clone(&cfg))
+            .await
+            .unwrap();
+        open_tree_overlay(&session, &registry).await;
+        let nodes_before = {
+            let m = session.window_manager.lock().await;
+            let Some(Overlay::Tree(state)) = m.overlay() else {
+                panic!("tree overlay must be open");
+            };
+            state.nodes.clone()
+        };
+
+        let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
+        let mut client_id = 0u64;
+        let prefix_armed = Arc::new(AtomicBool::new(false));
+        let mut ctx = ClientCtx {
+            session: &mut session,
+            client_id: &mut client_id,
+            size,
+            registry: &registry,
+            switch_tx: &switch_tx,
+            prefix_armed: &prefix_armed,
+        };
+        ctx.dispatch_tree_action(TreeAction::RenameSession {
+            old: "beta".into(),
+            new: "alpha".into(),
+        })
+        .await;
+
+        assert!(registry.get("alpha").await.is_some());
+        assert!(registry.get("beta").await.is_some(), "failed rename leaves the key alone");
+        let mut m = session.window_manager.lock().await;
+        let msg = m.take_active_message().expect("collision must set a status message");
+        assert!(
+            msg.contains("already exists"),
+            "status message carries the registry error; got {msg:?}"
+        );
+        let Some(Overlay::Tree(state)) = m.overlay() else {
+            panic!("tree overlay must still be open");
+        };
+        assert_eq!(state.nodes, nodes_before, "failed rename leaves the tree untouched");
     }
 
     // Drive break-pane and join-pane through the full key/verb path and assert

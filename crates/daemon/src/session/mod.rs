@@ -29,7 +29,10 @@ pub struct ClientHandle {
 }
 
 pub struct Session {
-    pub name: String,
+    /// The live session name. Behind a Mutex because the registry's
+    /// `rename_session` changes it at runtime; read via the clone-out
+    /// accessor [`Session::name`] (Pane.name style, never hand out a guard).
+    name: StdMutex<String>,
     pub created: SystemTime,
     pub window_manager: Mutex<WindowManager>,
     pub clients: Mutex<Vec<ClientHandle>>,
@@ -62,6 +65,23 @@ pub struct Session {
 }
 
 impl Session {
+    /// The session's live name, cloned out from under the lock. Always a
+    /// clone, never a guard: one reader runs per rendered frame and several
+    /// call sites are async, so clone-out precludes any guard-across-await
+    /// hazard by construction.
+    pub fn name(&self) -> String {
+        // invariant: name mutex briefly held to clone the value out.
+        self.name.lock().expect("name mutex poisoned").clone()
+    }
+
+    /// Replace the live name. Only the registry's `rename_session` calls
+    /// this, under its map lock, so the map key and the live name move
+    /// together.
+    pub(crate) fn set_name(&self, new: String) {
+        // invariant: name mutex briefly held to store the value.
+        *self.name.lock().expect("name mutex poisoned") = new;
+    }
+
     /// Snapshot the current active config Arc. Hot reload swaps the
     /// inner Arc; callers should call this each time they need a current view
     /// of the config rather than caching across awaits.
@@ -139,7 +159,7 @@ impl Session {
             .collect();
         SessionStateV1 {
             schema: SCHEMA_VERSION,
-            name: self.name.clone(),
+            name: self.name(),
             created: chrono::DateTime::<chrono::Utc>::from(self.created),
             active_window: wm.active_idx(),
             windows,
@@ -166,7 +186,7 @@ impl Session {
         let engine = plexy_glass_status::StatusEngine::new(&config.status, &config.palette);
         let status_engine = engine.inner();
         let session = Arc::new(Self {
-            name,
+            name: StdMutex::new(name),
             created: SystemTime::now(),
             window_manager: Mutex::new(window_manager),
             clients: Mutex::new(Vec::new()),
@@ -352,7 +372,7 @@ impl Session {
             .map(|w| w.layout().panes().len() as u8)
             .sum();
         SessionEntry {
-            name: self.name.clone(),
+            name: self.name(),
             windows,
             panes,
             clients,
@@ -382,7 +402,7 @@ impl Session {
                 WindowTree { id: w.id, name: w.name.clone(), active_pane: w.active(), panes }
             })
             .collect();
-        SessionTree { name: self.name.clone(), active_window, total_panes, windows }
+        SessionTree { name: self.name(), active_window, total_panes, windows }
     }
 
     /// `prefix_armed` is the connection's live prefix flag (shared, not
@@ -396,7 +416,7 @@ impl Session {
     ) -> Result<ClientHandle, DaemonError> {
         if self.closing.load(Ordering::SeqCst) {
             return Err(DaemonError::Protocol(ProtocolError::SessionNotFound {
-                name: self.name.clone(),
+                name: self.name(),
             }));
         }
         let client_id = self.next_client_id.fetch_add(1, Ordering::SeqCst);
@@ -1068,7 +1088,7 @@ async fn persist_loop(weak: std::sync::Weak<Session>) {
             session.snapshot_for_persist(&wm)
         };
         if let Err(e) = crate::persist::save_session(&snap) {
-            tracing::warn!(error = %e, name = %session.name, "session persist failed");
+            tracing::warn!(error = %e, name = %session.name(), "session persist failed");
             // `dirty` was already swapped to false above; without this the
             // snapshot is silently lost until the next structural change.
             // mark_dirty re-sets the flag AND notifies, so the next
@@ -1106,7 +1126,7 @@ fn empty_snapshot_ctx() -> plexy_glass_status::SnapshotCtx {
 /// async lock is also runtime-agnostic (works on current-thread test runtimes).
 async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::SnapshotCtx {
     let manager = session.window_manager.lock().await;
-    let session_name = session.name.clone();
+    let session_name = session.name();
     let attached_clients = session.clients.lock().await.len() as u8;
     let active_idx = manager.active_idx();
     let windows: Vec<plexy_glass_status::WindowSummary> = manager
@@ -1175,7 +1195,7 @@ mod tests {
     async fn session_construct_succeeds() {
         let _g = crate::test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).expect("construct session");
-        assert_eq!(s.name, "main");
+        assert_eq!(s.name(), "main");
         assert!(!s.closing.load(Ordering::SeqCst));
     }
 
