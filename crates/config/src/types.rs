@@ -7,6 +7,28 @@ pub struct Config {
     pub status: StatusConfig,
     pub keymap: KeymapConfig,
     pub sessions: Vec<SessionTemplate>,
+    pub blocks: BlocksConfig,
+}
+
+/// Configuration for the block exit-status border feature.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlocksConfig {
+    /// When `false`, no block-status border painting is performed.
+    pub enabled: bool,
+    /// Palette name or `#rrggbb` hex color for succeeded-command border segments.
+    pub ok_color: String,
+    /// Palette name or `#rrggbb` hex color for failed-command border segments.
+    pub fail_color: String,
+}
+
+impl Default for BlocksConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ok_color: "ok".to_string(),
+            fail_color: "alert".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

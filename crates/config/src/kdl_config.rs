@@ -3,9 +3,9 @@
 //! every downstream consumer are unchanged.
 
 use crate::{
-    Config, ConfigError, KeymapBinding, KeymapConfig, Padding, PaletteConfig, PaneNode,
-    PaneTemplate, Position, SessionTemplate, SplitDirection, StatusConfig, StyleConfig, WidgetSpec,
-    WindowTemplate,
+    BlocksConfig, Config, ConfigError, KeymapBinding, KeymapConfig, Padding, PaletteConfig,
+    PaneNode, PaneTemplate, Position, SessionTemplate, SplitDirection, StatusConfig, StyleConfig,
+    WidgetSpec, WindowTemplate,
 };
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use std::time::Duration;
@@ -22,6 +22,7 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
     let mut seen_palette = false;
     let mut seen_status = false;
     let mut seen_keymap = false;
+    let mut seen_blocks = false;
     for node in doc.nodes() {
         match node.name().value() {
             "palette" => {
@@ -38,6 +39,11 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
                 dup_check(seen_keymap, "keymap", node, src)?;
                 seen_keymap = true;
                 config.keymap = decode_keymap(node, src)?;
+            }
+            "blocks" => {
+                dup_check(seen_blocks, "blocks", node, src)?;
+                seen_blocks = true;
+                config.blocks = decode_blocks(node, src)?;
             }
             "session" => {
                 let template = decode_session(node, src)?;
@@ -166,6 +172,25 @@ fn decode_keymap(node: &KdlNode, src: &str) -> Result<KeymapConfig, ConfigError>
         }
     }
     Ok(km)
+}
+
+// --- blocks ---
+
+fn decode_blocks(node: &KdlNode, src: &str) -> Result<BlocksConfig, ConfigError> {
+    ensure_no_props(node, src)?;
+    // Start from the built-in default and override only the fields the node specifies.
+    let mut blocks = BlocksConfig::default();
+    if let Some(doc) = node.children() {
+        for child in doc.nodes() {
+            match child.name().value() {
+                "enabled" => blocks.enabled = bool_arg(child, 0, src, "enabled")?,
+                "ok-color" => blocks.ok_color = string_arg(child, 0, src, "ok-color")?.to_string(),
+                "fail-color" => blocks.fail_color = string_arg(child, 0, src, "fail-color")?.to_string(),
+                other => return Err(decode_err(src, child, &format!("unknown blocks node `{other}`"))),
+            }
+        }
+    }
+    Ok(blocks)
 }
 
 // --- sessions (declarative defaults, Feature B) ---
@@ -1193,5 +1218,73 @@ session "dev" cwd="~/projects/app" {
     fn window_rejects_unknown_prop() {
         let err = parse_config(r##"session "x" { window "w" bogus="1" { pane } }"##);
         assert!(err.is_err(), "unknown window property must error");
+    }
+
+    // --- blocks ---
+
+    #[test]
+    fn blocks_defaults_when_absent() {
+        let cfg = parse_config("").unwrap();
+        let d = BlocksConfig::default();
+        assert_eq!(cfg.blocks, d);
+        assert!(cfg.blocks.enabled);
+        assert_eq!(cfg.blocks.ok_color, "ok");
+        assert_eq!(cfg.blocks.fail_color, "alert");
+    }
+
+    #[test]
+    fn blocks_round_trip_custom_values() {
+        let cfg = parse_config(
+            r##"blocks { enabled #true; ok-color "#87a987"; fail-color "#c4746e" }"##,
+        )
+        .unwrap();
+        assert!(cfg.blocks.enabled);
+        assert_eq!(cfg.blocks.ok_color, "#87a987");
+        assert_eq!(cfg.blocks.fail_color, "#c4746e");
+    }
+
+    #[test]
+    fn blocks_round_trip_hex_literal() {
+        let cfg = parse_config(r##"blocks { ok-color "#ff0000"; fail-color "#0000ff" }"##).unwrap();
+        assert_eq!(cfg.blocks.ok_color, "#ff0000");
+        assert_eq!(cfg.blocks.fail_color, "#0000ff");
+    }
+
+    #[test]
+    fn blocks_round_trip_palette_names() {
+        let cfg = parse_config(r##"blocks { ok-color "ok"; fail-color "alert" }"##).unwrap();
+        assert_eq!(cfg.blocks.ok_color, "ok");
+        assert_eq!(cfg.blocks.fail_color, "alert");
+    }
+
+    #[test]
+    fn blocks_partial_node_other_fields_default() {
+        // Only `fail-color` set, so `enabled` and `ok_color` stay at defaults.
+        let cfg = parse_config(r##"blocks { fail-color "#ff0000" }"##).unwrap();
+        assert!(cfg.blocks.enabled, "enabled defaults to true");
+        assert_eq!(cfg.blocks.ok_color, "ok", "ok_color defaults to ok");
+        assert_eq!(cfg.blocks.fail_color, "#ff0000");
+    }
+
+    #[test]
+    fn blocks_enabled_false_decodes() {
+        let cfg = parse_config(r##"blocks { enabled #false }"##).unwrap();
+        assert!(!cfg.blocks.enabled);
+    }
+
+    #[test]
+    fn blocks_unknown_child_errors() {
+        assert!(parse_config(r##"blocks { bogus "x" }"##).is_err());
+    }
+
+    #[test]
+    fn blocks_duplicate_node_errors() {
+        assert!(parse_config(r##"blocks { } blocks { }"##).is_err());
+    }
+
+    #[test]
+    fn blocks_property_form_rejected() {
+        // blocks takes no properties on the node itself.
+        assert!(parse_config(r##"blocks enabled=#true"##).is_err());
     }
 }

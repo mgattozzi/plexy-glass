@@ -1,6 +1,6 @@
 use crate::{
-    Config, KeymapBinding, KeymapConfig, PaletteConfig, Padding, Position, StatusConfig,
-    StyleConfig, WidgetSpec,
+    BlocksConfig, Config, KeymapBinding, KeymapConfig, PaletteConfig, Padding, Position,
+    StatusConfig, StyleConfig, WidgetSpec,
 };
 use std::time::Duration;
 
@@ -43,6 +43,7 @@ pub fn built_in_default() -> Config {
         // The built-in default declares no sessions (Feature B); declared
         // sessions are opt-in via `session` nodes in the user's config.
         sessions: Vec::new(),
+        blocks: BlocksConfig::default(),
         status: StatusConfig {
             position: Position::Bottom,
             refresh: Duration::from_secs(5),

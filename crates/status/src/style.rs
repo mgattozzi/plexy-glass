@@ -51,6 +51,14 @@ pub fn resolve_style(style: &StyleConfig, palette: &PaletteConfig) -> ResolvedSt
     }
 }
 
+/// Resolve a palette name or `#rrggbb` hex literal to an `Rgb` color.
+///
+/// Returns `None` when the name is absent from the palette or the hex is
+/// malformed.
+pub fn resolve_color(name_or_hex: &str, palette: &PaletteConfig) -> Option<Rgb> {
+    lookup(name_or_hex, palette)
+}
+
 fn lookup(name_or_hex: &str, palette: &PaletteConfig) -> Option<Rgb> {
     if let Some(literal) = Rgb::parse_hex(name_or_hex) {
         return Some(literal);
@@ -111,5 +119,29 @@ mod tests {
         };
         let r = resolve_style(&s, &PaletteConfig::default());
         assert!(r.attrs.contains(Attrs::BOLD));
+    }
+
+    #[test]
+    fn resolve_color_hex_literal() {
+        let result = resolve_color("#ff0000", &PaletteConfig::default());
+        assert_eq!(result, Some(Rgb { r: 0xff, g: 0x00, b: 0x00 }));
+    }
+
+    #[test]
+    fn resolve_color_palette_name() {
+        let result = resolve_color("accent", &palette());
+        assert_eq!(result, Some(Rgb { r: 0x7e, g: 0x9c, b: 0xd8 }));
+    }
+
+    #[test]
+    fn resolve_color_unknown_name_is_none() {
+        let result = resolve_color("nonexistent", &PaletteConfig::default());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn resolve_color_malformed_hex_is_none() {
+        let result = resolve_color("#gggggg", &PaletteConfig::default());
+        assert_eq!(result, None);
     }
 }
