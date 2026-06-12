@@ -451,6 +451,42 @@ themselves contain colons and spaces.
 | `reload_config` | Reload `config.kdl` |
 | `cancel` | Do nothing (an explicit no-op, e.g. to neuter a default chord) |
 
+## `blocks`
+
+Controls the block exit-status border feature (see
+[docs/command-blocks.md, Exit status on the border](command-blocks.md#exit-status-on-the-border)
+for the user-facing description of what it does).
+
+```kdl
+blocks {
+    enabled #true         // #false disables all block border painting
+    ok-color "ok"         // palette name or #rrggbb; default: palette `ok`
+    fail-color "alert"    // palette name or #rrggbb; default: palette `alert`
+}
+```
+
+- `enabled` is `#true` (default) or `#false`. When `#false`, no block-status
+  coloring is performed and the left border is always plain. All other
+  `blocks` properties are still decoded normally, so `enabled #false` is the
+  way to opt out of the feature without deleting the rest of the node.
+- `ok-color` is the foreground color for border rows belonging to a block
+  that exited with code 0. It takes a palette name (e.g. `"ok"`, `"accent"`)
+  or a `#rrggbb` hex literal (e.g. `"#87a987"`). Default: `"ok"` (the
+  built-in palette entry `#87a987`).
+- `fail-color` is the foreground color for rows belonging to a block that
+  exited with a nonzero code, and it also triggers the `│` → `▌` glyph on
+  plain vertical segments. Same value forms as `ok-color`. Default: `"alert"`
+  (the built-in palette entry `#c4746e`).
+
+A bad color value (unknown palette name or malformed hex) falls back to the
+built-in default for that field, so it never disables the feature and is not
+a hard error. Both fields resolve through the same color lookup the
+status-bar widget styles use, so custom `palette` entries are valid values.
+
+The `blocks` node live-reloads with the config (`Ctrl+a R` /
+`plexy-glass reload`), same as `palette` and `status`. A reload that supplies
+new colors shows up on the next rendered frame.
+
 ## `session` — declarative sessions
 
 `session` nodes declare sessions that the daemon builds fresh at boot. For a

@@ -254,7 +254,16 @@ and reflow; block helpers in `crates/mux/src/blocks.rs`; copy-mode `[`/`]`
 verbs with default chords `prefix <`/`prefix >`; `:copy-output` / `copy_output`
 binding verb yanks the last completed block's output; `plexy-glass capture
 --last-command` (protocol v7, `CaptureLastCommand` message) prints the
-scrollback-inclusive block output from a script. Each has a spec in
+scrollback-inclusive block output from a script; **block exit-status border** —
+each pane's left border is color-coded per visible row by the block's exit
+status: ok-color `│` for exit 0, fail-color `▌` for nonzero, plain for
+unmarked rows / running blocks; the whole block (prompt row through the row
+before the next prompt) takes the status; coloring is viewport-tracked (live,
+wheel scrollback, copy mode); alt-screen panes revert to plain while active;
+marked-ring beats block status, block status beats the active ring on status
+rows; colors and `enabled` flag from the `blocks` config node (live-reloads)
+via `viewport_block_status` in `crates/mux/src/blocks.rs` and the border
+painter in `crates/mux/src/borders.rs`. Each has a spec in
 `docs/superpowers/specs/`.
 
 The overlay subsystem is the substrate for modal UI: add `Overlay` +
@@ -277,10 +286,10 @@ updated as part of each feature, per **User documentation**. Workflows
 Not yet built (future work): pipe-pane; cross-window **swap**-pane
 and the choose-tree filter/collapse + session rename (deferred in their specs);
 silence monitoring + bell/activity alert messages; set/save/load paste buffers;
-command-block gutter/exit-status visuals; `capture --last-command --json`
-(text + exit code + command line); a synchronous `run` verb (send input, wait
-for block close); block-aware mouse (click a prompt to jump); mark persistence
-across daemon restart.
+`capture --last-command --json` (text + exit code + command line); a synchronous
+`run` verb (send input, wait for block close); block-aware mouse (click a prompt
+to jump); mark persistence across daemon restart; block exit-status border on
+popup panes (deferred in the 2026-06-12 spec).
 Declarative-session v1 boundaries left for later: split ratios + active
 window/pane selection in the template, per-pane env maps, re-reading templates on
 `Ctrl+a R` reload, and `switch_session` auto-creating a not-yet-running declared
@@ -297,4 +306,6 @@ protocol v6, popup-aware, sole-or-explicit session resolution — shipped
 prefix-relative defaults, resolved-chord help — shipped 2026-06-10 spec/plan;
 command-block awareness — OSC 133 row marks, copy-mode block navigation,
 viewport prompt verbs, copy-output, capture --last-command, protocol v7 —
-shipped 2026-06-11 spec/plan.)
+shipped 2026-06-11 spec/plan; block exit-status border — left-border coloring
+per block exit status, viewport-tracked, blocks config node — shipped
+2026-06-12 spec/plan.)

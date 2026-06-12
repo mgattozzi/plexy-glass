@@ -159,6 +159,41 @@ keymap {
 }
 ```
 
+## Exit status on the border
+
+When shell integration is active, each pane's **left border line** is
+color-coded per visible row by the command block the row belongs to:
+
+| Border | Meaning |
+|---|---|
+| Colored `│` in the ok color (default: `#87a987`) | Row belongs to a block that exited with code 0 |
+| Colored `▌` in the fail color (default: `#c4746e`) | Row belongs to a block that exited with a nonzero code |
+| Plain `│` | Row before the first prompt, a running block (no exit code yet), or an exit code that arrived without a code value |
+
+The entire block (prompt row through the row before the next prompt) takes the
+same status. This means you can glance at the border and see which commands
+succeeded and which failed, even after scrolling back.
+
+**Viewport-tracked**: the coloring always matches what is on screen, whether
+you are at the live view, scrolled back with the mouse wheel, or in copy mode.
+
+**Alternate screen** (`hx`, `less`, and other full-screen programs): while the
+alternate screen is active the border reverts to plain. Status coloring comes
+back on its own when the program exits.
+
+**Precedence**: a marked pane's ring (bright magenta) beats block status, so a
+`▌` will never appear on a marked-pane border. Block status beats the active
+pane's blue ring on the colored rows; plain (None) rows still show the active
+ring as usual.
+
+**Requires OSC 133 shell integration**, same as all the other block features.
+
+### Configuration
+
+The `blocks` node in `config.kdl` controls this feature. See the
+[`blocks` section of docs/configuration.md](configuration.md#blocks) for the
+full reference (colors, `enabled` flag, defaults, and live-reload behavior).
+
 ## Scripting: `capture --last-command`
 
 ```sh
@@ -185,8 +220,6 @@ plexy-glass capture --last-command -n work > /tmp/build.log
 
 We track the following as future work:
 
-- **No gutter / exit-status visuals**: blocks are not rendered with decorations
-  or color-coded exit codes in the pane.
 - **No `--json` flag** on `capture --last-command`: the flag that would return
   `{ text, exit_code, command_line }` as JSON is deferred.
 - **No synchronous `run` verb**: a `run "cmd"` that sends input and blocks until

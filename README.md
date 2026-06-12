@@ -41,7 +41,9 @@ is designed alongside Ghostty-style terminal integration.
 - Command-block awareness (OSC 133): navigate scrollback by prompt with
   `Ctrl+a <` / `>`, jump prompts in copy mode with `[` / `]`, select a
   command's output with `o` then `y`, yank it with `:copy-output`, or capture
-  it from a script with `plexy-glass capture --last-command`
+  it from a script with `plexy-glass capture --last-command`; each pane's left
+  border is color-coded per row by block exit status (ok color `│` / fail color
+  `▌`), viewport-tracked and live-reloading with the `blocks` config node
 
 ## Quick start
 
