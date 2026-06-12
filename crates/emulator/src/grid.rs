@@ -14,7 +14,9 @@ pub enum WrapOrigin {
 /// OSC 133 block annotation carried by a row. Kept tiny (8 bytes, since rows
 /// are cloned per frame): the exit code is stored inline with a presence bit
 /// in `flags` instead of an `Option<i32>` (which has no niche and would pad
-/// the struct to 12 bytes).
+/// the struct to 12 bytes). `prompt_end_col` shares the padding gap between
+/// the `u8` flags and the `i32` exit code (`u8` + `u16` + `i32` = 7 bytes,
+/// 8 with alignment, so the size test is untouched).
 ///
 /// Marks live ON the row, so they travel with it into scrollback, vanish on
 /// eviction, and survive reflow by the same mechanism as `wrap_origin`.
@@ -22,8 +24,13 @@ pub enum WrapOrigin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RowMark {
     /// Bitwise OR of [`RowMark::PROMPT_START`], [`RowMark::OUTPUT_START`],
-    /// [`RowMark::BLOCK_END`] (plus the private exit-presence bit). 0 = unmarked.
+    /// [`RowMark::BLOCK_END`], [`RowMark::PROMPT_END`] (plus the private
+    /// exit-presence bit). 0 = unmarked.
     flags: u8,
+    /// Column at which `OSC 133;B` (prompt end) landed. Valid only when
+    /// [`RowMark::PROMPT_END`] is set; kept `0` otherwise so the derived
+    /// `PartialEq` stays well-defined.
+    prompt_end_col: u16,
     /// Exit code payload; meaningful only while the `HAS_EXIT` bit is set
     /// (kept 0 otherwise so the derived `PartialEq` stays well-defined).
     exit_code: i32,
@@ -38,6 +45,9 @@ impl RowMark {
     /// [`RowMark::exit`]; it may still be `None` when `D` carried no
     /// parseable code).
     pub const BLOCK_END: u8 = 4;
+    /// An `OSC 133;B` landed on this row: prompt end / command input begins.
+    /// `prompt_end_col` holds the cursor column at the time of the event.
+    pub const PROMPT_END: u8 = 8;
     /// Private presence bit for `exit_code`.
     const HAS_EXIT: u8 = 1 << 7;
 
@@ -50,6 +60,24 @@ impl RowMark {
     /// True when `flag` (one of the public associated consts) is set.
     pub fn contains(self, flag: u8) -> bool {
         self.flags & flag != 0
+    }
+
+    /// Record the prompt-end column from `OSC 133;B`. Sets the `PROMPT_END`
+    /// flag and stores `col`; re-calling updates `col` (idempotent re-mark).
+    pub fn set_prompt_end(&mut self, col: u16) {
+        self.flags |= Self::PROMPT_END;
+        self.prompt_end_col = col;
+    }
+
+    /// The cursor column recorded by `OSC 133;B`, if any. `None` when the
+    /// `PROMPT_END` flag is unset (kept `0` in that case so `PartialEq` is
+    /// well-defined).
+    pub fn prompt_end_col(self) -> Option<u16> {
+        if self.flags & Self::PROMPT_END != 0 {
+            Some(self.prompt_end_col)
+        } else {
+            None
+        }
     }
 
     /// Record (or clear) the exit code from `OSC 133;D;code`.
@@ -83,16 +111,20 @@ impl RowMark {
     }
 
     /// Fold another row's mark into this one: flags are OR-ed; an exit code on
-    /// `other` wins. Used by reflow when a logical line's physical rows are
-    /// merged. Today at most one row of a line carries a mark (133 marks land
-    /// at the cursor row), but a mark CAN land on a soft continuation row
-    /// (cursor mid-wrapped-line when the OSC arrives), so merge defensively.
-    /// "Other's exit wins" is the natural order: callers merge first→last row,
-    /// so a later `133;D` supersedes an earlier one.
+    /// `other` wins; when `other` carries `PROMPT_END`, its col wins too.
+    /// Used by reflow when a logical line's physical rows are merged. Today
+    /// at most one row of a line carries a mark (133 marks land at the cursor
+    /// row), but a mark CAN land on a soft continuation row (cursor
+    /// mid-wrapped-line when the OSC arrives), so merge defensively.
+    /// "Other wins" is the natural order: callers merge first→last row, so a
+    /// later mark supersedes an earlier one.
     pub fn merge(&mut self, other: RowMark) {
         self.flags |= other.flags;
         if other.flags & Self::HAS_EXIT != 0 {
             self.exit_code = other.exit_code;
+        }
+        if other.flags & Self::PROMPT_END != 0 {
+            self.prompt_end_col = other.prompt_end_col;
         }
     }
 }
@@ -250,7 +282,82 @@ mod tests {
         assert!(!m.contains(RowMark::PROMPT_START));
         assert!(!m.contains(RowMark::OUTPUT_START));
         assert!(!m.contains(RowMark::BLOCK_END));
+        assert!(!m.contains(RowMark::PROMPT_END));
         assert_eq!(m.exit(), None);
+        // Col is None when PROMPT_END is not set.
+        assert_eq!(m.prompt_end_col(), None);
+    }
+
+    #[test]
+    fn prompt_end_col_round_trip() {
+        let mut m = RowMark::default();
+        // Unset → None.
+        assert_eq!(m.prompt_end_col(), None);
+        // Set col 5.
+        m.set_prompt_end(5);
+        assert!(m.contains(RowMark::PROMPT_END));
+        assert_eq!(m.prompt_end_col(), Some(5));
+        // Re-set (idempotent re-mark) updates the col.
+        m.set_prompt_end(10);
+        assert_eq!(m.prompt_end_col(), Some(10));
+    }
+
+    #[test]
+    fn prompt_end_col_zeroed_when_flag_unset() {
+        // A default RowMark has prompt_end_col == None even though the field
+        // stores 0 internally (the flag gates the accessor).
+        let m = RowMark::default();
+        assert_eq!(m.prompt_end_col(), None, "no flag → None even if internal 0");
+        // Two marks with PROMPT_END should not equal one without, even at col 0.
+        let mut with_flag = RowMark::default();
+        with_flag.set_prompt_end(0);
+        assert_ne!(m, with_flag, "flag bit distinguishes the two states");
+    }
+
+    #[test]
+    fn merge_prompt_end_col_other_wins() {
+        // Merge rule: when OTHER carries PROMPT_END, its col wins.
+        let mut base = RowMark::default();
+        base.set_prompt_end(3); // base has col 3
+
+        let mut other = RowMark::default();
+        other.set_prompt_end(7); // other has col 7
+
+        base.merge(other);
+        assert!(base.contains(RowMark::PROMPT_END));
+        assert_eq!(base.prompt_end_col(), Some(7), "other's col must win on merge");
+    }
+
+    #[test]
+    fn merge_prompt_end_col_only_self_has_flag() {
+        // When only self has PROMPT_END, self's col is unchanged after merge.
+        let mut base = RowMark::default();
+        base.set_prompt_end(3);
+
+        let other = RowMark::default(); // no PROMPT_END
+
+        base.merge(other);
+        assert!(base.contains(RowMark::PROMPT_END));
+        assert_eq!(base.prompt_end_col(), Some(3), "self col preserved when other has no flag");
+    }
+
+    #[test]
+    fn merge_flags_or_ed() {
+        // Flags are OR-ed: both sides' marks survive.
+        let mut a = RowMark::default();
+        a.set(RowMark::PROMPT_START);
+        a.set_prompt_end(1);
+
+        let mut b = RowMark::default();
+        b.set(RowMark::BLOCK_END);
+        b.set_exit(Some(0));
+
+        a.merge(b);
+        assert!(a.contains(RowMark::PROMPT_START));
+        assert!(a.contains(RowMark::BLOCK_END));
+        assert!(a.contains(RowMark::PROMPT_END));
+        assert_eq!(a.exit(), Some(0));
+        assert_eq!(a.prompt_end_col(), Some(1));
     }
 
     #[test]

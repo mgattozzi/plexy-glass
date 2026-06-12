@@ -3,7 +3,7 @@
 
 use crate::error::DaemonError;
 use bytes::Bytes;
-use plexy_glass_emulator::PromptMarkKind;
+
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -111,21 +111,21 @@ pub async fn read_clipboard() -> Vec<u8> {
 }
 
 /// Move the shell cursor in `pane` to local column `click_col` by
-/// synthesizing arrow-key bytes. Only fires when the most recent OSC 133 'B'
-/// (prompt-end) mark on the cursor's row sits at a column <= `click_col`.
+/// synthesizing arrow-key bytes. Only fires when the cursor's row carries a
+/// `PROMPT_END` (`OSC 133;B`) mark whose column is <= `click_col`.
 /// Returns `Ok(false)` if no movement was performed; `Ok(true)` if arrow
 /// keys were sent.
 pub async fn click_to_position(pane: &crate::pane::Pane, click_col: u16) -> Result<bool, DaemonError> {
     let plan = pane.with_screen(|s| {
         let cursor = &s.cursor;
-        let mark = s
-            .prompt_marks
-            .iter()
-            .rev()
-            .find(|m| m.kind == PromptMarkKind::PromptEnd && m.row == cursor.row)
-            .copied();
-        mark.and_then(|m| {
-            if click_col < m.col {
+        let row_mark = s
+            .active
+            .rows
+            .get(cursor.row as usize)
+            .map(|r| r.mark)
+            .unwrap_or_default();
+        row_mark.prompt_end_col().and_then(|prompt_col| {
+            if click_col < prompt_col {
                 return None; // click is inside the prompt itself
             }
             let delta: i32 = i32::from(click_col) - i32::from(cursor.col);
@@ -169,7 +169,6 @@ mod tests {
     #[tokio::test]
     async fn click_to_position_emits_arrow_keys() {
         use crate::pane::Pane;
-        use plexy_glass_emulator::PromptMark;
         use plexy_glass_mux::PaneId;
         use plexy_glass_protocol::{PtySize, SpawnSpec};
         use std::sync::Arc;
@@ -184,13 +183,10 @@ mod tests {
         };
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let p = Pane::spawn(PaneId(0), spec, size, Arc::new(Notify::new()), None, cfg).unwrap();
-        // Inject a PromptEnd mark at row 0 col 2 and put cursor at col 2.
+        // Inject a PROMPT_END mark at row 0 col 2 (via the row mark) and put
+        // cursor at col 2.
         p.with_screen_mut(|s| {
-            s.prompt_marks.push(PromptMark {
-                kind: PromptMarkKind::PromptEnd,
-                row: 0,
-                col: 2,
-            });
+            s.active.rows[0].mark.set_prompt_end(2);
             s.cursor.row = 0;
             s.cursor.col = 2;
         });

@@ -448,4 +448,72 @@ mod tests {
         assert!(active.num_rows() >= 1);
         assert!(active.num_cols() >= 1);
     }
+
+    // Helper: build a `Row` with `PROMPT_END` set at the given col.
+    fn with_prompt_end(mut row: Row, col: u16) -> Row {
+        row.mark.set_prompt_end(col);
+        row
+    }
+
+    #[test]
+    fn reflow_carries_prompt_end_to_logical_first_row() {
+        use crate::grid::RowMark;
+        // An 11-col hard line with PROMPT_END at col 4; it wraps to 6-col rows.
+        // After reflow the PROMPT_END flag+col must be on the FIRST physical row.
+        let mut active = Grid {
+            cols: 11,
+            rows: vec![with_prompt_end(
+                fill_row(
+                    &["$", " ", "c", "m", "d", " ", "a", "r", "g", " ", " "],
+                    WrapOrigin::Hard,
+                ),
+                4, // B landed at col 4 (after "$ cmd")
+            )],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor::default();
+
+        reflow(&mut active, &mut sb, &mut c, 4, 6);
+
+        // Wrapped into two rows; PROMPT_END must be on the first row.
+        assert!(
+            active.rows[0].mark.contains(RowMark::PROMPT_END),
+            "PROMPT_END must be on the first physical row after narrower reflow"
+        );
+        assert_eq!(
+            active.rows[0].mark.prompt_end_col(),
+            Some(4),
+            "prompt_end_col must survive narrower reflow unchanged"
+        );
+        assert!(
+            !active.rows[1].mark.contains(RowMark::PROMPT_END),
+            "continuation row must not have PROMPT_END"
+        );
+    }
+
+    #[test]
+    fn reflow_merge_both_carry_prompt_end_other_col_wins() {
+        use crate::grid::RowMark;
+        // Two soft-wrapped rows that BOTH carry PROMPT_END (rare but defensive):
+        // after join, the SECOND (other) row's col must win.
+        let mut r0 = fill_row(&["a", "b", "c", "d"], WrapOrigin::Hard);
+        r0.mark.set_prompt_end(2); // first row col 2
+
+        let mut r1 = fill_row(&["e", "f", " ", " "], WrapOrigin::SoftFrom(0));
+        r1.mark.set_prompt_end(6); // second (other) row col 6
+
+        let mut active = Grid { cols: 4, rows: vec![r0, r1] };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor::default();
+
+        reflow(&mut active, &mut sb, &mut c, 2, 8); // widen: joins
+
+        let mark = active.rows[0].mark;
+        assert!(mark.contains(RowMark::PROMPT_END));
+        assert_eq!(
+            mark.prompt_end_col(),
+            Some(6),
+            "other row's col wins when both carry PROMPT_END"
+        );
+    }
 }

@@ -26,29 +26,6 @@ pub enum ColorQuery {
     Cursor,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptMarkKind {
-    /// OSC 133 ; A (prompt start).
-    PromptStart,
-    /// OSC 133 ; B (prompt end / input start).
-    PromptEnd,
-    /// OSC 133 ; C (command submitted).
-    CommandStart,
-    /// OSC 133 ; D[;exit_code] (command finished).
-    CommandEnd(Option<i32>),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PromptMark {
-    pub kind: PromptMarkKind,
-    pub row: u16,
-    pub col: u16,
-}
-
-/// Belt-and-braces bound on `Screen::prompt_marks` (scroll pruning is the
-/// primary cleanup; this caps pathological cases like a child spamming
-/// `133;B` without ever scrolling).
-pub(crate) const PROMPT_MARKS_MAX: usize = 32;
 
 #[derive(Clone)]
 pub struct Screen {
@@ -70,14 +47,6 @@ pub struct Screen {
     /// through the child's stdin so TUI line editors (reedline, fish, etc.)
     /// don't block on `ESC[6n`.
     pub replies: Vec<Vec<u8>>,
-    /// OSC 133 `B` (prompt-end) marks on CURRENT grid rows, consumed only by
-    /// click-to-position (cursor-row lookup). `A`/`C`/`D` live on the rows
-    /// themselves (`Row.mark`). Entries shift with scrolls and are dropped
-    /// when their row leaves the grid; resize clears the list; pushes are
-    /// capped at `PROMPT_MARKS_MAX`. ED/2J does NOT prune the list, a stale
-    /// entry is harmless to the newest-wins cursor-row consumer and the cap
-    /// bounds the list regardless.
-    pub prompt_marks: Vec<PromptMark>,
     /// OSC 52 clipboard payloads queued for the daemon to flush via
     /// `pbcopy` / `xclip`. Drained by `take_clipboard_writes`.
     pub clipboard_writes: Vec<Vec<u8>>,
@@ -128,7 +97,6 @@ impl Screen {
             hyperlinks: HyperlinkTable::default(),
             scroll_region: (0, rows.saturating_sub(1)),
             replies: Vec::new(),
-            prompt_marks: Vec::new(),
             clipboard_writes: Vec::new(),
             color_queries: Vec::new(),
             bell_pending: false,
@@ -284,7 +252,6 @@ impl Screen {
                 for r in popped {
                     self.scrollback.push(r);
                 }
-                self.shift_prompt_marks(top, bottom, -1);
             }
             // Stay at the bottom; new content goes there.
             self.cursor.row = bottom;
@@ -451,16 +418,12 @@ impl Screen {
                     for r in popped {
                         self.scrollback.push(r);
                     }
-                    self.shift_prompt_marks(top, bottom, -i32::from(n));
                 }
             }
             'T' => {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 let (top, bottom) = self.scroll_region;
                 self.active.scroll_down(top, bottom, n);
-                if self.alt.is_none() {
-                    self.shift_prompt_marks(top, bottom, i32::from(n));
-                }
             }
             'g' => {
                 let mode = first.unwrap_or(0);
@@ -931,9 +894,6 @@ impl Screen {
                 if self.cursor.row == top {
                     let (t, b) = self.scroll_region;
                     self.active.scroll_down(t, b, 1);
-                    if self.alt.is_none() {
-                        self.shift_prompt_marks(t, b, 1);
-                    }
                 } else {
                     self.cursor.up(1);
                 }
@@ -1001,10 +961,9 @@ impl Screen {
         // params[0] is "133", params[1] is the subcommand letter, optional
         // params[2..] carry sub-arguments (e.g. exit code for D).
         //
-        // A/C/D annotate the cursor ROW itself (`Row.mark`), so the
+        // All four marks annotate the cursor ROW itself (`Row.mark`), so the
         // annotation travels with the row into scrollback, dies on eviction,
-        // and survives reflow alongside `wrap_origin`. B feeds only the
-        // click-to-position side list.
+        // and survives reflow alongside `wrap_origin`.
         if self.alt.is_some() {
             // Block marks are meaningless on the alternate screen
             // (full-screen apps); ignore all four.
@@ -1031,16 +990,8 @@ impl Screen {
                 self.last_block_exit = exit_code;
             }
             b'B' => {
-                self.prompt_marks.push(PromptMark {
-                    kind: PromptMarkKind::PromptEnd,
-                    row: self.cursor.row,
-                    col: self.cursor.col,
-                });
-                // Belt-and-braces bound; scroll pruning is the primary cleanup.
-                if self.prompt_marks.len() > PROMPT_MARKS_MAX {
-                    let excess = self.prompt_marks.len() - PROMPT_MARKS_MAX;
-                    self.prompt_marks.drain(..excess);
-                }
+                let col = self.cursor.col;
+                self.mark_cursor_row(|m| m.set_prompt_end(col));
             }
             other => {
                 tracing::trace!(subcmd = other, "unhandled OSC 133 subcommand");
@@ -1054,26 +1005,6 @@ impl Screen {
         if let Some(row) = self.active.rows.get_mut(self.cursor.row as usize) {
             f(&mut row.mark);
         }
-    }
-
-    /// Keep the click-to-position side list consistent when grid content
-    /// moves: marks inside the scrolled region `[top, bottom]` travel with
-    /// their row by `delta` (negative = up); marks displaced out of the
-    /// region are dropped, the row they described is no longer on the grid.
-    /// Callers skip this while the alt screen is active (marks always refer
-    /// to the main grid, which doesn't move then).
-    fn shift_prompt_marks(&mut self, top: u16, bottom: u16, delta: i32) {
-        self.prompt_marks.retain_mut(|m| {
-            if m.row < top || m.row > bottom {
-                return true;
-            }
-            let shifted = i32::from(m.row) + delta;
-            if shifted < i32::from(top) || shifted > i32::from(bottom) {
-                return false;
-            }
-            m.row = shifted as u16;
-            true
-        });
     }
 
     const OSC52_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -1705,7 +1636,7 @@ mod tests {
     #[test]
     fn new_screen_has_no_marks_or_clipboard() {
         let s = Screen::new(8, 24);
-        assert!(s.prompt_marks.is_empty());
+        assert!(s.active.rows.iter().all(|r| r.mark.is_empty()));
         assert!(s.clipboard_writes.is_empty());
     }
 
@@ -1740,10 +1671,12 @@ mod tests {
     }
 
     #[test]
-    fn osc_133_prompt_end_records_position() {
+    fn osc_133_prompt_end_sets_row_mark_and_col() {
+        // "abc" moves cursor to col 3; B records that col on the row.
         let s = parse(b"abc\x1b]133;B\x07");
-        let mark = s.prompt_marks.iter().find(|m| m.kind == PromptMarkKind::PromptEnd);
-        assert!(mark.is_some(), "expected a PromptEnd mark: {:?}", s.prompt_marks);
+        let mark = s.active.rows[0].mark;
+        assert!(mark.contains(RowMark::PROMPT_END), "PROMPT_END flag must be set");
+        assert_eq!(mark.prompt_end_col(), Some(3), "col must equal cursor col at B time");
     }
 
     #[test]
@@ -1782,55 +1715,67 @@ mod tests {
 
     #[test]
     fn osc_133_ignored_on_alt_screen() {
-        // All four marks while the alt screen is active: no row flags on
-        // either grid, and no side-list entries.
+        // All four marks while the alt screen is active: no row flags on either grid.
         let s = parse(b"\x1b[?1049h\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07\x1b[?1049l");
         assert!(s.alt.is_none(), "test must end back on the main screen");
         for row in &s.active.rows {
             assert!(row.mark.is_empty(), "main grid must be unmarked");
         }
-        assert!(s.prompt_marks.is_empty(), "no PromptEnd while alt is active");
     }
 
     #[test]
-    fn prompt_marks_list_retains_only_prompt_end() {
-        // A/C/D live on rows now; only B feeds the click-to-position list.
+    fn prompt_end_b_sets_prompt_end_flag_on_cursor_row() {
+        // All four 133 marks now live on the row.
         let s = parse(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07");
-        assert_eq!(s.prompt_marks.len(), 1, "got {:?}", s.prompt_marks);
-        assert_eq!(s.prompt_marks[0].kind, PromptMarkKind::PromptEnd);
+        let mark = s.active.rows[0].mark;
+        assert!(mark.contains(RowMark::PROMPT_START), "A must set PROMPT_START");
+        assert!(mark.contains(RowMark::PROMPT_END), "B must set PROMPT_END");
+        assert!(mark.contains(RowMark::OUTPUT_START), "C must set OUTPUT_START");
+        assert!(mark.contains(RowMark::BLOCK_END), "D must set BLOCK_END");
     }
 
     #[test]
-    fn prompt_marks_shift_with_scroll_up() {
+    fn prompt_end_mark_rides_into_scrollback_with_row() {
+        // B lands on row 1, then a linefeed scrolls everything up (2-row screen).
+        // The row carrying PROMPT_END travels into scrollback.
         let mut p = crate::parser::Parser::new();
         let mut s = Screen::new(2, 8);
-        // B lands on row 1, then one more linefeed scrolls everything up.
+        // "b" + B puts cursor on row 1 at col 1; then one linefeed scrolls the grid.
         p.advance(&mut s, b"a\r\nb\x1b]133;B\x07\r\nc");
         p.flush(&mut s);
-        assert_eq!(s.prompt_marks.len(), 1, "got {:?}", s.prompt_marks);
-        assert_eq!(s.prompt_marks[0].row, 0, "mark must follow its row up");
+        // Row 1's content ("b"+mark) is now at row 0 after scrolling.
+        let mark = s.active.rows[0].mark;
+        assert!(mark.contains(RowMark::PROMPT_END), "PROMPT_END must follow its row on scroll");
     }
 
     #[test]
-    fn prompt_marks_pruned_when_row_scrolls_away() {
+    fn prompt_end_mark_rides_into_scrollback_when_row_scrolls_away() {
+        // B lands on row 0; two scrolls push that row into scrollback.
         let mut p = crate::parser::Parser::new();
         let mut s = Screen::new(2, 8);
-        // B lands on row 0; two scrolls push that row into scrollback.
         p.advance(&mut s, b"a\x1b]133;B\x07\r\nb\r\nc\r\nd");
         p.flush(&mut s);
-        assert!(
-            s.prompt_marks.is_empty(),
-            "mark for a scrolled-away row must be pruned: {:?}",
-            s.prompt_marks
-        );
+        // The row with `PROMPT_END` is in scrollback, so the active grid has no B rows.
+        let active_has_b = s.active.rows.iter().any(|r| r.mark.contains(RowMark::PROMPT_END));
+        assert!(!active_has_b, "PROMPT_END row scrolled away; active grid must be clean");
+        // It rides in scrollback.
+        let sb_has_b = s.scrollback.rows().iter().any(|r| r.mark.contains(RowMark::PROMPT_END));
+        assert!(sb_has_b, "PROMPT_END row must exist in scrollback");
     }
 
     #[test]
-    fn prompt_marks_shift_with_scroll_down() {
+    fn prompt_end_mark_shifts_with_scroll_down() {
         // CSI T scrolls the region down: the mark rides its row downward.
         let s = parse(b"\x1b]133;B\x07\x1b[T");
-        assert_eq!(s.prompt_marks.len(), 1, "got {:?}", s.prompt_marks);
-        assert_eq!(s.prompt_marks[0].row, 1);
+        // Before scroll: mark is on row 0. After CSI T, row 0 → row 1.
+        assert!(
+            s.active.rows[1].mark.contains(RowMark::PROMPT_END),
+            "PROMPT_END must follow its row down after CSI T"
+        );
+        assert!(
+            !s.active.rows[0].mark.contains(RowMark::PROMPT_END),
+            "row 0 must not have PROMPT_END after the scroll"
+        );
     }
 
     #[test]
@@ -1891,17 +1836,14 @@ mod tests {
     }
 
     #[test]
-    fn prompt_marks_list_is_capped() {
-        let mut input = Vec::new();
-        for _ in 0..(PROMPT_MARKS_MAX + 20) {
-            input.extend_from_slice(b"\x1b]133;B\x07");
-        }
-        let s = parse(&input);
-        assert!(
-            s.prompt_marks.len() <= PROMPT_MARKS_MAX,
-            "list must stay bounded; len = {}",
-            s.prompt_marks.len()
-        );
+    fn prompt_end_remark_updates_col() {
+        // A second B on the same row updates the stored col (idempotent re-mark).
+        // Emitting "abc" moves cursor to col 3, then B records col 3.
+        // Emitting "x" moves cursor to col 4, then a second B updates to col 4.
+        let s = parse(b"abc\x1b]133;B\x07x\x1b]133;B\x07");
+        let mark = s.active.rows[0].mark;
+        assert!(mark.contains(RowMark::PROMPT_END));
+        assert_eq!(mark.prompt_end_col(), Some(4), "second B must update the col");
     }
 
     #[test]

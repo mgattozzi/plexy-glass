@@ -46,10 +46,8 @@ impl Emulator {
                 cols,
             );
         }
-        // Reflow remapped every row; rather than recompute the
-        // click-to-position list, drop it (the shell re-emits 133;B on its
-        // post-SIGWINCH prompt redraw).
-        self.screen.prompt_marks.clear();
+        // Row-resident marks (including `PROMPT_END`) travel with their rows
+        // through reflow automatically, so no housekeeping is needed here.
         // Also resize tab stops.
         self.screen.tabs.resize(cols);
         // Reset scroll region to full screen.
@@ -119,15 +117,27 @@ mod tests {
     }
 
     #[test]
-    fn resize_clears_prompt_end_marks() {
-        // Reflow remaps every row; rather than remap the click-to-position
-        // list, resize clears it (the shell re-emits 133;B on its
-        // post-SIGWINCH prompt redraw).
+    fn resize_carries_prompt_end_mark_via_reflow() {
+        // Row-resident `PROMPT_END` marks travel with their row through reflow,
+        // so no side-list housekeeping is needed. The shell still re-emits 133;B
+        // on its post-SIGWINCH redraw, but reflow does not destroy the mark.
         let mut e = Emulator::new(4, 8);
-        e.advance(b"\x1b]133;B\x07");
-        assert_eq!(e.screen().prompt_marks.len(), 1);
+        e.advance(b"\x1b]133;B\x07"); // cursor col 0, row 0
+        assert!(
+            e.screen().active.rows[0]
+                .mark
+                .contains(crate::grid::RowMark::PROMPT_END),
+            "PROMPT_END must be set on row 0 before resize"
+        );
         e.resize(4, 16);
-        assert!(e.screen().prompt_marks.is_empty());
+        // After reflow the logical line maps to the first physical row; the
+        // mark is still there.
+        assert!(
+            e.screen().active.rows[0]
+                .mark
+                .contains(crate::grid::RowMark::PROMPT_END),
+            "PROMPT_END must survive reflow"
+        );
     }
 
     #[test]

@@ -36,7 +36,7 @@ pub use grid::{Grid, Row, RowMark, WrapOrigin};
 pub use hyperlinks::HyperlinkTable;
 pub use keyboard::KeyboardState;
 pub use modes::Modes;
-pub use screen::{ColorQuery, PromptMark, PromptMarkKind, Screen};
+pub use screen::{ColorQuery, Screen};
 pub use scrollback::{Scrollback, DEFAULT_SCROLLBACK_LINES};
 pub use tabs::TabStops;
 pub use width::{
