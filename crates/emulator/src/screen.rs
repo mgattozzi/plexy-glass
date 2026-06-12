@@ -101,6 +101,15 @@ pub struct Screen {
     /// from the client's `\e[?997;Xn` relay. Answered to a `\e[?996n` query so
     /// the one-shot query agrees with the `?2031` subscription push. Default dark.
     pub color_scheme_dark: bool,
+    /// Monotonic count of completed blocks (`133;D` received on the main grid).
+    /// Survives row eviction and `ED 2J` clears because it is not row state.
+    /// Transient across daemon restart (like all block state). Reset to 0 by
+    /// RIS (via the screen rebuild).
+    pub blocks_completed: u64,
+    /// Exit payload of the most recent completed block (`133;D[;exit]`).
+    /// `None` when no `D` has been received, or when the last `D` carried no
+    /// parseable exit payload. Survives eviction and clears; reset by RIS.
+    pub last_block_exit: Option<i32>,
 }
 
 impl Screen {
@@ -126,6 +135,8 @@ impl Screen {
             kbd: KeyboardState::default(),
             term: String::from("xterm-256color"),
             color_scheme_dark: true,
+            blocks_completed: 0,
+            last_block_exit: None,
         }
     }
 
@@ -1016,6 +1027,8 @@ impl Screen {
                     m.set(RowMark::BLOCK_END);
                     m.set_exit(exit_code);
                 });
+                self.blocks_completed += 1;
+                self.last_block_exit = exit_code;
             }
             b'B' => {
                 self.prompt_marks.push(PromptMark {
@@ -2211,5 +2224,87 @@ mod tests {
         p2.advance(&mut s2, b"\x1bc\x1b[?996nX");
         p2.flush(&mut s2);
         assert_eq!(s2.replies, vec![b"\x1b[?997;2n".to_vec()]);
+    }
+
+    // ── blocks_completed / last_block_exit ────────────────────────────────────
+
+    #[test]
+    fn fresh_screen_has_zero_counter_and_no_exit() {
+        let s = Screen::new(4, 8);
+        assert_eq!(s.blocks_completed, 0);
+        assert_eq!(s.last_block_exit, None);
+    }
+
+    #[test]
+    fn single_d_with_exit_zero_increments_counter_and_records_exit() {
+        let s = parse(b"\x1b]133;D;0\x07");
+        assert_eq!(s.blocks_completed, 1);
+        assert_eq!(s.last_block_exit, Some(0));
+    }
+
+    #[test]
+    fn single_d_with_nonzero_exit_records_that_exit() {
+        let s = parse(b"\x1b]133;D;7\x07");
+        assert_eq!(s.blocks_completed, 1);
+        assert_eq!(s.last_block_exit, Some(7));
+    }
+
+    #[test]
+    fn bare_d_increments_counter_and_exit_is_none() {
+        // D with no exit payload: counter goes up, exit stays None.
+        let s = parse(b"\x1b]133;D\x07");
+        assert_eq!(s.blocks_completed, 1);
+        assert_eq!(s.last_block_exit, None);
+    }
+
+    #[test]
+    fn two_ds_counter_is_2_exit_is_last() {
+        // Two D's: counter = 2, exit = the second payload.
+        let s = parse(b"\x1b]133;D;3\x07\x1b]133;D;9\x07");
+        assert_eq!(s.blocks_completed, 2);
+        assert_eq!(s.last_block_exit, Some(9));
+    }
+
+    #[test]
+    fn d_on_alt_screen_does_not_increment_counter() {
+        // Enter alt screen, emit D, return to main, and the counter must stay 0.
+        let s = parse(b"\x1b[?1049h\x1b]133;D;0\x07\x1b[?1049l");
+        assert_eq!(s.blocks_completed, 0);
+        assert_eq!(s.last_block_exit, None);
+    }
+
+    #[test]
+    fn ed2_clear_does_not_affect_counter_or_exit() {
+        // A D then an ED 2 clear: counter and exit survive (they are not row state).
+        let s = parse(b"\x1b]133;D;5\x07\x1b[2J");
+        assert_eq!(s.blocks_completed, 1);
+        assert_eq!(s.last_block_exit, Some(5));
+    }
+
+    #[test]
+    fn scroll_eviction_does_not_affect_counter_or_exit() {
+        // Feed enough lines to scroll the marked row into scrollback and then
+        // evict it; the counter and exit must survive eviction.
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(2, 8);
+        s.scrollback = crate::scrollback::Scrollback::with_cap(1);
+        // Emit D on row 0, then scroll many lines past the scrollback cap.
+        p.advance(&mut s, b"\x1b]133;D;4\x07");
+        p.flush(&mut s);
+        // Generate enough newlines to push the marked row beyond the cap.
+        let lots = b"\r\na\r\nb\r\nc\r\nd\r\ne\r\nf";
+        p.advance(&mut s, lots);
+        p.flush(&mut s);
+        assert_eq!(s.blocks_completed, 1, "eviction must not reset the counter");
+        assert_eq!(s.last_block_exit, Some(4), "eviction must not clear last exit");
+    }
+
+    #[test]
+    fn ris_resets_counter_and_exit() {
+        // RIS (\ec) rebuilds Screen::new, so the counter must reset to 0 and
+        // exit to None.
+        let s = parse(b"\x1b]133;D;2\x07\x1bc");
+        assert_eq!(s.blocks_completed, 0);
+        assert_eq!(s.last_block_exit, None);
     }
 }
