@@ -941,6 +941,39 @@ session "main" {{
 }
 
 #[test]
+fn plain_attach_creates_main_not_the_declared_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // One DECLARED session "dev" is built at daemon boot. Plain `attach`
+    // (no -n) must still mean the default session "main", never silently
+    // landing in a declared session just because it is the only one running.
+    write_config(
+        &env,
+        r##"
+session "dev" {
+    window "w" {
+        pane command="tail -f /dev/null"
+    }
+}
+"##,
+    );
+
+    let sess = TestSession::spawn(&env);
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(6)),
+        "plain attach must attach-or-create \"main\", not the declared session. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // The declared session was still built at boot, alongside "main".
+    let (status, list_out, _) = run_cli(&env, &["list"]);
+    assert!(status.success(), "list failed: {list_out}");
+    assert!(list_out.contains("dev"), "declared session missing from list: {list_out}");
+    assert!(list_out.contains("main"), "default session missing from list: {list_out}");
+}
+
+#[test]
 fn arrow_keys_pass_through_to_shell() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);

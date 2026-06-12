@@ -20,6 +20,9 @@ pub enum ProtocolError {
     SessionNotFound { name: String },
     #[error("session already exists: {name}")]
     SessionAlreadyExists { name: String },
+    /// No longer emitted: plain attach now means attach-or-create "main"
+    /// instead of erroring on 2+ sessions. Kept for wire compatibility
+    /// (postcard-positional; variants are append-only, never removed).
     #[error("ambiguous attach: {count} sessions exist; specify -n NAME")]
     AmbiguousSession { count: u8 },
     #[error("session name is empty or too long")]

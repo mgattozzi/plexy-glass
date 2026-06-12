@@ -221,42 +221,19 @@ where
             }
         },
         None => {
-            // Smart default fallback: 0 -> create "main"; 1 -> attach to it; 2+ -> ambiguous.
-            let entries = registry.list().await;
-            match entries.len() {
-                0 => {
-                    let spec = cmd.unwrap_or_else(default_spawn_spec);
-                    let cfg = Arc::clone(&config);
-                    // `attach_or_create` restores "main" from disk if saved.
-                    match registry.attach_or_create("main".into(), spec, size, cfg).await {
-                        Ok(s) => s,
-                        Err(DaemonError::Protocol(perr)) => {
-                            return send_msg(&mut writer, &ServerMsg::Error(perr)).await;
-                        }
-                        Err(e) => return Err(e),
-                    }
+            // No name means the default session "main": attach-or-create,
+            // deterministic regardless of what else is running. (The old
+            // sole-session fallback silently attached to a config-declared
+            // session when it was the only one.)
+            let spec = cmd.unwrap_or_else(default_spawn_spec);
+            let cfg = Arc::clone(&config);
+            // `attach_or_create` restores "main" from disk if saved.
+            match registry.attach_or_create("main".into(), spec, size, cfg).await {
+                Ok(s) => s,
+                Err(DaemonError::Protocol(perr)) => {
+                    return send_msg(&mut writer, &ServerMsg::Error(perr)).await;
                 }
-                1 => match registry.get(&entries[0].name).await {
-                    Some(s) => s,
-                    None => {
-                        // We raced with a kill, so surface it as session-not-found.
-                        return send_msg(
-                            &mut writer,
-                            &ServerMsg::Error(ProtocolError::SessionNotFound {
-                                name: entries[0].name.clone(),
-                            }),
-                        )
-                        .await;
-                    }
-                },
-                n => {
-                    let count = u8::try_from(n).unwrap_or(u8::MAX);
-                    return send_msg(
-                        &mut writer,
-                        &ServerMsg::Error(ProtocolError::AmbiguousSession { count }),
-                    )
-                    .await;
-                }
+                Err(e) => return Err(e),
             }
         }
     };

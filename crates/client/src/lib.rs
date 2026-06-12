@@ -274,26 +274,13 @@ pub async fn client_list_saved() -> Result<(), ClientError> {
 
 /// Attach to a session, creating it if it doesn't exist.
 ///
-/// - explicit name supplied → attach-or-create that name
-/// - 0 sessions → create and attach to "main"
-/// - 1 session  → attach to that session
-/// - 2+ sessions → print list, exit 1
+/// No name means the default session "main", deterministic regardless of what
+/// other sessions (declared or otherwise) happen to be running. The old
+/// sole-session fallback silently attached plain `attach` to a config-declared
+/// session.
 pub async fn client_attach_smart(explicit_name: Option<String>) -> Result<(), ClientError> {
-    match explicit_name {
-        Some(n) => run(Some(n), true, Some(default_spawn_spec())).await,
-        None => {
-            let entries = list_sessions_inline().await?;
-            match entries.len() {
-                0 => run(Some("main".to_string()), true, Some(default_spawn_spec())).await,
-                1 => run(Some(entries[0].name.clone()), false, None).await,
-                n => {
-                    eprintln!("error: {n} sessions exist; specify with -n NAME");
-                    print_sessions_table(&entries);
-                    std::process::exit(1);
-                }
-            }
-        }
-    }
+    let name = explicit_name.unwrap_or_else(|| "main".to_string());
+    run(Some(name), true, Some(default_spawn_spec())).await
 }
 
 /// Run one or more command-prompt lines against a session.

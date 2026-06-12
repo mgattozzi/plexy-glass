@@ -11,7 +11,7 @@ struct Cli {
 enum Subcommands {
     /// Attach to a session (creates it if it doesn't exist).
     Attach {
-        /// Session name. If omitted: attach to the only existing session, or create "main" if none.
+        /// Session name (default: "main").
         #[arg(short = 'n', long = "name")]
         name: Option<String>,
     },

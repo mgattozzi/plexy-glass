@@ -52,7 +52,7 @@ cargo build --release
 The binary lands at `target/release/plexy-glass`.
 
 ```sh
-plexy-glass attach            # attach to the only session, or create "main"
+plexy-glass attach            # attach to (or create) the default session "main"
 plexy-glass attach -n work    # attach to (or create) the session "work"
 ```
 
