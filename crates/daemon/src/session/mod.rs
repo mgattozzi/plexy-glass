@@ -755,9 +755,12 @@ impl Session {
             | PromptCommand::Switch(_)
             | PromptCommand::ChooseSession
             | PromptCommand::ChooseTree
-            | PromptCommand::PasteBuffer
+            | PromptCommand::PasteBuffer(_)
             | PromptCommand::ChooseBuffer
-            | PromptCommand::CopyOutput => {
+            | PromptCommand::CopyOutput
+            | PromptCommand::SetBuffer { .. }
+            | PromptCommand::SaveBuffer { .. }
+            | PromptCommand::LoadBuffer { .. } => {
                 return Ok(None);
             }
             PromptCommand::Popup(cmd) => Command::OpenPopup { command: cmd },

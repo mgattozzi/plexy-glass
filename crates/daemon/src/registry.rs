@@ -57,6 +57,16 @@ impl SessionRegistry {
         self.paste_buffers.lock().await.get(name).map(|b| b.content.clone())
     }
 
+    /// Clone out the most-recent buffer's `(name, content)`, `save-buffer`'s
+    /// default source (its status text names the buffer it wrote).
+    pub async fn paste_buffer_top_entry(&self) -> Option<(String, Vec<u8>)> {
+        self.paste_buffers
+            .lock()
+            .await
+            .top()
+            .map(|b| (b.name.clone(), b.content.clone()))
+    }
+
     /// Delete a named buffer; returns whether one was removed.
     pub async fn delete_paste_buffer(&self, name: &str) -> bool {
         self.paste_buffers.lock().await.delete(name)

@@ -65,14 +65,22 @@ impl PasteBufferStore {
     }
 }
 
-/// First line of `content`, lossily decoded, control chars (incl. `\r`/`\t`)
-/// mapped to spaces, then truncated to `PREVIEW_WIDTH` display columns. Control
-/// stripping precedes truncation because `grapheme_advance` floors a control char
-/// to one column, so an un-stripped control would consume a truncation column.
-/// Splits on the newline BYTE first so only one line is decoded/allocated (a
-/// yanked buffer can be many KB, and this runs under the paste-buffers lock).
+/// Byte cap on the prefix of `content` scanned for a preview. The scan runs
+/// under the paste-buffers mutex; without a cap a 10 MiB newline-free
+/// `load-buffer` would be decoded whole just to render 40 columns. 4 KiB is
+/// far past any 40-column first line (behavior-identical for normal buffers).
+const PREVIEW_SCAN_BYTES: usize = 4096;
+
+/// First line of `content` (scanning at most `PREVIEW_SCAN_BYTES`), lossily
+/// decoded, control chars (incl. `\r`/`\t`) mapped to spaces, then truncated to
+/// `PREVIEW_WIDTH` display columns. Control stripping precedes truncation
+/// because `grapheme_advance` floors a control char to one column, so an
+/// un-stripped control would consume a truncation column. Splits on the
+/// newline BYTE first so only one line is decoded/allocated (a yanked buffer
+/// can be many KB, and this runs under the paste-buffers lock).
 fn preview(content: &[u8]) -> String {
-    let first_line = content.split(|&b| b == b'\n').next().unwrap_or(&[]);
+    let scan = &content[..content.len().min(PREVIEW_SCAN_BYTES)];
+    let first_line = scan.split(|&b| b == b'\n').next().unwrap_or(&[]);
     let s = String::from_utf8_lossy(first_line);
     let cleaned: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
     truncate_to_width(&cleaned, PREVIEW_WIDTH).to_string()
@@ -120,6 +128,20 @@ mod tests {
         s.push(wide.into_bytes());
         let p2 = &s.entries()[0].preview;
         assert!(plexy_glass_emulator::display_width(p2) <= 40, "preview truncated to width");
+    }
+
+    #[test]
+    fn preview_caps_the_scan_for_a_huge_first_line() {
+        let mut s = PasteBufferStore::new(10);
+        // First line longer than the 4 KiB scan cap: the preview still renders
+        // the head and respects the width cap; the tail is never decoded.
+        let mut content = vec![b'a'; 8 * 1024];
+        content.extend_from_slice(b"\nsecond line");
+        s.push(content);
+        let p = &s.entries()[0].preview;
+        assert!(p.starts_with("aaaa"), "preview head wrong: {p:?}");
+        assert!(plexy_glass_emulator::display_width(p) <= 40);
+        assert!(!p.contains("second"));
     }
 
     #[test]

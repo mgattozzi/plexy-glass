@@ -978,23 +978,27 @@ enum ConnVerb {
     Switch(String),
     ChooseSession,
     ChooseTree,
-    PasteBuffer,
+    PasteBuffer(Option<String>),
     ChooseBuffer,
     CopyOutput,
+    SetBuffer(String),
+    SaveBuffer { name: Option<String>, path: String },
+    LoadBuffer(String),
 }
 
 impl ConnVerb {
     /// Keymap commands handled at the connection layer. Everything else is
     /// returned unchanged for the caller (`CommandPrompt` opener or
     /// `Session::handle_command`). The keymap has no by-name switch binding,
-    /// so `Switch` only arises from `from_prompt`.
+    /// so `Switch` only arises from `from_prompt`; likewise the buffer-file
+    /// verbs (set/save/load) and by-name paste are prompt-only.
     fn from_command(cmd: Command) -> Result<Self, Command> {
         match cmd {
             Command::Detach => Ok(Self::Detach),
             Command::ReloadConfig => Ok(Self::Reload),
             Command::ChooseSession => Ok(Self::ChooseSession),
             Command::ChooseTree => Ok(Self::ChooseTree),
-            Command::PasteBuffer => Ok(Self::PasteBuffer),
+            Command::PasteBuffer => Ok(Self::PasteBuffer(None)),
             Command::ChooseBuffer => Ok(Self::ChooseBuffer),
             Command::CopyOutput => Ok(Self::CopyOutput),
             other => Err(other),
@@ -1012,9 +1016,12 @@ impl ConnVerb {
             PromptCommand::Switch(name) => Ok(Self::Switch(name)),
             PromptCommand::ChooseSession => Ok(Self::ChooseSession),
             PromptCommand::ChooseTree => Ok(Self::ChooseTree),
-            PromptCommand::PasteBuffer => Ok(Self::PasteBuffer),
+            PromptCommand::PasteBuffer(name) => Ok(Self::PasteBuffer(name)),
             PromptCommand::ChooseBuffer => Ok(Self::ChooseBuffer),
             PromptCommand::CopyOutput => Ok(Self::CopyOutput),
+            PromptCommand::SetBuffer { text } => Ok(Self::SetBuffer(text)),
+            PromptCommand::SaveBuffer { name, path } => Ok(Self::SaveBuffer { name, path }),
+            PromptCommand::LoadBuffer { path } => Ok(Self::LoadBuffer(path)),
             other => Err(other),
         }
     }
@@ -1052,8 +1059,13 @@ async fn run_connection_verb(
         ConnVerb::ChooseTree => {
             open_tree_overlay(ctx.session, ctx.registry).await;
         }
-        ConnVerb::PasteBuffer => {
+        ConnVerb::PasteBuffer(None) => {
             paste_top_buffer(ctx.session, ctx.registry).await;
+        }
+        ConnVerb::PasteBuffer(Some(name)) => {
+            if let Err(e) = paste_named_buffer(ctx.session, ctx.registry, &name).await {
+                ctx.session.set_status_message(e).await;
+            }
         }
         ConnVerb::ChooseBuffer => {
             open_buffer_picker_overlay(ctx.session, ctx.registry).await;
@@ -1061,6 +1073,23 @@ async fn run_connection_verb(
         ConnVerb::CopyOutput => {
             // Status messages (success and no-blocks) are set inside.
             let _ = copy_last_output(ctx.session, ctx.registry).await;
+        }
+        ConnVerb::SetBuffer(text) => {
+            let msg = set_buffer(ctx.registry, text).await;
+            ctx.session.set_status_message(msg).await;
+        }
+        ConnVerb::SaveBuffer { name, path } => {
+            // Both arms carry the status-line text (success or error).
+            let msg = match save_buffer(ctx.registry, name, &path).await {
+                Ok(m) | Err(m) => m,
+            };
+            ctx.session.set_status_message(msg).await;
+        }
+        ConnVerb::LoadBuffer(path) => {
+            let msg = match load_buffer(ctx.registry, &path).await {
+                Ok(m) | Err(m) => m,
+            };
+            ctx.session.set_status_message(msg).await;
         }
     }
     false
@@ -1375,10 +1404,27 @@ async fn run_prompt_line(
             Ok(()) => (true, None),
             Err(e) => (false, Some(format!("reload failed: {e}"))),
         },
-        PromptCommand::PasteBuffer => {
+        PromptCommand::PasteBuffer(None) => {
             paste_top_buffer(session, registry).await;
             (true, None)
         }
+        PromptCommand::PasteBuffer(Some(name)) => {
+            match paste_named_buffer(session, registry, &name).await {
+                Ok(()) => (true, None),
+                Err(e) => (false, Some(e)),
+            }
+        }
+        PromptCommand::SetBuffer { text } => (true, Some(set_buffer(registry, text).await)),
+        PromptCommand::SaveBuffer { name, path } => {
+            match save_buffer(registry, name, &path).await {
+                Ok(m) => (true, Some(m)),
+                Err(e) => (false, Some(e)),
+            }
+        }
+        PromptCommand::LoadBuffer { path } => match load_buffer(registry, &path).await {
+            Ok(m) => (true, Some(m)),
+            Err(e) => (false, Some(e)),
+        },
         PromptCommand::CopyOutput => {
             if copy_last_output(session, registry).await {
                 (true, None)
@@ -1444,6 +1490,105 @@ async fn paste_top_buffer(session: &Arc<Session>, registry: &Arc<SessionRegistry
         Some(content) => paste_bytes(session, content).await,
         None => session.set_status_message("no paste buffer".into()).await,
     }
+}
+
+/// Paste the buffer named `name` (`:paste bufferN`). `Err` carries the
+/// unknown-name text: the interactive path shows it as a status message,
+/// and the headless path returns it in `CommandResult`.
+async fn paste_named_buffer(
+    session: &Arc<Session>,
+    registry: &Arc<SessionRegistry>,
+    name: &str,
+) -> Result<(), String> {
+    match registry.paste_buffer_get(name).await {
+        Some(content) => {
+            paste_bytes(session, content).await;
+            Ok(())
+        }
+        None => Err(format!("paste: no buffer named {name}")),
+    }
+}
+
+/// `load-buffer`'s size cap. Buffers are memory-resident and cloned per
+/// paste, and the store bounds count, not bytes, so the system's only
+/// arbitrary-file ingress is bounded here.
+const LOAD_BUFFER_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Resolve a `save-buffer` / `load-buffer` path: expand a leading `~`
+/// against `$HOME`, then refuse anything still relative. The daemon's cwd is
+/// whatever directory the first auto-spawning client happened to be in
+/// (undiscoverable from any plexy-glass surface), so relative resolution
+/// would be a silent footgun.
+fn resolve_buffer_path(verb: &str, path: &str) -> Result<std::path::PathBuf, String> {
+    let home = std::env::var("HOME").ok();
+    let resolved = std::path::PathBuf::from(crate::declared::expand_tilde(path, home.as_deref()));
+    if resolved.is_relative() {
+        return Err(format!(
+            "{verb}: relative paths are not supported — the daemon's working \
+             directory is not yours; use an absolute or ~ path"
+        ));
+    }
+    Ok(resolved)
+}
+
+/// `:set-buffer <text…>` pushes literal text as a new newest paste buffer.
+/// The grammar guarantees non-empty text, and a prompt line cannot carry
+/// newlines and is edge-trimmed (use `load-buffer` for those).
+async fn set_buffer(registry: &Arc<SessionRegistry>, text: String) -> String {
+    let n = text.len();
+    registry.push_paste_buffer(text.into_bytes()).await;
+    format!("buffer set ({n} bytes)")
+}
+
+/// `:save-buffer [bufferN] <path…>` writes a buffer (named, or the newest) to `path`.
+/// Bytes go out verbatim, truncate-overwrite; that's non-atomic by design, since
+/// these are user export files, not state files. Success and error texts both
+/// carry the resolved path.
+async fn save_buffer(
+    registry: &Arc<SessionRegistry>,
+    name: Option<String>,
+    path: &str,
+) -> Result<String, String> {
+    let resolved = resolve_buffer_path("save-buffer", path)?;
+    let (buf_name, content) = match name {
+        Some(n) => {
+            let content = registry
+                .paste_buffer_get(&n)
+                .await
+                .ok_or_else(|| format!("save-buffer: no buffer named {n}"))?;
+            (n, content)
+        }
+        None => registry
+            .paste_buffer_top_entry()
+            .await
+            .ok_or_else(|| "save-buffer: no paste buffer".to_string())?,
+    };
+    std::fs::write(&resolved, &content)
+        .map_err(|e| format!("save-buffer: {}: {e}", resolved.display()))?;
+    Ok(format!("saved {buf_name} → {} ({} bytes)", resolved.display(), content.len()))
+}
+
+/// `:load-buffer <path…>`: read a file into a new newest paste buffer.
+/// This is the system's only arbitrary-file ingress, so it is gated BEFORE
+/// reading: `symlink_metadata`-then-`is_file()` refuses FIFOs, devices, and
+/// directories (a FIFO `open` would hang a runtime worker; `/dev/zero` would
+/// OOM), and the size cap bounds resident memory. Empty files load as an
+/// empty buffer.
+async fn load_buffer(registry: &Arc<SessionRegistry>, path: &str) -> Result<String, String> {
+    let resolved = resolve_buffer_path("load-buffer", path)?;
+    let disp = resolved.display();
+    let meta = std::fs::symlink_metadata(&resolved)
+        .map_err(|e| format!("load-buffer: {disp}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("load-buffer: {disp}: not a regular file"));
+    }
+    if meta.len() > LOAD_BUFFER_MAX_BYTES {
+        return Err(format!("load-buffer: {disp} is {} bytes (limit 10 MiB)", meta.len()));
+    }
+    let content = std::fs::read(&resolved).map_err(|e| format!("load-buffer: {disp}: {e}"))?;
+    let n = content.len();
+    registry.push_paste_buffer(content).await;
+    Ok(format!("loaded {disp} ({n} bytes)"))
 }
 
 /// Send `content` to the input-target pane (the popup's child while one is
@@ -3263,16 +3408,16 @@ mod tests {
 
     /// Lockstep guard for the headless verb policy.
     /// `Session::handle_prompt_command` carries a defensive `Ok(None)` arm for
-    /// the connection-level verbs, currently eight: Detach, Reload, Switch,
-    /// ChooseSession, ChooseTree, PasteBuffer, ChooseBuffer, CopyOutput. If a
-    /// future verb is added to that arm (and `ConnVerb::from_prompt`) but NOT
-    /// to `run_prompt_line`'s intercept, `cmd "<verb>"` would fall through to
-    /// the defensive arm and silently exit 0 doing nothing. This test
-    /// hardcodes the current eight (plus `help`, refused for its modal
-    /// overlay) and asserts each is either refused with a message or
-    /// specially handled with a real effect, never a silent no-op. If you
-    /// add a connection-level verb, extend BOTH `run_prompt_line` and this
-    /// test.
+    /// the connection-level verbs, currently eleven: Detach, Reload, Switch,
+    /// ChooseSession, ChooseTree, PasteBuffer, ChooseBuffer, CopyOutput,
+    /// SetBuffer, SaveBuffer, LoadBuffer. If a future verb is added to that
+    /// arm (and `ConnVerb::from_prompt`) but NOT to `run_prompt_line`'s
+    /// intercept, `cmd "<verb>"` would fall through to the defensive arm and
+    /// silently exit 0 doing nothing. This test hardcodes the current eleven
+    /// (plus `help`, refused for its modal overlay) and asserts each is
+    /// either refused with a message or specially handled with a real effect,
+    /// never a silent no-op. If you add a connection-level verb, extend
+    /// BOTH `run_prompt_line` and this test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_prompt_line_never_silently_noops_connection_verbs() {
         let _g = crate::test_env::isolate();
@@ -3312,6 +3457,280 @@ mod tests {
         assert!(!ok, "copy-output with no blocks must not claim success");
         let msg = message.unwrap_or_default();
         assert!(msg.contains("no command blocks"), "wrong no-blocks text: {msg}");
+
+        // The buffer-file verbs are specially handled with real effects:
+        // set pushes (with a confirmation message), save writes the file,
+        // load reads it back, and a by-name paste of an unknown buffer
+        // FAILS with a message, never the silent defensive no-op.
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("guard.txt");
+        let (ok, message) = run_prompt_line(&session, &registry, "set-buffer guard text").await;
+        assert!(ok, "headless set-buffer failed: {message:?}");
+        assert!(message.unwrap_or_default().contains("buffer set"), "set-buffer must confirm");
+        let (ok, message) =
+            run_prompt_line(&session, &registry, &format!("save-buffer {}", out.display())).await;
+        assert!(ok, "headless save-buffer failed: {message:?}");
+        let (ok, message) =
+            run_prompt_line(&session, &registry, &format!("load-buffer {}", out.display())).await;
+        assert!(ok, "headless load-buffer failed: {message:?}");
+        let (ok, message) = run_prompt_line(&session, &registry, "paste buffer999").await;
+        assert!(!ok, "paste of an unknown buffer must not claim success");
+        let msg = message.unwrap_or_default();
+        assert!(msg.contains("no buffer named buffer999"), "wrong unknown-name text: {msg}");
+    }
+
+    // ── paste buffers v2: set-buffer / save-buffer / load-buffer / paste-by-name ──
+
+    /// `set-buffer` (over the wire) pushes the rest of the line VERBATIM
+    /// (internal spaces preserved), and `paste bufferN` types that buffer into
+    /// the input-target pane.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_buffer_via_wire_then_paste_by_name_types_it() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("s1".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::RunCommand {
+                session: Some("s1".into()),
+                line: "set-buffer hello   world".into(),
+            },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(ok, "set-buffer over the wire failed: {message:?}");
+        assert_eq!(message.as_deref(), Some("buffer set (13 bytes)"));
+
+        let entries = registry.list_paste_buffers().await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "buffer0");
+        assert!(
+            entries[0].preview.contains("hello   world"),
+            "internal spaces must survive: {:?}",
+            entries[0].preview
+        );
+
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::RunCommand { session: Some("s1".into()), line: "paste buffer0".into() },
+        )
+        .await;
+        let (ok, message) = expect_command_result(reply);
+        assert!(ok, "paste buffer0 over the wire failed: {message:?}");
+        // `cat` echoes the pasted bytes, but the emulator buffers the trailing
+        // grapheme until the next byte, so probe for all but the last char.
+        let pane = session
+            .window_manager
+            .lock()
+            .await
+            .input_target_pane()
+            .expect("session has a pane")
+            .clone();
+        wait_screen_contains(&pane, "hello   worl").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn paste_unknown_name_is_an_error() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("s1".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+        registry.push_paste_buffer(b"x".to_vec()).await;
+
+        let (ok, message) = run_prompt_line(&session, &registry, "paste buffer42").await;
+        assert!(!ok);
+        assert_eq!(message.as_deref(), Some("paste: no buffer named buffer42"));
+    }
+
+    /// `save-buffer <path>` writes the NEWEST buffer; `save-buffer bufferN
+    /// <path>` writes that buffer. Bytes verbatim in both (incl. a non-UTF8
+    /// byte), and the status message carries the buffer name + resolved path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn save_buffer_newest_and_named_write_bytes_verbatim() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("s1".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        registry.push_paste_buffer(b"old\xFFbytes".to_vec()).await; // buffer0
+        registry.push_paste_buffer(b"new line\n".to_vec()).await; // buffer1
+
+        // Newest (`buffer1`) by default.
+        let newest = dir.path().join("newest.out");
+        let line = format!("save-buffer {}", newest.display());
+        let (ok, message) = run_prompt_line(&session, &registry, &line).await;
+        assert!(ok, "save-buffer (newest) failed: {message:?}");
+        assert_eq!(
+            message.as_deref(),
+            Some(format!("saved buffer1 → {} (9 bytes)", newest.display()).as_str())
+        );
+        assert_eq!(std::fs::read(&newest).unwrap(), b"new line\n");
+
+        // Named `buffer0`, binary-safe write.
+        let named = dir.path().join("named.out");
+        let line = format!("save-buffer buffer0 {}", named.display());
+        let (ok, message) = run_prompt_line(&session, &registry, &line).await;
+        assert!(ok, "save-buffer buffer0 failed: {message:?}");
+        assert_eq!(std::fs::read(&named).unwrap(), b"old\xFFbytes");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn save_buffer_errors_carry_the_resolved_path() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("s1".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        // No buffers at all.
+        let (ok, message) = run_prompt_line(&session, &registry, "save-buffer /tmp/x.out").await;
+        assert!(!ok);
+        assert_eq!(message.as_deref(), Some("save-buffer: no paste buffer"));
+
+        registry.push_paste_buffer(b"x".to_vec()).await;
+
+        // Unknown buffer name.
+        let line = format!("save-buffer buffer99 {}", dir.path().join("x.out").display());
+        let (ok, message) = run_prompt_line(&session, &registry, &line).await;
+        assert!(!ok);
+        assert_eq!(message.as_deref(), Some("save-buffer: no buffer named buffer99"));
+
+        // io error: the message names the RESOLVED path and the os error.
+        let missing = dir.path().join("no-such-subdir").join("x.out");
+        let line = format!("save-buffer {}", missing.display());
+        let (ok, message) = run_prompt_line(&session, &registry, &line).await;
+        assert!(!ok);
+        let msg = message.unwrap_or_default();
+        assert!(
+            msg.starts_with(&format!("save-buffer: {}: ", missing.display())),
+            "io error must carry the resolved path: {msg}"
+        );
+
+        // Relative paths are refused (after tilde expansion).
+        let (ok, message) = run_prompt_line(&session, &registry, "save-buffer rel/x.out").await;
+        assert!(!ok);
+        assert_eq!(
+            message.as_deref(),
+            Some(
+                "save-buffer: relative paths are not supported — the daemon's \
+                 working directory is not yours; use an absolute or ~ path"
+            )
+        );
+    }
+
+    /// `load-buffer` reads file bytes verbatim (incl. non-UTF8) into a new
+    /// newest buffer; an empty file loads as an empty buffer (legal).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn load_buffer_reads_file_bytes_verbatim() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("s1".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let file = dir.path().join("snippet.bin");
+        std::fs::write(&file, b"bin\xFFary\ncontent").unwrap();
+        let line = format!("load-buffer {}", file.display());
+        let (ok, message) = run_prompt_line(&session, &registry, &line).await;
+        assert!(ok, "load-buffer failed: {message:?}");
+        assert_eq!(
+            message.as_deref(),
+            Some(format!("loaded {} (15 bytes)", file.display()).as_str())
+        );
+        assert_eq!(registry.paste_buffer_top().await.as_deref(), Some(b"bin\xFFary\ncontent".as_slice()));
+
+        // Empty file → empty buffer.
+        let empty = dir.path().join("empty.txt");
+        std::fs::write(&empty, b"").unwrap();
+        let line = format!("load-buffer {}", empty.display());
+        let (ok, message) = run_prompt_line(&session, &registry, &line).await;
+        assert!(ok, "load-buffer of an empty file failed: {message:?}");
+        assert_eq!(registry.paste_buffer_top().await.as_deref(), Some(b"".as_slice()));
+    }
+
+    /// The load gates: FIFOs, directories, oversize files, and relative
+    /// paths are all refused BEFORE any read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn load_buffer_refuses_non_regular_oversize_and_relative() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("s1".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        // Directory.
+        let line = format!("load-buffer {}", dir.path().display());
+        let (ok, message) = run_prompt_line(&session, &registry, &line).await;
+        assert!(!ok);
+        assert_eq!(
+            message.as_deref(),
+            Some(format!("load-buffer: {}: not a regular file", dir.path().display()).as_str())
+        );
+
+        // FIFO: opening it would hang a runtime worker, so the `is_file`
+        // gate refuses it from metadata alone.
+        let fifo = dir.path().join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("spawn mkfifo");
+        assert!(status.success(), "mkfifo failed");
+        let line = format!("load-buffer {}", fifo.display());
+        let (ok, message) = run_prompt_line(&session, &registry, &line).await;
+        assert!(!ok);
+        assert_eq!(
+            message.as_deref(),
+            Some(format!("load-buffer: {}: not a regular file", fifo.display()).as_str())
+        );
+
+        // Oversize: a sparse file one byte past the 10 MiB cap.
+        let big = dir.path().join("big.bin");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(10 * 1024 * 1024 + 1).unwrap();
+        drop(f);
+        let line = format!("load-buffer {}", big.display());
+        let (ok, message) = run_prompt_line(&session, &registry, &line).await;
+        assert!(!ok);
+        assert_eq!(
+            message.as_deref(),
+            Some(
+                format!("load-buffer: {} is 10485761 bytes (limit 10 MiB)", big.display())
+                    .as_str()
+            )
+        );
+
+        // Relative path.
+        let (ok, message) = run_prompt_line(&session, &registry, "load-buffer rel.txt").await;
+        assert!(!ok);
+        assert_eq!(
+            message.as_deref(),
+            Some(
+                "load-buffer: relative paths are not supported — the daemon's \
+                 working directory is not yours; use an absolute or ~ path"
+            )
+        );
+        assert!(registry.list_paste_buffers().await.is_empty(), "no refusal may push a buffer");
     }
 
     /// Write ASCII `text` into grid row `row` of a screen (test fixture: the

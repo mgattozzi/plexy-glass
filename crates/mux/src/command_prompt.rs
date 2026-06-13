@@ -55,8 +55,15 @@ pub enum PromptCommand {
     JoinPane(SplitDir),
     SwapPane(SwapTarget),
     SwapMarked,
-    PasteBuffer,
+    /// Paste a paste buffer: the named one, or the newest (`None`).
+    PasteBuffer(Option<String>),
     ChooseBuffer,
+    /// Push literal text as a new paste buffer.
+    SetBuffer { text: String },
+    /// Write a buffer (named, or the newest with `None`) to a file.
+    SaveBuffer { name: Option<String>, path: String },
+    /// Read a file into a new paste buffer.
+    LoadBuffer { path: String },
     ToggleMonitorActivity,
     ToggleMonitorBell,
     /// Open a floating popup running the given command line (`None` = scratch shell).
@@ -90,14 +97,23 @@ impl std::error::Error for ParseError {}
 /// Static verb names, sorted, for Tab-completion of the first token.
 pub const VERBS: &[&str] = &[
     "break", "buffers", "close-popup", "copy", "copy-output", "detach", "focus",
-    "help", "join", "kill", "last", "layout", "mark", "monitor-activity",
-    "monitor-bell", "new", "next", "next-prompt", "paste", "popup", "prev",
-    "prev-prompt", "reload", "rename", "rename-pane", "resize", "sessions",
-    "split", "swap", "switch", "sync", "tree", "win", "zoom",
+    "help", "join", "kill", "last", "layout", "load-buffer", "mark",
+    "monitor-activity", "monitor-bell", "new", "next", "next-prompt", "paste",
+    "popup", "prev", "prev-prompt", "reload", "rename", "rename-pane", "resize",
+    "save-buffer", "sessions", "set-buffer", "split", "swap", "switch", "sync",
+    "tree", "win", "zoom",
 ];
 
 fn err(msg: impl Into<String>) -> ParseError {
     ParseError(msg.into())
+}
+
+/// Whether `s` matches the machine-generated paste-buffer name shape
+/// (`^buffer[0-9]+$`), the state-independent test `save-buffer` uses to
+/// split a leading buffer name from the path.
+fn is_buffer_name(s: &str) -> bool {
+    s.strip_prefix("buffer")
+        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn dir_from_letter(s: &str) -> Option<Direction> {
@@ -148,8 +164,46 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
         "tree" => no_args(PromptCommand::ChooseTree),
         "mark" => no_args(PromptCommand::MarkPane),
         "break" => no_args(PromptCommand::BreakPane),
-        "paste" => no_args(PromptCommand::PasteBuffer),
+        "paste" => match args.as_slice() {
+            [] => Ok(PromptCommand::PasteBuffer(None)),
+            [name] => Ok(PromptCommand::PasteBuffer(Some((*name).to_string()))),
+            _ => Err(err("paste: expected a buffer name or no argument")),
+        },
         "buffers" => no_args(PromptCommand::ChooseBuffer),
+        "set-buffer" => {
+            if rest.is_empty() {
+                Err(err("set-buffer: expected text"))
+            } else {
+                Ok(PromptCommand::SetBuffer { text: rest.to_string() })
+            }
+        }
+        "save-buffer" => {
+            // Shape-based split: a first token matching the machine-generated
+            // buffer-name shape (`bufferN`) names the source buffer and the
+            // rest is the path; otherwise the WHOLE tail is the path (newest
+            // buffer). State-independent: a path whose first word is
+            // literally `bufferN ` is pathological and not supported.
+            match rest.split_once(char::is_whitespace) {
+                Some((first, tail)) if is_buffer_name(first) => Ok(PromptCommand::SaveBuffer {
+                    name: Some(first.to_string()),
+                    path: tail.trim_start().to_string(),
+                }),
+                Some(_) => Ok(PromptCommand::SaveBuffer { name: None, path: rest.to_string() }),
+                // A lone `bufferN` is a missing path; a lone anything else is
+                // the path. Empty rest is a missing path either way.
+                None if !rest.is_empty() && !is_buffer_name(rest) => {
+                    Ok(PromptCommand::SaveBuffer { name: None, path: rest.to_string() })
+                }
+                None => Err(err("save-buffer: expected a path")),
+            }
+        }
+        "load-buffer" => {
+            if rest.is_empty() {
+                Err(err("load-buffer: expected a path"))
+            } else {
+                Ok(PromptCommand::LoadBuffer { path: rest.to_string() })
+            }
+        }
         "monitor-activity" => no_args(PromptCommand::ToggleMonitorActivity),
         "monitor-bell" => no_args(PromptCommand::ToggleMonitorBell),
         "prev-prompt" => no_args(PromptCommand::PrevPrompt),
@@ -458,10 +512,72 @@ mod tests {
 
     #[test]
     fn paste_buffer_verbs() {
-        assert_eq!(p("paste").unwrap(), PromptCommand::PasteBuffer);
+        assert_eq!(p("paste").unwrap(), PromptCommand::PasteBuffer(None));
+        assert_eq!(
+            p("paste buffer2").unwrap(),
+            PromptCommand::PasteBuffer(Some("buffer2".into()))
+        );
         assert_eq!(p("buffers").unwrap(), PromptCommand::ChooseBuffer);
-        assert!(p("paste x").is_err());
+        assert_eq!(
+            p("paste a b").unwrap_err().to_string(),
+            "paste: expected a buffer name or no argument"
+        );
         assert!(p("buffers x").is_err());
+    }
+
+    #[test]
+    fn set_buffer_takes_rest_verbatim() {
+        assert_eq!(
+            p("set-buffer some literal   text").unwrap(),
+            PromptCommand::SetBuffer { text: "some literal   text".into() }
+        );
+        assert_eq!(p("set-buffer").unwrap_err().to_string(), "set-buffer: expected text");
+        assert_eq!(p("set-buffer   ").unwrap_err().to_string(), "set-buffer: expected text");
+    }
+
+    #[test]
+    fn load_buffer_takes_rest_as_path() {
+        assert_eq!(
+            p("load-buffer /tmp/my snippet.txt").unwrap(),
+            PromptCommand::LoadBuffer { path: "/tmp/my snippet.txt".into() }
+        );
+        assert_eq!(
+            p("load-buffer").unwrap_err().to_string(),
+            "load-buffer: expected a path"
+        );
+    }
+
+    #[test]
+    fn save_buffer_shape_based_first_token_split() {
+        // No leading buffer name: the whole tail is the path (spaces preserved).
+        assert_eq!(
+            p("save-buffer /tmp/my yank.txt").unwrap(),
+            PromptCommand::SaveBuffer { name: None, path: "/tmp/my yank.txt".into() }
+        );
+        // First token matches `^buffer[0-9]+$`: it names the buffer, the rest
+        // is the path (extra separating spaces collapse, internal ones stay).
+        assert_eq!(
+            p("save-buffer buffer3 /tmp/old.txt").unwrap(),
+            PromptCommand::SaveBuffer { name: Some("buffer3".into()), path: "/tmp/old.txt".into() }
+        );
+        assert_eq!(
+            p("save-buffer buffer0   /tmp/with space.txt").unwrap(),
+            PromptCommand::SaveBuffer {
+                name: Some("buffer0".into()),
+                path: "/tmp/with space.txt".into()
+            }
+        );
+        // Shape, not state: `bufferX` has no digits, so the whole tail is a path.
+        assert_eq!(
+            p("save-buffer bufferX /tmp/old.txt").unwrap(),
+            PromptCommand::SaveBuffer { name: None, path: "bufferX /tmp/old.txt".into() }
+        );
+        // Edge: a lone `bufferN` is a missing path, not a path.
+        assert_eq!(
+            p("save-buffer buffer3").unwrap_err().to_string(),
+            "save-buffer: expected a path"
+        );
+        assert_eq!(p("save-buffer").unwrap_err().to_string(), "save-buffer: expected a path");
     }
 
     #[test]

@@ -148,7 +148,10 @@ pub(crate) fn default_shell() -> String {
         .unwrap_or_else(|| "/bin/sh".to_string())
 }
 
-fn expand_tilde(path: &str, home: Option<&str>) -> String {
+/// Expand a leading `~` / `~/…` against `home`. No `~user` form; with no
+/// HOME the path is returned verbatim. Shared with the connection layer's
+/// `save-buffer` / `load-buffer` path policy.
+pub(crate) fn expand_tilde(path: &str, home: Option<&str>) -> String {
     let Some(home) = home else {
         return path.to_string();
     };
@@ -233,6 +236,10 @@ mod tests {
         assert_eq!(expand_tilde("~/a/b", Some("/home/u")), "/home/u/a/b");
         assert_eq!(expand_tilde("/abs", Some("/home/u")), "/abs");
         assert_eq!(expand_tilde("~/a", None), "~/a"); // no HOME: unchanged
+        assert_eq!(expand_tilde("~", None), "~"); // no HOME: unchanged
+        assert_eq!(expand_tilde("~user/a", Some("/home/u")), "~user/a"); // no ~user form
+        assert_eq!(expand_tilde("rel/a", Some("/home/u")), "rel/a"); // relative: verbatim
+        assert_eq!(expand_tilde("a~/b", Some("/home/u")), "a~/b"); // ~ only leads
     }
 
     #[test]
