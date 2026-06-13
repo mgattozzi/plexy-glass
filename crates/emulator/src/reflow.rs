@@ -67,6 +67,20 @@ pub fn reflow(
         }
     }
 
+    // If the cursor's logical column landed on a wide spacer (CUP/CHA clamp the
+    // cursor only to cols-1, so it can sit on a spacer column), back it up to
+    // the spacer's wide partner. Spacers are `continue`d in the re-wrap loop
+    // before the per-cell cursor match, so a spacer-resident cursor would
+    // otherwise never match and fall through to the stale-row clamp.
+    if let (Some(li), Some(ci)) = (cursor_logical_line_idx, cursor_logical_col_in_line)
+        && logical_lines
+            .get(li)
+            .and_then(|line| line.get(ci))
+            .is_some_and(Cell::is_wide_spacer)
+    {
+        cursor_logical_col_in_line = Some(ci.saturating_sub(1));
+    }
+
     // 4. Re-wrap each logical line at `new_cols`. Wide chars (width 2) must not
     //    split across a row boundary; if the next char doesn't fit, pad the
     //    current row with a blank and wrap.
@@ -82,7 +96,9 @@ pub fn reflow(
             // that is blank after the trailing-blank trim above).
             let mut row = Row::blank(new_cols);
             row.mark = line_mark;
-            if Some(line_idx) == cursor_logical_line_idx && Some(0) == cursor_logical_col_in_line {
+            // The cursor is on this empty logical line (any column maps to col 0
+            // of the single blank row it becomes).
+            if Some(line_idx) == cursor_logical_line_idx && cursor_logical_col_in_line.is_some() {
                 cursor_new_abs_row = Some(new_rows_buf.len());
                 cursor_new_col = 0;
             }
@@ -126,8 +142,15 @@ pub fn reflow(
             row_cells.push(cell.clone());
             col_in_row += 1;
             if cw == 2 {
-                row_cells.push(Cell::wide_spacer());
-                col_in_row += 1;
+                // Only emit the wide spacer if its column fits. In a 1-col grid
+                // a leading wide char can't (the pad/flush guards above require
+                // col_in_row > 0), so without this check we'd write a 2-cell row
+                // into a 1-col grid. Drop the spacer and keep the grapheme as a
+                // single clamped cell, mirroring `put_grapheme`'s degenerate case.
+                if col_in_row < new_cols {
+                    row_cells.push(Cell::wide_spacer());
+                    col_in_row += 1;
+                }
             } else if cw == 0 {
                 // Zero-width char: attach it to the previous cell's grapheme, and if
                 // there is no previous cell, drop it.
@@ -141,10 +164,12 @@ pub fn reflow(
             }
         }
 
-        // Cursor at end-of-line (col == line.len()), so place it at the end of
-        // the last row.
+        // Cursor at or past end-of-line (col >= line.len(), e.g. parked in the
+        // trailing-blank padding that was trimmed away), so place it at the end
+        // of the last emitted row rather than falling through to the stale-row
+        // clamp.
         if Some(line_idx) == cursor_logical_line_idx
-            && cursor_logical_col_in_line == Some(line.len())
+            && cursor_logical_col_in_line.is_some_and(|c| c >= line.len())
         {
             cursor_new_abs_row = Some(new_rows_buf.len());
             cursor_new_col = col_in_row;
@@ -271,6 +296,86 @@ mod tests {
         // Cursor was at logical col 6 (length of "Hello!"); on the new row at col 6.
         assert_eq!(c.row, 0);
         assert_eq!(c.col, 6);
+    }
+
+    #[test]
+    fn wide_char_at_col0_in_one_col_grid_stays_rectangular() {
+        // A leading wide grapheme reflowed into a 1-col grid must not emit a
+        // 2-cell (wide + spacer) row, since that violates grid-rectangularity.
+        let mut active = Grid {
+            cols: 2,
+            rows: vec![Row {
+                cells: vec![cell("あ"), Cell::wide_spacer()],
+                wrap_origin: WrapOrigin::Hard,
+                mark: crate::grid::RowMark::default(),
+            }],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor::default();
+        reflow(&mut active, &mut sb, &mut c, 4, 1);
+        assert_eq!(active.cols, 1);
+        for r in &active.rows {
+            assert_eq!(r.cells.len(), 1, "every row must be exactly 1 cell wide");
+        }
+    }
+
+    #[test]
+    fn cursor_past_text_tracks_row_after_join() {
+        // "Hello World" soft-wrapped across rows 0-1, then "ab" on row 2 with the
+        // cursor parked in the trailing padding (col 5, past "ab"). Widening
+        // joins rows 0-1, shifting "ab" up to new row 1, so the cursor must
+        // follow to row 1, not stay on the stale row 2.
+        let mut active = Grid {
+            cols: 8,
+            rows: vec![
+                fill_row(&["H", "e", "l", "l", "o", " ", "W", "o"], WrapOrigin::Hard),
+                fill_row(&["r", "l", "d", " ", " ", " ", " ", " "], WrapOrigin::SoftFrom(0)),
+                fill_row(&["a", "b", " ", " ", " ", " ", " ", " "], WrapOrigin::Hard),
+            ],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor {
+            row: 2,
+            col: 5,
+            ..Cursor::default()
+        };
+        reflow(&mut active, &mut sb, &mut c, 4, 16);
+        assert_eq!(row_text(&active.rows[0]), "Hello World");
+        assert_eq!(row_text(&active.rows[1]), "ab");
+        assert_eq!(c.row, 1, "cursor must follow 'ab' to the joined-up row");
+    }
+
+    #[test]
+    fn cursor_on_wide_spacer_normalizes_to_partner() {
+        // Cursor parked on a wide char's spacer column (col 1). After reflow it
+        // must resolve onto the wide grapheme (col 0), not fall through to the
+        // stale-row clamp.
+        let mut active = Grid {
+            cols: 8,
+            rows: vec![Row {
+                cells: vec![
+                    cell("あ"),
+                    Cell::wide_spacer(),
+                    cell("b"),
+                    cell("c"),
+                    Cell::default(),
+                    Cell::default(),
+                    Cell::default(),
+                    Cell::default(),
+                ],
+                wrap_origin: WrapOrigin::Hard,
+                mark: crate::grid::RowMark::default(),
+            }],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor {
+            row: 0,
+            col: 1,
+            ..Cursor::default()
+        };
+        reflow(&mut active, &mut sb, &mut c, 4, 16);
+        assert_eq!(c.row, 0);
+        assert_eq!(c.col, 0, "spacer cursor must resolve to the wide grapheme");
     }
 
     #[test]

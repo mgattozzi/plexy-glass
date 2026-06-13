@@ -118,36 +118,53 @@ pub async fn read_clipboard() -> Vec<u8> {
 pub async fn click_to_position(pane: &crate::pane::Pane, click_col: u16) -> Result<bool, DaemonError> {
     let plan = pane.with_screen(|s| {
         let cursor = &s.cursor;
-        let row_mark = s
-            .active
-            .rows
-            .get(cursor.row as usize)
-            .map(|r| r.mark)
-            .unwrap_or_default();
+        let row = s.active.rows.get(cursor.row as usize);
+        let row_mark = row.map(|r| r.mark).unwrap_or_default();
         row_mark.prompt_end_col().and_then(|prompt_col| {
             if click_col < prompt_col {
                 return None; // click is inside the prompt itself
             }
-            let delta: i32 = i32::from(click_col) - i32::from(cursor.col);
-            Some(delta)
+            // The shell's line editor moves one GRAPHEME per arrow press, but a
+            // wide (CJK/emoji) grapheme spans two grid columns. Count real
+            // grapheme cells (skipping wide spacers) in the column span so the
+            // synthesized arrows land on the click target instead of
+            // overshooting by one per wide char.
+            let (lo, hi) = (cursor.col.min(click_col), cursor.col.max(click_col));
+            let count = row
+                .map(|r| graphemes_in_span(&r.cells, lo, hi))
+                .unwrap_or(usize::from(hi - lo));
+            Some((click_col > cursor.col, count))
         })
     });
 
-    let Some(delta) = plan else {
+    let Some((rightward, count)) = plan else {
         return Ok(false);
     };
-    if delta == 0 {
+    if count == 0 {
         return Ok(true);
     }
 
-    let arrow: &[u8] = if delta > 0 { b"\x1b[C" } else { b"\x1b[D" };
-    let count = delta.unsigned_abs() as usize;
+    let arrow: &[u8] = if rightward { b"\x1b[C" } else { b"\x1b[D" };
     let mut keystream = Vec::with_capacity(count * arrow.len());
     for _ in 0..count {
         keystream.extend_from_slice(arrow);
     }
     pane.send_input(Bytes::from(keystream)).await?;
     Ok(true)
+}
+
+/// Count grapheme cells (skipping wide spacers) in the half-open column span
+/// `[lo, hi)` of a row, i.e. the number of one-grapheme-per-press cursor moves
+/// a shell line editor makes across that span.
+fn graphemes_in_span(cells: &[plexy_glass_emulator::Cell], lo: u16, hi: u16) -> usize {
+    cells
+        .iter()
+        .enumerate()
+        .filter(|&(c, cell)| {
+            let col = c as u16;
+            col >= lo && col < hi && !cell.is_wide_spacer()
+        })
+        .count()
 }
 
 #[cfg(test)]
@@ -164,6 +181,29 @@ mod tests {
     async fn write_clipboard_does_not_error_even_when_tool_missing() {
         let r = write_clipboard(b"hello").await;
         assert!(r.is_ok());
+    }
+
+    #[test]
+    fn graphemes_in_span_counts_one_per_grapheme_not_per_column() {
+        use plexy_glass_emulator::Cell;
+        let cellch = |s: &str| Cell {
+            grapheme: s.into(),
+            ..Cell::default()
+        };
+        // Row: "a" "あ"(wide)+spacer "b" "c"  -> columns 0,1,2,3,4
+        let cells = vec![
+            cellch("a"),
+            cellch("あ"),
+            Cell::wide_spacer(),
+            cellch("b"),
+            cellch("c"),
+        ];
+        // ASCII-only span [0,1): one grapheme.
+        assert_eq!(graphemes_in_span(&cells, 0, 1), 1);
+        // Span [0,3) covers "a" + "あ"(+spacer): two graphemes, not three columns.
+        assert_eq!(graphemes_in_span(&cells, 0, 3), 2);
+        // Span [0,5) covers a あ b c: four graphemes across five columns.
+        assert_eq!(graphemes_in_span(&cells, 0, 5), 4);
     }
 
     #[tokio::test]

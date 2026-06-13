@@ -257,8 +257,18 @@ impl Compositor {
                 }
                 let local_row = (m.line_idx - viewport_lo) as u16;
                 let host_r = pane_row_offset + view.rect.row + local_row;
-                for c in m.col_start..=m.col_end {
+                // Clamp to the pane's own columns: a match's `col_end` is captured
+                // at search time against the grid width, so a column-shrinking
+                // resize while copy mode stays open can leave `col_end` past the
+                // pane rect. `cell_mut` is only bounds-safe against the whole host
+                // screen, so without this the HIGHLIGHT would bleed onto the
+                // pane border / a neighbouring pane (mirrors the content path).
+                let last_col = m.col_end.min(view.rect.cols.saturating_sub(1));
+                for c in m.col_start..=last_col {
                     let host_c = view.rect.col + c;
+                    if host_c >= host_cols {
+                        break;
+                    }
                     if let Some(cell) = screen.cell_mut(host_r, host_c) {
                         cell.attrs |= plexy_glass_emulator::Attrs::HIGHLIGHT;
                     }
