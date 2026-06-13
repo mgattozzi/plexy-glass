@@ -520,6 +520,67 @@ fn rename_window_via_overlay_updates_status_bar() {
     );
 }
 
+// Keyboard follow-ups (K3): on a legacy-classified client (the TestSession PTY
+// negotiates Legacy, like a real older terminal), a BARE `\x1b` byte must
+// cancel an open overlay. That's the Esc-idle-flush path the choose-tree
+// feature could not exercise. Then, while an overlay is open, a paste must NOT
+// leak to the shell behind the modal (the K2 byte/paste swallow).
+#[test]
+fn esc_cancels_overlay_and_paste_does_not_leak_on_legacy_client() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+
+    // --- Part 1: a lone ESC closes the choose-tree overlay. ---
+    // Open the tree (Ctrl+a W); its " Tree " title / footer paints only while
+    // open, so it's a clean open needle.
+    sess.send_prefix(b'W');
+    assert!(
+        sess.wait_for(b"Tree", Duration::from_secs(15)),
+        "choose-tree overlay never opened. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // Send a single raw escape byte (NOT a chord). On a legacy client this
+    // parks in the parser; the ~30ms idle-flush turns it into `Key(Escape)`,
+    // which the overlay handles as cancel. Prove the overlay actually closed by
+    // typing a shell command afterwards: if the tree were still open it would
+    // capture these keys (no shell echo); once closed, the shell echoes it.
+    sess.send(b"\x1b");
+    // Give the idle-flush (30ms) + repaint a margin, then drive the shell.
+    std::thread::sleep(Duration::from_millis(150));
+    let before = sess.buffer_len();
+    sess.send_str("echo ESC_CLOSED_TREE\n");
+    assert!(
+        sess.wait_for_from(before, b"ESC_CLOSED_TREE", Duration::from_secs(10)),
+        "after a lone ESC the shell command never echoed — the tree overlay \
+         did not close (Esc-cancel broken on a legacy client). raw: {}",
+        sess.snapshot_str()
+    );
+
+    // --- Part 2: a paste behind an open overlay does NOT reach the shell. ---
+    // Re-open the tree, then send a bracketed paste. Behind the modal it must
+    // be discarded; the marker must never echo from the shell.
+    sess.send_prefix(b'W');
+    assert!(
+        sess.wait_for(b"Tree", Duration::from_secs(15)),
+        "choose-tree overlay never re-opened. raw: {}",
+        sess.snapshot_str()
+    );
+    let before_paste = sess.buffer_len();
+    sess.send(b"\x1b[200~LEAKED_PASTE_MARKER\n\x1b[201~");
+    // Ample time for an (incorrect) forward + shell echo, then assert absence.
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(
+        !sess.wait_for_from(before_paste, b"LEAKED_PASTE_MARKER", Duration::from_millis(1)),
+        "a paste leaked to the shell behind an open overlay. raw: {}",
+        sess.snapshot_str()
+    );
+    // Close the tree (Esc) so the session tears down cleanly.
+    sess.send(b"\x1b");
+}
+
 #[test]
 fn mux_kill_pane_collapses_layout() {
     let tmp = tempfile::tempdir().unwrap();

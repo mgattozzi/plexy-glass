@@ -247,8 +247,17 @@ shifted/base-layout alternates, super/hyper/meta/lock modifiers aligned to the
 wire `1+bitset`), a per-pane key **re-encode** stage (legacy / modifyOtherKeys
 27-form / Kitty CSI-u with down-conversion), client probe→negotiate→graceful-
 fallback→precise-teardown of the outer terminal, focus/color-scheme routed
-end-to-end, and **colored underlines** (SGR `58`/`59`, per-cell
-`underline_color`, advertised as `Setulc`); and **preset layouts** — five
+end-to-end, a symmetric **decode** of the modifyOtherKeys 27-form
+(`CSI 27 ; mods ; code ~` → the same `KeyEvent` the re-encode emits), a
+**~30ms Esc idle-flush** in the connection input loop (a bare `\x1b` parks in
+the paste→mouse→key parser chain; the flush turns it into `Key(Escape)` so Esc
+cancels overlays on legacy / modifyOtherKeys clients, not only Kitty — the
+read_frame future is pinned/recreated for cancel-safety, the timer gated by an
+`armed` flag so it never busy-wakes when idle), and **overlay input isolation**
+(while an overlay is open `InputEvent::Bytes`/`Paste` are discarded — the modal
+owns input, nothing leaks to the pane's child); and **colored underlines** (SGR
+`58`/`59`, per-cell `underline_color`, advertised as `Setulc`); and **preset
+layouts** — five
 presets (`even-horizontal`/`even-vertical`/`main-horizontal`/`main-vertical`/
 `tiled`), `Ctrl+a Space` cycling with per-window memory, `:layout <name>` /
 `layout:<name>` verbs, the active pane takes the main slot in main-*, evenness
@@ -402,4 +411,13 @@ directly, recompute would misfire the monitor-command alert); width-mismatch
 seeds rows as-is (first resize normalizes); save moved onto `spawn_blocking`
 guarded by a `persist_in_flight` async mutex (`stop_persist` acquires it before
 aborting the loop so an in-flight save completes before `kill`'s
-`delete_session`) — shipped 2026-06-13 spec/plan.)
+`delete_session`) — shipped 2026-06-13 spec/plan; keyboard follow-ups —
+modifyOtherKeys 27-form decode (symmetric with the re-encode emitter), the
+~30ms Esc idle-flush in the connection loop (a bare `\x1b` parks in the
+paste→mouse→key parser chain — `InputRouter::has_pending`/`flush_keys` drain it,
+`MouseParser`/`PasteParser` gained mid-sequence + flush helpers — and becomes
+`Key(Escape)` so Esc cancels overlays on legacy/MOK clients; read_frame pinned +
+recreated for cancel-safety, timer gated by `armed`), and overlay input
+isolation (`InputEvent::Bytes`/`Paste` discarded while an overlay is open; the
+per-event dispatch extracted to `dispatch_input_event`) — shipped 2026-06-13
+spec/plan.)
