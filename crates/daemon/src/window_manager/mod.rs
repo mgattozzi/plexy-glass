@@ -740,6 +740,16 @@ impl WindowManager {
             {
                 self.marked_pane = None;
             }
+            // Kill every pane's child + cancel its pipe before the window is
+            // dropped. The synchronous window close must not leak shells or
+            // pipe-pane consumers (dropping the panes alone never SIGHUPs the
+            // children; the reader threads hold the PTY masters open).
+            let w = &self.windows[removed];
+            for pid in w.layout().panes() {
+                if let Some(p) = w.pane(pid) {
+                    p.kill_child();
+                }
+            }
             self.windows.remove(removed);
             if self.windows.is_empty() {
                 self.last_active_window = None;

@@ -246,7 +246,15 @@ impl Window {
 
     pub fn close_pane(&mut self, id: PaneId) -> Result<CloseOutcome, DaemonError> {
         let outcome = self.layout.close(id);
-        self.panes.remove(&id);
+        // Kill the removed pane's child and cancel any pipe-pane consumer.
+        // Dropping the pane alone does NOT terminate the child (the detached
+        // reader thread holds the PTY master open until the child exits), so a
+        // synchronous close (Ctrl+a x / Ctrl+a &) must do what `kill_child`
+        // does for the death-channel paths, or it leaks both the shell and the
+        // pipe consumer.
+        if let Some(pane) = self.panes.remove(&id) {
+            pane.kill_child();
+        }
         // Drop a zoom overlay that pointed at the closed pane so it never
         // outlives its target (a dangling zoom renders a blank viewport).
         if self.zoomed == Some(id) {

@@ -326,8 +326,14 @@ mod tests {
             .await,
             "too-slow status never surfaced"
         );
-        // Producer unaffected: the broadcast sender outlives the closed pipe.
-        let _ = tx.send(Bytes::from_static(b"still fine"));
+        // Producer unaffected: the drain's receiver was dropped (count → 0)
+        // but the sender itself remains valid. A zero receiver count also
+        // confirms the drain task exited cleanly (it wasn't leaked).
+        assert_eq!(
+            tx.receiver_count(),
+            0,
+            "drain receiver must be dropped after the pipe closes"
+        );
     }
 
     // A handle dropped from the slot must stop the drain via cancel even when

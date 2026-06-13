@@ -329,9 +329,11 @@ impl Pane {
     ///
     /// Also closes any pipe-pane explicitly: `kill_child` knows nothing about
     /// the pipe's consumer child, so the pipe must be cancelled here (the
-    /// drain task then kills and reaps the consumer). Every production
-    /// teardown site (`terminate_panes`, `close_popup`, `kill_window_panes`,
-    /// `kill_pane_child`) flows through this method.
+    /// drain task then kills and reaps the consumer). Every production teardown
+    /// site flows through this method, both the death-channel paths
+    /// (`terminate_panes`, `close_popup`, `kill_window_panes`,
+    /// `kill_pane_child`) and the synchronous-close paths (`close_pane` via
+    /// Ctrl+a x, `close_active_window` via Ctrl+a &).
     pub fn kill_child(&self) {
         crate::pipe::cancel_slot(&self.inner.pipe, crate::pipe::PipeCloseReason::PaneClosed);
         // invariant: child_killer mutex briefly held; kill never blocks.

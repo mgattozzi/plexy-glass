@@ -2528,6 +2528,132 @@ mod tests {
         assert!(!pane.has_pipe(), "kill_child cleared the pipe slot");
     }
 
+    // Regression: Ctrl+a x (Command::KillPane) must kill the pane child AND
+    // cancel any running pipe-pane consumer. Previously, close_pane and
+    // close_active_window did NOT call kill_child, so both the shell and the
+    // pipe consumer were leaked.
+    //
+    // This test drives the `close_active_window` code path:
+    // KillPane on a single-pane window → TreeEmpty → close_active_window(),
+    // which iterates every pane and calls kill_child() on each.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pipe_pane_kill_pane_cmd_cancels_consumer() {
+        let _g = crate::test_env::isolate();
+        let s = Session::new("t-pipe-killpane".into(), cat_spec(), size(), cfg()).unwrap();
+        let pane = active_pane(&s).await;
+        s.handle_prompt_command(PromptCommand::PipePane(Some("exec sleep 1000".into())))
+            .await
+            .unwrap();
+        let pid = pane.pipe_pid().expect("consumer pid");
+        // Wait until the pipe's drain task is actually running (slot occupied).
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(5), || pane.has_pipe())
+                .await,
+            "pipe never attached"
+        );
+        assert!(pid_alive(pid), "consumer must be alive before the kill");
+
+        // Drive the Ctrl+a x route, NOT pane.kill_child() directly.
+        // Single-pane window: KillPane → TreeEmpty → close_active_window.
+        s.handle_command(plexy_glass_mux::Command::KillPane).await.unwrap();
+
+        // Consumer must be killed AND reaped (kill -0 fails once the zombie is gone).
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+                !pid_alive(pid)
+            })
+            .await,
+            "consumer survived (or zombied) after Command::KillPane — \
+             close_active_window must call kill_child on removed panes"
+        );
+    }
+
+    // Regression: Ctrl+a & (Command::KillWindow) must also kill the pane child
+    // and cancel any running pipe-pane consumer. Uses a 2-window session so the
+    // session itself survives after the first window is killed.
+    //
+    // This test drives the `close_active_window` code path directly via
+    // Command::KillWindow (no TreeEmpty detour, the window is removed as a
+    // whole).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pipe_pane_kill_window_cmd_cancels_consumer() {
+        let _g = crate::test_env::isolate();
+        let s = Session::new("t-pipe-killwin".into(), cat_spec(), size(), cfg()).unwrap();
+
+        // Start a pipe on the first window's pane before opening a second
+        // window so the session survives the close.
+        let pane_w0 = active_pane(&s).await;
+        s.handle_prompt_command(PromptCommand::PipePane(Some("exec sleep 1000".into())))
+            .await
+            .unwrap();
+        let pid = pane_w0.pipe_pid().expect("consumer pid");
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(5), || {
+                pane_w0.has_pipe()
+            })
+            .await,
+            "pipe never attached"
+        );
+        assert!(pid_alive(pid), "consumer must be alive before the kill");
+
+        // Open a second window so the session is not destroyed by the close.
+        s.handle_command(plexy_glass_mux::Command::NewWindow).await.unwrap();
+
+        // Switch back to window 0 and kill it via the Ctrl+a & route.
+        s.handle_command(plexy_glass_mux::Command::PrevWindow).await.unwrap();
+        s.handle_command(plexy_glass_mux::Command::KillWindow).await.unwrap();
+
+        // Consumer must be killed AND reaped.
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+                !pid_alive(pid)
+            })
+            .await,
+            "consumer survived (or zombied) after Command::KillWindow — \
+             close_active_window must call kill_child on all removed panes"
+        );
+    }
+
+    // Prove the pipe streams RAW bytes (escape/control sequences included),
+    // NOT the rendered grid text produced by `screen_text` / `capture`.
+    //
+    // cat_spec() echoes stdin verbatim as pane OUTPUT (the broadcast stream).
+    // Sending b"\x1b[1mbold\x1b[0m\n" causes cat to echo those raw bytes back
+    // through the broadcast, which the pipe writes directly to the consumer's
+    // stdin. The consumer (`cat > file`) stores them as-is. Asserting the file
+    // contains 0x1b distinguishes the raw-byte stream from the decoded grid
+    // text (which would contain "bold" without the SGR escape sequences).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pipe_pane_streams_raw_bytes_not_rendered_text() {
+        let _g = crate::test_env::isolate();
+        let s = Session::new("t-pipe-raw".into(), cat_spec(), size(), cfg()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("raw.out");
+        s.handle_prompt_command(PromptCommand::PipePane(Some(format!(
+            "cat > {}",
+            file.display()
+        ))))
+        .await
+        .unwrap();
+
+        // Send bytes that include a raw ESC (0x1b). cat echoes them verbatim
+        // as pane output, which the pipe streams to the consumer unchanged.
+        // `needle\n` is appended so the final grapheme is flushed from the
+        // emulator's buffer before the assertion.
+        s.handle_input_bytes(b"\x1b[1mbold\x1b[0mneedle\n").await.unwrap();
+
+        let f = file.clone();
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), move || {
+                std::fs::read(&f).unwrap_or_default().contains(&0x1b_u8)
+            })
+            .await,
+            "pipe output file must contain a raw ESC byte (0x1b); \
+             if it only has decoded text the pipe is filtering escape sequences"
+        );
+        s.terminate_panes().await;
+    }
+
     // The cwd pin: pipe-pane resolves the TARGET pane's cwd (the popup's
     // while one owns input), not popup_cwd's ACTIVE-pane read, and the two
     // diverge exactly when a popup is open.
@@ -2556,9 +2682,11 @@ mod tests {
             });
         }
         // The consumer command writes its own cwd (its stdout is /dev/null;
-        // the in-command redirection bypasses that).
+        // the in-command redirection bypasses that). `pwd -P` resolves symlinks
+        // (physical path) because `/bin/sh pwd` can echo the inherited stale $PWD
+        // env var rather than the real cwd set via spawn's current_dir().
         s.handle_prompt_command(PromptCommand::PipePane(Some(format!(
-            "pwd > {}",
+            "pwd -P > {}",
             out.display()
         ))))
         .await
