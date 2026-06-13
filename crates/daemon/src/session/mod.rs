@@ -595,29 +595,37 @@ impl Session {
     /// pane in EVERY window that subscribed via ?2031.
     pub async fn forward_color_scheme(&self, dark: bool) {
         let seq: &[u8] = if dark { b"\x1b[?997;1n" } else { b"\x1b[?997;2n" };
-        let manager = self.window_manager.lock().await;
-        for win in manager.windows() {
-            for (_id, pane) in win.panes() {
-                // Record the scheme on EVERY pane so a later one-shot `\e[?996n`
-                // query answers the real preference (not the hardcoded default).
-                pane.with_screen_mut(|s| s.set_color_scheme_dark(dark));
-                // Push the unsolicited notification only to `?2031` subscribers.
-                let wants = pane.with_screen(|s| {
+        // Record the scheme on EVERY pane under the lock so a later one-shot
+        // `\e[?996n` query answers the real preference; collect the ?2031
+        // subscribers, then send the unsolicited notification off-lock (the
+        // send awaits a bounded channel, see `handle_key_event`).
+        let subscribers: Vec<crate::pane::Pane> = {
+            let manager = self.window_manager.lock().await;
+            let mut subs = Vec::new();
+            for win in manager.windows() {
+                for (_id, pane) in win.panes() {
+                    pane.with_screen_mut(|s| s.set_color_scheme_dark(dark));
+                    let wants = pane.with_screen(|s| {
+                        s.modes.contains(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES)
+                    });
+                    if wants {
+                        subs.push(pane.clone());
+                    }
+                }
+            }
+            if let Some(p) = manager.popup() {
+                p.pane.with_screen_mut(|s| s.set_color_scheme_dark(dark));
+                let wants = p.pane.with_screen(|s| {
                     s.modes.contains(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES)
                 });
                 if wants {
-                    pane.send_input(bytes::Bytes::from_static(seq)).await.ok();
+                    subs.push(p.pane.clone());
                 }
             }
-        }
-        if let Some(p) = manager.popup() {
-            p.pane.with_screen_mut(|s| s.set_color_scheme_dark(dark));
-            let wants = p.pane.with_screen(|s| {
-                s.modes.contains(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES)
-            });
-            if wants {
-                p.pane.send_input(bytes::Bytes::from_static(seq)).await.ok();
-            }
+            subs
+        };
+        for pane in subscribers {
+            pane.send_input(bytes::Bytes::from_static(seq)).await.ok();
         }
     }
 
@@ -692,20 +700,34 @@ impl Session {
         raw_bytes: &[u8],
         client_kbd: NegotiatedKbd,
     ) -> Result<(), DaemonError> {
-        let manager = self.window_manager.lock().await;
-        let win = manager.active_window();
-        if win.sync_input {
-            for id in win.layout().panes() {
-                if let Some(pane) = win.pane(id) {
-                    let bytes = encode_for_pane(pane, event, raw_bytes, client_kbd);
-                    pane.send_input(bytes::Bytes::from(bytes)).await.ok();
-                }
+        // Encode each target pane's bytes UNDER the lock, then send off-lock:
+        // send_input awaits a bounded (64) channel, and holding the session-wide
+        // window-manager lock across that await stalls the whole session behind
+        // one pane whose child stopped draining its PTY. Mirrors
+        // handle_input_bytes / handle_popup_key_event.
+        let sends: Vec<(crate::pane::Pane, Vec<u8>)> = {
+            let manager = self.window_manager.lock().await;
+            let win = manager.active_window();
+            if win.sync_input {
+                win.layout()
+                    .panes()
+                    .into_iter()
+                    .filter_map(|id| win.pane(id))
+                    .map(|pane| {
+                        let bytes = encode_for_pane(pane, event, raw_bytes, client_kbd);
+                        (pane.clone(), bytes)
+                    })
+                    .collect()
+            } else if let Some(pane) = win.active_pane() {
+                let bytes = encode_for_pane(pane, event, raw_bytes, client_kbd);
+                vec![(pane.clone(), bytes)]
+            } else {
+                Vec::new()
             }
-        } else if let Some(pane) = win.active_pane() {
-            let bytes = encode_for_pane(pane, event, raw_bytes, client_kbd);
+        };
+        for (pane, bytes) in sends {
             pane.send_input(bytes::Bytes::from(bytes)).await.ok();
         }
-        drop(manager);
         self.notify.notify_one();
         Ok(())
     }

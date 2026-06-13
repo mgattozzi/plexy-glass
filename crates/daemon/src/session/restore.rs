@@ -42,7 +42,7 @@ impl Session {
             Arc::clone(&config),
             first_preseed,
         )?;
-        {
+        let build: Result<(), DaemonError> = async {
             let mut wm = session.window_manager.lock().await;
             // Re-anchor the session base cwd so interactive new windows
             // (`Ctrl+a c` anchors to session_cwd) keep working after restore.
@@ -95,6 +95,19 @@ impl Session {
                 .active_window
                 .min(wm.windows().len().saturating_sub(1));
             wm.set_active_window(active);
+            Ok(())
+        }
+        .await;
+        if let Err(e) = build {
+            // A mid-build spawn/split failure already created the first pane (and
+            // maybe more); a bare drop leaks their children + reader threads (the
+            // reader holds the PTY master open until the child exits). Tear down
+            // properly, mirroring the restore-race loser cleanup in
+            // attach_or_create.
+            session.begin_close();
+            session.stop_persist().await;
+            session.terminate_panes().await;
+            return Err(e);
         }
         // Round-trip: re-save the restored shape (also catches any drift
         // between the saved file and what we actually built).
@@ -128,7 +141,7 @@ impl Session {
         let first_spec = crate::declared::pane_spec(leaves0[0], win0_home.as_deref(), first_env);
 
         let session = Self::new(template.name.clone(), first_spec, size, Arc::clone(&config))?;
-        {
+        let build: Result<(), DaemonError> = async {
             let mut wm = session.window_manager.lock().await;
             wm.set_session_cwd(crate::declared::home_base(None, template.cwd.as_deref()));
             wm.set_window_name(0, first_window.name.clone());
@@ -160,6 +173,16 @@ impl Session {
                 .position(|w| w.active)
                 .unwrap_or(0);
             wm.set_active_window(active_window);
+            Ok(())
+        }
+        .await;
+        if let Err(e) = build {
+            // Tear down a partially-built session (see restore_from): the first
+            // pane (and maybe more) already exist and would leak otherwise.
+            session.begin_close();
+            session.stop_persist().await;
+            session.terminate_panes().await;
+            return Err(e);
         }
         // Persist the built shape. Harmless: declared names are never
         // restored (attach_or_create routes them to the template, never the

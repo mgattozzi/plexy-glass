@@ -181,6 +181,12 @@ impl Pane {
         // Reader also writes emulator-generated replies (DSR cursor reports,
         // DA, …) back through the input mpsc so the writer thread forwards
         // them to the child. Without this, TUI line editors block on `ESC[6n`.
+        // These go out via try_send (drop-on-full), NOT blocking_send: the reader
+        // is the SOLE drainer of this pane's PTY OUTPUT, so blocking it on the
+        // shared input channel (e.g. a child that stops reading its stdin while
+        // still emitting queries) would freeze the pane's output pump. Replies
+        // are best-effort responses, so dropping under extreme backpressure is
+        // acceptable.
         let reply_tx = input_tx.clone();
         let reader_notify_for_self = Arc::clone(&output_notify);
         let config_for_reader = Arc::clone(&config_slot);
@@ -233,13 +239,21 @@ impl Pane {
                         }
                         notify_for_reader.notify_one();
                         for reply in replies {
-                            if let Err(err) = reply_tx.blocking_send(Bytes::from(reply)) {
-                                debug!(error = %err, "could not forward emulator reply");
-                                break;
+                            match reply_tx.try_send(Bytes::from(reply)) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    debug!("input channel full; dropping emulator reply");
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    debug!("input channel closed; stop forwarding replies");
+                                    break;
+                                }
                             }
                         }
+                        // clip writes are likewise non-blocking (drop on full):
+                        // the dedicated drain task may be slow behind pbcopy.
                         for payload in clip_writes {
-                            clip_tx.blocking_send(payload).ok();
+                            clip_tx.try_send(payload).ok();
                         }
                         if !color_queries.is_empty() {
                             // invariant: config mutex held briefly to clone the palette.
@@ -250,12 +264,17 @@ impl Pane {
                                 cfg.palette.clone()
                             };
                             for q in color_queries {
-                                if let Some(bytes) = format_color_reply(q, &palette)
-                                    && let Err(err) =
-                                        reply_tx.blocking_send(Bytes::from(bytes))
-                                {
-                                    debug!(error = %err, "could not forward color reply");
-                                    break;
+                                if let Some(bytes) = format_color_reply(q, &palette) {
+                                    match reply_tx.try_send(Bytes::from(bytes)) {
+                                        Ok(()) => {}
+                                        Err(mpsc::error::TrySendError::Full(_)) => {
+                                            debug!("input channel full; dropping color reply");
+                                        }
+                                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                                            debug!("input channel closed; stop color replies");
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                         }

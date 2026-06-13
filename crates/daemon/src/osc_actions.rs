@@ -48,22 +48,35 @@ pub async fn write_clipboard(payload: &[u8]) -> Result<(), DaemonError> {
     };
 
     for (program, args) in candidates {
-        let mut child = match Command::new(program)
+        let child = match Command::new(program)
             .args(*args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            .kill_on_drop(true)
             .spawn()
         {
             Ok(c) => c,
             Err(_) => continue, // tool not present; try next
         };
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(payload).await.ok();
-            drop(stdin);
+        // Bounded like read_clipboard: a wedged helper (stuck pbcopy/xclip) must
+        // not stall the caller, since several sites await this directly in the
+        // per-connection serve loop. kill_on_drop reaps the child on timeout.
+        let write_and_wait = async move {
+            let mut child = child;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(payload).await.ok();
+                drop(stdin);
+            }
+            let _ = child.wait().await;
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(2), write_and_wait).await {
+            Ok(()) => return Ok(()),
+            Err(_) => {
+                tracing::warn!(program, "clipboard write timed out");
+                return Ok(()); // child killed on drop; don't multiply the stall
+            }
         }
-        let _ = child.wait().await;
-        return Ok(());
     }
 
     tracing::warn!("no clipboard tool found (pbcopy/wl-copy/xclip/xsel)");
@@ -181,6 +194,33 @@ mod tests {
     async fn write_clipboard_does_not_error_even_when_tool_missing() {
         let r = write_clipboard(b"hello").await;
         assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn write_clipboard_is_bounded_when_helper_hangs() {
+        use std::os::unix::fs::PermissionsExt;
+        // Stub every clipboard helper to hang well past the 2s bound; `exec` so
+        // the sleeper is the direct child (kill_on_drop reaps it). Whichever the
+        // current OS tries first is the hanging stub.
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["pbcopy", "wl-copy", "xclip", "xsel"] {
+            let stub = dir.path().join(name);
+            std::fs::write(&stub, "#!/bin/sh\nexec sleep 10\n").unwrap();
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{old_path}", dir.path().display());
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::set_var("PATH", &new_path) };
+
+        let start = std::time::Instant::now();
+        let r = write_clipboard(b"hello").await;
+        let elapsed = start.elapsed();
+        assert!(r.is_ok());
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "write_clipboard must be bounded by the timeout, took {elapsed:?}"
+        );
     }
 
     #[test]
