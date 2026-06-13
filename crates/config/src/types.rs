@@ -195,6 +195,9 @@ pub enum WidgetSpec {
 pub struct SessionTemplate {
     pub name: String,
     pub cwd: Option<String>,
+    /// Session-level env, inherited by every window/pane (overridable per
+    /// window then per pane). Empty = no session-level overlay.
+    pub env: Vec<(String, String)>,
     pub windows: Vec<WindowTemplate>, // invariant: non-empty (enforced by the decoder)
 }
 
@@ -202,6 +205,13 @@ pub struct SessionTemplate {
 pub struct WindowTemplate {
     pub name: String,
     pub cwd: Option<String>,
+    /// `active=#true`: this window is the session's focused window on build.
+    /// At most one window per session may be active (enforced by the decoder);
+    /// default `false` means window 0 is active.
+    pub active: bool,
+    /// Window-level env, inherited by the window's panes (overlays the session
+    /// env, overridden per pane).
+    pub env: Vec<(String, String)>,
     pub layout: PaneNode,
 }
 
@@ -212,6 +222,11 @@ pub enum PaneNode {
     Split {
         dir: SplitDirection,
         children: Vec<PaneNode>, // invariant: len() >= 2 (enforced by the decoder)
+        /// Relative split weights aligned to `children`.
+        // invariant: weights.len() == children.len() >= 2, every weight >= 1
+        // (enforced by the decoder: `ratio=` defaults to 1 and `ratio=0` is a
+        // decode error).
+        weights: Vec<u32>,
     },
 }
 
@@ -221,6 +236,12 @@ pub struct PaneTemplate {
     pub command: Option<String>,
     pub cwd: Option<String>,
     pub name: Option<String>,
+    /// `active=#true`: this pane is its window's focused pane on build. At most
+    /// one pane per window may be active (enforced by the decoder); default
+    /// `false` means the DFS-leftmost pane is active.
+    pub active: bool,
+    /// Pane-level env, overlaying the window/session env (pane wins per key).
+    pub env: Vec<(String, String)>,
 }
 
 /// Orientation of a config split. `Vertical` = side-by-side; `Horizontal` =

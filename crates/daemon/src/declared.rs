@@ -28,7 +28,7 @@ pub(crate) struct BuildOp {
 pub(crate) fn to_binary(node: &PaneNode) -> BinLayout<'_> {
     match node {
         PaneNode::Leaf(pt) => BinLayout::Leaf(pt),
-        PaneNode::Split { dir, children } => fold_children(map_dir(*dir), children),
+        PaneNode::Split { dir, children, .. } => fold_children(map_dir(*dir), children),
     }
 }
 
@@ -170,12 +170,18 @@ mod tests {
     use plexy_glass_config::{PaneNode, PaneTemplate, SplitDirection};
 
     fn leaf(cmd: Option<&str>) -> PaneNode {
-        PaneNode::Leaf(PaneTemplate { command: cmd.map(str::to_string), cwd: None, name: None })
+        PaneNode::Leaf(PaneTemplate {
+            command: cmd.map(str::to_string),
+            cwd: None,
+            name: None,
+            active: false,
+            env: vec![],
+        })
     }
 
     #[test]
     fn make_spec_command_runs_via_shell_dash_c() {
-        let pt = PaneTemplate { command: Some("npm run dev".into()), cwd: None, name: None };
+        let pt = PaneTemplate { command: Some("npm run dev".into()), cwd: None, name: None, active: false, env: vec![] };
         let s = make_spec("/bin/zsh", &pt, None, None);
         assert_eq!(s.program, "/bin/zsh");
         assert_eq!(s.args, vec!["-c".to_string(), "npm run dev".to_string()]);
@@ -185,7 +191,7 @@ mod tests {
 
     #[test]
     fn make_spec_no_command_is_interactive_shell() {
-        let pt = PaneTemplate { command: None, cwd: None, name: None };
+        let pt = PaneTemplate { command: None, cwd: None, name: None, active: false, env: vec![] };
         let s = make_spec("/bin/sh", &pt, None, None);
         assert_eq!(s.program, "/bin/sh");
         assert!(s.args.is_empty());
@@ -195,16 +201,16 @@ mod tests {
     fn make_spec_cwd_precedence_and_tilde() {
         // `home_cwd` is already resolved (`resolve_home_cwd` expanded the tilde upstream).
         let home_cwd = Some("/home/u/proj");
-        let pt_override = PaneTemplate { command: None, cwd: Some("~/proj/sub".into()), name: None };
+        let pt_override = PaneTemplate { command: None, cwd: Some("~/proj/sub".into()), name: None, active: false, env: vec![] };
         let s = make_spec("/bin/sh", &pt_override, home_cwd, Some("/home/u"));
         assert_eq!(s.cwd.as_deref(), Some("/home/u/proj/sub"));
-        let pt_inherit = PaneTemplate { command: None, cwd: None, name: None };
+        let pt_inherit = PaneTemplate { command: None, cwd: None, name: None, active: false, env: vec![] };
         let s2 = make_spec("/bin/sh", &pt_inherit, home_cwd, Some("/home/u"));
         assert_eq!(s2.cwd.as_deref(), Some("/home/u/proj"));
     }
 
     fn pt(cwd: Option<&str>) -> PaneTemplate {
-        PaneTemplate { command: None, cwd: cwd.map(str::to_string), name: None }
+        PaneTemplate { command: None, cwd: cwd.map(str::to_string), name: None, active: false, env: vec![] }
     }
 
     #[test]
@@ -256,6 +262,7 @@ mod tests {
         let node = PaneNode::Split {
             dir: SplitDirection::Vertical,
             children: vec![leaf(Some("a")), leaf(Some("b")), leaf(Some("c"))],
+            weights: vec![1, 1, 1],
         };
         let bin = to_binary(&node);
         let leaves = bin_leaves(&bin);
@@ -280,8 +287,10 @@ mod tests {
                 PaneNode::Split {
                     dir: SplitDirection::Horizontal,
                     children: vec![leaf(Some("b")), leaf(Some("c"))],
+                    weights: vec![1, 1],
                 },
             ],
+            weights: vec![1, 1],
         };
         let bin = to_binary(&node);
         assert_eq!(

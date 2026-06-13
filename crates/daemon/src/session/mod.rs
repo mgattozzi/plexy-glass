@@ -1862,13 +1862,18 @@ mod tests {
         let tmpl = SessionTemplate {
             name: "dev".into(),
             cwd: None,
+            env: vec![],
             windows: vec![WindowTemplate {
                 name: "main".into(),
                 cwd: None,
+                active: false,
+                env: vec![],
                 layout: PaneNode::Leaf(PaneTemplate {
                     command: None,
                     cwd: None,
                     name: Some("editor".into()),
+                    active: false,
+                    env: vec![],
                 }),
             }],
         };
@@ -1888,21 +1893,37 @@ mod tests {
         use plexy_glass_config::{PaneNode, PaneTemplate, SessionTemplate, SplitDirection, WindowTemplate};
         let _g = crate::test_env::isolate();
         let pane = |c: Option<&str>| {
-            PaneNode::Leaf(PaneTemplate { command: c.map(str::to_string), cwd: None, name: None })
+            PaneNode::Leaf(PaneTemplate {
+                command: c.map(str::to_string),
+                cwd: None,
+                name: None,
+                active: false,
+                env: vec![],
+            })
         };
         let tmpl = SessionTemplate {
             name: "dev".into(),
             cwd: None,
+            env: vec![],
             windows: vec![
                 WindowTemplate {
                     name: "split".into(),
                     cwd: None,
+                    active: false,
+                    env: vec![],
                     layout: PaneNode::Split {
                         dir: SplitDirection::Vertical,
                         children: vec![pane(None), pane(None), pane(None)],
+                        weights: vec![1, 1, 1],
                     },
                 },
-                WindowTemplate { name: "solo".into(), cwd: None, layout: pane(None) },
+                WindowTemplate {
+                    name: "solo".into(),
+                    cwd: None,
+                    active: false,
+                    env: vec![],
+                    layout: pane(None),
+                },
             ],
         };
         let s = Session::build_from_template(&tmpl, size(), cfg()).await.unwrap();
@@ -1926,13 +1947,28 @@ mod tests {
             command: None,
             cwd: cwd.map(str::to_string),
             name: None,
+            active: false,
+            env: vec![],
         });
         let tmpl = SessionTemplate {
             name: "wcwd".into(),
             cwd: Some("/session".into()),
+            env: vec![],
             windows: vec![
-                WindowTemplate { name: "api".into(), cwd: Some("/win/api".into()), layout: pane(None) },
-                WindowTemplate { name: "logs".into(), cwd: None, layout: pane(None) },
+                WindowTemplate {
+                    name: "api".into(),
+                    cwd: Some("/win/api".into()),
+                    active: false,
+                    env: vec![],
+                    layout: pane(None),
+                },
+                WindowTemplate {
+                    name: "logs".into(),
+                    cwd: None,
+                    active: false,
+                    env: vec![],
+                    layout: pane(None),
+                },
             ],
         };
         let s = Session::build_from_template(&tmpl, size(), cfg()).await.unwrap();

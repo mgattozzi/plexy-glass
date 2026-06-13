@@ -198,17 +198,20 @@ fn decode_blocks(node: &KdlNode, src: &str) -> Result<BlocksConfig, ConfigError>
 fn decode_session(node: &KdlNode, src: &str) -> Result<SessionTemplate, ConfigError> {
     let name = string_arg(node, 0, src, "session name")?.to_string();
     ensure_only_props(node, &["cwd"], src)?;
+    ensure_only_children(node, &["window", "env"], src)?;
     let cwd = prop_str(node, "cwd").map(str::to_string);
+    let env = decode_env_child(node, src)?;
     let mut windows = Vec::new();
     if let Some(doc) = node.children() {
         for child in doc.nodes() {
             match child.name().value() {
                 "window" => windows.push(decode_window(child, src)?),
+                "env" => {} // already collected via `decode_env_child`
                 other => {
                     return Err(decode_err(
                         src,
                         child,
-                        &format!("unknown session node `{other}` (expected `window`)"),
+                        &format!("unknown session node `{other}` (expected `window` or `env`)"),
                     ));
                 }
             }
@@ -217,16 +220,26 @@ fn decode_session(node: &KdlNode, src: &str) -> Result<SessionTemplate, ConfigEr
     if windows.is_empty() {
         return Err(decode_err(src, node, &format!("session `{name}` has no windows")));
     }
-    Ok(SessionTemplate { name, cwd, windows })
+    // At most one active window per session (deterministic config, not last-wins).
+    if windows.iter().filter(|w| w.active).count() > 1 {
+        return Err(decode_err(src, node, &format!("session `{name}` has more than one active window")));
+    }
+    Ok(SessionTemplate { name, cwd, env, windows })
 }
 
 fn decode_window(node: &KdlNode, src: &str) -> Result<WindowTemplate, ConfigError> {
     let name = string_arg(node, 0, src, "window name")?.to_string();
-    ensure_only_props(node, &["cwd"], src)?;
+    ensure_only_props(node, &["cwd", "active"], src)?;
     let cwd = prop_str(node, "cwd").map(str::to_string);
-    let nodes: Vec<&KdlNode> = node.children().map(|d| d.nodes().iter().collect()).unwrap_or_default();
-    let layout = match nodes.as_slice() {
-        [single] => decode_layout_node(single, src)?,
+    let active = bool_prop(node, "active", src)?.unwrap_or(false);
+    let env = decode_env_child(node, src)?;
+    // The window's layout is its single non-`env` child node.
+    let layout_nodes: Vec<&KdlNode> = node
+        .children()
+        .map(|d| d.nodes().iter().filter(|n| n.name().value() != "env").collect())
+        .unwrap_or_default();
+    let layout = match layout_nodes.as_slice() {
+        [single] => decode_layout_node(single, false, src)?,
         [] => {
             return Err(decode_err(src, node, &format!("window `{name}` has no layout (expected one `pane` or `split`)")));
         }
@@ -234,28 +247,43 @@ fn decode_window(node: &KdlNode, src: &str) -> Result<WindowTemplate, ConfigErro
             return Err(decode_err(src, node, &format!("window `{name}` must contain exactly one layout node; wrap multiple panes in a `split`")));
         }
     };
-    Ok(WindowTemplate { name, cwd, layout })
+    // At most one active pane per window (deterministic config, not last-wins).
+    if count_active_leaves(&layout) > 1 {
+        return Err(decode_err(src, node, &format!("window `{name}` has more than one active pane")));
+    }
+    Ok(WindowTemplate { name, cwd, active, env, layout })
 }
 
-fn decode_layout_node(node: &KdlNode, src: &str) -> Result<PaneNode, ConfigError> {
+/// Decode one layout node (`pane` or `split`). `allow_ratio` is true only when
+/// the node is a DIRECT child of a `split`: `ratio=` is read by the parent
+/// (`decode_split`) and so is permitted in the prop allowlist here; everywhere
+/// else a `ratio=` is rejected by the existing `ensure_only_props`.
+fn decode_layout_node(node: &KdlNode, allow_ratio: bool, src: &str) -> Result<PaneNode, ConfigError> {
     match node.name().value() {
-        "pane" => Ok(PaneNode::Leaf(decode_pane(node, src)?)),
-        "split" => decode_split(node, src),
+        "pane" => Ok(PaneNode::Leaf(decode_pane(node, allow_ratio, src)?)),
+        "split" => decode_split(node, allow_ratio, src),
         other => Err(decode_err(src, node, &format!("expected `pane` or `split`, got `{other}`"))),
     }
 }
 
-fn decode_pane(node: &KdlNode, src: &str) -> Result<PaneTemplate, ConfigError> {
-    ensure_only_props(node, &["command", "cwd", "name"], src)?;
-    ensure_only_children(node, &[], src)?;
+fn decode_pane(node: &KdlNode, allow_ratio: bool, src: &str) -> Result<PaneTemplate, ConfigError> {
+    let allowed: &[&str] = if allow_ratio {
+        &["command", "cwd", "name", "active", "ratio"]
+    } else {
+        &["command", "cwd", "name", "active"]
+    };
+    ensure_only_props(node, allowed, src)?;
+    ensure_only_children(node, &["env"], src)?;
     Ok(PaneTemplate {
         command: prop_str(node, "command").map(str::to_string),
         cwd: prop_str(node, "cwd").map(str::to_string),
         name: prop_str(node, "name").map(str::to_string),
+        active: bool_prop(node, "active", src)?.unwrap_or(false),
+        env: decode_env_child(node, src)?,
     })
 }
 
-fn decode_split(node: &KdlNode, src: &str) -> Result<PaneNode, ConfigError> {
+fn decode_split(node: &KdlNode, allow_ratio: bool, src: &str) -> Result<PaneNode, ConfigError> {
     let dir = match string_arg(node, 0, src, "split direction")? {
         "vertical" => SplitDirection::Vertical,
         "horizontal" => SplitDirection::Horizontal,
@@ -263,17 +291,70 @@ fn decode_split(node: &KdlNode, src: &str) -> Result<PaneNode, ConfigError> {
             return Err(decode_err(src, node, &format!("split direction must be `vertical` or `horizontal`, got `{other}`")));
         }
     };
-    ensure_only_props(node, &[], src)?;
+    // A split itself may carry `ratio=` only when it is a direct child of an
+    // outer split (its weight in that outer split); `direction` is positional.
+    let allowed: &[&str] = if allow_ratio { &["ratio"] } else { &[] };
+    ensure_only_props(node, allowed, src)?;
     let mut children = Vec::new();
+    let mut weights = Vec::new();
     if let Some(doc) = node.children() {
         for child in doc.nodes() {
-            children.push(decode_layout_node(child, src)?);
+            // Each direct child carries its own `ratio=` weight (default 1).
+            weights.push(split_child_ratio(child, src)?);
+            children.push(decode_layout_node(child, /*allow_ratio=*/ true, src)?);
         }
     }
     if children.len() < 2 {
         return Err(decode_err(src, node, "`split` needs at least two child layout nodes"));
     }
-    Ok(PaneNode::Split { dir, children })
+    Ok(PaneNode::Split { dir, children, weights })
+}
+
+/// Read a split direct-child's `ratio=` weight: a `u32` >= 1, default 1.
+/// `ratio=0` is a decode error (it would make the preorder split formula
+/// produce a NaN ratio that poisons persistence, see the v2 spec).
+fn split_child_ratio(node: &KdlNode, src: &str) -> Result<u32, ConfigError> {
+    match prop_val(node, "ratio") {
+        None => Ok(1),
+        Some(v) => {
+            let i = v
+                .as_integer()
+                .ok_or_else(|| decode_err(src, node, "`ratio` must be a positive integer"))?;
+            let w = u32::try_from(i)
+                .map_err(|_| decode_err(src, node, "`ratio` out of range (expected a positive integer)"))?;
+            if w < 1 {
+                return Err(decode_err(src, node, "`ratio` must be >= 1 (zero weights are not allowed)"));
+            }
+            Ok(w)
+        }
+    }
+}
+
+/// Count the `active=#true` leaves in a layout subtree (for the at-most-one
+/// active-pane-per-window decode check).
+fn count_active_leaves(node: &PaneNode) -> usize {
+    match node {
+        PaneNode::Leaf(p) => usize::from(p.active),
+        PaneNode::Split { children, .. } => children.iter().map(count_active_leaves).sum(),
+    }
+}
+
+/// Decode an optional `env { KEY "value"; … }` child node into ordered
+/// `(key, value)` pairs. Mirrors `decode_palette`'s string-map child shape.
+fn decode_env_child(node: &KdlNode, src: &str) -> Result<Vec<(String, String)>, ConfigError> {
+    let Some(env_node) = find_child(node, "env") else {
+        return Ok(Vec::new());
+    };
+    ensure_no_props(env_node, src)?;
+    let mut out = Vec::new();
+    if let Some(doc) = env_node.children() {
+        for entry in doc.nodes() {
+            let key = entry.name().value().to_string();
+            let val = string_arg(entry, 0, src, &format!("env value for `{key}`"))?.to_string();
+            out.push((key, val));
+        }
+    }
+    Ok(out)
 }
 
 // --- property access (widgets) ---
@@ -289,6 +370,18 @@ fn prop_val<'a>(node: &'a KdlNode, key: &str) -> Option<&'a KdlValue> {
 
 fn prop_str<'a>(node: &'a KdlNode, key: &str) -> Option<&'a str> {
     prop_val(node, key).and_then(|v| v.as_string())
+}
+
+/// A `key=#true`/`key=#false` bool property; absent ⇒ `None`. A present
+/// non-bool value is a decode error (KDL v2 requires `#true`/`#false`).
+fn bool_prop(node: &KdlNode, key: &str, src: &str) -> Result<Option<bool>, ConfigError> {
+    match prop_val(node, key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| decode_err(src, node, &format!("`{key}` must be #true/#false"))),
+    }
 }
 
 fn require_prop_str<'a>(node: &'a KdlNode, key: &str, src: &str) -> Result<&'a str, ConfigError> {
@@ -1032,9 +1125,11 @@ keymap {
         )
         .unwrap();
         match &cfg.sessions[0].windows[0].layout {
-            PaneNode::Split { dir, children } => {
+            PaneNode::Split { dir, children, weights } => {
                 assert_eq!(*dir, SplitDirection::Vertical);
                 assert_eq!(children.len(), 3);
+                // default weights (no `ratio=`) are all 1, aligned to children.
+                assert_eq!(weights, &vec![1, 1, 1]);
             }
             other => panic!("expected Split, got {other:?}"),
         }
@@ -1048,7 +1143,7 @@ keymap {
         .unwrap();
         match &cfg.sessions[0].windows[0].layout {
             PaneNode::Split { children, .. } => match &children[1] {
-                PaneNode::Split { dir, children } => {
+                PaneNode::Split { dir, children, .. } => {
                     assert_eq!(*dir, SplitDirection::Horizontal);
                     assert_eq!(children.len(), 2);
                 }
@@ -1056,6 +1151,165 @@ keymap {
             },
             other => panic!("expected Split, got {other:?}"),
         }
+    }
+
+    // --- v2: ratios, active, env ---
+
+    #[test]
+    fn split_ratio_weights_parse_and_default_to_one() {
+        let cfg = parse_config(
+            r##"session "s" { window "w" { split vertical { pane ratio=2; pane; pane ratio=3 } } }"##,
+        )
+        .unwrap();
+        match &cfg.sessions[0].windows[0].layout {
+            PaneNode::Split { weights, children, .. } => {
+                assert_eq!(weights, &vec![2, 1, 3]);
+                assert_eq!(weights.len(), children.len());
+            }
+            other => panic!("expected Split, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_split_can_carry_its_own_ratio() {
+        // A `split` that is itself a child of a split may carry `ratio=` (its
+        // weight in the OUTER split); the inner children keep their own.
+        let cfg = parse_config(
+            r##"session "s" { window "w" { split vertical { pane ratio=2; split horizontal ratio=1 { pane; pane } } } }"##,
+        )
+        .unwrap();
+        match &cfg.sessions[0].windows[0].layout {
+            PaneNode::Split { weights, children, .. } => {
+                assert_eq!(weights, &vec![2, 1], "outer weights are 2:1 (nested split contributes its own ratio=1)");
+                match &children[1] {
+                    PaneNode::Split { weights, .. } => assert_eq!(weights, &vec![1, 1]),
+                    other => panic!("expected nested Split, got {other:?}"),
+                }
+            }
+            other => panic!("expected Split, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ratio_zero_is_a_decode_error() {
+        assert!(parse_config(r##"session "s" { window "w" { split vertical { pane ratio=0; pane } } }"##).is_err());
+    }
+
+    #[test]
+    fn ratio_on_non_split_child_is_rejected() {
+        // A top-level window pane (not a split child) with `ratio=` is rejected
+        // by the standalone `decode_pane` allowlist (which omits `ratio`).
+        assert!(parse_config(r##"session "s" { window "w" { pane ratio=2 } }"##).is_err());
+        // A bare split (the window's top layout) with `ratio=` is likewise rejected.
+        assert!(parse_config(r##"session "s" { window "w" { split vertical ratio=2 { pane; pane } } }"##).is_err());
+    }
+
+    #[test]
+    fn active_window_and_pane_parse() {
+        let cfg = parse_config(
+            r##"session "s" {
+                window "a" { pane }
+                window "b" active=#true { split vertical { pane; pane active=#true } }
+            }"##,
+        )
+        .unwrap();
+        let s = &cfg.sessions[0];
+        assert!(!s.windows[0].active);
+        assert!(s.windows[1].active);
+        match &s.windows[1].layout {
+            PaneNode::Split { children, .. } => {
+                assert!(matches!(&children[0], PaneNode::Leaf(p) if !p.active));
+                assert!(matches!(&children[1], PaneNode::Leaf(p) if p.active));
+            }
+            other => panic!("expected Split, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_active_window_is_a_decode_error() {
+        assert!(parse_config(
+            r##"session "s" { window "a" active=#true { pane } window "b" active=#true { pane } }"##
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn duplicate_active_pane_is_a_decode_error() {
+        assert!(parse_config(
+            r##"session "s" { window "w" { split vertical { pane active=#true; pane active=#true } } }"##
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn env_blocks_parse_at_all_levels() {
+        let cfg = parse_config(
+            r##"session "s" {
+                env { RUST_LOG "debug" }
+                window "w" {
+                    env { TIER "win" }
+                    split vertical {
+                        pane { env { PORT "8080" } }
+                        pane command="x"
+                    }
+                }
+            }"##,
+        )
+        .unwrap();
+        let s = &cfg.sessions[0];
+        assert_eq!(s.env, vec![("RUST_LOG".to_string(), "debug".to_string())]);
+        assert_eq!(s.windows[0].env, vec![("TIER".to_string(), "win".to_string())]);
+        match &s.windows[0].layout {
+            PaneNode::Split { children, .. } => match &children[0] {
+                PaneNode::Leaf(p) => {
+                    assert_eq!(p.env, vec![("PORT".to_string(), "8080".to_string())]);
+                }
+                other => panic!("expected Leaf, got {other:?}"),
+            },
+            other => panic!("expected Split, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_keeps_declared_order_and_multiple_keys() {
+        let cfg = parse_config(
+            r##"session "s" { window "w" { pane { env { A "1"; B "2"; C "3" } } } }"##,
+        )
+        .unwrap();
+        match &cfg.sessions[0].windows[0].layout {
+            PaneNode::Leaf(p) => assert_eq!(
+                p.env,
+                vec![
+                    ("A".to_string(), "1".to_string()),
+                    ("B".to_string(), "2".to_string()),
+                    ("C".to_string(), "3".to_string()),
+                ]
+            ),
+            other => panic!("expected Leaf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_non_string_value_is_a_decode_error() {
+        assert!(parse_config(r##"session "s" { window "w" { pane { env { PORT 8080 } } } }"##).is_err());
+    }
+
+    #[test]
+    fn unknown_child_on_pane_still_rejected() {
+        // `env` is now allowed on a pane, but other children are not.
+        assert!(parse_config(r##"session "s" { window "w" { pane { bogus "x" } } }"##).is_err());
+    }
+
+    #[test]
+    fn unknown_child_on_session_still_rejected() {
+        // `window` and `env` are the only session children.
+        assert!(parse_config(r##"session "s" { window "w" { pane } bogus "x" }"##).is_err());
+    }
+
+    #[test]
+    fn active_non_bool_is_a_decode_error() {
+        // KDL v2 requires `#true`/`#false`; a string is a decode error.
+        assert!(parse_config(r##"session "s" { window "w" active="yes" { pane } }"##).is_err());
     }
 
     #[test]
@@ -1203,11 +1457,11 @@ session "dev" cwd="~/projects/app" {
         assert_eq!(s.windows.len(), 3);
         assert_eq!(s.windows[2].cwd.as_deref(), Some("~/projects/app/db"));
         match &s.windows[1].layout {
-            PaneNode::Split { dir: SplitDirection::Vertical, children } => {
+            PaneNode::Split { dir: SplitDirection::Vertical, children, .. } => {
                 assert_eq!(children.len(), 2);
                 assert!(matches!(
                     &children[1],
-                    PaneNode::Split { dir: SplitDirection::Horizontal, children } if children.len() == 2
+                    PaneNode::Split { dir: SplitDirection::Horizontal, children, .. } if children.len() == 2
                 ));
             }
             other => panic!("expected vertical Split, got {other:?}"),
