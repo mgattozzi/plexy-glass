@@ -136,8 +136,9 @@ fn ensure_no_props(node: &KdlNode, src: &str) -> Result<(), ConfigError> {
 fn decode_palette(node: &KdlNode, src: &str) -> Result<PaletteConfig, ConfigError> {
     ensure_no_props(node, src)?;
     // Merge onto the default palette: a present `palette` node overrides the
-    // named entries it lists and keeps the rest of the built-in colors.
-    let mut entries = crate::built_in_default().palette.entries;
+    // named entries it lists and keeps the rest of the built-in colors. Build
+    // just the palette, not the whole default `Config`.
+    let mut entries = crate::kanagawa_dragon_palette().entries;
     if let Some(doc) = node.children() {
         for child in doc.nodes() {
             let key = child.name().value().to_string();

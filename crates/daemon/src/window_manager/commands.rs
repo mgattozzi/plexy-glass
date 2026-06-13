@@ -12,7 +12,12 @@ impl WindowManager {
             self.clear_zoom_restore()?;
         }
         match cmd {
-            Command::SplitV => {
+            Command::SplitV | Command::SplitH => {
+                let dir = if matches!(cmd, Command::SplitV) {
+                    SplitDir::Vertical
+                } else {
+                    SplitDir::Horizontal
+                };
                 let new_id = self.alloc_pane_id();
                 let mut spec = self.default_spec.clone();
                 spec.cwd = self.split_cwd();
@@ -20,32 +25,7 @@ impl WindowManager {
                 let death = self.death_tx.clone();
                 let config = Arc::clone(&self.config);
                 self.active_window_mut().split(
-                    SplitDir::Vertical,
-                    new_id,
-                    spec,
-                    viewport,
-                    notify,
-                    death,
-                    config,
-                    None,
-                )?;
-            }
-            Command::SplitH => {
-                let new_id = self.alloc_pane_id();
-                let mut spec = self.default_spec.clone();
-                spec.cwd = self.split_cwd();
-                let notify = Arc::clone(&self.notify);
-                let death = self.death_tx.clone();
-                let config = Arc::clone(&self.config);
-                self.active_window_mut().split(
-                    SplitDir::Horizontal,
-                    new_id,
-                    spec,
-                    viewport,
-                    notify,
-                    death,
-                    config,
-                    None,
+                    dir, new_id, spec, viewport, notify, death, config, None,
                 )?;
             }
             Command::SelectNextPane => self.active_window_mut().select_next(),

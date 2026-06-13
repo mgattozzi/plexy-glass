@@ -155,10 +155,12 @@ impl Compositor {
                             // This row comes from scrollback.
                             let sb_idx =
                                 (scroll_len - want_from_scrollback + r as u32) as usize;
+                            // VecDeque::get is O(1); iter().nth(sb_idx) was
+                            // O(sb_idx) per row → O(rows × offset) per frame.
                             view.screen
                                 .scrollback
-                                .iter()
-                                .nth(sb_idx)
+                                .rows()
+                                .get(sb_idx)
                                 .map(|row| row.cells.as_slice())
                         } else {
                             // This row comes from the active grid (offset by the

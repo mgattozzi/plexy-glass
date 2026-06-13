@@ -73,11 +73,7 @@ impl Widget for BatteryWidget {
         let Ok(batteries) = manager.batteries() else {
             return StyledText::empty();
         };
-        let mut first = None;
-        for b in batteries.flatten().take(1) {
-            first = Some(b);
-        }
-        let Some(b) = first else {
+        let Some(b) = batteries.flatten().next() else {
             return StyledText::empty();
         };
         let pct = b

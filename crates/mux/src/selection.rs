@@ -98,7 +98,7 @@ impl Iterator for SelectionCells {
 /// alphanumeric, `_`, `.`, `-`, `/`, `~`. Multi-codepoint graphemes (emoji,
 /// combining marks) are treated as word chars. A configurable `[mouse]
 /// word_chars` knob is a future follow-up.
-fn is_word_char(g: &str) -> bool {
+pub(crate) fn is_word_char(g: &str) -> bool {
     let mut chars = g.chars();
     let Some(ch) = chars.next() else { return false };
     if chars.next().is_some() {

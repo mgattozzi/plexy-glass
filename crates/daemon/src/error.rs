@@ -21,6 +21,4 @@ pub enum DaemonError {
     Handshake(#[from] plexy_glass_protocol::HandshakeError),
     #[error("config: {0}")]
     Config(#[from] plexy_glass_config::ConfigError),
-    #[error("not yet implemented")]
-    NotYetImplemented,
 }

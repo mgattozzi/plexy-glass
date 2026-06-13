@@ -105,17 +105,22 @@ impl<S: ScreenOps> Performer<'_, S> {
             self.flush_all();
             return;
         }
-        let snapshot = self.pending.clone();
-        let clusters: Vec<&str> = snapshot.graphemes(true).collect();
-        if clusters.len() <= 1 {
-            // Could be one growing cluster, so don't flush yet.
-            return;
-        }
-        self.pending.clear();
-        for cluster in &clusters[..clusters.len() - 1] {
+        // Find the byte offset where the LAST grapheme begins. Everything before
+        // it is complete and can be flushed; the trailing grapheme stays in
+        // `pending` (it may still grow via combining marks). Working off offsets
+        // avoids cloning the whole buffer + a Vec<&str> on every print().
+        let last_start = match self.pending.grapheme_indices(true).next_back() {
+            Some((i, _)) if i > 0 => i,
+            // Empty handled above; offset 0 = a single (still-growing) cluster.
+            _ => return,
+        };
+        for (offset, cluster) in self.pending.grapheme_indices(true) {
+            if offset >= last_start {
+                break;
+            }
             self.screen.put_grapheme(cluster);
         }
-        self.pending.push_str(clusters[clusters.len() - 1]);
+        self.pending.drain(..last_start);
     }
 
     /// Force-flush the entire pending buffer (called on non-print events).

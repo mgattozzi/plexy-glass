@@ -55,10 +55,10 @@ fn fold_children(dir: SplitDir, children: &[PaneNode]) -> BinLayout<'_> {
 /// subtree, then the second, the same structure `to_binary` builds).
 ///
 /// At each right-leaning binary split node the first (direct) child's ratio is
-/// its OWN declared weight / the sum of the remaining direct children's weights
-/// at that level. A 0-total sibling group falls back to equal weights, but that
-/// path is defense only: the decoder rejects `ratio=0`, so a 0 total cannot
-/// arise from config.
+/// its OWN declared weight / the sum of ALL the direct children's weights at
+/// that level (the head included). A 0-total sibling group falls back to equal
+/// weights, but that path is defense only: the decoder rejects `ratio=0`, so a
+/// 0 total cannot arise from config.
 pub(crate) fn preorder_ratios(node: &PaneNode) -> Vec<f32> {
     let mut out = Vec::new();
     push_preorder_ratios(node, &mut out);

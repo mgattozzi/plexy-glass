@@ -93,7 +93,6 @@ struct TrieNode {
 pub struct Keymap {
     root: TrieNode,
     pending: Vec<Chord>,
-    pending_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +113,6 @@ impl Keymap {
         Self {
             root: TrieNode::default(),
             pending: Vec::new(),
-            pending_bytes: Vec::new(),
         }
     }
 
@@ -149,7 +147,6 @@ impl Keymap {
         if let Some(child) = node.children.get(&chord) {
             if !child.children.is_empty() {
                 self.pending.push(chord);
-                self.pending_bytes.extend_from_slice(&bytes);
                 return KeymapAction::Pending;
             }
             if let Some(cmd) = child.terminal.clone() {
@@ -180,7 +177,6 @@ impl Keymap {
 
     fn cancel(&mut self) {
         self.pending.clear();
-        self.pending_bytes.clear();
     }
 }
 

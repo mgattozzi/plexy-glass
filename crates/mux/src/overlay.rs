@@ -43,6 +43,19 @@ pub fn picker_filtered_indices(entries: &[PickerEntry], filter: &str) -> Vec<usi
         .collect()
 }
 
+/// Count of filtered entries without allocating the index Vec, for the
+/// navigation/clamp paths that only need the length.
+fn picker_filtered_len(entries: &[PickerEntry], filter: &str) -> usize {
+    if filter.is_empty() {
+        return entries.len();
+    }
+    let needle = filter.to_lowercase();
+    entries
+        .iter()
+        .filter(|e| e.name.to_lowercase().contains(&needle))
+        .count()
+}
+
 /// An active overlay. `None` (on the holder) means no overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlay {
@@ -315,7 +328,7 @@ fn handle_session_picker(
     filter: &mut String,
     selected: &mut usize,
 ) -> OverlayAction {
-    let filtered_len = picker_filtered_indices(entries, filter).len();
+    let filtered_len = picker_filtered_len(entries, filter);
     match (event.mods, event.key) {
         (m, Key::Escape) if m.is_empty() => OverlayAction::Cancel,
         (_, Key::Enter) | (_, Key::KeypadEnter) => {
@@ -333,7 +346,7 @@ fn handle_session_picker(
         (m, Key::End) if m.is_empty() => set_picker(selected, filtered_len.saturating_sub(1)),
         (m, Key::Backspace) if m.is_empty() => {
             if filter.pop().is_some() {
-                let len = picker_filtered_indices(entries, filter).len();
+                let len = picker_filtered_len(entries, filter);
                 *selected = (*selected).min(len.saturating_sub(1));
                 OverlayAction::Redraw
             } else {

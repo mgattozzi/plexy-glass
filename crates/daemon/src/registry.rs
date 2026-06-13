@@ -81,13 +81,12 @@ impl SessionRegistry {
         let mut map = self.inner.lock().await;
         // Lazily prune sessions that have already closed.
         map.retain(|_, s| !s.closing.load(std::sync::atomic::Ordering::SeqCst));
-        // `list_entry` takes blocking locks, so defer to spawn_blocking-style.
+        // `list_entry` takes blocking locks, so defer via `block_in_place`. No
+        // per-session `Arc::clone` needed, `block_in_place` runs inline and
+        // `list_entry` only needs a shared borrow.
         let mut out: Vec<SessionEntry> = map
             .values()
-            .map(|s| {
-                let s = Arc::clone(s);
-                tokio::task::block_in_place(|| s.list_entry())
-            })
+            .map(|s| tokio::task::block_in_place(|| s.list_entry()))
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out

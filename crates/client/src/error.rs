@@ -19,6 +19,4 @@ pub enum ClientError {
     Codec(#[from] plexy_glass_protocol::errors::CodecError),
     #[error("daemon reported error: {0}")]
     DaemonError(plexy_glass_protocol::errors::ProtocolError),
-    #[error("not yet implemented")]
-    NotYetImplemented,
 }

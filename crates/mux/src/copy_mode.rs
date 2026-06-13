@@ -118,7 +118,7 @@ impl CopyMode {
         }
         let on_word = cells
             .get(col as usize)
-            .map(|c| is_word_grapheme(c.grapheme.as_str()))
+            .map(|c| crate::selection::is_word_char(c.grapheme.as_str()))
             .unwrap_or(false);
         if !on_word {
             return;
@@ -128,7 +128,7 @@ impl CopyMode {
             let prev = start - 1;
             if cells
                 .get(prev as usize)
-                .map(|c| is_word_grapheme(c.grapheme.as_str()))
+                .map(|c| crate::selection::is_word_char(c.grapheme.as_str()))
                 .unwrap_or(false)
             {
                 start = prev;
@@ -141,7 +141,7 @@ impl CopyMode {
             let next = end + 1;
             if cells
                 .get(next as usize)
-                .map(|c| is_word_grapheme(c.grapheme.as_str()))
+                .map(|c| crate::selection::is_word_char(c.grapheme.as_str()))
                 .unwrap_or(false)
             {
                 end = next;
@@ -347,16 +347,6 @@ fn unified_line_cells(screen: &Screen, line: u32) -> Option<Vec<plexy_glass_emul
         let active_row = (line - scrollback_len) as usize;
         screen.active.rows.get(active_row).map(|r| r.cells.clone())
     }
-}
-
-/// Word-char predicate shared with `selection::word_at` semantics.
-fn is_word_grapheme(g: &str) -> bool {
-    let mut chars = g.chars();
-    let Some(ch) = chars.next() else { return false };
-    if chars.next().is_some() {
-        return true;
-    }
-    ch.is_alphanumeric() || matches!(ch, '_' | '.' | '-' | '/' | '~')
 }
 
 /// Extract the selected (or current-line) text from the unified

@@ -158,11 +158,7 @@ pub async fn click_to_position(pane: &crate::pane::Pane, click_col: u16) -> Resu
     }
 
     let arrow: &[u8] = if rightward { b"\x1b[C" } else { b"\x1b[D" };
-    let mut keystream = Vec::with_capacity(count * arrow.len());
-    for _ in 0..count {
-        keystream.extend_from_slice(arrow);
-    }
-    pane.send_input(Bytes::from(keystream)).await?;
+    pane.send_input(Bytes::from(arrow.repeat(count))).await?;
     Ok(true)
 }
 

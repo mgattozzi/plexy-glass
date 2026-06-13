@@ -84,9 +84,8 @@ fn closing_block_end_line(screen: &Screen, prompt_line: u32) -> Option<u32> {
     let next_p = next_prompt_line(screen, prompt_line);
     // Search range: (prompt_line, next_p], including the next prompt row so a
     // shared D+A row still counts.
-    let search_end = next_p
-        .map(|np| np.min(total.saturating_sub(1)))
-        .unwrap_or_else(|| total.saturating_sub(1));
+    let last = total.saturating_sub(1);
+    let search_end = next_p.map(|np| np.min(last)).unwrap_or(last);
     (prompt_line + 1..=search_end).find(|&l| {
         l < total && row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::BLOCK_END))
     })
