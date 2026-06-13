@@ -1088,6 +1088,52 @@ async fn pane_death_window_removal_keeps_last_active_valid() {
     assert_eq!(m.windows()[m.active_idx()].id, w2_id, "toggle lands on the original W2");
 }
 
+#[tokio::test]
+async fn pane_death_of_active_middle_window_focuses_next() {
+    let mut m = mk_mgr(); // W0 (pane 0)
+    m.handle_command(Command::NewWindow).unwrap(); // W1 (pane 1)
+    m.handle_command(Command::NewWindow).unwrap(); // W2 (pane 2)
+    m.handle_command(Command::SelectWindow(1)).unwrap(); // active middle window
+    let w2_id = m.windows()[2].id;
+    // The active middle window's sole pane dies via the death channel → the
+    // window is removed. Focus must land on the NEXT window (W2), matching
+    // `KillWindow`'s tmux-standard policy, not the previous window.
+    m.handle_pane_death(PaneId(1)).unwrap();
+    assert_eq!(m.windows().len(), 2);
+    assert_eq!(
+        m.windows()[m.active_idx()].id,
+        w2_id,
+        "focus follows the next window when the active middle window dies"
+    );
+}
+
+#[tokio::test]
+async fn cross_window_swap_into_monitored_window_does_not_replay_done() {
+    // A pane that ran commands (blocks_completed > 0) swapped into a background
+    // monitor-command window must NOT fire a spurious "done" alert, because its
+    // block baseline is seeded from its live counter at install time.
+    let mut m = mk_mgr(); // W0: pane 0, active
+    m.handle_command(Command::ToggleMonitorCommand).unwrap(); // monitor-command on W0
+    m.handle_command(Command::MarkPane).unwrap(); // marked = pane 0 (in W0)
+    m.new_window_with_spec(spec(), "api".into()).unwrap(); // W1: pane 1, active
+    // pane 1 completed commands before being moved.
+    set_block_counter(&m, 1, 3, Some(0));
+    let _ = m.update_monitor_flags(); // establish baselines (W1 active, W0 background)
+    // Swap marked(pane 0 @ W0) <-> active(pane 1 @ W1): pane 1 (blocks=3) lands
+    // in the background, monitored W0.
+    m.handle_command(Command::SwapMarkedPane).unwrap();
+    assert!(
+        m.windows()[0].pane(PaneId(1)).is_some(),
+        "the blocks>0 pane moved into the monitored background window"
+    );
+    let _ = m.take_active_message();
+    assert!(
+        !m.update_monitor_flags(),
+        "a moved pane must not replay its prior completion as a done alert"
+    );
+    assert_eq!(m.windows()[0].done_flag(), None, "no spurious done flag");
+}
+
 // ----- choose-tree -----
 
 fn mk_mgr() -> WindowManager {

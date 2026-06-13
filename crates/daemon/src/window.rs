@@ -14,6 +14,10 @@ use std::time::Duration;
 // mock-time is off.
 use tokio::time::Instant;
 
+/// Upper bound on retained focus-history entries (see `Window::record_focus`).
+/// Only the most-recent entries matter for the close-pane focus fallback.
+const FOCUS_HISTORY_CAP: usize = 64;
+
 pub struct Window {
     pub id: WindowId,
     pub name: String,
@@ -248,7 +252,7 @@ impl Window {
             }
         };
         self.panes.insert(new_pane_id, pane);
-        self.focus_history.push_back(self.active);
+        self.record_focus(self.active);
         self.active = new_pane_id;
         self.resize(viewport)?;
         Ok(())
@@ -359,9 +363,16 @@ impl Window {
     /// pane's id. Slot-preserving: the tree shape never changes.
     pub(crate) fn install_in_slot(&mut self, old_slot: PaneId, pane: Pane) {
         let new_id = pane.id();
+        // Seed the block-completion baseline from the incoming pane's LIVE
+        // counter so the next drain in this window compares against its real
+        // count, not 0. Otherwise a pane that ran commands in its previous
+        // window would fire a spurious "done" alert when swapped into a
+        // background monitor-command window.
+        let incoming_blocks = pane.with_screen(|s| s.blocks_completed);
         let replaced = self.layout.replace_leaf(old_slot, new_id);
         debug_assert!(replaced, "install_in_slot: no leaf for {old_slot:?}");
         self.panes.insert(new_id, pane);
+        self.block_baselines.insert(new_id, incoming_blocks);
         if self.active == old_slot {
             self.active = new_id;
         }
@@ -389,8 +400,13 @@ impl Window {
         self.layout
             .split(target, dir, id, SplitPosition::After)
             .map_err(|e| DaemonError::Io(std::io::Error::other(format!("layout: {e}"))))?;
+        // Seed the block baseline from the incoming pane's live counter (see
+        // install_in_slot) so a moved pane never replays a completion as a
+        // spurious alert in its new window.
+        let incoming_blocks = pane.with_screen(|s| s.blocks_completed);
         self.panes.insert(id, pane);
-        self.focus_history.push_back(self.active);
+        self.block_baselines.insert(id, incoming_blocks);
+        self.record_focus(self.active);
         self.active = id;
         self.resize(viewport)?;
         Ok(())
@@ -636,25 +652,45 @@ impl Window {
         self.layout.is_empty()
     }
 
+    /// Push `prev` onto the focus history, bounding it. Without the bound the
+    /// deque grew one entry per focus switch for the window's whole lifetime
+    /// (never pop_front'd, only retain-pruned of dead panes on close), which also
+    /// made `last_pane`'s reverse scan ever slower. The cap is generous: only the
+    /// most-recent entries matter for the close-pane fallback.
+    fn record_focus(&mut self, prev: PaneId) {
+        self.focus_history.push_back(prev);
+        while self.focus_history.len() > FOCUS_HISTORY_CAP {
+            self.focus_history.pop_front();
+        }
+    }
+
     pub fn select_next(&mut self) {
         let panes = self.layout.panes();
+        // Single-pane windows: (idx+1)%1 == idx is a no-op focus change that
+        // would still grow the history. Skip it.
+        if panes.len() < 2 {
+            return;
+        }
         let Some(idx) = panes.iter().position(|p| *p == self.active) else {
             return;
         };
         if let Some(next) = panes.get((idx + 1) % panes.len()) {
-            self.focus_history.push_back(self.active);
+            self.record_focus(self.active);
             self.active = *next;
         }
     }
 
     pub fn select_prev(&mut self) {
         let panes = self.layout.panes();
+        if panes.len() < 2 {
+            return;
+        }
         let Some(idx) = panes.iter().position(|p| *p == self.active) else {
             return;
         };
         let prev_idx = if idx == 0 { panes.len() - 1 } else { idx - 1 };
         if let Some(prev) = panes.get(prev_idx) {
-            self.focus_history.push_back(self.active);
+            self.record_focus(self.active);
             self.active = *prev;
         }
     }
@@ -665,7 +701,7 @@ impl Window {
     /// pane.
     pub fn focus(&mut self, target: PaneId) {
         if self.panes.contains_key(&target) && target != self.active {
-            self.focus_history.push_back(self.active);
+            self.record_focus(self.active);
             self.active = target;
         }
     }
@@ -676,7 +712,7 @@ impl Window {
         viewport: Rect,
     ) -> Result<(), LayoutError> {
         if let Some(target) = self.layout.next_in_direction(self.active, viewport, dir) {
-            self.focus_history.push_back(self.active);
+            self.record_focus(self.active);
             self.active = target;
         }
         Ok(())

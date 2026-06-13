@@ -242,7 +242,13 @@ impl WindowManager {
         }
         if let Some(idx) = closed_idx {
             self.windows.remove(idx);
-            if idx <= self.active && self.active > 0 {
+            // Only a strictly-lower window shifts the active index down. When the
+            // ACTIVE window is the one removed (idx == active), leave the index
+            // put so focus lands on the NEXT window (clamped to last below),
+            // matching close_active_window's tmux-standard policy. The previous
+            // `idx <= active` decremented to the PREVIOUS window, so typing
+            // `exit` and pressing kill-window gave opposite focus.
+            if idx < self.active {
                 self.active -= 1;
             }
             if self.active >= self.windows.len() && !self.windows.is_empty() {

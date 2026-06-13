@@ -261,9 +261,15 @@ impl Session {
                 let mut m = session_for_death.window_manager.lock().await;
                 let _ = m.handle_pane_death(pane_id);
                 let now_empty = m.is_empty();
+                // Read the silence arm-state under the same lock window: an
+                // organic pane death can remove a silence-monitored window, and
+                // (unlike handle_command) nothing else reconciles the tick task,
+                // so it would keep waking 1 Hz for a now-pointless check.
+                let armed = m.any_silence_monitored();
                 drop(m);
                 session_for_death.notify.notify_one();
                 session_for_death.mark_dirty();
+                session_for_death.reconcile_silence_task(armed);
                 if now_empty {
                     break;
                 }
@@ -1449,6 +1455,37 @@ mod tests {
         assert!(
             s.silence_tick_handle.lock().unwrap().is_none(),
             "the silence task is aborted on the last disarm"
+        );
+    }
+
+    #[tokio::test]
+    async fn organic_death_of_last_silence_window_disarms_tick() {
+        let _g = crate::test_env::isolate();
+        use plexy_glass_mux::Command;
+        let s = Session::new("sild".into(), spec(), size(), cfg()).unwrap();
+        // A second window so killing the monitored one doesn't end the session.
+        s.handle_command(Command::NewWindow).await.unwrap(); // W1 active
+        // Arm silence on W1, then switch away so W1 is the only (background)
+        // silence-monitored window and the tick is running.
+        s.handle_command(Command::SetMonitorSilence(Some(5))).await.unwrap();
+        assert!(s.silence_tick_handle.lock().unwrap().is_some());
+        s.handle_command(Command::SelectWindow(0)).await.unwrap();
+        let w1_pane = {
+            let m = s.window_manager.lock().await;
+            m.windows()[1].layout().panes()[0]
+        };
+        // Organic death of W1's last pane (Ctrl+D): the death consumer removes
+        // the window and must reconcile the now-pointless silence tick.
+        s.death_tx.send(w1_pane).await.unwrap();
+        let disarmed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while s.silence_tick_handle.lock().unwrap().is_some() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(
+            disarmed.is_ok(),
+            "silence tick must be aborted when the last silence window dies organically"
         );
     }
 
