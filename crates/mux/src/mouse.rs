@@ -158,6 +158,25 @@ impl MouseParser {
         }
     }
 
+    /// Whether the parser is mid-sequence (holding bytes that have not yet been
+    /// resolved to a mouse event or bailed). A lone `\x1b` parks here as
+    /// `SawEsc`, so the connection loop must treat a mid-sequence mouse parser
+    /// as "pending" too (the key parser hasn't seen the ESC yet).
+    pub fn is_mid_sequence(&self) -> bool {
+        !matches!(self.state, ParseState::Idle)
+    }
+
+    /// Abandon any partial sequence and return the held bytes so the caller can
+    /// re-route them (e.g. into the key parser). Used by the Esc idle-flush:
+    /// the lone `\x1b` parks in this parser's `held`, never reaching the key
+    /// parser, so flushing the key parser alone would never see it. Returns the
+    /// held bytes (empty when idle).
+    pub fn flush(&mut self) -> Vec<u8> {
+        let bytes = std::mem::take(&mut self.held);
+        self.reset_state();
+        bytes
+    }
+
     /// Push `byte` to held, drain held into `BailedBytes`, and reset state.
     fn bail_with_byte(&mut self, byte: u8) -> MouseParseAction {
         self.held.push(byte);
@@ -367,6 +386,18 @@ mod tests {
             MouseParseAction::BailedBytes(bytes) => assert_eq!(bytes, vec![0x1b, b'a']),
             other => panic!("expected BailedBytes, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn flush_drains_held_partial_and_resets() {
+        let mut p = MouseParser::new();
+        assert!(!p.is_mid_sequence());
+        assert_eq!(p.consume(0x1b), MouseParseAction::Pending);
+        assert_eq!(p.consume(b'['), MouseParseAction::Pending);
+        assert!(p.is_mid_sequence(), "ESC [ is a partial mouse sequence");
+        assert_eq!(p.flush(), vec![0x1b, b'[']);
+        assert!(!p.is_mid_sequence(), "flush reset the parser");
+        assert_eq!(p.flush(), Vec::<u8>::new(), "second flush is empty");
     }
 
     #[test]

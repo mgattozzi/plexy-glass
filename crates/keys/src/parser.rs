@@ -114,6 +114,14 @@ impl KeyParser {
         }
     }
 
+    /// Whether the parser is mid-sequence (has buffered bytes awaiting more
+    /// input), i.e. not `Idle`. The connection loop uses this to decide
+    /// whether to arm the Esc idle-flush timer (only meaningful while a lone
+    /// `\x1b` or a partial CSI/SS3 is pending).
+    pub fn is_mid_sequence(&self) -> bool {
+        self.state != State::Idle
+    }
+
     pub fn flush(&mut self) -> Option<KeyParseOutput> {
         if self.state == State::SawEsc {
             let bytes = std::mem::take(&mut self.buf);
@@ -258,6 +266,15 @@ impl KeyParser {
     fn decode_csi(&self, byte: u8, params: &[Param]) -> Option<KeyEvent> {
         let p0 = params.first().map(Param::primary);
         let p1 = params.get(1).map(Param::primary);
+        // modifyOtherKeys 27-form: `CSI 27 ; mods ; code ~`, the key whose codepoint
+        // is the THIRD param, modifiers from the SECOND. Mapped through the same
+        // codepoint→KeyEvent path as CSI-u so it is symmetric with the encoder
+        // (`encode::modify_other_keys_bytes` emits this form). Decoded before the
+        // generic tilde arm so `27` is not mistaken for a (nonexistent)
+        // function-key number.
+        if byte == b'~' && p0 == Some(27) {
+            return self.decode_modify_other_keys(params);
+        }
         match (byte, p0, p1) {
             (b'A', None, None) => Some(KeyEvent::plain(Key::Arrow(Direction::Up))),
             (b'B', None, None) => Some(KeyEvent::plain(Key::Arrow(Direction::Down))),
@@ -322,6 +339,19 @@ impl KeyParser {
         ev.shifted = shifted;
         ev.base_layout = base_layout;
         Some(ev)
+    }
+
+    /// Decode the modifyOtherKeys 27-form `CSI 27 ; mods ; code ~`. Params are
+    /// `[27, mods, code]`; the codepoint is param 3, modifiers param 2. Maps
+    /// through `kitty_key` so the resulting `KeyEvent` is identical to what the
+    /// CSI-u path produces for the same key, which keeps parse symmetric with
+    /// the encoder. Malformed (missing mods/code, non-mappable codepoint) →
+    /// `None` (the caller's bail). Accepted in every protocol scope: the 27-form
+    /// is the modifyOtherKeys wire form, and a permissive parser must accept it.
+    fn decode_modify_other_keys(&self, params: &[Param]) -> Option<KeyEvent> {
+        let mods = decode_xterm_mods(params.get(1)?.primary().max(1));
+        let code = params.get(2)?.primary();
+        kitty_key(code, mods)
     }
 
     fn emit_simple(&mut self, key: Key, mods: Modifiers) -> KeyParseOutput {
@@ -724,5 +754,155 @@ mod tests {
             last = p.consume(b);
         }
         assert!(matches!(last, KeyParseOutput::Bytes(_)));
+    }
+
+    // --- modifyOtherKeys 27-form decode (K1) ---
+
+    #[test]
+    fn mok_27_form_ctrl_a() {
+        // \e[27;5;97~ -> Ctrl+a (mods param 5 = ctrl, code 97 = 'a').
+        let e = last_event(b"\x1b[27;5;97~");
+        assert_eq!(e.key, Key::Char('a'));
+        assert_eq!(e.mods, Modifiers::CTRL);
+    }
+
+    #[test]
+    fn mok_27_form_shift_enter() {
+        // \e[27;2;13~ -> Shift+Enter (mods 2 = shift, code 13 = Enter).
+        let e = last_event(b"\x1b[27;2;13~");
+        assert_eq!(e.key, Key::Enter);
+        assert_eq!(e.mods, Modifiers::SHIFT);
+    }
+
+    #[test]
+    fn mok_27_form_ctrl_shift_i() {
+        // \e[27;6;105~ -> Ctrl+Shift+i (mods 6 = ctrl|shift, code 105 = 'i').
+        let e = last_event(b"\x1b[27;6;105~");
+        assert_eq!(e.key, Key::Char('i'));
+        assert_eq!(e.mods, Modifiers::CTRL | Modifiers::SHIFT);
+    }
+
+    #[test]
+    fn mok_27_form_escape() {
+        // \e[27;2;27~ -> Shift+Escape (code 27 maps to the Escape named key).
+        let e = last_event(b"\x1b[27;2;27~");
+        assert_eq!(e.key, Key::Escape);
+        assert_eq!(e.mods, Modifiers::SHIFT);
+    }
+
+    #[test]
+    fn mok_27_form_accepted_in_every_protocol() {
+        // The 27-form is the modifyOtherKeys wire form, so we accept it under the
+        // strict ModifyOtherKeys scope (CSI-u is the one rejected there).
+        for proto in [
+            KeyboardProtocol::ModifyOtherKeys,
+            KeyboardProtocol::Legacy,
+            KeyboardProtocol::Kitty,
+            KeyboardProtocol::Permissive,
+        ] {
+            let mut p = KeyParser::new().with_protocol(proto);
+            let mut last = KeyParseOutput::Pending;
+            for &b in b"\x1b[27;5;97~" {
+                last = p.consume(b);
+            }
+            match last {
+                KeyParseOutput::Event { event, .. } => {
+                    assert_eq!(event.key, Key::Char('a'), "{proto:?}");
+                    assert_eq!(event.mods, Modifiers::CTRL, "{proto:?}");
+                }
+                other => panic!("expected Event for {proto:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn mok_27_form_missing_code_bails() {
+        // \e[27;5~ has no third (code) param: malformed, bail to raw bytes.
+        let outputs = drive(b"\x1b[27;5~");
+        match outputs.last().unwrap() {
+            KeyParseOutput::Bytes(bs) => assert_eq!(bs.as_slice(), b"\x1b[27;5~"),
+            other => panic!("expected Bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mok_27_form_round_trips_with_encoder() {
+        // Symmetric with `encode::modify_other_keys_bytes`: encode a key to its
+        // 27-form, parse it back, get the same KeyEvent shape.
+        use crate::encode::{encode, KeyboardTarget};
+        for (key, mods) in [
+            (Key::Char('a'), Modifiers::CTRL),
+            (Key::Enter, Modifiers::SHIFT),
+            (Key::Char('i'), Modifiers::CTRL | Modifiers::SHIFT),
+        ] {
+            let original = KeyEvent::new(key, mods);
+            let bytes = encode(&original, KeyboardTarget::ModifyOtherKeys(2), false);
+            assert!(bytes.starts_with(b"\x1b[27;"), "expected 27-form for {key:?}/{mods:?}, got {bytes:?}");
+            let mut p = KeyParser::new().with_protocol(KeyboardProtocol::ModifyOtherKeys);
+            let mut got = None;
+            for &b in &bytes {
+                if let KeyParseOutput::Event { event, .. } = p.consume(b) {
+                    got = Some(event);
+                }
+            }
+            let got = got.expect("decoded event");
+            assert_eq!(got.key, key, "{key:?}/{mods:?}");
+            assert_eq!(got.mods, mods, "{key:?}/{mods:?}");
+        }
+    }
+
+    // --- flush guard (K1) ---
+
+    #[test]
+    fn flush_after_lone_esc_yields_escape() {
+        let mut p = KeyParser::new();
+        assert!(matches!(p.consume(0x1b), KeyParseOutput::Pending));
+        assert!(p.is_mid_sequence());
+        match p.flush().expect("flush should emit Escape") {
+            KeyParseOutput::Event { event, .. } => assert_eq!(event.key, Key::Escape),
+            other => panic!("expected Event, got {other:?}"),
+        }
+        // After the flush the parser is back to Idle.
+        assert!(!p.is_mid_sequence());
+    }
+
+    #[test]
+    fn flush_mid_incomplete_csi_does_not_synthesize_escape() {
+        // A partial `\x1b[` (state == SawCsi, not SawEsc) must NOT flush into a
+        // bogus Escape, so the flush only fires when the state is exactly SawEsc.
+        let mut p = KeyParser::new();
+        assert!(matches!(p.consume(0x1b), KeyParseOutput::Pending));
+        assert!(matches!(p.consume(b'['), KeyParseOutput::Pending));
+        assert!(p.is_mid_sequence(), "still mid-sequence after \\x1b[");
+        assert!(p.flush().is_none(), "flush must not synthesize Escape mid-CSI");
+        // The real CSI can still complete after the flush no-op.
+        let e = {
+            let mut last = None;
+            for &b in b"A" {
+                if let KeyParseOutput::Event { event, .. } = p.consume(b) {
+                    last = Some(event);
+                }
+            }
+            last.expect("arrow event")
+        };
+        assert_eq!(e.key, Key::Arrow(Direction::Up));
+    }
+
+    #[test]
+    fn flush_when_idle_is_noop() {
+        let mut p = KeyParser::new();
+        assert!(!p.is_mid_sequence());
+        assert!(p.flush().is_none());
+    }
+
+    #[test]
+    fn is_mid_sequence_tracks_partial_ss3() {
+        let mut p = KeyParser::new();
+        assert!(!p.is_mid_sequence());
+        p.consume(0x1b);
+        p.consume(b'O');
+        assert!(p.is_mid_sequence());
+        p.consume(b'P'); // completes \e O P = F1
+        assert!(!p.is_mid_sequence());
     }
 }

@@ -135,6 +135,39 @@ impl PasteParser {
         }
     }
 
+    /// Whether the parser is mid-sequence on a *partial open*, i.e. it has
+    /// speculatively swallowed `\x1b…` while checking for a `\x1b[200~` opener
+    /// but hasn't decided yet. A lone `\x1b` parks here (state `SawEsc`), which
+    /// is why a bare Esc never reaches the key parser without a flush. We
+    /// deliberately do NOT report mid-*content*/mid-close states as pending:
+    /// inside an active paste there is no Esc to deliver, and the connection
+    /// loop must not arm the Esc idle-flush there (it would prematurely bail an
+    /// in-progress paste).
+    pub fn is_pending_open(&self) -> bool {
+        matches!(
+            self.state,
+            State::SawEsc
+                | State::SawBracket
+                | State::SawTwo
+                | State::SawTwoZero
+                | State::SawTwoZeroZero
+        )
+    }
+
+    /// Abandon a partial *open* sequence and return the held bytes as
+    /// `NotPaste` so the caller can re-route them (mouse → key). The lone-`\x1b`
+    /// case returns `[0x1b]`, which the key parser then turns into Escape. A
+    /// no-op (returns `None`) when not on a partial open, since mid-content and
+    /// mid-close are left untouched so an in-progress paste isn't corrupted.
+    pub fn flush_open(&mut self) -> Option<PasteParseOutput> {
+        if !self.is_pending_open() {
+            return None;
+        }
+        let out = std::mem::take(&mut self.held);
+        self.state = State::Idle;
+        Some(PasteParseOutput::NotPaste(out))
+    }
+
     /// Helper for opener-state transitions: advance if matched, bail if not.
     fn advance_open(&mut self, byte: u8, expected: u8, next: State) -> PasteParseOutput {
         if byte == expected {
@@ -301,5 +334,52 @@ mod tests {
         let outs = drive(b"\x1ba");
         let np: Vec<u8> = collect_not_paste(&outs).into_iter().flatten().collect();
         assert_eq!(np, b"\x1ba");
+    }
+
+    #[test]
+    fn lone_esc_parks_pending_open_and_flushes_back_the_esc() {
+        let mut p = PasteParser::new();
+        assert!(matches!(p.consume(0x1b), PasteParseOutput::Pending));
+        assert!(p.is_pending_open(), "a lone ESC parks on a partial open");
+        match p.flush_open().expect("flush yields the held ESC") {
+            PasteParseOutput::NotPaste(bs) => assert_eq!(bs, vec![0x1b]),
+            other => panic!("expected NotPaste([0x1b]), got {other:?}"),
+        }
+        assert!(!p.is_pending_open(), "back to Idle after flush");
+        assert!(p.flush_open().is_none(), "second flush is a no-op");
+    }
+
+    #[test]
+    fn partial_open_flushes_back_all_held_bytes() {
+        let mut p = PasteParser::new();
+        for &b in b"\x1b[2" {
+            assert!(matches!(p.consume(b), PasteParseOutput::Pending));
+        }
+        assert!(p.is_pending_open());
+        match p.flush_open().expect("flush yields held bytes") {
+            PasteParseOutput::NotPaste(bs) => assert_eq!(bs, b"\x1b[2"),
+            other => panic!("expected NotPaste, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mid_content_is_not_pending_open() {
+        // Inside an active paste there is no Esc to deliver; the connection
+        // loop must NOT arm the Esc idle-flush, and flush_open must no-op so it
+        // doesn't corrupt the in-progress paste.
+        let mut p = PasteParser::new();
+        for &b in b"\x1b[200~ab" {
+            p.consume(b);
+        }
+        assert!(!p.is_pending_open(), "mid-content is not a partial open");
+        assert!(p.flush_open().is_none());
+        // The paste still completes correctly afterwards.
+        let mut paste = None;
+        for &b in b"c\x1b[201~" {
+            if let PasteParseOutput::Paste(bs) = p.consume(b) {
+                paste = Some(bs);
+            }
+        }
+        assert_eq!(paste, Some(b"abc".to_vec()));
     }
 }
