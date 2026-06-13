@@ -15,8 +15,18 @@ impl Widget for TimeWidget {
         self.interval.or(Some(Duration::from_secs(1)))
     }
     async fn evaluate(&mut self, _ctx: &EvalContext<'_>) -> StyledText {
+        use std::fmt::Write as _;
         let now = chrono::Local::now();
-        let text = now.format(&self.format).to_string();
+        // chrono's `Display` returns `Err` on a malformed format specifier;
+        // `.to_string()` would then panic ("a Display implementation returned an
+        // error unexpectedly") and kill the spawned status tick task, silently
+        // freezing the bar. A user `time format="…"` is unvalidated config, so
+        // degrade to a safe default on error instead of panicking.
+        let mut text = String::new();
+        if write!(text, "{}", now.format(&self.format)).is_err() {
+            text.clear();
+            let _ = write!(text, "{}", now.format("%H:%M"));
+        }
         StyledText::single(SmolStr::new(text), self.style)
     }
 }
@@ -50,5 +60,20 @@ mod tests {
         assert!(!out.segments[0].text.is_empty());
         // %H:%M -> "12:34" 5 chars.
         assert_eq!(out.segments[0].text.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn time_bad_format_degrades_instead_of_panicking() {
+        // "%Q" is an invalid chrono specifier; the old `.to_string()` panicked
+        // and killed the tick task. It must now fall back to the default.
+        let mut w = TimeWidget {
+            format: "%Q".to_string(),
+            interval: None,
+            style: ResolvedStyle::default(),
+        };
+        let out = w.evaluate(&ctx_empty()).await;
+        // Fallback "%H:%M" -> "12:34".
+        assert_eq!(out.segments[0].text.len(), 5);
+        assert!(out.segments[0].text.contains(':'));
     }
 }

@@ -328,7 +328,9 @@ impl SegmentSnapshot {
             let width = plexy_glass_emulator::display_width(&seg.text);
             if let Some(action) = seg.click_action {
                 out.push(StatusHit {
-                    col_range: col..col + width,
+                    // saturating_add to match the accumulation below, so both column
+                    // computations share one overflow policy.
+                    col_range: col..col.saturating_add(width),
                     action,
                 });
             }

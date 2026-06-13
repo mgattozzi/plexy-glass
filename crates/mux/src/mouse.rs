@@ -135,8 +135,13 @@ impl MouseParser {
         // invariant: FSM only ever sets idx to 0, 1, or 2
         debug_assert!(idx <= 2, "AccumParam idx out of range");
         if byte.is_ascii_digit() {
-            self.params[idx as usize] =
-                self.params[idx as usize].saturating_mul(10) + u32::from(byte - b'0');
+            // saturating on BOTH ops: a long digit run from a buggy/malicious
+            // client would overflow the trailing plain `+` once the mul
+            // saturated to u32::MAX (debug panic / release wrap). build_event
+            // clamps into u16 anyway, so saturating here is harmless.
+            self.params[idx as usize] = self.params[idx as usize]
+                .saturating_mul(10)
+                .saturating_add(u32::from(byte - b'0'));
             MouseParseAction::Pending
         } else if byte == b';' {
             if idx >= 2 {
@@ -369,6 +374,17 @@ mod tests {
         let e = finalize(b"\x1b[<28;3;3M");
         assert_eq!(e.modifiers, MouseModifiers { shift: true, alt: true, ctrl: true });
         assert_eq!(e.button, MouseButton::Left);
+    }
+
+    #[test]
+    fn oversized_param_clamps_without_panic() {
+        // A buggy/malicious client sends an 11-digit coordinate. The old plain
+        // `+` overflowed once `saturating_mul` hit `u32::MAX` (debug panic /
+        // release wrap), so saturating arithmetic has to clamp into the `u16`
+        // range instead of panicking.
+        let e = finalize(b"\x1b[<0;99999999999;1M");
+        assert_eq!(e.col, u16::MAX);
+        assert_eq!(e.row, 0); // wire "1" -> 0 (1-indexed)
     }
 
     #[test]

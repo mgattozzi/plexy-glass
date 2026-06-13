@@ -11,7 +11,11 @@ pub struct Rgb {
 impl Rgb {
     pub fn parse_hex(s: &str) -> Option<Self> {
         let s = s.strip_prefix('#')?;
-        if s.len() != 6 {
+        // Require 6 ASCII bytes before byte-slicing: a 6-byte string can hold a
+        // multi-byte UTF-8 char straddling a slice boundary (e.g. "#aébc1"),
+        // and slicing off a char boundary panics. ASCII-only makes the byte
+        // indices safe and falls into the existing None path for bad input.
+        if s.len() != 6 || !s.is_ascii() {
             return None;
         }
         let r = u8::from_str_radix(&s[0..2], 16).ok()?;
@@ -143,5 +147,14 @@ mod tests {
     fn resolve_color_malformed_hex_is_none() {
         let result = resolve_color("#gggggg", &PaletteConfig::default());
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_hex_multibyte_char_is_none_not_panic() {
+        // "#aébc1": the body is exactly 6 bytes but `é` is 2 bytes straddling the
+        // &s[0..2] boundary, so this must return None, not panic.
+        assert_eq!(Rgb::parse_hex("#aébc1"), None);
+        // A 4-char body padded to 6 bytes by a multi-byte char, too.
+        assert_eq!(Rgb::parse_hex("#1234é"), None);
     }
 }
