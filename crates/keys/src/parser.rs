@@ -393,24 +393,20 @@ fn kitty_key(code: u32, mods: Modifiers) -> Option<KeyEvent> {
         13 => return Some(KeyEvent::new(Key::Enter, mods)),
         27 => return Some(KeyEvent::new(Key::Escape, mods)),
         127 => return Some(KeyEvent::new(Key::Backspace, mods)),
-        // Kitty-extended named-key codepoints.
-        57361 => return Some(KeyEvent::new(Key::Insert, mods)),
-        57352 => return Some(KeyEvent::new(Key::Home, mods)),
-        57359 => return Some(KeyEvent::new(Key::End, mods)),
-        57353 => return Some(KeyEvent::new(Key::PageUp, mods)),
-        57354 => return Some(KeyEvent::new(Key::PageDown, mods)),
-        // F1..F12 in kitty's extended range:
-        57364..=57375 => {
-            let n = (code - 57364 + 1) as u8;
-            return Some(KeyEvent::new(Key::Function(n), mods));
-        }
-        // Arrows in kitty's extended range:
-        57355 => return Some(KeyEvent::new(Key::Arrow(Direction::Up), mods)),
-        57356 => return Some(KeyEvent::new(Key::Arrow(Direction::Down), mods)),
-        57358 => return Some(KeyEvent::new(Key::Arrow(Direction::Right), mods)),
-        57357 => return Some(KeyEvent::new(Key::Arrow(Direction::Left), mods)),
         _ => {}
     }
+    // Named functional keys (arrows, Home/End/Insert/Delete, PageUp/Down,
+    // F1-F12) are NOT carried in the Kitty private-use range: under the Kitty
+    // protocol they keep their legacy CSI/SS3 final-byte forms, already handled
+    // by `step_ss3` / `decode_csi` / `key_from_tilde`. The Kitty PUA (U+E000.. =
+    // 57344+) is reserved for keys with no legacy form (Caps/Scroll/Num Lock,
+    // Print Screen, Pause, Menu, F13-F35, the keypad). `Key` has no variants for
+    // those, so they fall through to `Char` (inert in keymaps; the raw bytes
+    // still pass through to the child verbatim). An earlier hand-written table
+    // both invented unassigned codepoints and, worse, mismapped real Kitty
+    // assignments (57358=CapsLock, 57359=ScrollLock, 57361=PrintScreen) onto
+    // Right/End/Insert, silently turning those keys into navigation keystrokes;
+    // that masquerade is removed.
     char::from_u32(code).map(|c| KeyEvent::new(Key::Char(c), mods))
 }
 
@@ -652,9 +648,30 @@ mod tests {
     }
 
     #[test]
-    fn kitty_function_key() {
-        let e = last_event(b"\x1b[57364;1u");
-        assert_eq!(e.key, Key::Function(1));
+    fn kitty_function_keys_arrive_via_legacy_forms() {
+        // Under the Kitty protocol F-keys keep their legacy SS3/CSI forms; the
+        // private-use range is not used for them. F1 = SS3 P, F5 = CSI 15~.
+        assert_eq!(last_event(b"\x1bOP").key, Key::Function(1));
+        assert_eq!(last_event(b"\x1b[15~").key, Key::Function(5));
+    }
+
+    #[test]
+    fn kitty_lock_and_system_keys_are_not_mismapped_to_nav() {
+        // 57358=CapsLock, 57359=ScrollLock, 57361=PrintScreen in the Kitty PUA.
+        // `Key` has no variants for them; they must NOT decode to Right/End/
+        // Insert (the old hand-written table's bug). They fall through to Char.
+        for code in [57358u32, 57359, 57361] {
+            let e = last_event(format!("\x1b[{code};1u").as_bytes());
+            assert!(
+                !matches!(
+                    e.key,
+                    Key::Arrow(_) | Key::End | Key::Insert | Key::Home | Key::PageUp | Key::PageDown
+                ),
+                "kitty code {code} mis-decoded as a navigation key: {:?}",
+                e.key
+            );
+            assert!(matches!(e.key, Key::Char(_)));
+        }
     }
 
     #[test]

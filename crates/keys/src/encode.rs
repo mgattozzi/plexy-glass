@@ -18,10 +18,19 @@ pub fn legacy_bytes(event: KeyEvent) -> Vec<u8> {
             // Ctrl+a..z -> 0x01..0x1a
             vec![(c.to_ascii_lowercase() as u8) - b'`']
         }
-        Key::Char(c) if event.mods == Modifiers::ALT => {
+        // Ctrl+Space -> NUL, honoring `is_well_known_legacy`'s contract (emacs
+        // set-mark, vim ^@). Without this it falls through to the catch-all and
+        // is silently eaten.
+        Key::Char(' ') if event.mods == Modifiers::CTRL => vec![0x00],
+        Key::Char(_) if event.mods.contains(Modifiers::ALT) => {
+            // Alt is the Meta/ESC prefix; emit ESC then the same key with Alt
+            // removed. So Alt+x -> ESC x, Alt+Shift+a -> ESC 'A', Alt+Ctrl+a ->
+            // ESC 0x01, degrading rather than eating the keystroke. Recursion
+            // terminates: the inner event no longer has the Alt bit.
+            let mut inner = event;
+            inner.mods.remove(Modifiers::ALT);
             let mut out = vec![0x1b];
-            let mut buf = [0u8; 4];
-            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            out.extend_from_slice(&legacy_bytes(inner));
             out
         }
         Key::Tab if event.mods.is_empty() => vec![0x09],
@@ -576,5 +585,43 @@ mod tests {
         let got = got.expect("decoded event");
         assert_eq!(got.key, original.key);
         assert_eq!(got.mods, original.mods);
+    }
+
+    #[test]
+    fn ctrl_space_emits_nul() {
+        let e = KeyEvent::new(Key::Char(' '), Modifiers::CTRL);
+        // Legacy and modifyOtherKeys-level-1 panes both get NUL (was eaten).
+        assert_eq!(encode(&e, KeyboardTarget::Legacy, false), vec![0x00]);
+        assert_eq!(encode(&e, KeyboardTarget::ModifyOtherKeys(1), false), vec![0x00]);
+        // Level 2 reports it in the canonical 27-form (codepoint 32, mods 5).
+        assert_eq!(
+            encode(&e, KeyboardTarget::ModifyOtherKeys(2), false),
+            b"\x1b[27;5;32~"
+        );
+        // Round-trips: the parser decodes NUL back to Ctrl+Space.
+        let mut p = KeyParser::new();
+        let mut got = None;
+        if let KeyParseOutput::Event { event, .. } = p.consume(0x00) {
+            got = Some(event);
+        }
+        let got = got.expect("decoded event");
+        assert_eq!(got.key, Key::Char(' '));
+        assert_eq!(got.mods, Modifiers::CTRL);
+    }
+
+    #[test]
+    fn alt_with_other_mods_degrades_via_esc_prefix() {
+        // Alt+Shift+a degrades to ESC 'A' (was eaten by the catch-all).
+        let alt_shift = KeyEvent::new(Key::Char('a'), Modifiers::ALT | Modifiers::SHIFT);
+        assert_eq!(encode(&alt_shift, KeyboardTarget::Legacy, false), b"\x1bA");
+        // Plain Alt+a is unchanged: ESC + lowercase.
+        let plain = KeyEvent::new(Key::Char('a'), Modifiers::ALT);
+        assert_eq!(encode(&plain, KeyboardTarget::Legacy, false), b"\x1ba");
+        // Alt+Ctrl+a degrades to ESC + Ctrl-a (0x01) rather than being dropped.
+        let ctrl_alt = KeyEvent::new(Key::Char('a'), Modifiers::ALT | Modifiers::CTRL);
+        assert_eq!(
+            encode(&ctrl_alt, KeyboardTarget::Legacy, false),
+            vec![0x1b, 0x01]
+        );
     }
 }
