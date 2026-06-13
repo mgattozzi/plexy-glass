@@ -46,6 +46,12 @@ pub(super) async fn render_coordinator(
             break;
         }
 
+        // Set true when the monitor drain emitted an alert message under the
+        // WM lock below; the TTL-expiry repaint wake is scheduled after the
+        // lock releases (scheduling re-borrows the session and must not nest
+        // under the WM guard, and `Session::set_status_message`, which would,
+        // deadlocks here because it re-locks the WM).
+        let alert_message_emitted;
         let frame = {
             let mut m = session.window_manager.lock().await;
             if m.is_empty() {
@@ -54,9 +60,10 @@ pub(super) async fn render_coordinator(
                 let _ = frame_tx.send(Arc::new(virt));
                 break;
             }
-            // Sole drainer of the per-pane activity/bell signals into the per-window
+            // Sole drainer of the per-pane activity/bell signals → per-window
             // sticky flags. Must run before any immutable borrow of `m` below.
-            m.update_monitor_flags();
+            // Emits monitor-alert messages on a flag's false→true edge.
+            alert_message_emitted = m.update_monitor_flags();
             let host = m.host_size();
             let viewport = m.viewport();
             let win = m.active_window();
@@ -250,6 +257,11 @@ pub(super) async fn render_coordinator(
                 block_colors.as_ref(),
             )
         };
+        // The WM lock is released; if the drain set an alert message, schedule
+        // its TTL-expiry repaint wake now (see `update_monitor_flags`).
+        if alert_message_emitted {
+            session.schedule_status_expiry_wake();
+        }
         let _ = frame_tx.send(Arc::new(frame));
     }
     session.closing.store(true, Ordering::SeqCst);

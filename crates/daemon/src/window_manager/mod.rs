@@ -247,25 +247,42 @@ impl WindowManager {
     }
 
     /// Drain every pane's activity/bell signal and fold it into the per-window
-    /// sticky alert flags. This is the sole drainer of the pane atomics, called
-    /// once per frame by the render coordinator (the status tick task only
-    /// *reads* the flags). The current window's alerts are cleared (you're
-    /// watching it); a background window with the matching monitor option on
-    /// gets its sticky flag set.
-    pub fn update_monitor_flags(&mut self) {
+    /// sticky alert flags. The sole drainer of the pane atomics, called once per
+    /// frame by the render coordinator (the status tick task only *reads* the
+    /// flags). The current window's alerts are cleared (you're watching it); a
+    /// background window with the matching monitor option on gets its sticky flag
+    /// set, and a false→true EDGE on that flag fires a status-line alert message.
+    ///
+    /// Returns `true` if any alert message was emitted this drain, so the
+    /// coordinator can schedule the message's TTL-expiry repaint wake after it
+    /// releases the WM lock (the message is set here under the held lock, see
+    /// `set_status_message`'s deadlock note in the coordinator).
+    #[must_use = "schedule the status-message TTL wake when an edge fired"]
+    pub fn update_monitor_flags(&mut self) -> bool {
         let active = self.active;
+        // Collect edge messages while iterating (the iterator borrows
+        // `windows` mutably; `set_status_message` borrows `self`), then emit
+        // after the loop. The status line is a single slot, so on simultaneous
+        // edges the LAST message wins (accepted, same as any rapid succession).
+        let mut message: Option<String> = None;
         for (i, w) in self.windows.iter_mut().enumerate() {
             let (acted, belled) = w.drain_pane_alerts();
             if i == active {
                 w.clear_alerts();
             } else {
-                if acted && w.monitor_activity() {
-                    w.set_activity();
+                if acted && w.monitor_activity() && w.set_activity() {
+                    message = Some(format!("activity in window {} ({})", i + 1, w.name));
                 }
-                if belled && w.monitor_bell() {
-                    w.set_bell();
+                if belled && w.monitor_bell() && w.set_bell() {
+                    message = Some(format!("bell in window {} ({})", i + 1, w.name));
                 }
             }
+        }
+        if let Some(text) = message {
+            self.set_status_message(text);
+            true
+        } else {
+            false
         }
     }
 

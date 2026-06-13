@@ -824,7 +824,21 @@ impl Session {
             m.set_status_message(text);
         }
         self.notify.notify_one();
+        self.schedule_status_expiry_wake();
+    }
 
+    /// Schedule a single wake `STATUS_TTL` from now so an expired status-line
+    /// message is repainted away even if nothing else changes. Any prior
+    /// pending wake is aborted first (mirroring `status_tick_handle`), so rapid
+    /// messages neither leak tasks nor fire redundant notifies.
+    ///
+    /// Split out from `set_status_message` so the render coordinator can reuse
+    /// it: the coordinator emits monitor-alert messages via
+    /// `WindowManager::set_status_message` UNDER the WM lock it already holds
+    /// (calling `Session::set_status_message` there would re-lock the WM and
+    /// deadlock), then calls this AFTER releasing the lock so the TTL repaint
+    /// still fires without depending on an incidental notify.
+    pub fn schedule_status_expiry_wake(self: &Arc<Self>) {
         let prior = {
             // invariant: status_msg_handle mutex held briefly; no .await holding the lock.
             let mut slot = self

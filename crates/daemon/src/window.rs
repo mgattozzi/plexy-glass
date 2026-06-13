@@ -399,14 +399,22 @@ impl Window {
         self.bell = false;
     }
 
-    /// Set the sticky alert flags (called by the manager for a background window
-    /// with the matching monitor option on).
-    pub fn set_activity(&mut self) {
+    /// Set the sticky activity flag (called by the manager for a background
+    /// window with monitor-activity on). Returns whether this set was a
+    /// false→true EDGE. The drain emits an alert message only on the edge, so
+    /// a chatty pane (whose atomic re-arms every frame while the sticky flag
+    /// merely stays true) is messaged once, not per frame.
+    pub fn set_activity(&mut self) -> bool {
+        let edge = !self.activity;
         self.activity = true;
+        edge
     }
 
-    pub fn set_bell(&mut self) {
+    /// Set the sticky bell flag; returns whether this set was a false→true edge.
+    pub fn set_bell(&mut self) -> bool {
+        let edge = !self.bell;
         self.bell = true;
+        edge
     }
 
     /// Read-and-clear every pane's activity/bell signal, OR-ing the results.

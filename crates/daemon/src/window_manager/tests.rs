@@ -1635,7 +1635,7 @@ async fn update_monitor_flags_clears_active_window_alerts() {
     let mut m = mk_mgr();
     m.active_window_mut().set_bell(); // a stale alert on the (current) window
     m.active_window_mut().set_activity();
-    m.update_monitor_flags();
+    let _ = m.update_monitor_flags();
     assert!(!m.active_window().bell_flag(), "current window's bell cleared");
     assert!(!m.active_window().activity_flag(), "current window's activity cleared");
 }
@@ -1657,7 +1657,7 @@ async fn update_monitor_flags_sets_background_activity_then_clears_on_switch() {
     // Drain into the sticky flag (the coordinator's per-frame step).
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        m.update_monitor_flags();
+        let _ = m.update_monitor_flags();
         if m.windows()[1].activity_flag() {
             break;
         }
@@ -1669,7 +1669,7 @@ async fn update_monitor_flags_sets_background_activity_then_clears_on_switch() {
     assert!(!m.active_window().activity_flag(), "the current window is never flagged");
     // Switching to the flagged window clears it on the next update.
     m.handle_command(Command::SelectWindow(1)).unwrap();
-    m.update_monitor_flags();
+    let _ = m.update_monitor_flags();
     assert!(!m.windows()[1].activity_flag(), "flag cleared once the window is current");
 }
 
@@ -1699,7 +1699,7 @@ async fn update_monitor_flags_sets_background_bell_from_a_real_bel() {
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        m.update_monitor_flags();
+        let _ = m.update_monitor_flags();
         if m.windows()[1].bell_flag() {
             break;
         }
@@ -1709,6 +1709,111 @@ async fn update_monitor_flags_sets_background_bell_from_a_real_bel() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(!m.active_window().bell_flag(), "the current window is never bell-flagged");
+}
+
+/// Drive output into the background window's pane until `update_monitor_flags`
+/// reports an edge (returns true) or the deadline passes. Returns whether an
+/// edge fired and (if so) the message it set. Pumps a fresh byte each poll so
+/// the activity atomic keeps re-arming.
+async fn drive_until_alert(m: &mut WindowManager, bg_idx: usize) -> Option<String> {
+    let pid = m.windows()[bg_idx].layout().panes()[0];
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        m.windows()[bg_idx]
+            .pane(pid)
+            .unwrap()
+            .send_input(bytes::Bytes::from_static(b"x\n"))
+            .await
+            .unwrap();
+        if m.update_monitor_flags() {
+            return m.take_active_message().map(str::to_string);
+        }
+        if Instant::now() > deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn activity_edge_in_background_window_emits_message() {
+    let mut m = mk_mgr(); // window 0 (`cat`)
+    m.new_window_with_spec(spec(), "api".into()).unwrap(); // window 1 (active), `cat`
+    m.handle_command(Command::ToggleMonitorActivity).unwrap(); // monitor on for window 1
+    m.handle_command(Command::SelectWindow(0)).unwrap(); // window 0 active; window 1 background
+    let msg = drive_until_alert(&mut m, 1).await;
+    assert_eq!(
+        msg.as_deref(),
+        Some("activity in window 2 (api)"),
+        "background activity edge fires a 1-based message with the window name"
+    );
+    assert!(m.windows()[1].activity_flag(), "the sticky flag is set");
+}
+
+#[tokio::test]
+async fn activity_in_active_window_emits_no_message() {
+    let mut m = mk_mgr(); // window 0 (`cat`), active
+    m.handle_command(Command::ToggleMonitorActivity).unwrap(); // monitor on for the active window
+    // Generate output in the ACTIVE window's pane.
+    let pid = m.windows()[0].layout().panes()[0];
+    m.windows()[0]
+        .pane(pid)
+        .unwrap()
+        .send_input(bytes::Bytes::from_static(b"x\n"))
+        .await
+        .unwrap();
+    // Drain a few times; the active window never flags and never emits an edge
+    // alert (`update_monitor_flags` returns false → no alert message set).
+    for _ in 0..5 {
+        assert!(!m.update_monitor_flags(), "active window emits no alert message");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!m.active_window().activity_flag(), "active window is never flagged");
+}
+
+#[tokio::test]
+async fn activity_does_not_re_message_while_sticky() {
+    let mut m = mk_mgr();
+    m.new_window_with_spec(spec(), "api".into()).unwrap(); // window 1, active
+    m.handle_command(Command::ToggleMonitorActivity).unwrap();
+    m.handle_command(Command::SelectWindow(0)).unwrap();
+    // First edge fires.
+    assert!(drive_until_alert(&mut m, 1).await.is_some(), "first edge messages");
+    // Subsequent drains, even with continued output, do NOT re-message while
+    // the sticky flag stays true (the edge already happened).
+    let pid = m.windows()[1].layout().panes()[0];
+    for _ in 0..5 {
+        m.windows()[1]
+            .pane(pid)
+            .unwrap()
+            .send_input(bytes::Bytes::from_static(b"y\n"))
+            .await
+            .unwrap();
+        assert!(!m.update_monitor_flags(), "no re-message while the flag stays sticky");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn activity_re_messages_after_view_clears_and_re_edges() {
+    let mut m = mk_mgr();
+    m.new_window_with_spec(spec(), "api".into()).unwrap(); // window 1, active
+    m.handle_command(Command::ToggleMonitorActivity).unwrap();
+    m.handle_command(Command::SelectWindow(0)).unwrap();
+    assert!(drive_until_alert(&mut m, 1).await.is_some(), "first edge messages");
+    let _ = m.take_active_message();
+    // View window 1 (clears its flag), then go back to window 0.
+    m.handle_command(Command::SelectWindow(1)).unwrap();
+    let _ = m.update_monitor_flags(); // clears the now-active window's flag
+    assert!(!m.windows()[1].activity_flag(), "viewing cleared the flag");
+    m.handle_command(Command::SelectWindow(0)).unwrap();
+    // A fresh edge after clearing must message again.
+    let msg = drive_until_alert(&mut m, 1).await;
+    assert_eq!(
+        msg.as_deref(),
+        Some("activity in window 2 (api)"),
+        "a fresh edge after view-clear messages again"
+    );
 }
 
 #[tokio::test]
