@@ -336,19 +336,94 @@ where
     let mut router = InputRouter::with_protocol(decode_protocol(client_kbd));
     let mut keymap = plexy_glass_keys::build_keymap(&config.keymap);
 
+    // Esc-disambiguation window: a lone `\x1b` (or a partial CSI) parks in the
+    // input parsers awaiting more bytes. If nothing more arrives within this
+    // window, flush it, so a lone ESC becomes `Key(Escape)` (the only way a bare
+    // Esc cancels an overlay on legacy / modifyOtherKeys clients). Long enough
+    // that a real `\x1b[…` split across reads still arrives as one sequence,
+    // short enough to feel instant.
+    const IDLE_FLUSH: std::time::Duration = std::time::Duration::from_millis(30);
+
+    // Cancel-safety: `Codec::read_frame` is `read_exact`-based and NOT
+    // cancel-safe (dropping it mid-frame loses buffered bytes), so it is
+    // pinned and polled across iterations, recreated only after it
+    // completes. The idle-flush timer is the cancel-safe arm; it is gated
+    // by `armed` so when the parser is idle it is never polled (no
+    // busy-wake), matching the `serve_exec` discipline.
+    let mut read_fut = Box::pin(Codec::read_frame(&mut reader));
+    let idle_flush = tokio::time::sleep(IDLE_FLUSH);
+    tokio::pin!(idle_flush);
+    // Whether the parser is mid-escape AND we have set the timer deadline for
+    // this pending state. Reset to the `IDLE_FLUSH` deadline the first time a
+    // frame leaves the parser pending; cleared once it drains or the timer
+    // fires (so the next pending state re-arms freshly).
+    let mut armed = false;
+
     loop {
-        let frame = tokio::select! {
+        enum Wake {
+            Frame(bytes::Bytes),
+            IdleFlush,
+            Stop,
+        }
+        let wake = tokio::select! {
             biased;
             // Renderer exits when its `frame_rx` is closed, i.e. the session's
             // coordinator dropped its `frame_tx`. That means the session ended
             // (last pane exited, or the session was killed). Tear down so the
             // client process exits and `HostTty::restore` runs.
-            _ = &mut renderer_task => break,
-            result = Codec::read_frame(&mut reader) => match result {
-                Ok(Some(f)) => f,
-                Ok(None) => break,
-                Err(_) => break,
+            _ = &mut renderer_task => Wake::Stop,
+            // The idle-flush fires only when armed (a lone ESC / partial CSI is
+            // parked). When not armed the branch is disabled, never polled.
+            _ = &mut idle_flush, if armed => Wake::IdleFlush,
+            result = &mut read_fut => match result {
+                Ok(Some(f)) => Wake::Frame(f),
+                Ok(None) | Err(_) => Wake::Stop,
             },
+        };
+        let frame = match wake {
+            Wake::Stop => break,
+            Wake::IdleFlush => {
+                // The disambiguation window elapsed with no follow-on byte:
+                // flush the parked sequence and dispatch the resulting event
+                // (a lone ESC → `Key(Escape)`) through the SAME routing as any
+                // key, so Esc-cancel reaches the open overlay.
+                armed = false;
+                if let Some(event) = router.flush_keys() {
+                    let focus_before = session.active_pane_id().await;
+                    let detach = {
+                        let mut ctx = ClientCtx {
+                            session: &mut session,
+                            client_id: &mut client_id,
+                            size,
+                            registry: &registry,
+                            switch_tx: &switch_tx,
+                            prefix_armed: &prefix_active,
+                        };
+                        dispatch_input_event(&mut ctx, &mut keymap, client_kbd, event).await
+                    };
+                    if let (Some(before), Some(after)) =
+                        (focus_before, session.active_pane_id().await)
+                        && before != after
+                    {
+                        session.synthesize_focus_transition(before, after).await;
+                    }
+                    if detach {
+                        break;
+                    }
+                }
+                continue;
+            }
+            Wake::Frame(f) => {
+                // Recreate the pinned read future for the next iteration, and only
+                // ever after it has completed, so no buffered frame is lost.
+                // Drop the old (completed) future FIRST to release its borrow of
+                // `reader` before the new one reborrows it.
+                read_fut = {
+                    drop(read_fut);
+                    Box::pin(Codec::read_frame(&mut reader))
+                };
+                f
+            }
         };
         let msg: ClientMsg = match postcard::from_bytes(&frame) {
             Ok(m) => m,
@@ -364,226 +439,17 @@ where
                 // ?1004 subscribers after the batch.
                 let focus_before = session.active_pane_id().await;
                 for event in events {
-                    match event {
-                        InputEvent::Mouse(me) => {
-                            let _ = session.handle_mouse(me).await;
-                            // Status-bar Detach click sets WindowManager.detach_requested.
-                            // Propagate it to the local flag so this connection exits.
-                            let mut mgr = session.window_manager.lock().await;
-                            if mgr.detach_requested {
-                                mgr.detach_requested = false;
-                                detach_requested = true;
-                            }
-                        }
-                        InputEvent::Key(ke, raw_bytes) => {
-                            // An open overlay (rename / help) captures every key
-                            // before the keymap or the shell, the same routing
-                            // as copy mode below. The overlay was opened by a
-                            // Command, so the opening keystroke already went
-                            // through the keymap; every subsequent key lands
-                            // here until commit/cancel.
-                            let overlay_active = {
-                                let m = session.window_manager.lock().await;
-                                m.overlay().is_some()
-                            };
-                            if overlay_active {
-                                let result = {
-                                    let mut m = session.window_manager.lock().await;
-                                    m.handle_overlay_key(&ke)
-                                };
-                                let mut ctx = ClientCtx {
-                                    session: &mut session,
-                                    client_id: &mut client_id,
-                                    size,
-                                    registry: &registry,
-                                    switch_tx: &switch_tx,
-                                    prefix_armed: &prefix_active,
-                                };
-                                // The extracted fn can't `break`/`continue` this
-                                // loop; it returns the detach intent instead.
-                                if apply_overlay_result(&mut ctx, &mut keymap, result).await {
-                                    detach_requested = true;
-                                }
-                                if detach_requested {
-                                    break;
-                                }
-                                continue;
-                            }
-                            // A floating popup is modal: keys still run through
-                            // the keymap (so the close/open chords fire), but any
-                            // OTHER recognized command is swallowed, and
-                            // PassThrough bytes go to the POPUP's child instead of
-                            // the active layout pane. This must precede the
-                            // copy-mode routing below, since a pre-existing
-                            // copy-mode pane must not steal popup keys.
-                            let popup_open = session.popup_active().await;
-                            if popup_open {
-                                let action = keymap.consume(ke, raw_bytes);
-                                store_prefix_armed(&prefix_active, &keymap, &session);
-                                match action {
-                                    KeymapAction::PassThrough(event_ke, bytes_back) => {
-                                        let _ = session
-                                            .handle_popup_key_event(
-                                                &event_ke,
-                                                &bytes_back,
-                                                client_kbd,
-                                            )
-                                            .await;
-                                    }
-                                    KeymapAction::Command(
-                                        cmd @ (Command::ClosePopup | Command::OpenPopup { .. }),
-                                    ) => {
-                                        if let Err(e) = session.handle_command(cmd).await {
-                                            session.set_status_message(e.to_string()).await;
-                                        }
-                                    }
-                                    KeymapAction::Command(_)
-                                    | KeymapAction::Pending
-                                    | KeymapAction::Cancel => {
-                                        session.notify.notify_one();
-                                    }
-                                }
-                                continue;
-                            }
-                            let action = keymap.consume(ke, raw_bytes);
-                            store_prefix_armed(&prefix_active, &keymap, &session);
-                            // Snap scrollback to live on any keystroke,
-                            // EXCEPT the block-scroll verbs (they SET the
-                            // offset; resetting first would pin every press
-                            // to the newest prompt) and a pending prefix
-                            // chord (resetting on the prefix key itself
-                            // would break the second `prefix <` the same
-                            // way; the chord's final command decides).
-                            let keeps_scroll = matches!(
-                                action,
-                                KeymapAction::Pending
-                                    | KeymapAction::Command(
-                                        Command::PrevPrompt
-                                            | Command::NextPrompt
-                                            | Command::CopyOutput
-                                    )
-                            );
-                            if !keeps_scroll {
-                                let manager = session.window_manager.lock().await;
-                                if let Some(p) = manager.active_window().active_pane() {
-                                    p.reset_scroll();
-                                }
-                            }
-                            match action {
-                                KeymapAction::PassThrough(event_ke, bytes_back) => {
-                                    // If the active pane is in copy mode, route the key event
-                                    // to the CopyModeHandler instead of the shell.
-                                    let active_in_copy_mode = {
-                                        let m = session.window_manager.lock().await;
-                                        m.active_window()
-                                            .active_pane()
-                                            .map(|p| p.is_in_copy_mode())
-                                            .unwrap_or(false)
-                                    };
-                                    if active_in_copy_mode {
-                                        let action = {
-                                            let m = session.window_manager.lock().await;
-                                            let pane_opt = m.active_window().active_pane();
-                                            pane_opt.and_then(|p| {
-                                                let screen = p.with_screen(|s| s.clone());
-                                                p.with_copy_mode_mut(|state| {
-                                                    plexy_glass_mux::CopyModeHandler::handle(
-                                                        &event_ke,
-                                                        state,
-                                                        &screen,
-                                                    )
-                                                })
-                                            })
-                                        };
-                                        match action {
-                                            Some(plexy_glass_mux::CopyModeAction::Render) => {
-                                                session.notify.notify_one();
-                                            }
-                                            Some(plexy_glass_mux::CopyModeAction::Exit) => {
-                                                let m = session.window_manager.lock().await;
-                                                if let Some(p) = m.active_window().active_pane() {
-                                                    p.exit_copy_mode();
-                                                }
-                                                session.notify.notify_one();
-                                            }
-                                            Some(plexy_glass_mux::CopyModeAction::Yank(text)) => {
-                                                let _ = crate::osc_actions::write_clipboard(
-                                                    text.as_bytes(),
-                                                )
-                                                .await;
-                                                // Also push a paste buffer (before
-                                                // re-taking the WM lock, so the
-                                                // registry await isn't held under it).
-                                                registry
-                                                    .push_paste_buffer(text.into_bytes())
-                                                    .await;
-                                                let m = session.window_manager.lock().await;
-                                                if let Some(p) = m.active_window().active_pane() {
-                                                    p.exit_copy_mode();
-                                                }
-                                                session.notify.notify_one();
-                                            }
-                                            None => {}
-                                        }
-                                    } else {
-                                        let _ = session
-                                            .handle_key_event(&event_ke, &bytes_back, client_kbd)
-                                            .await;
-                                    }
-                                }
-                                KeymapAction::Command(cmd) => match ConnVerb::from_command(cmd) {
-                                    Ok(verb) => {
-                                        let mut ctx = ClientCtx {
-                                            session: &mut session,
-                                            client_id: &mut client_id,
-                                            size,
-                                            registry: &registry,
-                                            switch_tx: &switch_tx,
-                                            prefix_armed: &prefix_active,
-                                        };
-                                        if run_connection_verb(&mut ctx, &mut keymap, verb)
-                                            .await
-                                        {
-                                            detach_requested = true;
-                                            break;
-                                        }
-                                    }
-                                    Err(Command::CommandPrompt) => {
-                                        // Opened here (not in handle_command)
-                                        // because it needs the live session list
-                                        // for `switch ` Tab-completion.
-                                        let names: Vec<String> = registry
-                                            .list()
-                                            .await
-                                            .into_iter()
-                                            .map(|e| e.name)
-                                            .collect();
-                                        {
-                                            let mut m = session.window_manager.lock().await;
-                                            m.open_command_prompt(names);
-                                        }
-                                        session.notify.notify_one();
-                                    }
-                                    Err(other) => {
-                                        if let Err(e) = session.handle_command(other).await {
-                                            session.set_status_message(e.to_string()).await;
-                                        }
-                                    }
-                                },
-                                KeymapAction::Pending => {
-                                    session.notify.notify_one();
-                                }
-                                KeymapAction::Cancel => {
-                                    session.notify.notify_one();
-                                }
-                            }
-                        }
-                        InputEvent::Paste(bytes) => {
-                            paste_bytes(&session, bytes).await;
-                        }
-                        InputEvent::Bytes(bs) => {
-                            let _ = session.handle_input_bytes(&bs).await;
-                        }
+                    let mut ctx = ClientCtx {
+                        session: &mut session,
+                        client_id: &mut client_id,
+                        size,
+                        registry: &registry,
+                        switch_tx: &switch_tx,
+                        prefix_armed: &prefix_active,
+                    };
+                    if dispatch_input_event(&mut ctx, &mut keymap, client_kbd, event).await {
+                        detach_requested = true;
+                        break;
                     }
                 }
                 if let (Some(before), Some(after)) =
@@ -594,6 +460,19 @@ where
                 }
                 if detach_requested {
                     break;
+                }
+                // Arm (or disarm) the Esc idle-flush based on whether this
+                // batch left the parser mid-escape. Reset the deadline only on
+                // the transition into pending so a stream of input frames can't
+                // keep pushing it out. Between a lone ESC and the next byte
+                // there are no frames, which is exactly when it must fire.
+                if router.has_pending() {
+                    if !armed {
+                        idle_flush.as_mut().reset(tokio::time::Instant::now() + IDLE_FLUSH);
+                        armed = true;
+                    }
+                } else {
+                    armed = false;
                 }
             }
             ClientMsg::Resize(new_size) => {
@@ -652,6 +531,213 @@ async fn cleanup_and_exit(
     .await;
     renderer_task.abort();
     Ok(())
+}
+
+/// Dispatch one classified input event through the full per-key routing
+/// (overlay → popup → keymap → copy-mode/shell), or route a paste/byte. Called
+/// once per event in the batch loop AND by the Esc idle-flush (so a flushed
+/// `Key(Escape)` takes the exact same overlay/keymap path as any other key).
+/// Returns `true` iff the event requested a detach (the caller breaks the loop).
+///
+/// `Bytes` and `Paste` are DISCARDED while an overlay is open, since the modal
+/// owns input and nothing should leak to the pane's child behind it. (Copy mode
+/// is a separate modal surface, routed inside the `Key` arm below.)
+async fn dispatch_input_event(
+    ctx: &mut ClientCtx<'_>,
+    keymap: &mut Keymap,
+    client_kbd: plexy_glass_protocol::NegotiatedKbd,
+    event: InputEvent,
+) -> bool {
+    match event {
+        InputEvent::Mouse(me) => {
+            let _ = ctx.session.handle_mouse(me).await;
+            // Status-bar Detach click sets WindowManager.detach_requested.
+            // Propagate it so this connection exits.
+            let mut mgr = ctx.session.window_manager.lock().await;
+            if mgr.detach_requested {
+                mgr.detach_requested = false;
+                return true;
+            }
+        }
+        InputEvent::Key(ke, raw_bytes) => {
+            // An open overlay (rename / help / picker) captures every key
+            // before the keymap or the shell, the same routing as copy mode
+            // below. The overlay was opened by a Command, so the opening
+            // keystroke already went through the keymap; every subsequent key
+            // lands here until commit/cancel.
+            let overlay_active = {
+                let m = ctx.session.window_manager.lock().await;
+                m.overlay().is_some()
+            };
+            if overlay_active {
+                let result = {
+                    let mut m = ctx.session.window_manager.lock().await;
+                    m.handle_overlay_key(&ke)
+                };
+                return apply_overlay_result(ctx, keymap, result).await;
+            }
+            // A floating popup is modal: keys still run through the keymap (so
+            // the close/open chords fire), but any OTHER recognized command is
+            // swallowed, and PassThrough bytes go to the POPUP's child instead
+            // of the active layout pane. This must precede the copy-mode
+            // routing below, since a pre-existing copy-mode pane must not
+            // steal popup keys.
+            let popup_open = ctx.session.popup_active().await;
+            if popup_open {
+                let action = keymap.consume(ke, raw_bytes);
+                store_prefix_armed(ctx.prefix_armed, keymap, ctx.session);
+                match action {
+                    KeymapAction::PassThrough(event_ke, bytes_back) => {
+                        let _ = ctx
+                            .session
+                            .handle_popup_key_event(&event_ke, &bytes_back, client_kbd)
+                            .await;
+                    }
+                    KeymapAction::Command(
+                        cmd @ (Command::ClosePopup | Command::OpenPopup { .. }),
+                    ) => {
+                        if let Err(e) = ctx.session.handle_command(cmd).await {
+                            ctx.session.set_status_message(e.to_string()).await;
+                        }
+                    }
+                    KeymapAction::Command(_) | KeymapAction::Pending | KeymapAction::Cancel => {
+                        ctx.session.notify.notify_one();
+                    }
+                }
+                return false;
+            }
+            let action = keymap.consume(ke, raw_bytes);
+            store_prefix_armed(ctx.prefix_armed, keymap, ctx.session);
+            // Snap scrollback to live on any keystroke, EXCEPT the
+            // block-scroll verbs (they SET the offset; resetting first would
+            // pin every press to the newest prompt) and a pending prefix chord
+            // (resetting on the prefix key itself would break the second
+            // `prefix <` the same way; the chord's final command decides).
+            let keeps_scroll = matches!(
+                action,
+                KeymapAction::Pending
+                    | KeymapAction::Command(
+                        Command::PrevPrompt | Command::NextPrompt | Command::CopyOutput
+                    )
+            );
+            if !keeps_scroll {
+                let manager = ctx.session.window_manager.lock().await;
+                if let Some(p) = manager.active_window().active_pane() {
+                    p.reset_scroll();
+                }
+            }
+            match action {
+                KeymapAction::PassThrough(event_ke, bytes_back) => {
+                    // If the active pane is in copy mode, route the key event
+                    // to the CopyModeHandler instead of the shell.
+                    let active_in_copy_mode = {
+                        let m = ctx.session.window_manager.lock().await;
+                        m.active_window()
+                            .active_pane()
+                            .map(|p| p.is_in_copy_mode())
+                            .unwrap_or(false)
+                    };
+                    if active_in_copy_mode {
+                        let action = {
+                            let m = ctx.session.window_manager.lock().await;
+                            let pane_opt = m.active_window().active_pane();
+                            pane_opt.and_then(|p| {
+                                let screen = p.with_screen(|s| s.clone());
+                                p.with_copy_mode_mut(|state| {
+                                    plexy_glass_mux::CopyModeHandler::handle(
+                                        &event_ke, state, &screen,
+                                    )
+                                })
+                            })
+                        };
+                        match action {
+                            Some(plexy_glass_mux::CopyModeAction::Render) => {
+                                ctx.session.notify.notify_one();
+                            }
+                            Some(plexy_glass_mux::CopyModeAction::Exit) => {
+                                let m = ctx.session.window_manager.lock().await;
+                                if let Some(p) = m.active_window().active_pane() {
+                                    p.exit_copy_mode();
+                                }
+                                ctx.session.notify.notify_one();
+                            }
+                            Some(plexy_glass_mux::CopyModeAction::Yank(text)) => {
+                                let _ =
+                                    crate::osc_actions::write_clipboard(text.as_bytes()).await;
+                                // Also push a paste buffer (before re-taking the
+                                // WM lock, so the registry await isn't held under it).
+                                ctx.registry.push_paste_buffer(text.into_bytes()).await;
+                                let m = ctx.session.window_manager.lock().await;
+                                if let Some(p) = m.active_window().active_pane() {
+                                    p.exit_copy_mode();
+                                }
+                                ctx.session.notify.notify_one();
+                            }
+                            None => {}
+                        }
+                    } else {
+                        let _ = ctx
+                            .session
+                            .handle_key_event(&event_ke, &bytes_back, client_kbd)
+                            .await;
+                    }
+                }
+                KeymapAction::Command(cmd) => match ConnVerb::from_command(cmd) {
+                    Ok(verb) => {
+                        if run_connection_verb(ctx, keymap, verb).await {
+                            return true;
+                        }
+                    }
+                    Err(Command::CommandPrompt) => {
+                        // Opened here (not in handle_command) because it needs
+                        // the live session list for `switch ` Tab-completion.
+                        let names: Vec<String> =
+                            ctx.registry.list().await.into_iter().map(|e| e.name).collect();
+                        {
+                            let mut m = ctx.session.window_manager.lock().await;
+                            m.open_command_prompt(names);
+                        }
+                        ctx.session.notify.notify_one();
+                    }
+                    Err(other) => {
+                        if let Err(e) = ctx.session.handle_command(other).await {
+                            ctx.session.set_status_message(e.to_string()).await;
+                        }
+                    }
+                },
+                KeymapAction::Pending => {
+                    ctx.session.notify.notify_one();
+                }
+                KeymapAction::Cancel => {
+                    ctx.session.notify.notify_one();
+                }
+            }
+        }
+        // An open overlay is modal: a paste must not leak to the pane's child
+        // behind it (an Esc-then-paste bail, or a real paste while a picker is
+        // up). Discard it; the modal owns input.
+        InputEvent::Paste(bytes) => {
+            let overlay_active = {
+                let m = ctx.session.window_manager.lock().await;
+                m.overlay().is_some()
+            };
+            if !overlay_active {
+                paste_bytes(ctx.session, bytes).await;
+            }
+        }
+        // Likewise for raw passthrough bytes (e.g. an Esc-then-non-printable
+        // bail the parser maps to bytes): swallowed while an overlay is open.
+        InputEvent::Bytes(bs) => {
+            let overlay_active = {
+                let m = ctx.session.window_manager.lock().await;
+                m.overlay().is_some()
+            };
+            if !overlay_active {
+                let _ = ctx.session.handle_input_bytes(&bs).await;
+            }
+        }
+    }
+    false
 }
 
 /// Publish the keymap's prefix-armed state after a `Keymap::consume`, and
@@ -2736,6 +2822,109 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+
+        server.abort();
+    }
+
+    // K2: behind a modal overlay, a paste (and raw bytes) must NOT leak to the
+    // pane's child. Without an overlay the same paste reaches cat (regression
+    // guard). Drives the real wire path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn paste_swallowed_behind_overlay_but_reaches_pane_without_one() {
+        let _g = crate::test_env::isolate();
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server =
+            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        let attach = ClientMsg::AttachOrCreate {
+            name: Some("main".into()),
+            create_if_missing: true,
+            cmd: Some(cat()),
+            size,
+        };
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&attach).unwrap()).await.unwrap();
+        tokio::spawn(async move {
+            let mut b = [0u8; 4096];
+            while cr.read(&mut b).await.unwrap_or(0) > 0 {}
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let session = loop {
+            if let Some(s) = registry.get("main").await {
+                break s;
+            }
+            assert!(Instant::now() < deadline, "session never created");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let pane = session
+            .window_manager
+            .lock()
+            .await
+            .input_target_pane()
+            .expect("session has a pane")
+            .clone();
+
+        // 1. No overlay: a bracketed paste reaches cat, which echoes it.
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(
+                b"\x1b[200~no-overlay-leak\n\x1b[201~",
+            )))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        wait_screen_contains(&pane, "no-overlay-leak").await;
+
+        // 2. Open the help overlay (Ctrl+a ?), then send a paste. Behind the
+        //    modal overlay it must be DISCARDED, so cat never sees it.
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01?")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        // Wait for the overlay to actually be open before sending the paste.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let open = { session.window_manager.lock().await.overlay().is_some() };
+            if open {
+                break;
+            }
+            assert!(Instant::now() < deadline, "help overlay never opened");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(
+                b"\x1b[200~SWALLOWED-PASTE\n\x1b[201~",
+            )))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // Give the daemon ample time to (incorrectly) forward it, then assert
+        // the marker never reached cat's echo.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let text = pane.with_screen(plexy_glass_mux::screen_text);
+        assert!(
+            !text.contains("SWALLOWED-PASTE"),
+            "paste leaked to the pane behind an overlay; screen:\n{text}"
+        );
 
         server.abort();
     }
