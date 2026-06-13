@@ -1227,6 +1227,44 @@ async fn tree_kill_keeps_overlay_open() {
 }
 
 #[tokio::test]
+async fn rename_tree_session_rewrites_subtree_and_rekeys_folds() {
+    use plexy_glass_mux::NodeKey;
+    let mut m = mk_mgr();
+    // Two sessions: "work" is NOT last, so its subtree is bounded by "other"'s
+    // depth-0 row (exercises the descendant scan).
+    m.open_tree(vec![
+        tnode("work", None, None, 0),
+        tnode("work", Some(0), None, 1),
+        tnode("work", Some(0), Some(5), 2),
+        tnode("other", None, None, 0),
+        tnode("other", Some(0), None, 1),
+    ]);
+    // Collapse work's window so a NodeKey::Window fold exists to be re-keyed.
+    m.handle_overlay_key(&key('j')); // select the window row
+    m.handle_overlay_key(&key('h')); // collapse it
+
+    m.rename_tree_session("work", "dev");
+
+    let Some(Overlay::Tree(state)) = m.overlay() else { panic!("expected tree overlay") };
+    // Session row + its descendants now point at the new name.
+    assert_eq!(state.nodes[0].name, "dev");
+    assert_eq!(state.nodes[0].session, "dev");
+    assert_eq!(state.nodes[1].session, "dev");
+    assert_eq!(state.nodes[2].session, "dev");
+    assert!(state.nodes[0].label.contains("dev"), "label re-derived: {:?}", state.nodes[0].label);
+    // The other session is untouched.
+    assert_eq!(state.nodes[3].session, "other");
+    // The collapsed window fold was re-keyed to the new session name.
+    assert!(
+        state
+            .collapsed
+            .contains(&NodeKey::Window { session: "dev".into(), window: WindowId(0) }),
+        "collapsed fold re-keyed: {:?}",
+        state.collapsed
+    );
+}
+
+#[tokio::test]
 async fn by_id_helpers_hit_and_miss() {
     let mut m = mk_mgr();
     m.handle_command(Command::SplitV).unwrap(); // window 0: panes {0,1}, active 1

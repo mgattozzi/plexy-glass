@@ -2317,6 +2317,41 @@ mod tests {
         assert_eq!(wm.windows()[0].layout().panes().len(), 2);
     }
 
+    #[tokio::test]
+    async fn restore_from_round_trips_multiple_windows() {
+        use plexy_glass_mux::{Command, PromptCommand};
+        let _g = crate::test_env::isolate();
+        let original = Session::new("rtmw".into(), spec(), size(), cfg()).unwrap();
+        // Window 0: a 2-pane split. Window 1: renamed, sync-panes on, and active.
+        original.handle_command(Command::SplitV).await.unwrap();
+        original.handle_command(Command::NewWindow).await.unwrap(); // window 1, active
+        original
+            .handle_prompt_command(PromptCommand::RenameWindow("logs".into()))
+            .await
+            .unwrap();
+        original.handle_command(Command::ToggleSyncPanes).await.unwrap();
+        // Wait until the persisted state reflects BOTH windows (debounced save).
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+                crate::persist::load_session("rtmw")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| s.windows.len() == 2)
+            })
+            .await,
+            "persist never captured both windows"
+        );
+        drop(original);
+        let saved = crate::persist::load_session("rtmw").expect("load").expect("file");
+        let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
+        let wm = restored.window_manager.lock().await;
+        assert_eq!(wm.windows().len(), 2, "both windows restored");
+        assert_eq!(wm.windows()[0].layout().panes().len(), 2, "window 0's split restored");
+        assert_eq!(wm.windows()[1].name, "logs", "window 1 name restored");
+        assert!(wm.windows()[1].sync_input, "window 1 sync-panes restored");
+        assert_eq!(wm.active_idx(), 1, "active window (1) restored");
+    }
+
     // ── scrollback persistence (P3) ────────────────────────────────────────
 
     /// Build a row of `text` at width `cols` with an optional 133 mark applied.
