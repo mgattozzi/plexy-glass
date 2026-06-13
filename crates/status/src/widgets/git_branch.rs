@@ -6,18 +6,11 @@ use std::time::Duration;
 pub struct GitBranchWidget {
     pub style: ResolvedStyle,
     pub interval: Option<Duration>,
-    cached_cwd: Option<String>,
-    cached_branch: Option<SmolStr>,
 }
 
 impl GitBranchWidget {
     pub fn new(style: ResolvedStyle, interval: Option<Duration>) -> Self {
-        Self {
-            style,
-            interval,
-            cached_cwd: None,
-            cached_branch: None,
-        }
+        Self { style, interval }
     }
 }
 
@@ -37,12 +30,13 @@ impl Widget for GitBranchWidget {
             },
             None => url,
         };
-        if self.cached_cwd.as_deref() == Some(path) {
-            if let Some(branch) = &self.cached_branch {
-                return StyledText::single(branch.clone(), self.style);
-            }
-            return StyledText::empty();
-        }
+        // No internal cwd-keyed cache: git-branch always declares an interval,
+        // so the engine only re-evaluates it on that schedule (default 5s). A
+        // cwd-keyed cache pinned the branch forever and missed a `git checkout`
+        // in the same directory (the most common case). The interval is the
+        // throttle; this just runs git when asked, like the other interval
+        // widgets (memory/cpu/battery).
+        //
         // Bounded + kill_on_drop: the render coordinator awaits widget
         // evaluation while holding the window-manager lock, so a hung `git`
         // (dead network mount, wedged fsmonitor) would wedge every keystroke,
@@ -57,18 +51,13 @@ impl Widget for GitBranchWidget {
             .kill_on_drop(true)
             .output();
         let output = tokio::time::timeout(Duration::from_secs(2), fut).await;
-        self.cached_cwd = Some(path.to_string());
         match output {
             Ok(Ok(o)) if o.status.success() => {
                 let branch_raw = String::from_utf8_lossy(&o.stdout).trim().to_string();
                 let branch = SmolStr::new(format!(" {branch_raw}"));
-                self.cached_branch = Some(branch.clone());
                 StyledText::single(branch, self.style)
             }
-            _ => {
-                self.cached_branch = None;
-                StyledText::empty()
-            }
+            _ => StyledText::empty(),
         }
     }
 }
@@ -98,6 +87,44 @@ mod tests {
         let mut w = GitBranchWidget::new(ResolvedStyle::default(), None);
         let out = w.evaluate(&ctx_with_cwd(&cwd)).await;
         assert!(out.segments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn branch_change_in_same_cwd_is_reflected() {
+        // Regression: the old cwd-keyed cache pinned the branch forever, so a
+        // `git checkout` in the same directory showed the stale branch. With the
+        // cache gone, a second evaluation of the same cwd reports the new branch.
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            return; // needs a real git; skip where unavailable
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap().to_string();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-C", &cwd])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        assert!(
+            git(&["commit", "-q", "--allow-empty", "-m", "init"])
+                .status
+                .success()
+        );
+
+        let mut w = GitBranchWidget::new(ResolvedStyle::default(), None);
+        let first = w.evaluate(&ctx_with_cwd(&cwd)).await;
+        let first_branch = first.segments[0].text.as_str().trim().to_string();
+        assert!(!first_branch.is_empty(), "expected a branch on the fresh repo");
+
+        assert!(git(&["checkout", "-q", "-b", "feature-xyz"]).status.success());
+        let second = w.evaluate(&ctx_with_cwd(&cwd)).await;
+        assert_eq!(second.segments[0].text.as_str().trim(), "feature-xyz");
+        assert_ne!(first_branch, "feature-xyz");
     }
 
     #[tokio::test]
