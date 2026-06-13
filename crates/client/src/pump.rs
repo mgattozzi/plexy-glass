@@ -92,18 +92,33 @@ where
 {
     let mut stdin_buf = BytesMut::with_capacity(STDIN_CHUNK);
     let exit_status: ExitStatus;
+    // Cancel-safety: `Codec::read_frame` is `read_exact`-based and NOT
+    // cancel-safe. If `select!` drops it mid-frame (because a stdin byte or a
+    // resize won the race while a daemon Output frame was still arriving) the
+    // bytes already consumed from the socket are lost and the stream desyncs.
+    // So the read future is pinned across iterations and recreated only after
+    // it completes, mirroring the daemon's `serve_attach` (see connection.rs).
+    let mut read_fut = Box::pin(Codec::read_frame(&mut daemon_read));
     loop {
         stdin_buf.clear();
         stdin_buf.resize(STDIN_CHUNK, 0);
         tokio::select! {
             // Daemon -> client
-            frame = Codec::read_frame(&mut daemon_read) => {
+            frame = &mut read_fut => {
                 let frame = match frame? {
                     Some(f) => f,
                     None => {
                         exit_status = ExitStatus::Unknown;
                         break;
                     }
+                };
+                // Recreate the pinned read future for the next iteration, and only ever
+                // after it completed, so no buffered frame bytes are lost. Drop the old
+                // (completed) future first to release its borrow of `daemon_read` before
+                // the new one reborrows it.
+                read_fut = {
+                    drop(read_fut);
+                    Box::pin(Codec::read_frame(&mut daemon_read))
                 };
                 let msg: ServerMsg = postcard::from_bytes(&frame)
                     .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
@@ -246,6 +261,77 @@ mod tests {
         assert_eq!(&out, b"abc");
 
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pump_output_survives_interleaved_stdin() {
+        // Regression: `Codec::read_frame` is read_exact-based and NOT
+        // cancel-safe. A daemon Output frame split across many socket reads must
+        // not be corrupted by stdin bytes arriving mid-frame and winning the
+        // `select!` race. A tiny daemon->client pipe (16 bytes) forces the 8 KiB
+        // payload to fragment into hundreds of reads; a feeder hammers stdin
+        // throughout. The full payload must still reach stdout intact.
+        let (mut server_w, client_r) = duplex(16);
+        let (server_r, client_w) = duplex(64 * 1024);
+        let (mut stdin_w, stdin_r) = duplex(64 * 1024);
+        let (mut stdout_r, stdout_w) = duplex(256 * 1024);
+        let (_tx, resize_rx) = mpsc::channel(4);
+
+        let payload = vec![b'x'; 8192];
+
+        // Drain client->daemon so stdin-forwarding never back-pressures.
+        let drain = tokio::spawn(async move {
+            let mut r = server_r;
+            let mut buf = vec![0u8; 4096];
+            while let Ok(n) = r.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+            }
+        });
+
+        // Hammer stdin so its select arm is frequently ready while the daemon
+        // Output frame is mid-transit. Ends when pump returns and drops stdin_r.
+        let feeder = tokio::spawn(async move {
+            loop {
+                if stdin_w.write_all(b"k").await.is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+
+        let srv_payload = payload.clone();
+        let server = tokio::spawn(async move {
+            let out = ServerMsg::Output(Bytes::from(srv_payload));
+            let bytes = postcard::to_allocvec(&out).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+            let done = ServerMsg::Exited { status: ExitStatus::Code(0) };
+            let bytes = postcard::to_allocvec(&done).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+        });
+
+        let status = pump(client_r, client_w, stdin_r, stdout_w, resize_rx)
+            .await
+            .expect("pump must not error on interleaved stdin");
+        assert!(matches!(status, ExitStatus::Code(0)), "got: {status:?}");
+
+        let mut out = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stdout_r.read_to_end(&mut out),
+        )
+        .await
+        .expect("stdout read timed out")
+        .expect("stdout read failed");
+        assert_eq!(
+            out, payload,
+            "daemon->client stream corrupted by mid-frame stdin"
+        );
+
+        let _ = feeder.await;
+        let _ = server.await;
+        let _ = drain.await;
     }
 
     #[test]
