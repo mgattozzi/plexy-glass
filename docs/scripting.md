@@ -97,6 +97,61 @@ so relative resolution would be a silent footgun.
   Note that a path whose first word is literally `bufferN ` is pathological
   and not supported.
 
+## pipe-pane — stream a pane's output to a command
+
+`pipe-pane` tees the target pane's raw output stream into an external
+command, same idea as tmux's `pipe-pane`. It is a command-prompt verb, so it
+works interactively (`Ctrl+a :`) and headlessly through `cmd`:
+
+```sh
+plexy-glass cmd "pipe-pane tee -a session.log"   # start: append the pane's output to a file
+plexy-glass cmd "pipe-pane"                       # stop the pipe
+```
+
+Synopsis:
+
+| Form | Effect |
+|---|---|
+| `:pipe-pane <cmd>` (or `cmd "pipe-pane <cmd>"`) | Start (or replace) the pipe |
+| `:pipe-pane` (or `cmd "pipe-pane"`) | Stop the running pipe |
+
+### Semantics
+
+- **What flows**: the pane's *raw output bytes*, exactly what the emulator
+  receives from the PTY (escape sequences and control bytes included), from
+  the moment the pipe starts onward. Note that there is **no scrollback
+  backfill**: output produced before the pipe started is not replayed.
+- **The consumer**: the command runs as `$SHELL -c <cmd>` with the pane's
+  output piped to its stdin; stdout and stderr go to `/dev/null` (the consumer
+  is a sink, not a pane). It spawns at the **target pane's** live OSC-7 cwd
+  (home-base fallback), the same `$SHELL` new windows and popups use.
+- **One pipe per pane**: starting a new pipe **replaces** any running one (the
+  old consumer is killed), and `pipe-pane` with no command stops it.
+- **Targets the input target pane**: the popup's child when a popup is open,
+  otherwise the focused pane, the same pane `send` and `capture` address.
+- **Too-slow consumers are closed**: if the consumer can't keep up and the
+  pipe falls a full channel behind, data has been irrecoverably lost, so we
+  **close** the pipe (and kill the consumer) rather than write a
+  silently-gapped stream. Honest failure over a corrupt log. The pane itself
+  is never stalled by a slow consumer.
+- **Popup caveat**: a pipe attached to the **popup** pane dies when any client
+  detaches. Popups are transient by design, so the pipe goes down with the
+  pane. A pipe on an ordinary window pane survives detach/reattach.
+- **Not persisted**: pipes are runtime-only state. They do **not** survive a
+  daemon restart or session restore.
+
+Status messages: `pipe-pane → <cmd>` (started), `pipe-pane stopped` (stopped),
+`pipe-pane: no pipe` (stop with nothing running), and, surfaced asynchronously
+when the consumer goes away, `pipe-pane: consumer exited` and
+`pipe-pane: consumer too slow — pipe closed`.
+
+```sh
+# Append the active pane's output to a rolling log
+plexy-glass cmd "pipe-pane tee -a session.log"
+# … work in the session …
+plexy-glass cmd "pipe-pane"          # stop logging
+```
+
 ## Exit-code semantics
 
 Exit 0 means all operations succeeded. Exit 1 means at least one failed. For

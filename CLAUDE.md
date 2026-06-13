@@ -299,7 +299,7 @@ implementation; user-facing docs (README / the configuration reference) are
 updated as part of each feature, per **User documentation**. Workflows
 (`Workflow` tool) drive the review fan-outs.
 
-Not yet built (future work): pipe-pane; silence monitoring + bell/activity alert messages;
+Not yet built (future work): silence monitoring + bell/activity alert messages;
 mark persistence across daemon restart; push notifications on run completion.
 Declarative-session v1 boundaries left for later: split ratios + active
 window/pane selection in the template, per-pane env maps, re-reading templates on
@@ -338,4 +338,11 @@ commit-on-success re-stamp + deferred old-file sweep — shipped 2026-06-12
 spec/plan; paste buffers v2 — `set-buffer`/`save-buffer`/`load-buffer` +
 paste-by-name, shape-based save split, refuse-relative path policy, load
 gates (regular file, 10 MiB), preview 4 KiB scan cap — shipped 2026-06-12
-spec.)
+spec; pipe-pane — session-level `:pipe-pane [cmd…]` verb
+(`PromptCommand::PipePane(Option<String>)`) that tees the input-target pane's
+raw output to `$SHELL -c <cmd>`; the pipe rides the existing pane output
+broadcast (`Pane::subscribe_output`), one drain task per pipe in `crate::pipe`;
+one pipe per pane (start replaces), too-slow consumers close (broadcast
+`Lagged` → kill+reap), every close path funnels through one kill→reap→clear-slot
+exit; cwd via the shared `WindowManager::pane_cwd(target)`; runtime-only (not
+persisted), popup pipes die on detach — shipped 2026-06-12 spec/plan.)

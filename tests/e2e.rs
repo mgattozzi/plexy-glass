@@ -2997,3 +2997,89 @@ fn choose_tree_filter_and_rename_session() {
 
     drop(beta_sess);
 }
+
+/// pipe-pane (spec: 2026-06-12-pipe-pane-design.md): `cmd "pipe-pane tee FILE"`
+/// streams the pane's raw output to `tee`, which writes it to FILE. Typing a
+/// command into the pane makes its output flow to the file; `cmd "pipe-pane"`
+/// stops the pipe, after which further pane output no longer reaches the file.
+#[test]
+fn cli_pipe_pane_streams_then_stops() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Absolute path under the test's tempdir, clean, and it avoids the
+    // daemon-cwd question.
+    let log = tmp.path().join("pipe.log");
+
+    // Start the pipe. `tee` copies its stdin (the pane's raw output) to FILE.
+    let (status, _stdout, stderr) =
+        run_cli(&env, &["cmd", &format!("pipe-pane tee {}", log.display())]);
+    assert!(status.success(), "cmd 'pipe-pane tee …' failed: {stderr}");
+
+    // Quote-concatenation: the typed line `echo PIPE_'NEEDLE'` cannot itself
+    // satisfy the poll (its source bytes hold `PIPE_'NEEDLE'`, not the
+    // contiguous needle); only the shell's EXECUTED `echo` output is the
+    // contiguous `PIPE_NEEDLE`. Both the echo of the typed line and the
+    // command's output flow to the pipe, but only the executed output matches.
+    let (status, _stdout, stderr) =
+        run_cli(&env, &["send", "--enter", "echo PIPE_'NEEDLE'"]);
+    assert!(status.success(), "send --enter failed: {stderr}");
+
+    // Poll the tee'd file (bounded) until the executed-output needle lands.
+    assert!(
+        wait_for_file_contains(&log, "PIPE_NEEDLE", Duration::from_secs(10)),
+        "pipe file never received the executed pane output. file: {:?}, pty: {}",
+        std::fs::read_to_string(&log).ok(),
+        sess.snapshot_str()
+    );
+
+    // Stop the pipe.
+    let (status, _stdout, stderr) = run_cli(&env, &["cmd", "pipe-pane"]);
+    assert!(status.success(), "cmd 'pipe-pane' (stop) failed: {stderr}");
+
+    // Settle: let any in-flight bytes flush and the consumer get killed/reaped,
+    // THEN snapshot the file length. Polling for the length to stabilize makes
+    // the "no growth" check sound: we only freeze the baseline once writes
+    // have quiesced, so a later growth can only come from a live pipe.
+    let settled_len = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut last = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+        loop {
+            std::thread::sleep(Duration::from_millis(200));
+            let now = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+            if now == last || Instant::now() >= deadline {
+                break now;
+            }
+            last = now;
+        }
+    };
+
+    // Drive more pane output AFTER the stop. The PTY wait confirms the shell
+    // actually executed the line and its output flowed through the pane, so if
+    // the pipe were still attached, the file WOULD grow.
+    let (status, _stdout, stderr) =
+        run_cli(&env, &["send", "--enter", "echo AFTER_'STOP'"]);
+    assert!(status.success(), "post-stop send failed: {stderr}");
+    assert!(
+        sess.wait_for(b"AFTER_STOP", Duration::from_secs(10)),
+        "post-stop output never reached the pane; the no-growth check would be vacuous. pty: {}",
+        sess.snapshot_str()
+    );
+    // Give a stopped-but-buggy pipe a chance to (wrongly) write before checking.
+    std::thread::sleep(Duration::from_millis(500));
+
+    let after_len = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(
+        after_len, settled_len,
+        "file grew after the pipe was stopped (pipe did not stop). \
+         settled={settled_len}, after={after_len}, contents: {:?}",
+        std::fs::read_to_string(&log).ok()
+    );
+    let contents = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !contents.contains("AFTER_STOP"),
+        "post-stop output leaked into the pipe file: {contents:?}"
+    );
+}

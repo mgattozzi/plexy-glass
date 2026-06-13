@@ -21,6 +21,9 @@ is designed alongside Ghostty-style terminal integration.
 - Copy mode with search
 - Full mouse support, including click-to-focus and drag-resize on split borders
 - Popup panes: `Ctrl+a P` or `:popup [cmd]` opens a transient floating pane
+- Pipe-pane: stream a pane's raw output to an external command with
+  `:pipe-pane <cmd>` (e.g. `:pipe-pane tee -a session.log`), scriptable via
+  `plexy-glass cmd`
 - Preset layouts: five tmux-style presets (`even-horizontal`, `even-vertical`,
   `main-horizontal`, `main-vertical`, `tiled`), cycled with `Ctrl+a Space` or
   applied by name with `:layout <name>`

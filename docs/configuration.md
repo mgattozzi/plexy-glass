@@ -629,6 +629,7 @@ cancels. Parse errors appear as a transient status-line message.
 | `monitor-activity` / `monitor-bell` | nothing | Toggle window monitoring |
 | `popup` | `[command line…]` | Open a popup (scratch shell if no command) |
 | `close-popup` | nothing | Close the popup |
+| `pipe-pane` | `[command line…]` | Stream the pane's raw output to a command (no command stops the pipe) |
 | `sessions` | nothing | Session picker |
 | `tree` | nothing | Choose-tree |
 | `switch` | `<session>` | Switch to a session in place |
@@ -637,10 +638,10 @@ cancels. Parse errors appear as a transient status-line message.
 | `help` | nothing | Help overlay |
 
 Verbs marked “—” reject arguments. `rename`, `rename-pane`, `switch`,
-`popup`, `set-buffer`, `load-buffer`, and `save-buffer`'s path take the rest
-of the line verbatim (internal spaces preserved). Note that `save-buffer`
+`popup`, `pipe-pane`, `set-buffer`, `load-buffer`, and `save-buffer`'s path
+take the rest of the line verbatim (internal spaces preserved). `save-buffer`
 and `load-buffer` paths must be absolute or `~`-prefixed, since they resolve
-daemon-side. See [docs/scripting.md](scripting.md#path-policy) for the path
+daemon-side; see [docs/scripting.md](scripting.md#path-policy) for the path
 policy and limits.
 
 ## Scripting from the CLI
