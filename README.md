@@ -38,7 +38,11 @@ is designed alongside Ghostty-style terminal integration.
 - Configurable status bar with live config reload
 - KDL v2 configuration (`config.kdl`)
 - Declarative sessions: recursive `session → window → split/pane` layouts in
-  the config, with per-pane commands and working directories
+  the config, with per-pane commands and working directories, split ratios
+  (`ratio=` weights), an active window/pane (`active=#true`), and per-pane
+  `env` overlays; reload re-reads the templates (building newly-declared
+  sessions, never rebuilding live ones) and `:switch` auto-creates a
+  declared-but-not-running session
 - A visual session picker (`Ctrl+a w`) and a choose-tree
   (session → window → pane drill-down with incremental filter `/`,
   collapse/expand `h`/`l`, and session rename `r`, `Ctrl+a W`)

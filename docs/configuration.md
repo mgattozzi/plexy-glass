@@ -47,7 +47,9 @@ The file is KDL **v2**. The practical differences from v1 that bite people:
 
   A reload re-reads the file and applies it to **every** live session
   (status bar, palette, keybindings; the reloading client's keymap is rebuilt
-  immediately).
+  immediately). It also **builds any newly-declared `session`** so it becomes
+  attachable; live sessions are never rebuilt (see
+  [Reload and switch](#reload-and-switch)).
 - **Error on reload**: the daemon does *not* keep the previous config. It
   falls back to the built-in defaults everywhere, since we'd rather run on a
   known-good config than on stale state. All three triggers surface the
@@ -514,13 +516,14 @@ from disk as usual.
 
 ```kdl
 session "dev" cwd="~/projects/app" {
-    window "edit" {
-        pane command="hx ."
+    env { RUST_LOG "debug" }              // session-level env (inherited)
+    window "edit" active=#true {
+        pane active=#true command="hx ."
     }
     window "run" cwd="~/projects/app/svc" {
         split vertical {
-            pane command="cargo watch -x check" name="check"
-            pane name="shell"
+            pane ratio=2 command="cargo watch -x check" name="check"
+            pane ratio=1 { env { PORT "8080" } }   // interactive, with env
         }
     }
 }
@@ -528,19 +531,70 @@ session "dev" cwd="~/projects/app" {
 
 Node by node:
 
-- `session "<name>" [cwd="<dir>"]` must contain at least one `window`.
-  Duplicate session names are errors.
-- `window "<name>" [cwd="<dir>"]` must contain exactly one layout node
-  (`pane` or `split`), so to put several panes in a window, wrap them in a
-  `split`.
+- `session "<name>" [cwd="<dir>"]` must contain at least one `window`. May
+  contain an `env` block. Duplicate session names are errors.
+- `window "<name>" [cwd="<dir>"] [active=#true]` must contain **exactly one**
+  layout node (`pane` or `split`); to put several panes in a window, wrap them
+  in a `split`. May contain an `env` block. `active=#true` makes this the
+  session's focused window on build, and at most one window per session may
+  be active (a second is a decode error); the default is the first window.
 - `split <direction> { … }` takes a direction, `vertical` (children
-  side-by-side) or `horizontal` (children stacked), plus two or more
-  children, each a `pane` or a nested `split`. Splits divide space evenly,
-  and ratios are not configurable in templates. No properties.
-- `pane [command="…"] [cwd="<dir>"] [name="…"]` is a leaf. `command` is a
-  shell command line, run via your default shell's `-c` (`$SHELL`, falling
-  back to `/bin/sh`), and without it the pane is an interactive shell. No
-  children.
+  side-by-side) or `horizontal` (children stacked), and two or more children,
+  each a `pane` or a nested `split`. No properties of its own.
+- `pane [command="…"] [cwd="<dir>"] [name="…"] [active=#true]` is a leaf.
+  `command` is a shell command line, run via your default shell's `-c`
+  (`$SHELL`, falling back to `/bin/sh`); without it the pane is an interactive
+  shell. May contain an `env` block. `active=#true` makes this its window's
+  focused pane on build, and at most one pane per window may be active (a
+  second is a decode error); the default is the DFS-leftmost pane.
+
+### Split ratios (`ratio=`)
+
+Each **direct child of a `split`** (a `pane`, or a nested `split`) may carry
+a `ratio=<n>`, a relative **weight** (a positive integer, default `1`).
+Within a split the children divide space in proportion to their weights:
+
+```kdl
+split vertical {
+    pane ratio=2     // gets 2/3 of the width
+    pane ratio=1     // gets 1/3
+}
+```
+
+- Default weights (no `ratio=`) give an **even** split: `1/N` to each of `N`
+  children (so a two-pane split is 50/50, a flat three-pane split is
+  33/33/33).
+- A nested split's weight is its **own** `ratio=` in the parent split, *not*
+  the number of leaves it contains:
+  `split vertical { pane ratio=2; split horizontal ratio=1 { pane; pane } }`
+  makes the outer split 2:1 regardless of the inner split's pane count.
+- `ratio=0` is a decode error (zero weights have no meaning). `ratio=` is
+  only valid on a direct split child; on a window's top-level pane, or on a
+  `split`/`pane` not inside a split, it is rejected.
+- A window too small to honor a ratio degrades gracefully (each ratio clamps
+  to `[0.1, 0.9]` and each pane to at least one cell); it never panics.
+
+### Per-pane environment (`env`)
+
+A `session`, `window`, or `pane` may carry an `env` block, a string map of
+environment variables:
+
+```kdl
+pane command="./run" {
+    env {
+        PORT "8080"
+        RUST_LOG "debug"
+    }
+}
+```
+
+The effective environment for a pane is the **overlay** of session → window →
+pane env (a later level overrides an earlier one per key), applied **on top
+of the daemon's inherited environment**, so `PATH`, `HOME`, `TERM`, `SHELL`
+and the rest survive; only the declared keys are added or overridden. Note
+that unlike an inline `command="FOO=bar cmd"` (which only affects that
+command), a structured `env` also applies to **interactive** panes (no
+`command`).
 
 ### Working-directory precedence
 
@@ -559,6 +613,28 @@ created interactively with `Ctrl+a c` anchors to the session cwd. Note that
 popups are the one exception: a popup spawns at the active pane's **live**
 OSC-7 cwd (falling back to the home base), so that a popup acts on the
 current context.
+
+### Reload and switch
+
+Reloading the config (`Ctrl+a R`, `:reload`, or `plexy-glass reload`) **re-reads
+the templates**: any session newly declared in the edited config is built
+immediately, so `:switch <new>` / `attach -n <new>` find it.
+
+- **Live sessions are never rebuilt by a reload.** Rebuilding would kill the
+  panes and processes you have running. A changed template for a session that
+  is already live takes effect on its **next** build, after you kill it and
+  reattach. Reload makes new templates *available*; it never destroys live
+  work.
+- A declared name you **remove** from the config is left alone if it is
+  currently live (your running session is not killed by an edit); it simply
+  stops being auto-created on future boots/reloads.
+
+`:switch <name>` (the command prompt and pickers) **auto-creates** a declared
+session that is not yet running: if `<name>` is declared in the config but no
+session by that name is live, it is built from the template, then switched to.
+An unknown, undeclared name still reports `no session: <name>`. (The headless
+`plexy-glass cmd "switch …"` path remains interactive-only and is refused;
+auto-create applies only to an attached client's switch.)
 
 ## Choose-tree (`Ctrl+a W`)
 

@@ -192,7 +192,18 @@ declared names over saved on-disk state — `crates/daemon/src/declared.rs` +
 **home base**: every pane and split created in the window spawns there
 (precedence `pane.cwd → window.cwd → session.cwd → daemon cwd`), and splits /
 interactive new panes always use the home base, not the active pane's live
-OSC-7 location; a `Ctrl+a c` window anchors to the session cwd); deep OSC handling
+OSC-7 location; a `Ctrl+a c` window anchors to the session cwd; **declarative
+v2** adds split ratios (`ratio=<weight>` per direct split-child, default 1 →
+even `1/N`; `ratio=0` rejected; a nested split's weight is its own `ratio`, not
+its leaf count; applied via `set_ratios_preorder`), an active window/pane
+(`active=#true`, at-most-one-each decode-enforced; mapped to a built PaneId via
+the DFS index), and per-pane `env { KEY "v" }` overlays inherited
+session→window→pane (pane wins per key) — set ON TOP of the inherited daemon
+env: the spawn path **overlays, never `env_clear`s**, so `PATH`/`TERM`/etc.
+survive; reload re-reads the templates via `SessionRegistry::build_declared`
+(builds newly-declared names, never rebuilds live ones, 24×80 default size like
+boot), and `switch_session` auto-creates a declared-but-not-running target from
+`config_snapshot()`); deep OSC handling
 (8 hyperlinks, 52 clipboard, 133 prompt marks, 10/11/12 colors, 0/1/2 titles);
 keyboard passthrough; interactive overlays (window/pane rename, help); a
 `Ctrl+a :` **command prompt** with in-place **session switching**
@@ -314,10 +325,7 @@ monitor-command + the `run` CLI's synchronous exit code — a detached `run`
 completes in its session's active window with nobody to see a flag, and the
 exit code IS the notification for detached scripting, while monitor-command
 serves the attached-but-looking-elsewhere case.)
-Declarative-session v1 boundaries left for later: split ratios + active
-window/pane selection in the template, per-pane env maps, re-reading templates on
-`Ctrl+a R` reload, and `switch_session` auto-creating a not-yet-running declared
-session (see the 2026-06-01 declarative-sessions spec's non-goals). (choose-tree,
+(choose-tree,
 break/join/swap + marked pane, paste buffers, and activity/bell monitoring shipped
 — 2026-05-31 specs/plans; the KDL config migration + declarative sessions shipped
 — 2026-06-01 specs/plans; keyboard-protocol negotiation + colored underlines
@@ -365,4 +373,13 @@ edge-triggered activity/bell/silence/command-completion alert messages +
 (advance unconditionally, RIS decrease re-baselines silently), a dedicated
 armed-only session-scope 1s silence tick with a per-window episode latch,
 deadlock-aware message emission under the held WM lock +
-`Session::schedule_status_expiry_wake` — shipped 2026-06-12 spec/plan.)
+`Session::schedule_status_expiry_wake` — shipped 2026-06-12 spec/plan;
+declarative sessions v2 — split ratios (`ratio=` weights → preorder
+`set_ratios_preorder`, even-by-default, `ratio=0` rejected, nested-split
+weight = its own ratio), active window/pane (`active=#true`, at-most-one-each,
+DFS-index → built PaneId), per-pane `env` overlays (session∪window∪pane, pane
+wins) set ON TOP of the inherited daemon env (the spawn path overlays, the
+`env_clear` was removed — `PATH`/`TERM` survive), `SessionRegistry::build_declared`
+reused by boot + reload (newly-declared names built, live never rebuilt, 24×80),
+and `switch_session` auto-create from `config_snapshot()` — shipped 2026-06-12
+spec/plan.)

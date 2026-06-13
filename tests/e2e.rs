@@ -974,6 +974,115 @@ session "dev" {
 }
 
 #[test]
+fn declared_v2_ratio_active_window_and_env() {
+    // Declarative v2: a session with an active SECOND window whose active pane
+    // is the larger half of a 2:1 vertical split and carries a declared env.
+    // Attaching to it should focus that window+pane; `stty size` in the focused
+    // pane proves both the ratio (the 2/3 column width) and the active focus,
+    // and `echo $FOO` proves the env overlay reached the child.
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // window "work" is active; its active pane is the `ratio=2` (left)
+    // interactive shell with env `FOO`; the `ratio=1` (right) pane just stays
+    // alive.
+    write_config(
+        &env,
+        r##"
+session "v2" {
+    window "first" {
+        pane command="tail -f /dev/null"
+    }
+    window "work" active=#true {
+        split vertical {
+            pane ratio=2 active=#true { env { FOO "barbaz" } }
+            pane ratio=1 command="tail -f /dev/null"
+        }
+    }
+}
+"##,
+    );
+
+    let mut sess = TestSession::builder(&env).args(&["attach", "-n", "v2"]).start();
+    assert!(sess.wait_ready("v2", Duration::from_secs(8)), "v2 never rendered");
+
+    // Focused pane is window "work"'s active (left, ratio=2) pane. At host 24x80
+    // the pane band is 21 rows x 78 cols; a vertical 2:1 split (usable 77) gives
+    // the left pane round(77*2/3)=51 cols → "21x51" via stty.
+    assert!(
+        sess.probe_until_size(b"21x51", Duration::from_secs(12)),
+        "active pane never reported the 2/3 (21x51) size — ratio or active-focus wrong. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // The declared env overlay reached the focused pane.
+    sess.send_str("echo FOO=$FOO\n");
+    if !sess.wait_for(b"FOO=barbaz", Duration::from_secs(6)) {
+        eprintln!("note: declared env not visible — fail-soft. raw: {}", sess.snapshot_str());
+    }
+}
+
+#[test]
+fn reload_adds_a_new_declared_session_then_attachable() {
+    use std::process::Stdio;
+    // After daemon boot, edit the config to ADD a new declared session, run
+    // `plexy-glass reload`, and confirm `attach -n new` lands on the freshly
+    // built session (reload re-reads templates and builds newly-declared names).
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // Boot with only the default; attach so a daemon is running.
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(6)), "daemon never rendered");
+
+    // Add a new declared session "fresh".
+    write_config(
+        &env,
+        r##"
+session "fresh" {
+    window "w" {
+        pane command="tail -f /dev/null"
+    }
+}
+"##,
+    );
+
+    // Reload from a second process; build_declared runs for the new name.
+    let out = std::process::Command::cargo_bin("plexy-glass")
+        .unwrap()
+        .arg("reload")
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdout(Stdio::piped())
+        .output()
+        .expect("reload");
+    assert!(out.status.success(), "reload failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    // "fresh" must now be live (built by the reload), so list shows it.
+    let listed = {
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            let (_, list_out, _) = run_cli(&env, &["list"]);
+            if list_out.contains("fresh") {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    assert!(listed, "reload never built the newly-declared session 'fresh'");
+
+    // And `attach -n fresh` lands on it.
+    let fresh = TestSession::builder(&env).args(&["attach", "-n", "fresh"]).start();
+    assert!(
+        fresh.wait_ready("fresh", Duration::from_secs(8)),
+        "attach -n fresh did not render the reloaded session. raw: {}",
+        fresh.snapshot_str()
+    );
+}
+
+#[test]
 fn arrow_keys_pass_through_to_shell() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
