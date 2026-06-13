@@ -375,24 +375,25 @@ pub(crate) fn capture_scrollback(
 ) -> Option<PaneScrollbackV1> {
     let main_grid = screen.alt.as_ref().unwrap_or(&screen.active);
     let cols = main_grid.cols;
+    // A live row that maps to a blank DTO row (no kept cells, no mark, Hard wrap),
+    // the exact predicate `row_to_dto` would produce, so the count below matches.
+    let default_cell = Cell::default();
+    let is_blank = |row: &Row| {
+        row.cells.iter().all(|c| *c == default_cell)
+            && mark_to_dto(row.mark).is_none()
+            && wrap_to_dto(row.wrap_origin) == WrapV1::Hard
+    };
     // Unified display-order row sequence: scrollback first, then the main grid.
+    // Drop blank trailing rows (the empty bottom of the live grid) BEFORE the N
+    // cap, so blank live-grid padding doesn't eat the budget and silently push
+    // the oldest real scrollback off the top. Count the blank tail without
+    // allocating DTOs, then map only the kept window (skip keeps the cost ~n).
+    let seq = || screen.scrollback.rows().iter().chain(main_grid.rows.iter());
     let total = screen.scrollback.len() + main_grid.rows.len();
-    let skip = total.saturating_sub(n);
-    let mut rows: Vec<RowV1> = screen
-        .scrollback
-        .iter()
-        .chain(main_grid.rows.iter())
-        .skip(skip)
-        .map(row_to_dto)
-        .collect();
-    // Drop blank trailing rows (the empty bottom of the live grid): a row with
-    // no cells and no mark and a Hard wrap origin contributes nothing.
-    while rows
-        .last()
-        .is_some_and(|r| r.cells.is_empty() && r.mark.is_none() && r.wrap == WrapV1::Hard)
-    {
-        rows.pop();
-    }
+    let blank_tail = seq().rev().take_while(|r| is_blank(r)).count();
+    let meaningful = total - blank_tail;
+    let skip = meaningful.saturating_sub(n);
+    let rows: Vec<RowV1> = seq().take(meaningful).skip(skip).map(row_to_dto).collect();
     if rows.is_empty() {
         return None;
     }
@@ -931,6 +932,25 @@ mod tests {
         // Rows 3 and 4 remain blank (all-default, no mark).
         let sb = capture_scrollback(&screen, 1000).expect("non-blank rows must yield Some");
         assert_eq!(sb.rows.len(), 3, "blank trailing rows must be dropped, leaving 3");
+    }
+
+    #[test]
+    fn capture_scrollback_cap_keeps_n_meaningful_rows_despite_blank_tail() {
+        // 30 non-blank scrollback rows + a 5-row grid with only the top row
+        // non-blank (4 blank trailing). n = 10. The blank tail must be dropped
+        // BEFORE the cap, so exactly 10 MEANINGFUL rows survive, not 10 minus
+        // the blank tail (the old cap-then-trim order returned only 6).
+        let mut screen = screen_with_scrollback(30, 5, 20);
+        screen.active.rows[0].cells[0].grapheme = "Z".into();
+        // rows 1..5 remain blank.
+
+        let sb = capture_scrollback(&screen, 10).expect("non-empty screen must yield Some");
+        assert_eq!(sb.rows.len(), 10, "blank tail must not consume the N budget");
+        // meaningful = 30 scrollback + 1 grid row = 31; skip = 21 → oldest kept
+        // is scrollback[21] → 'A'+21 = 'V'.
+        assert_eq!(sb.rows[0].cells[0].grapheme.as_str(), "V");
+        // Last kept row is the non-blank grid row.
+        assert_eq!(sb.rows[9].cells[0].grapheme.as_str(), "Z");
     }
 
     #[test]
