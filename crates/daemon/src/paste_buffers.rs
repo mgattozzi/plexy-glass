@@ -131,10 +131,13 @@ mod tests {
     }
 
     #[test]
-    fn preview_caps_the_scan_for_a_huge_first_line() {
+    fn preview_output_is_unchanged_when_the_first_line_exceeds_the_scan_cap() {
         let mut s = PasteBufferStore::new(10);
-        // First line longer than the 4 KiB scan cap: the preview still renders
-        // the head and respects the width cap; the tail is never decoded.
+        // Pins the observable output for a buffer whose first line is 8 KiB
+        // (well past the 4 KiB scan cap). The scan-cap is a performance
+        // property, not directly observable here, but the rendered preview
+        // must still start with the first bytes, stay within the width cap,
+        // and not bleed into the second line.
         let mut content = vec![b'a'; 8 * 1024];
         content.extend_from_slice(b"\nsecond line");
         s.push(content);

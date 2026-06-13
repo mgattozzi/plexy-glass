@@ -1570,14 +1570,15 @@ async fn save_buffer(
 
 /// `:load-buffer <path…>`: read a file into a new newest paste buffer.
 /// This is the system's only arbitrary-file ingress, so it is gated BEFORE
-/// reading: `symlink_metadata`-then-`is_file()` refuses FIFOs, devices, and
+/// reading: `metadata`-then-`is_file()` refuses FIFOs, devices, and
 /// directories (a FIFO `open` would hang a runtime worker; `/dev/zero` would
-/// OOM), and the size cap bounds resident memory. Empty files load as an
-/// empty buffer.
+/// OOM); symlinks to regular files are followed deliberately. The size cap
+/// guards resident memory (buffers are resident and cloned per paste).
+/// Empty files load as an empty buffer.
 async fn load_buffer(registry: &Arc<SessionRegistry>, path: &str) -> Result<String, String> {
     let resolved = resolve_buffer_path("load-buffer", path)?;
     let disp = resolved.display();
-    let meta = std::fs::symlink_metadata(&resolved)
+    let meta = std::fs::metadata(&resolved)
         .map_err(|e| format!("load-buffer: {disp}: {e}"))?;
     if !meta.is_file() {
         return Err(format!("load-buffer: {disp}: not a regular file"));
@@ -1585,7 +1586,19 @@ async fn load_buffer(registry: &Arc<SessionRegistry>, path: &str) -> Result<Stri
     if meta.len() > LOAD_BUFFER_MAX_BYTES {
         return Err(format!("load-buffer: {disp} is {} bytes (limit 10 MiB)", meta.len()));
     }
-    let content = std::fs::read(&resolved).map_err(|e| format!("load-buffer: {disp}: {e}"))?;
+    // Belt-and-braces cap: the file may grow between stat and read; take(cap+1)
+    // limits the actual bytes read so a race cannot OOM. If the read fills the
+    // cap+1 bucket the file is oversize and we return the oversize error.
+    use std::io::Read as _;
+    let mut content = Vec::new();
+    std::fs::File::open(&resolved)
+        .map_err(|e| format!("load-buffer: {disp}: {e}"))?
+        .take(LOAD_BUFFER_MAX_BYTES + 1)
+        .read_to_end(&mut content)
+        .map_err(|e| format!("load-buffer: {disp}: {e}"))?;
+    if content.len() as u64 > LOAD_BUFFER_MAX_BYTES {
+        return Err(format!("load-buffer: {disp} exceeds the 10 MiB limit"));
+    }
     let n = content.len();
     registry.push_paste_buffer(content).await;
     Ok(format!("loaded {disp} ({n} bytes)"))
@@ -3470,9 +3483,17 @@ mod tests {
         let (ok, message) =
             run_prompt_line(&session, &registry, &format!("save-buffer {}", out.display())).await;
         assert!(ok, "headless save-buffer failed: {message:?}");
+        assert!(
+            message.unwrap_or_default().contains("saved "),
+            "save-buffer must confirm with 'saved …'"
+        );
         let (ok, message) =
             run_prompt_line(&session, &registry, &format!("load-buffer {}", out.display())).await;
         assert!(ok, "headless load-buffer failed: {message:?}");
+        assert!(
+            message.unwrap_or_default().contains("loaded "),
+            "load-buffer must confirm with 'loaded …'"
+        );
         let (ok, message) = run_prompt_line(&session, &registry, "paste buffer999").await;
         assert!(!ok, "paste of an unknown buffer must not claim success");
         let msg = message.unwrap_or_default();
@@ -3731,6 +3752,54 @@ mod tests {
             )
         );
         assert!(registry.list_paste_buffers().await.is_empty(), "no refusal may push a buffer");
+    }
+
+    /// A symlink to a regular file is followed (the headline case is
+    /// `load-buffer ~/snippets/deploy.sh` in a symlink-managed home).
+    /// A symlink to a FIFO is still refused because `metadata()` follows the
+    /// link and the target fails `is_file()`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn load_buffer_follows_symlink_to_regular_file() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("s1".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        // Symlink to a regular file, so this must load.
+        let target = dir.path().join("real.txt");
+        std::fs::write(&target, b"via symlink").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let line = format!("load-buffer {}", link.display());
+        let (ok, message) = run_prompt_line(&session, &registry, &line).await;
+        assert!(ok, "symlink-to-regular-file must load: {message:?}");
+        assert_eq!(
+            registry.paste_buffer_top().await.as_deref(),
+            Some(b"via symlink".as_slice())
+        );
+
+        // Symlink to a FIFO, so this must be refused.
+        let fifo = dir.path().join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("spawn mkfifo");
+        assert!(status.success(), "mkfifo failed");
+        let fifo_link = dir.path().join("pipe_link");
+        std::os::unix::fs::symlink(&fifo, &fifo_link).unwrap();
+        let line = format!("load-buffer {}", fifo_link.display());
+        let (ok, message) = run_prompt_line(&session, &registry, &line).await;
+        assert!(!ok, "symlink-to-FIFO must be refused");
+        assert_eq!(
+            message.as_deref(),
+            Some(
+                format!("load-buffer: {}: not a regular file", fifo_link.display()).as_str()
+            )
+        );
     }
 
     /// Write ASCII `text` into grid row `row` of a screen (test fixture: the

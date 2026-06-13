@@ -83,18 +83,19 @@ so relative resolution would be a silent footgun.
 
 - `set-buffer` text is one prompt line: leading/trailing whitespace is
   trimmed (internal whitespace is preserved verbatim) and a line cannot carry
-  newlines, so multi-line content goes through `load-buffer`. No clipboard
+  newlines, so use `load-buffer` for multi-line content. No clipboard
   interaction (OSC 52 remains a copy-mode-yank behavior).
-- `load-buffer` accepts regular files only (FIFOs, devices, directories, and
-  symlinks are refused with `load-buffer: <path>: not a regular file`) and
-  caps the size at **10 MiB** (`load-buffer: <path> is N bytes (limit 10
-  MiB)`); buffers are memory-resident and cloned per paste. Empty files load
-  as an empty buffer.
+- `load-buffer` accepts regular files only (FIFOs, devices, and directories
+  are refused with `load-buffer: <path>: not a regular file`; symlinks to
+  regular files are followed) and caps the size at **10 MiB**
+  (`load-buffer: <path> is N bytes (limit 10 MiB)`), since buffers are
+  memory-resident and cloned per paste. Empty files load as an empty buffer.
 - `save-buffer` writes the buffer's bytes verbatim as a truncating overwrite
-  (non-atomic, these are user export files, not state files). A first token
-  shaped like `bufferN` names the source buffer; otherwise the whole tail is
-  the path and the **newest** buffer is written. A path whose first word is
-  literally `bufferN ` is pathological and not supported.
+  (non-atomic, and deliberately so: these are user export files, not state
+  files). A first token shaped like `bufferN` names the source buffer;
+  otherwise the whole tail is the path and the **newest** buffer is written.
+  Note that a path whose first word is literally `bufferN ` is pathological
+  and not supported.
 
 ## Exit-code semantics
 
