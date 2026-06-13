@@ -100,6 +100,19 @@ impl WindowManager {
         death_tx: Option<mpsc::Sender<PaneId>>,
         config: Arc<plexy_glass_config::Config>,
     ) -> Result<Self, DaemonError> {
+        Self::new_with_preseed(first_spec, host_size, notify, death_tx, config, None)
+    }
+
+    /// Like `new`, but seeds the first window's first pane with restored
+    /// scrollback (session restore). `preseed` is `None` for fresh sessions.
+    pub fn new_with_preseed(
+        first_spec: SpawnSpec,
+        host_size: PtySize,
+        notify: Arc<Notify>,
+        death_tx: Option<mpsc::Sender<PaneId>>,
+        config: Arc<plexy_glass_config::Config>,
+        preseed: Option<Vec<plexy_glass_emulator::Row>>,
+    ) -> Result<Self, DaemonError> {
         let viewport = host_viewport(host_size);
         let first = Window::spawn_first(
             WindowId(0),
@@ -110,7 +123,7 @@ impl WindowManager {
             Arc::clone(&notify),
             death_tx.clone(),
             Arc::clone(&config),
-            None,
+            preseed,
         )?;
         Ok(Self {
             windows: vec![first],

@@ -27,7 +27,21 @@ impl Session {
         let mut first_spec = base_spec.clone();
         first_spec.cwd = restore_cwd(first_pane_saved.cwd.as_deref());
 
-        let session = Self::new(saved.name.clone(), first_spec, size, Arc::clone(&config))?;
+        // The session's first pane (window 0, pane 0) is spawned by `Self::new`;
+        // thread its saved scrollback through so it is preseeded BEFORE the
+        // reader thread starts (the same hard-ordering rule as splits below).
+        let first_preseed = first_pane_saved
+            .scrollback
+            .as_ref()
+            .map(crate::persist::scrollback_to_rows);
+
+        let session = Self::new_with_preseed(
+            saved.name.clone(),
+            first_spec,
+            size,
+            Arc::clone(&config),
+            first_preseed,
+        )?;
         {
             let mut wm = session.window_manager.lock().await;
             // Re-anchor the session base cwd so interactive new windows
@@ -50,7 +64,11 @@ impl Session {
                 })?;
                 let mut spec_for_first = base_spec.clone();
                 spec_for_first.cwd = restore_cwd(first_pane.cwd.as_deref());
-                wm.new_window_with_spec(spec_for_first, w.name.clone())?;
+                let first_preseed = first_pane
+                    .scrollback
+                    .as_ref()
+                    .map(crate::persist::scrollback_to_rows);
+                wm.new_window_with_spec_preseed(spec_for_first, w.name.clone(), first_preseed)?;
                 replay_window_layout(&mut wm, wi, w, &base_spec)?;
             }
             // Restore per-window flags + active-pane focus.
@@ -228,13 +246,14 @@ fn replay_window_layout(
     collect_replay_ops(&saved.layout, 0, &mut ops);
     for op in ops {
         let mut spec = base_spec.clone();
-        spec.cwd = restore_cwd(
-            saved
-                .panes
-                .get(op.new_pane_dfs_idx as usize)
-                .and_then(|p| p.cwd.as_deref()),
-        );
-        wm.split_window_at_dfs(window_idx, op.target_dfs_idx, op.dir, spec)?;
+        let saved_pane = saved.panes.get(op.new_pane_dfs_idx as usize);
+        spec.cwd = restore_cwd(saved_pane.and_then(|p| p.cwd.as_deref()));
+        // Seed this split pane's saved scrollback through the spawn path (BEFORE
+        // its reader thread starts), not as a post-spawn pass.
+        let preseed = saved_pane
+            .and_then(|p| p.scrollback.as_ref())
+            .map(crate::persist::scrollback_to_rows);
+        wm.split_window_at_dfs_preseed(window_idx, op.target_dfs_idx, op.dir, spec, preseed)?;
     }
     // The replay rebuilt the exact saved shape at default 0.5 ratios, so the
     // saved preorder ratio list maps 1:1 onto the live tree's splits.

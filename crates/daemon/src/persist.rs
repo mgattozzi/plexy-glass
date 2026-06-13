@@ -230,8 +230,6 @@ impl From<UnderlineStyleV1> for UnderlineStyle {
 }
 
 /// Convert a live cell to its DTO. `hyperlink_id` is dropped (see `CellV1`).
-// Wired into snapshot/restore in P3; this commit's tests exercise it.
-#[allow(dead_code)]
 pub(crate) fn cell_to_dto(c: &Cell) -> CellV1 {
     CellV1 {
         grapheme: c.grapheme.as_str().to_string(),
@@ -245,8 +243,6 @@ pub(crate) fn cell_to_dto(c: &Cell) -> CellV1 {
 
 /// Reconstruct a live cell from its DTO. `hyperlink_id` is always `None`
 /// (links are not persisted).
-// Wired into snapshot/restore in P3; this commit's tests exercise it.
-#[allow(dead_code)]
 pub(crate) fn cell_from_dto(c: &CellV1) -> Cell {
     Cell {
         grapheme: c.grapheme.as_str().into(),
@@ -264,8 +260,6 @@ pub(crate) fn cell_from_dto(c: &CellV1) -> Cell {
 /// Convert a live `RowMark` to its DTO, or `None` when the row is unmarked.
 /// Only the public flag bits are persisted; the live mark's private
 /// exit-presence bit is captured by `exit`.
-// Wired into snapshot/restore in P3; this commit's tests exercise it.
-#[allow(dead_code)]
 pub(crate) fn mark_to_dto(m: RowMark) -> Option<RowMarkV1> {
     if m.is_empty() {
         return None;
@@ -289,8 +283,6 @@ pub(crate) fn mark_to_dto(m: RowMark) -> Option<RowMarkV1> {
 }
 
 /// Reconstruct a live `RowMark` from its DTO.
-// Wired into snapshot/restore in P3; this commit's tests exercise it.
-#[allow(dead_code)]
 pub(crate) fn mark_from_dto(m: &RowMarkV1) -> RowMark {
     let mut out = RowMark::default();
     for bit in [
@@ -314,8 +306,6 @@ pub(crate) fn mark_from_dto(m: &RowMarkV1) -> RowMark {
     out
 }
 
-// Wired into snapshot/restore in P3; this commit's tests exercise it.
-#[allow(dead_code)]
 fn wrap_to_dto(w: WrapOrigin) -> WrapV1 {
     match w {
         WrapOrigin::Hard => WrapV1::Hard,
@@ -323,8 +313,6 @@ fn wrap_to_dto(w: WrapOrigin) -> WrapV1 {
     }
 }
 
-// Wired into snapshot/restore in P3; this commit's tests exercise it.
-#[allow(dead_code)]
 fn wrap_from_dto(w: WrapV1) -> WrapOrigin {
     match w {
         WrapV1::Hard => WrapOrigin::Hard,
@@ -336,8 +324,6 @@ fn wrap_from_dto(w: WrapV1) -> WrapOrigin {
 /// to `cols` on load). A wide grapheme's trailing `Cell::wide_spacer()` is an
 /// empty-grapheme cell, which is NOT default (default is a single space), so
 /// spacers are preserved by the trim.
-// Wired into snapshot/restore in P3; this commit's tests exercise it.
-#[allow(dead_code)]
 pub(crate) fn row_to_dto(row: &Row) -> RowV1 {
     let default = Cell::default();
     let keep = row
@@ -358,8 +344,6 @@ pub(crate) fn row_to_dto(row: &Row) -> RowV1 {
 /// (the trim dropped the trailing defaults on save). Rows wider than `cols`
 /// (a width-mismatch restore) keep their captured cells; the first resize
 /// normalizes them.
-// Wired into snapshot/restore in P3; this commit's tests exercise it.
-#[allow(dead_code)]
 pub(crate) fn row_from_dto(row: &RowV1, cols: u16) -> Row {
     let mut cells: Vec<Cell> = row.cells.iter().map(cell_from_dto).collect();
     if cells.len() < cols as usize {
@@ -370,6 +354,56 @@ pub(crate) fn row_from_dto(row: &RowV1, cols: u16) -> Row {
         wrap_origin: wrap_from_dto(row.wrap),
         mark: row.mark.as_ref().map(mark_from_dto).unwrap_or_default(),
     }
+}
+
+/// Default number of persisted rows per pane (scrollback tail + main grid, in
+/// display order). Restore shows the most recent `SCROLLBACK_PERSIST_ROWS`.
+pub const SCROLLBACK_PERSIST_ROWS: usize = 1000;
+
+/// Capture a pane's scrollback for persistence: the last `n` rows of
+/// `scrollback ++ main_grid.rows`, in display order, where the **main** grid is
+/// `screen.alt.as_ref().unwrap_or(&screen.active)`. When a pane is on the alt
+/// screen, `enter_alt_screen` parked the main grid in `screen.alt`, so the alt
+/// (transient) grid in `screen.active` is never persisted. Trailing all-default
+/// cells are trimmed per row (by `row_to_dto`) and blank trailing rows are
+/// dropped. Returns `None` when there is nothing worth persisting (no scrollback
+/// and a blank grid).
+pub(crate) fn capture_scrollback(
+    screen: &plexy_glass_emulator::Screen,
+    n: usize,
+) -> Option<PaneScrollbackV1> {
+    let main_grid = screen.alt.as_ref().unwrap_or(&screen.active);
+    let cols = main_grid.cols;
+    // Unified display-order row sequence: scrollback first, then the main grid.
+    let total = screen.scrollback.len() + main_grid.rows.len();
+    let skip = total.saturating_sub(n);
+    let mut rows: Vec<RowV1> = screen
+        .scrollback
+        .iter()
+        .chain(main_grid.rows.iter())
+        .skip(skip)
+        .map(row_to_dto)
+        .collect();
+    // Drop blank trailing rows (the empty bottom of the live grid): a row with
+    // no cells and no mark and a Hard wrap origin contributes nothing.
+    while rows
+        .last()
+        .is_some_and(|r| r.cells.is_empty() && r.mark.is_none() && r.wrap == WrapV1::Hard)
+    {
+        rows.pop();
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    Some(PaneScrollbackV1 { cols, rows })
+}
+
+/// Reconstruct live preseed rows from a persisted scrollback. Each DTO row is
+/// re-padded to `sb.cols` (its captured width); a width-mismatch restore (spawn
+/// cols != saved cols) seeds the rows as-is, and the first resize normalizes
+/// them.
+pub(crate) fn scrollback_to_rows(sb: &PaneScrollbackV1) -> Vec<Row> {
+    sb.rows.iter().map(|r| row_from_dto(r, sb.cols)).collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

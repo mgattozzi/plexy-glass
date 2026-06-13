@@ -140,9 +140,18 @@ impl Session {
                             .and_then(|p| p.with_screen(|s| s.cwd.clone()))
                             .and_then(|url| crate::popup::osc7_to_path(&url));
                         let name = pane.and_then(|p| p.name());
-                        // Scrollback capture lands in P3; None here keeps the
-                        // additive field absent (old-file behavior) until then.
-                        PaneStateV1 { cwd, name, scrollback: None }
+                        // Capture the last N rows of `scrollback ++ main grid`
+                        // (the MAIN grid even when the pane is on the alt
+                        // screen). Brief copy under the emulator lock.
+                        let scrollback = pane.and_then(|p| {
+                            p.with_screen(|s| {
+                                crate::persist::capture_scrollback(
+                                    s,
+                                    crate::persist::SCROLLBACK_PERSIST_ROWS,
+                                )
+                            })
+                        });
+                        PaneStateV1 { cwd, name, scrollback }
                     })
                     .collect();
                 let layout = layout_tree
@@ -191,14 +200,27 @@ impl Session {
         first_size: PtySize,
         config: Arc<plexy_glass_config::Config>,
     ) -> Result<Arc<Self>, DaemonError> {
+        Self::new_with_preseed(name, initial_cmd, first_size, config, None)
+    }
+
+    /// Like `new`, but seeds the first pane with restored scrollback (session
+    /// restore). `preseed` is `None` for fresh sessions.
+    pub fn new_with_preseed(
+        name: String,
+        initial_cmd: SpawnSpec,
+        first_size: PtySize,
+        config: Arc<plexy_glass_config::Config>,
+        preseed: Option<Vec<plexy_glass_emulator::Row>>,
+    ) -> Result<Arc<Self>, DaemonError> {
         let notify = Arc::new(Notify::new());
         let (death_tx, death_rx) = mpsc::channel::<PaneId>(16);
-        let window_manager = WindowManager::new(
+        let window_manager = WindowManager::new_with_preseed(
             initial_cmd,
             first_size,
             Arc::clone(&notify),
             Some(death_tx.clone()),
             Arc::clone(&config),
+            preseed,
         )?;
         let initial_frame = Arc::new(VirtualScreen::blank(first_size.rows, first_size.cols));
         let (frame_tx, frame_rx_template) = watch::channel(initial_frame);
@@ -2229,6 +2251,193 @@ mod tests {
         let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
         let wm = restored.window_manager.lock().await;
         assert_eq!(wm.windows()[0].layout().panes().len(), 2);
+    }
+
+    // ── scrollback persistence (P3) ────────────────────────────────────────
+
+    /// Build a row of `text` at width `cols` with an optional 133 mark applied.
+    fn marked_row(text: &str, cols: u16, apply: impl FnOnce(&mut plexy_glass_emulator::RowMark)) -> plexy_glass_emulator::Row {
+        let mut r = plexy_glass_emulator::Row::blank(cols);
+        for (i, ch) in text.chars().enumerate() {
+            if (i as u16) < cols {
+                r.cells[i].grapheme = ch.to_string().into();
+            }
+        }
+        apply(&mut r.mark);
+        r
+    }
+
+    /// Construct a completed OSC-133 block in the active pane's MAIN grid by
+    /// writing rows directly (deterministic, parser-free): a PROMPT_START row,
+    /// two OUTPUT_START output rows, and a BLOCK_END row carrying exit 0. The
+    /// snapshot captures `scrollback ++ main grid`, so grid rows are enough.
+    fn inject_marked_block(wm: &WindowManager) {
+        use plexy_glass_emulator::RowMark;
+        let pid = wm.active_window().active();
+        wm.active_window().pane(pid).unwrap().with_screen_mut(|scr| {
+            let cols = scr.active.cols;
+            scr.active.rows[0] = marked_row("PROMPT", cols, |m| m.set(RowMark::PROMPT_START));
+            scr.active.rows[1] = marked_row("OUTLINE_A", cols, |m| m.set(RowMark::OUTPUT_START));
+            scr.active.rows[2] = marked_row("OUTLINE_B", cols, |_| {});
+            scr.active.rows[3] = marked_row("DONE", cols, |m| {
+                m.set(RowMark::BLOCK_END);
+                m.set_exit(Some(0));
+            });
+        });
+    }
+
+    #[tokio::test]
+    async fn snapshot_captures_scrollback_with_marks() {
+        let _g = crate::test_env::isolate();
+        let s = Session::new("t-sb-snap".into(), cat_spec(), size(), cfg()).unwrap();
+        let (saved, pane_cols) = {
+            let wm = s.window_manager.lock().await;
+            inject_marked_block(&wm);
+            let pid = wm.active_window().active();
+            let cols = wm.active_window().pane(pid).unwrap().with_screen(|scr| scr.active.cols);
+            (s.snapshot_for_persist(&wm), cols)
+        };
+        let sb = saved.windows[0].panes[0]
+            .scrollback
+            .as_ref()
+            .expect("scrollback captured");
+        assert_eq!(sb.cols, pane_cols, "captured width matches the pane grid width");
+        // The output text rode into the captured rows.
+        let joined: String = sb
+            .rows
+            .iter()
+            .flat_map(|r| r.cells.iter().map(|c| c.grapheme.clone()))
+            .collect();
+        assert!(joined.contains("OUTLINE_A"), "captured rows contain output: {joined:?}");
+        // At least one row carries a 133 mark.
+        assert!(
+            sb.rows.iter().any(|r| r.mark.is_some()),
+            "at least one captured row carries an OSC-133 mark"
+        );
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test]
+    async fn full_session_state_round_trips_with_scrollback() {
+        let _g = crate::test_env::isolate();
+        let s = Session::new("t-sb-rt".into(), cat_spec(), size(), cfg()).unwrap();
+        let saved = {
+            let wm = s.window_manager.lock().await;
+            inject_marked_block(&wm);
+            s.snapshot_for_persist(&wm)
+        };
+        crate::persist::save_session(&saved).expect("save");
+        let loaded = crate::persist::load_session("t-sb-rt")
+            .expect("load")
+            .expect("present");
+        assert_eq!(loaded, saved, "full SessionStateV1 round-trips through save/load");
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test]
+    async fn restore_seeds_scrollback_and_marks_ride() {
+        let _g = crate::test_env::isolate();
+        let s = Session::new("t-sb-restore".into(), cat_spec(), size(), cfg()).unwrap();
+        let saved = {
+            let wm = s.window_manager.lock().await;
+            inject_marked_block(&wm);
+            s.snapshot_for_persist(&wm)
+        };
+        s.terminate_panes().await;
+        drop(s);
+
+        let restored = Session::restore_from(saved, cat_spec(), size(), cfg()).await.unwrap();
+        let wm = restored.window_manager.lock().await;
+        let pid = wm.active_window().active();
+        let pane = wm.active_window().pane(pid).unwrap();
+        let (sb_len, last_block, joined, exit) = pane.with_screen(|scr| {
+            let lcb = plexy_glass_mux::blocks::last_completed_block(scr);
+            let joined: String = scr
+                .scrollback
+                .iter()
+                .flat_map(|r| r.cells.iter().map(|c| c.grapheme.as_str().to_string()))
+                .collect();
+            // closing_exit needs the prompt line; derive it from last_completed_prompt.
+            let exit = plexy_glass_mux::blocks::last_completed_prompt(scr)
+                .and_then(|pl| plexy_glass_mux::blocks::closing_exit(scr, pl));
+            (scr.scrollback.len(), lcb, joined, exit)
+        });
+        assert!(sb_len > 0, "history landed in the restored pane's scrollback");
+        assert!(joined.contains("OUTLINE_A"), "restored scrollback has the history: {joined:?}");
+        assert!(
+            last_block.is_some(),
+            "the seeded marks drive last_completed_block on the restored scrollback"
+        );
+        assert_eq!(exit, Some(0), "the D;0 exit code rode into the restored mark");
+        // Block counters stay at their fresh defaults (NOT recomputed).
+        let (blocks, last_exit) = pane.with_screen(|scr| (scr.blocks_completed, scr.last_block_exit));
+        assert_eq!(blocks, 0, "blocks_completed left at 0 (not recomputed)");
+        assert_eq!(last_exit, None, "last_block_exit left at None (not recomputed)");
+        drop(wm);
+        restored.terminate_panes().await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_on_alt_screen_persists_main_grid() {
+        let _g = crate::test_env::isolate();
+        let s = Session::new("t-sb-alt".into(), cat_spec(), size(), cfg()).unwrap();
+        let saved = {
+            let wm = s.window_manager.lock().await;
+            let pid = wm.active_window().active();
+            wm.active_window().pane(pid).unwrap().with_screen_mut(|scr| {
+                // Simulate being on the alt screen: enter_alt_screen parks the
+                // MAIN grid in `screen.alt` and makes `screen.active` the ALT
+                // grid. Construct that state directly so the capture must read
+                // `screen.alt` (the main grid) and ignore `screen.active`.
+                let cols = scr.active.cols;
+                let rows = scr.active.num_rows();
+                // active = the transient alt grid; its content must NOT persist.
+                scr.active.rows[0] = marked_row("ALTTEXT_SHOULD_NOT_PERSIST", cols, |_| {});
+                // alt = the parked MAIN grid; its content MUST persist.
+                let mut main = plexy_glass_emulator::Grid::new(rows, cols);
+                main.rows[0] = marked_row("MAINTEXT", cols, |_| {});
+                scr.alt = Some(main);
+            });
+            s.snapshot_for_persist(&wm)
+        };
+        let sb = saved.windows[0].panes[0]
+            .scrollback
+            .as_ref()
+            .expect("main-grid scrollback captured even on alt");
+        let joined: String = sb
+            .rows
+            .iter()
+            .flat_map(|r| r.cells.iter().map(|c| c.grapheme.clone()))
+            .collect();
+        assert!(joined.contains("MAINTEXT"), "main-grid content persisted: {joined:?}");
+        assert!(
+            !joined.contains("ALTTEXT_SHOULD_NOT_PERSIST"),
+            "alt-screen content must NOT be persisted: {joined:?}"
+        );
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test]
+    async fn restore_width_mismatch_does_not_panic() {
+        // Save at 80 cols, restore at a different size: seeded rows keep their
+        // captured width and the first resize normalizes them. Must not panic.
+        let _g = crate::test_env::isolate();
+        let s = Session::new("t-sb-width".into(), cat_spec(), size(), cfg()).unwrap();
+        let saved = {
+            let wm = s.window_manager.lock().await;
+            inject_marked_block(&wm);
+            s.snapshot_for_persist(&wm)
+        };
+        s.terminate_panes().await;
+        drop(s);
+        let wide = PtySize { rows: 30, cols: 120, pixel_width: 0, pixel_height: 0 };
+        let restored = Session::restore_from(saved, cat_spec(), wide, cfg()).await.unwrap();
+        let wm = restored.window_manager.lock().await;
+        let pid = wm.active_window().active();
+        let len = wm.active_window().pane(pid).unwrap().with_screen(|scr| scr.scrollback.len());
+        assert!(len > 0, "history seeded despite the width mismatch");
+        drop(wm);
+        restored.terminate_panes().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
