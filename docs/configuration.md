@@ -636,6 +636,44 @@ An unknown, undeclared name still reports `no session: <name>`. (The headless
 `plexy-glass cmd "switch …"` path remains interactive-only and is refused;
 auto-create applies only to an attached client's switch.)
 
+## Persistence
+
+Each session is saved to a per-session JSON file under
+`$XDG_STATE_HOME/plexy-glass/sessions/<name>.json` (falling back to
+`~/.local/state/...`). Saves are atomic (write-to-temp + fsync + rename) and run
+off the main loop. A daemon restart restores from these files (attach the same
+name), and `plexy-glass kill` deletes the file.
+
+What is restored:
+
+- **Layout**: windows, panes, split directions and ratios, window/pane names,
+  the per-window home cwd, the sync-input flag, and the active window/pane.
+- **Per-pane cwd**: restored panes spawn a *fresh* shell at the saved working
+  directory.
+- **Scrollback + command-block marks**: each pane's recent history (text,
+  colors/attributes, and the OSC 133 block marks) comes back as the pane's
+  scrollback, and the fresh shell starts below it, so block navigation, the
+  exit-status border colors, and `capture --last-command` all work on the
+  restored history immediately. See [command-blocks.md](command-blocks.md).
+
+When it saves: persistence is *opportunistic*. The session file is rewritten
+at the next *structural* change (a split, a window/pane add / remove /
+rename, a resize that clamps ratios), debounced by ~1.5s. It is *not*
+written on every output line, and *not* flushed on detach, so scrollback is
+captured with whatever history existed at the moment of the next structural
+save.
+
+Scrollback caveats:
+
+- Only the most recent 1000 rows per pane are persisted, and older history
+  is truncated on restore.
+- Rows come back at their saved width and are *not* reflowed until the
+  pane's first resize.
+- OSC 8 hyperlinks are not persisted: restored text keeps its styling but
+  loses link clickability.
+- The alt screen (full-screen TUIs) is never persisted; the saved rows are
+  always the main screen.
+
 ## Choose-tree (`Ctrl+a W`)
 
 `Ctrl+a W` (or `:tree`) opens a floating session → window → pane drill-down.

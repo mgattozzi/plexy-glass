@@ -318,7 +318,7 @@ implementation; user-facing docs (README / the configuration reference) are
 updated as part of each feature, per **User documentation**. Workflows
 (`Workflow` tool) drive the review fan-outs.
 
-Not yet built (future work): mark persistence across daemon restart.
+Not yet built (future work): none currently tracked.
 (Silence monitoring + bell/activity alert messages shipped with the 2026-06-12
 alerts feature; "push notifications on run completion" is cleared by
 monitor-command + the `run` CLI's synchronous exit code — a detached `run`
@@ -382,4 +382,24 @@ wins) set ON TOP of the inherited daemon env (the spawn path overlays, the
 `env_clear` was removed — `PATH`/`TERM` survive), `SessionRegistry::build_declared`
 reused by boot + reload (newly-declared names built, live never rebuilt, 24×80),
 and `switch_session` auto-create from `config_snapshot()` — shipped 2026-06-12
-spec/plan.)
+spec/plan; scrollback + mark persistence — per-pane scrollback (text +
+attrs + OSC 133 marks) persisted to the session file and restored as the pane's
+scrollback on daemon restart (the fresh shell draws below it). Persist DTOs in
+`crates/daemon/src/persist.rs` (`PaneScrollbackV1`/`RowV1`/`CellV1` with per-cell
+default-field elision + compact `serde_json::to_vec`, `ColorV1`/`UnderlineStyleV1`/
+`WrapV1`/`RowMarkV1`) with explicit live↔DTO mappers (emulator types stay
+serde-free; `hyperlink_id` dropped, links not persisted); capture via
+`capture_scrollback(screen, N=1000)` over `scrollback ++ main_grid.rows`
+(`main_grid = screen.alt.unwrap_or(&screen.active)` — MAIN grid even on alt),
+trailing-default-cell trim + blank-trailing-row drop; `Screen::preseed_scrollback`
+threaded THROUGH `Pane::spawn` (applied before the reader thread starts so no
+child byte races the seed) → `Window::spawn_first`/`split`/`split_at` →
+`WindowManager::new_with_preseed`/`new_window_with_spec_preseed`/
+`split_window_at_dfs_preseed`; `restore_from` forwards each saved pane's
+scrollback into the spawn path (first pane via `Session::new_with_preseed`);
+block counters left at 0/None (NOT recomputed — block nav reads `Row.mark`
+directly, recompute would misfire the monitor-command alert); width-mismatch
+seeds rows as-is (first resize normalizes); save moved onto `spawn_blocking`
+guarded by a `persist_in_flight` async mutex (`stop_persist` acquires it before
+aborting the loop so an in-flight save completes before `kill`'s
+`delete_session`) — shipped 2026-06-13 spec/plan.)

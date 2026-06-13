@@ -26,8 +26,20 @@ block with an exit code (an OSC 133;D); a command that is still running has no
 D yet and is not counted.
 
 Note that marks are **not** recorded on the alternate screen (full-screen
-programs like editors and pagers) and are **not** persisted across daemon
-restarts, so a restored pane starts without blocks.
+programs like editors and pagers).
+
+Marks **are** persisted across daemon restarts. A pane's scrollback (text,
+attributes, and OSC 133 block marks) is saved to the session file at the next
+structural save (a split, window/pane add/remove/rename, resize, *not* on every
+output line and *not* on detach, see
+[Persistence](configuration.md#persistence)). On restart the saved rows come
+back as the pane's **scrollback history** (the new shell starts fresh below
+them), so block navigation, the exit-status border colors, and
+`capture --last-command` all work on the restored content immediately. The most
+recent 1000 rows per pane are kept (older history is truncated), rows seeded at
+their saved width are not reflowed until the first resize, and OSC 8 hyperlinks
+are not persisted (restored text keeps its styling but loses link
+clickability).
 
 ## Shell integration
 
@@ -287,5 +299,10 @@ full reference (colors, `enabled` flag, defaults, and live-reload behavior).
 
 ## Limitations
 
-- **No mark persistence**: marks are not saved to disk, so a restored pane
-  starts without block history.
+- **Scrollback cap on restore**: only the most recent 1000 rows per pane are
+  persisted, and older history is truncated. Restored rows keep their saved
+  width (no reflow until the first resize), and OSC 8 hyperlinks are not
+  persisted (text and styling survive, link clickability does not). Note that
+  persistence is opportunistic: it's captured at the next *structural* save,
+  not continuously and not on detach (see
+  [Persistence](configuration.md#persistence)).

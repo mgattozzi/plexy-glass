@@ -1330,6 +1330,121 @@ fn attach_split_detach_restart_restores_layout() {
     }
 }
 
+/// Scrollback + mark persistence across a daemon restart (abandon-daemon
+/// pattern, NOT `plexy-glass kill`, since kill deletes the state file). Run 1
+/// drives an OSC-133-marked command block into the pane, then a STRUCTURAL
+/// change (split) so the debounced save captures the scrollback; run 2 is a
+/// SECOND daemon (fresh XDG_RUNTIME_DIR, shared XDG_STATE_HOME) that restores
+/// from the surviving file. On the fresh daemon, `capture --last-command`
+/// returns the pre-restart block output, proving the marks (and history) were
+/// persisted and re-seeded into the restored pane's scrollback. Fail-soft on
+/// timing.
+#[test]
+fn scrollback_marks_persist_across_daemon_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env_run1 = isolate_dirs(&tmp);
+    let xdg2 = tmp.path().join("xdg2");
+    std::fs::create_dir_all(&xdg2).unwrap();
+    // Run 2: same XDG_STATE_HOME (shared file), fresh XDG_RUNTIME_DIR (second
+    // daemon abandoning run 1's). Wrapped in its own TestEnv guard so both
+    // daemons are reaped at teardown.
+    let env_run2 = TestEnv {
+        vars: env_run1
+            .iter()
+            .map(|(k, v)| {
+                if k == "XDG_RUNTIME_DIR" {
+                    ("XDG_RUNTIME_DIR".to_string(), xdg2.to_string_lossy().into_owned())
+                } else {
+                    (k.clone(), v.clone())
+                }
+            })
+            .collect(),
+    };
+
+    let state = tmp.path().join("state/plexy-glass/sessions/sbpersist.json");
+
+    // Run 1: attach -n sbpersist, drive a marked block, then split (structural
+    // change → dirty → debounced save captures the scrollback), wait for the
+    // file to carry persisted scrollback, then detach.
+    {
+        let mut s1 = TestSession::builder(&env_run1).args(&["attach", "-n", "sbpersist"]).start();
+        assert!(s1.wait_ready("sbpersist", Duration::from_secs(20)), "sbpersist never rendered");
+
+        // Same OSC-133 block structure as capture_last_command_returns_block_output.
+        // Quote-concat so the EXECUTED output is the plain `SB_LINE_1`.
+        let (send_status, _, send_err) = run_cli(
+            &env_run1,
+            &[
+                "send",
+                "-n",
+                "sbpersist",
+                "--enter",
+                "printf '\\033]133;A\\007SBPONE\\r\\n\\033]133;C\\007SB_'LINE'_1\\nSB_'LINE'_2\\n\\033]133;D;0\\007\\033]133;A\\007SBPTWO\\n'",
+            ],
+        );
+        assert!(send_status.success(), "send failed: {send_err}");
+        // Wait for the marked output to be on screen (marks set in the emulator).
+        if !s1.wait_for(b"SB_LINE_1", Duration::from_secs(15)) {
+            eprintln!("note: marked output never rendered — fail-soft.");
+            return;
+        }
+
+        // Structural change AFTER the marked output: split marks the session
+        // dirty, triggering the debounced (~1.5s) save that captures scrollback.
+        // The split puts a fresh empty pane on the right and makes it active;
+        // refocus the LEFT pane (the one carrying the marked block) so the saved
+        // active pane (and thus `capture --last-command`'s target after restore)
+        // is the one with the history.
+        s1.send_prefix(b'v');
+        let _ = s1.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)); // vertical gutter
+        s1.send_prefix(b'h'); // select the left (history) pane
+
+        // Poll the file until persisted scrollback lands (the additive
+        // `scrollback` key only appears once the capture wrote it).
+        if !wait_for_file_contains(&state, &("scroll".to_string() + "back"), Duration::from_secs(8)) {
+            eprintln!("note: scrollback not persisted to {state:?} — fail-soft.");
+            return;
+        }
+
+        s1.send_prefix(b'd'); // detach
+        drop(s1);
+    }
+
+    // Run 2: fresh daemon restores from the surviving file; capture
+    // --last-command must return the pre-restart block output.
+    {
+        let s2 = TestSession::builder(&env_run2).args(&["attach", "-n", "sbpersist"]).start();
+        if !s2.wait_ready("sbpersist", Duration::from_secs(20)) {
+            eprintln!("note: restored daemon never rendered — fail-soft.");
+            return;
+        }
+        // The restored history is in the FIRST pane's scrollback. capture
+        // --last-command reads the most recent completed block off the seeded
+        // Row.marks. Poll: restore + first render can lag.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut got = String::new();
+        let mut ok = false;
+        while Instant::now() < deadline {
+            let (status, stdout, _) = run_cli(&env_run2, &["capture", "-n", "sbpersist", "--last-command"]);
+            if status.success() && stdout.contains("SB_LINE_1") {
+                got = stdout;
+                ok = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        assert!(
+            ok,
+            "capture --last-command on the restored daemon never returned the pre-restart block output. last stdout: {got:?}; pane: {}",
+            s2.snapshot_str()
+        );
+        assert!(got.contains("SB_LINE_2"), "restored block output must contain SB_LINE_2: {got:?}");
+        // The prompt text and the next prompt must be excluded (same range rule).
+        assert!(!got.contains("SBPONE"), "block output must exclude the prompt text: {got:?}");
+        assert!(!got.contains("SBPTWO"), "block output must exclude the next prompt: {got:?}");
+    }
+}
+
 /// Smoke-test that a mouse drag-resize sequence (press on gutter → drag right →
 /// release) flows end-to-end. Fail-soft: timing variance may cause the daemon
 /// to interpret the click outside the gutter, in which case the test passes

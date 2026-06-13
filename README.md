@@ -16,7 +16,10 @@ is designed alongside Ghostty-style terminal integration.
 - Sessions, windows, and panes with horizontal/vertical splits, pane zoom, and
   keyboard or mouse resize
 - Detach/reattach with on-disk session persistence and restore (split ratios
-  are restored faithfully, not reset)
+  are restored faithfully, not reset; each pane's scrollback and OSC 133
+  command-block marks are restored across a daemon restart, so block nav and
+  exit-status colors light up on the restored history; see
+  [Persistence](docs/configuration.md#persistence))
 - Multiple clients attached to the same session
 - Copy mode with search
 - Full mouse support, including click-to-focus and drag-resize on split borders
@@ -44,8 +47,8 @@ is designed alongside Ghostty-style terminal integration.
   sessions, never rebuilding live ones) and `:switch` auto-creates a
   declared-but-not-running session
 - A visual session picker (`Ctrl+a w`) and a choose-tree
-  (session → window → pane drill-down with incremental filter `/`,
-  collapse/expand `h`/`l`, and session rename `r`, `Ctrl+a W`)
+  (session → window → pane drill-down with incremental filter `/`, collapse/expand `h`/`l`,
+  and session rename `r`, `Ctrl+a W`)
 - Pane mobility: break a pane to its own window, join it elsewhere, swap
   panes (including cross-window swap with the marked pane), and a marked pane
   for cross-window moves; focus and zoom follow the slot, mark is preserved
@@ -59,10 +62,10 @@ is designed alongside Ghostty-style terminal integration.
   `plexy-glass capture --last-command` (plain text) or
   `plexy-glass capture --last-command --json` (structured `{"output",
   "exit_code", "command_line"}`); `plexy-glass run --json` returns the same
-  structure for synchronous runs; each pane's left border (popup pane borders
-  included) is color-coded per row by block exit status (ok color `│` /
-  fail color `▌`), viewport-tracked and live-reloading with the `blocks`
-  config node
+  structure for synchronous runs; each pane's left border (popup pane
+  borders included) is color-coded per row by block exit status (ok color `│` /
+  fail color `▌`), viewport-tracked and live-reloading with the `blocks` config
+  node
 
 ## Quick start
 
