@@ -51,6 +51,51 @@ Some verbs require an attached client and are refused headlessly:
 These return exit 1 with `<verb>: requires an attached client`. All other
 verbs, including `reload` and `paste`, work headlessly.
 
+## Paste buffers from scripts
+
+The buffer verbs make `cmd` a text/file bridge into the daemon's
+paste-buffer stack (the same stack copy-mode yanks push onto):
+
+```sh
+plexy-glass cmd "load-buffer ~/snippets/deploy.sh"   # file → newest buffer
+plexy-glass cmd "set-buffer some literal   text"     # text → newest buffer (verbatim)
+plexy-glass cmd "save-buffer /tmp/yanked.txt"        # newest buffer → file
+plexy-glass cmd "save-buffer buffer3 /tmp/old.txt"   # named buffer → file
+plexy-glass cmd "paste buffer2"                      # paste a named buffer
+```
+
+Success messages print to stdout and name what happened:
+`buffer set (N bytes)`, `saved bufferN → /abs/path (N bytes)`,
+`loaded /abs/path (N bytes)`.
+
+### Path policy
+
+`save-buffer` and `load-buffer` paths are resolved **daemon-side**. A leading
+`~` / `~/…` expands against the daemon's `$HOME` (there is no `~user` form).
+After expansion, **relative paths are refused** with
+`<verb>: relative paths are not supported — the daemon's working directory is
+not yours; use an absolute or ~ path`. We refuse them because the daemon's
+working directory is whichever directory the first auto-spawning client
+happened to be in, and you can't discover it from any plexy-glass surface,
+so relative resolution would be a silent footgun.
+
+### Limits
+
+- `set-buffer` text is one prompt line: leading/trailing whitespace is
+  trimmed (internal whitespace is preserved verbatim) and a line cannot carry
+  newlines, so multi-line content goes through `load-buffer`. No clipboard
+  interaction (OSC 52 remains a copy-mode-yank behavior).
+- `load-buffer` accepts regular files only (FIFOs, devices, directories, and
+  symlinks are refused with `load-buffer: <path>: not a regular file`) and
+  caps the size at **10 MiB** (`load-buffer: <path> is N bytes (limit 10
+  MiB)`); buffers are memory-resident and cloned per paste. Empty files load
+  as an empty buffer.
+- `save-buffer` writes the buffer's bytes verbatim as a truncating overwrite
+  (non-atomic, these are user export files, not state files). A first token
+  shaped like `bufferN` names the source buffer; otherwise the whole tail is
+  the path and the **newest** buffer is written. A path whose first word is
+  literally `bufferN ` is pathological and not supported.
+
 ## Exit-code semantics
 
 Exit 0 means all operations succeeded. Exit 1 means at least one failed. For

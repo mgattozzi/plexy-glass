@@ -206,7 +206,10 @@ argument also works cross-window: the marked pane's slot and the active pane's
 slot exchange occupants via `replace_leaf`/`swap_occupant`, focus and zoom
 follow the slot, mark is preserved); **paste buffers** —
 copy-mode yanks push a bounded named-buffer stack, `Ctrl+a ]` pastes the newest,
-`Ctrl+a =` opens a choose-buffer overlay; **popup panes** — `Ctrl+a P` /
+`:paste bufferN` pastes by name, `Ctrl+a =` opens a choose-buffer overlay, and
+`:set-buffer` / `:save-buffer` / `:load-buffer` bridge text and files
+(prompt-only verbs at the connection layer; daemon-side paths, `~`-expanded,
+relative refused; load gated to regular files ≤ 10 MiB); **popup panes** — `Ctrl+a P` /
 `:popup [cmd]` / `bind "…" "popup:lazygit"` opens a transient PTY-backed
 floating pane (centered 80%×80% box) running `$SHELL -c <cmd>` at the active
 pane's live OSC-7 cwd (home-base fallback); modal (all keys to the child, every
@@ -296,7 +299,7 @@ implementation; user-facing docs (README / the configuration reference) are
 updated as part of each feature, per **User documentation**. Workflows
 (`Workflow` tool) drive the review fan-outs.
 
-Not yet built (future work): pipe-pane; silence monitoring + bell/activity alert messages; set/save/load paste buffers;
+Not yet built (future work): pipe-pane; silence monitoring + bell/activity alert messages;
 mark persistence across daemon restart; push notifications on run completion.
 Declarative-session v1 boundaries left for later: split ratios + active
 window/pane selection in the template, per-pane env maps, re-reading templates on
@@ -332,4 +335,7 @@ focus/zoom follow the slot, mark preserved — shipped 2026-06-12 spec/plan;
 choose-tree v2 — incremental filter `/`, collapse/expand `h`/`l`, session
 rename `r` via registry re-key + `Mutex<String>` name accessor +
 commit-on-success re-stamp + deferred old-file sweep — shipped 2026-06-12
-spec/plan.)
+spec/plan; paste buffers v2 — `set-buffer`/`save-buffer`/`load-buffer` +
+paste-by-name, shape-based save split, refuse-relative path policy, load
+gates (regular file, 10 MiB), preview 4 KiB scan cap — shipped 2026-06-12
+spec.)

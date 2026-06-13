@@ -620,8 +620,11 @@ cancels. Parse errors appear as a transient status-line message.
 | `next-prompt` | nothing | Scroll viewport forward to the next prompt |
 | `copy-output` | nothing | Yank the last completed command block's output |
 | `copy` | nothing | Enter copy mode |
-| `paste` | nothing | Paste the newest buffer |
+| `paste` | `[bufferN]` | Paste the newest buffer, or the named one |
 | `buffers` | nothing | Choose-buffer overlay |
+| `set-buffer` | `<text…>` | Push literal text as a new paste buffer (verbatim; no newlines) |
+| `save-buffer` | `[bufferN] <path…>` | Write a buffer (default: the newest) to a file, bytes verbatim |
+| `load-buffer` | `<path…>` | Read a file into a new paste buffer (regular files only, 10 MiB cap) |
 | `sync` | nothing | Toggle sync-panes |
 | `monitor-activity` / `monitor-bell` | nothing | Toggle window monitoring |
 | `popup` | `[command line…]` | Open a popup (scratch shell if no command) |
@@ -633,8 +636,12 @@ cancels. Parse errors appear as a transient status-line message.
 | `detach` | nothing | Detach |
 | `help` | nothing | Help overlay |
 
-Verbs marked “—” reject arguments. `rename`, `rename-pane`, `switch`, and
-`popup` take the rest of the line verbatim (internal spaces preserved).
+Verbs marked “—” reject arguments. `rename`, `rename-pane`, `switch`,
+`popup`, `set-buffer`, `load-buffer`, and `save-buffer`'s path take the rest
+of the line verbatim (internal spaces preserved). Note that `save-buffer`
+and `load-buffer` paths must be absolute or `~`-prefixed, since they resolve
+daemon-side. See [docs/scripting.md](scripting.md#path-policy) for the path
+policy and limits.
 
 ## Scripting from the CLI
 

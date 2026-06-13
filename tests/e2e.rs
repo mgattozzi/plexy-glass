@@ -1711,6 +1711,80 @@ fn cli_cmd_structural_and_errors() {
     );
 }
 
+/// Paste-buffers v2 happy path over the CLI: `cmd "set-buffer …"` pushes a
+/// buffer, `cmd "save-buffer <abs>"` writes its bytes to a file, `cmd
+/// "load-buffer <abs>"` reads them back as a new buffer, and `cmd "paste
+/// bufferN"` types that buffer into the pane (a `cat` child echoes it).
+#[test]
+fn cli_buffer_set_save_load_paste_round_trips() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // `set-buffer` creates `buffer0` (confirmation message on stdout).
+    let (status, stdout, stderr) = run_cli(&env, &["cmd", "set-buffer hello world"]);
+    assert!(status.success(), "cmd set-buffer failed: {stderr}");
+    assert!(
+        stdout.contains("buffer set (11 bytes)"),
+        "unexpected set-buffer output: {stdout}"
+    );
+
+    // `save-buffer` (the newest) writes the bytes to the file verbatim.
+    let out = tmp.path().join("buf.txt");
+    let (status, stdout, stderr) =
+        run_cli(&env, &["cmd", &format!("save-buffer {}", out.display())]);
+    assert!(status.success(), "cmd save-buffer failed: {stderr}");
+    assert!(
+        stdout.contains("saved buffer0"),
+        "save must name the buffer it wrote: {stdout}"
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), b"hello world");
+
+    // `load-buffer` pushes a new newest buffer (`buffer1`).
+    let (status, stdout, stderr) =
+        run_cli(&env, &["cmd", &format!("load-buffer {}", out.display())]);
+    assert!(status.success(), "cmd load-buffer failed: {stderr}");
+    assert!(stdout.contains("(11 bytes)"), "unexpected load-buffer output: {stdout}");
+
+    // Start `cat` so the paste goes to cat's stdin and is echoed (probe loop
+    // per the copy-mode e2e: cat echoes the plain token once it is up).
+    sess.send_str("cat\n");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut cat_ready = false;
+    while Instant::now() < deadline {
+        sess.send_str("CATREADY\n");
+        if sess.wait_for(b"CATREADY", Duration::from_millis(500)) {
+            cat_ready = true;
+            break;
+        }
+    }
+    assert!(cat_ready, "cat child never came up: {}", sess.snapshot_str());
+
+    // Paste `buffer1` (the loaded one) and `cat` echoes it into the pane.
+    // Assert via `capture` (the grid as text): the frame diff skips blank
+    // cells, so the needle is not contiguous in the raw PTY stream, and the
+    // emulator buffers the trailing grapheme until the next byte arrives, so
+    // probe for all but the last char.
+    let (status, _stdout, stderr) = run_cli(&env, &["cmd", "paste buffer1"]);
+    assert!(status.success(), "cmd paste buffer1 failed: {stderr}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut pasted = false;
+    while Instant::now() < deadline {
+        let (status, stdout, _stderr) = run_cli(&env, &["capture"]);
+        if status.success() && stdout.contains("hello worl") {
+            pasted = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        pasted,
+        "pasted buffer never echoed by cat. raw: {}",
+        sess.snapshot_str()
+    );
+}
+
 /// Cross-window swap-with-marked: `Ctrl+a m` marks a pane in window 2; after
 /// switching back to window 1 and running `:swap-pane`, the two panes exchange
 /// slots, so window 1 holds the former window-2 pane and vice versa.

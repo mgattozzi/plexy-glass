@@ -25,7 +25,9 @@ is designed alongside Ghostty-style terminal integration.
   `main-horizontal`, `main-vertical`, `tiled`), cycled with `Ctrl+a Space` or
   applied by name with `:layout <name>`
 - Paste buffers: copy-mode yanks push a named-buffer stack; paste the newest
-  with `Ctrl+a ]`, or pick one with `Ctrl+a =`
+  with `Ctrl+a ]` or a named one with `:paste bufferN`, pick one with
+  `Ctrl+a =`, and bridge text/files with `:set-buffer`, `:save-buffer`, and
+  `:load-buffer` (scriptable via `plexy-glass cmd`)
 - Per-window activity and bell monitoring, surfaced as flags in the status bar
 - Configurable status bar with live config reload
 - KDL v2 configuration (`config.kdl`)
