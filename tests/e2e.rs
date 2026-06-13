@@ -3083,3 +3083,55 @@ fn cli_pipe_pane_streams_then_stops() {
         "post-stop output leaked into the pipe file: {contents:?}"
     );
 }
+
+/// `monitor-command` surfaces a background window's command completion as a
+/// status message + a `✗` window-list flag. `send` targets the ACTIVE window,
+/// so the synthetic completion is scheduled (a backgrounded delayed printf of
+/// the OSC-133 C/D;1/A sequence) into window 1 BEFORE switching to a new
+/// window, since a "switch then send into window 1" order is unimplementable.
+#[test]
+fn cli_monitor_command_alerts_background_completion() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Turn monitor-command ON for window 1 (the active window).
+    let (status, _o, stderr) = run_cli(&env, &["cmd", "monitor-command"]);
+    assert!(status.success(), "cmd monitor-command failed: {stderr}");
+
+    // Schedule a delayed command completion in window 1's shell: after ~1s,
+    // emit OSC 133;C (command start), some output, 133;D;1 (done, exit 1), and
+    // 133;A (next prompt). Backgrounded so the shell returns immediately and we
+    // can switch windows before it fires. The single-quoted printf format keeps
+    // the ESC bytes literal in the typed line; the shell's printf interprets
+    // the \033/\007 escapes.
+    let printf =
+        r"( sleep 1; printf '\033]133;C\007out\033]133;D;1\007\033]133;A\007' ) &";
+    let (status, _o, stderr) = run_cli(&env, &["send", "--enter", printf]);
+    assert!(status.success(), "send backgrounded printf failed: {stderr}");
+
+    // Switch to a new window (Ctrl+a c) so window 1 is now in the background
+    // when the completion fires ~1s later.
+    sess.send_prefix(b'c');
+
+    // Poll the status line for the alert message. The diff renderer skips
+    // UNCHANGED cells (incl. spaces) between frames, so the message can render
+    // with leading chars clobbered by the prior "monitor-command on" message at
+    // the same column and with its inter-word spaces dropped (the documented
+    // "27 48 never renders contiguously" behavior). So we match a contiguous
+    // fragment downstream of that collision that survives, "in window 1 (shell)",
+    // rather than the full "done in window 1 …" prefix.
+    assert!(
+        sess.wait_for(b"in window 1 (shell)", Duration::from_secs(15)),
+        "monitor-command alert message never appeared. pty: {}",
+        sess.snapshot_str()
+    );
+    // The window list shows the `✗` (nonzero-exit) flag on window 1. A single
+    // non-space glyph, so it's immune to the space-skipping diff artifact.
+    assert!(
+        sess.wait_for("✗".as_bytes(), Duration::from_secs(15)),
+        "the ✗ done flag never appeared in the window list. pty: {}",
+        sess.snapshot_str()
+    );
+}

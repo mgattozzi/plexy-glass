@@ -1944,6 +1944,114 @@ async fn command_completion_counter_decrease_re_baselines_silently() {
     assert_eq!(m.take_active_message(), Some("done in window 2 (api): exit 2"));
 }
 
+// ----- silence monitoring -----
+
+#[tokio::test]
+async fn monitor_silence_set_and_clear_messages() {
+    let mut m = mk_mgr();
+    m.handle_command(Command::SetMonitorSilence(Some(30))).unwrap();
+    assert_eq!(m.take_active_message(), Some("monitor-silence 30s"));
+    assert_eq!(m.active_window().monitor_silence(), Some(Duration::from_secs(30)));
+    m.handle_command(Command::SetMonitorSilence(None)).unwrap();
+    assert_eq!(m.take_active_message(), Some("monitor-silence off"));
+    assert_eq!(m.active_window().monitor_silence(), None);
+}
+
+#[tokio::test]
+async fn any_silence_monitored_reflects_arm_state() {
+    let mut m = mk_mgr();
+    assert!(!m.any_silence_monitored(), "no monitors by default");
+    m.handle_command(Command::SetMonitorSilence(Some(5))).unwrap();
+    assert!(m.any_silence_monitored(), "armed after set");
+    m.handle_command(Command::SetMonitorSilence(None)).unwrap();
+    assert!(!m.any_silence_monitored(), "disarmed after clear");
+}
+
+#[tokio::test]
+async fn silence_edge_in_background_window_flags_and_messages() {
+    let mut m = mk_mgr(); // window 0
+    m.new_window_with_spec(spec(), "build".into()).unwrap(); // window 1, active
+    // Inject a small threshold directly (sub-second control without the
+    // 1s-minimum parse path), then switch away so window 1 is background.
+    m.windows_mut()[1].set_monitor_silence(Some(Duration::from_millis(80)));
+    m.handle_command(Command::SelectWindow(0)).unwrap();
+    // Before the threshold elapses: no edge.
+    assert!(!m.check_silence_alerts(), "no silence before the threshold");
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(m.check_silence_alerts(), "silence edge fires past the threshold");
+    assert_eq!(m.take_active_message(), Some("silence in window 2 (build)"));
+    assert!(m.windows()[1].silence_flag(), "the ~ flag is set");
+    // The episode latch prevents re-firing on the next tick while still silent.
+    assert!(!m.check_silence_alerts(), "no re-fire within the same silence episode");
+}
+
+#[tokio::test]
+async fn silence_active_window_never_fires() {
+    let mut m = mk_mgr(); // window 0, active
+    m.active_window_mut().set_monitor_silence(Some(Duration::from_millis(50)));
+    tokio::time::sleep(Duration::from_millis(90)).await;
+    // The active window is excluded (else an idle active window flickers 1 Hz).
+    assert!(!m.check_silence_alerts(), "active window never silence-fires");
+    assert!(!m.active_window().silence_flag());
+}
+
+#[tokio::test]
+async fn silence_output_resets_timer_and_latch() {
+    let mut m = mk_mgr();
+    m.new_window_with_spec(spec(), "build".into()).unwrap(); // window 1, active
+    m.windows_mut()[1].set_monitor_silence(Some(Duration::from_millis(80)));
+    m.handle_command(Command::SelectWindow(0)).unwrap();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(m.check_silence_alerts(), "first silence episode fires");
+    let _ = m.take_active_message();
+    // Output resumes: refresh `last_output` + reset the latch.
+    m.windows_mut()[1].note_drain_output(true);
+    // Right after output, no silence (timer reset) and no re-fire.
+    assert!(!m.check_silence_alerts(), "output reset the timer");
+    // A NEW silence episode after output resumes can fire again.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(m.check_silence_alerts(), "a new silence episode after output re-fires");
+    assert_eq!(m.take_active_message(), Some("silence in window 2 (build)"));
+}
+
+#[tokio::test]
+async fn silence_viewing_clears_flag_but_not_latch() {
+    let mut m = mk_mgr();
+    m.new_window_with_spec(spec(), "build".into()).unwrap(); // window 1, active
+    m.windows_mut()[1].set_monitor_silence(Some(Duration::from_millis(80)));
+    m.handle_command(Command::SelectWindow(0)).unwrap();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(m.check_silence_alerts(), "silence fires");
+    let _ = m.take_active_message();
+    assert!(m.windows()[1].silence_flag());
+    // View window 1: `clear_alerts` clears the ~ FLAG but not the episode latch.
+    m.handle_command(Command::SelectWindow(1)).unwrap();
+    let _ = m.update_monitor_flags(); // clears the now-active window's flag
+    assert!(!m.windows()[1].silence_flag(), "viewing cleared the ~ flag");
+    // Go back to window 0; the window is STILL silent (no output happened), so
+    // the latch must prevent a re-fire (no 1 Hz flag loop).
+    m.handle_command(Command::SelectWindow(0)).unwrap();
+    assert!(!m.check_silence_alerts(), "no re-fire while still silent (latch held)");
+    assert!(!m.windows()[1].silence_flag(), "flag stays clear without a re-fire");
+}
+
+#[tokio::test]
+async fn silence_disable_clears_flag_and_threshold() {
+    let mut m = mk_mgr();
+    m.new_window_with_spec(spec(), "build".into()).unwrap();
+    m.windows_mut()[1].set_monitor_silence(Some(Duration::from_millis(60)));
+    m.handle_command(Command::SelectWindow(0)).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(m.check_silence_alerts());
+    let _ = m.take_active_message();
+    assert!(m.windows()[1].silence_flag());
+    // Disabling (0/None) clears the threshold, the flag, and the latch.
+    m.windows_mut()[1].set_monitor_silence(None);
+    assert_eq!(m.windows()[1].monitor_silence(), None);
+    assert!(!m.windows()[1].silence_flag(), "disable cleared the ~ flag");
+    assert!(!m.check_silence_alerts(), "disabled window never fires");
+}
+
 #[tokio::test]
 async fn open_popup_sets_state_with_derived_size() {
     let notify = Arc::new(Notify::new());

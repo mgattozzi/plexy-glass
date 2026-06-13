@@ -267,6 +267,10 @@ impl WindowManager {
         let mut message: Option<String> = None;
         for (i, w) in self.windows.iter_mut().enumerate() {
             let (acted, belled) = w.drain_pane_alerts();
+            // Silence-timing bookkeeping updates every drain for every window
+            // regardless of monitor/active state (the silence tick reads
+            // `last_output`); output also resets the per-window episode latch.
+            w.note_drain_output(acted);
             // Command-completion baselines advance every drain for every
             // window; the flag/edge is recorded only for a monitored non-active
             // window (background completion you can't see).
@@ -287,6 +291,41 @@ impl WindowManager {
                         None => format!("done in window {} ({})", i + 1, w.name),
                     });
                 }
+            }
+        }
+        if let Some(text) = message {
+            self.set_status_message(text);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether any window currently arms silence monitoring. The session uses
+    /// this to spawn the dedicated silence tick task on the first arm and abort
+    /// it on the last disarm (armed-only fast path, no idle 1 Hz task).
+    pub fn any_silence_monitored(&self) -> bool {
+        self.windows.iter().any(|w| w.monitor_silence().is_some())
+    }
+
+    /// Silence-tick step: check every monitored NON-active window for the
+    /// silence threshold and fold a fresh edge into the sticky `~` flag + a
+    /// status message. Returns `true` if any edge fired, so the tick notifies
+    /// the coordinator ONLY on an edge (a silent session is by definition not
+    /// rendering, so the tick must drive the wake, not ride renders). The
+    /// active-window exclusion is required: an idle active window would
+    /// otherwise flicker at 1 Hz (tick sets → render clears → tick re-fires).
+    #[must_use = "schedule the status-message TTL wake when a silence edge fired"]
+    pub fn check_silence_alerts(&mut self) -> bool {
+        let active = self.active;
+        let now = Instant::now();
+        let mut message: Option<String> = None;
+        for (i, w) in self.windows.iter_mut().enumerate() {
+            if i == active {
+                continue;
+            }
+            if w.check_silence(now) {
+                message = Some(format!("silence in window {} ({})", i + 1, w.name));
             }
         }
         if let Some(text) = message {

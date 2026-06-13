@@ -42,6 +42,9 @@ pub enum Command {
     ToggleMonitorBell,
     /// Toggle monitor-command (command-completion alerts) on the active window.
     ToggleMonitorCommand,
+    /// Set the silence-monitor threshold (seconds) on the active window; `None`
+    /// (or 0) disables it.
+    SetMonitorSilence(Option<u64>),
     RenameWindow,
     RenamePane,
     ShowHelp,

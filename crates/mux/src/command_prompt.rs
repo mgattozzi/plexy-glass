@@ -67,6 +67,8 @@ pub enum PromptCommand {
     ToggleMonitorActivity,
     ToggleMonitorBell,
     ToggleMonitorCommand,
+    /// Set the silence-monitor threshold in seconds (`None` or `0` = off).
+    MonitorSilence(Option<u64>),
     /// Open a floating popup running the given command line (`None` = scratch shell).
     Popup(Option<String>),
     /// Close the floating popup.
@@ -101,7 +103,8 @@ impl std::error::Error for ParseError {}
 pub const VERBS: &[&str] = &[
     "break", "buffers", "close-popup", "copy", "copy-output", "detach", "focus",
     "help", "join", "kill", "last", "layout", "load-buffer", "mark",
-    "monitor-activity", "monitor-bell", "monitor-command", "new", "next", "next-prompt", "paste",
+    "monitor-activity", "monitor-bell", "monitor-command", "monitor-silence", "new", "next",
+    "next-prompt", "paste",
     "pipe-pane", "popup", "prev", "prev-prompt", "reload", "rename", "rename-pane", "resize",
     "save-buffer", "sessions", "set-buffer", "split", "swap", "switch", "sync",
     "tree", "win", "zoom",
@@ -210,6 +213,20 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
         "monitor-activity" => no_args(PromptCommand::ToggleMonitorActivity),
         "monitor-bell" => no_args(PromptCommand::ToggleMonitorBell),
         "monitor-command" => no_args(PromptCommand::ToggleMonitorCommand),
+        "monitor-silence" => match args.as_slice() {
+            // No argument disables (same as `0`).
+            [] => Ok(PromptCommand::MonitorSilence(None)),
+            [n] => {
+                let secs: u64 = n
+                    .parse()
+                    .map_err(|_| err("monitor-silence: expected a number of seconds"))?;
+                // 0 disables; any positive value arms the threshold.
+                Ok(PromptCommand::MonitorSilence((secs > 0).then_some(secs)))
+            }
+            // Exactly zero or one argument (`monitor-silence 30 x` is rejected
+            // just like `win 1 2`).
+            _ => Err(err("monitor-silence: expected a number of seconds")),
+        },
         "prev-prompt" => no_args(PromptCommand::PrevPrompt),
         "next-prompt" => no_args(PromptCommand::NextPrompt),
         "copy-output" => no_args(PromptCommand::CopyOutput),
@@ -598,6 +615,25 @@ mod tests {
         assert_eq!(p("monitor-command").unwrap(), PromptCommand::ToggleMonitorCommand);
         assert!(p("monitor-activity x").is_err());
         assert!(p("monitor-command x").is_err());
+    }
+
+    #[test]
+    fn monitor_silence_arity_and_errors() {
+        // No arg / 0 disables (None).
+        assert_eq!(p("monitor-silence").unwrap(), PromptCommand::MonitorSilence(None));
+        assert_eq!(p("monitor-silence 0").unwrap(), PromptCommand::MonitorSilence(None));
+        // A positive number arms the threshold.
+        assert_eq!(p("monitor-silence 30").unwrap(), PromptCommand::MonitorSilence(Some(30)));
+        // Exactly zero or one argument: a second token is rejected like `win 1 2`.
+        assert_eq!(
+            p("monitor-silence 30 x").unwrap_err().to_string(),
+            "monitor-silence: expected a number of seconds"
+        );
+        // A non-numeric argument gets the pinned error text.
+        assert_eq!(
+            p("monitor-silence abc").unwrap_err().to_string(),
+            "monitor-silence: expected a number of seconds"
+        );
     }
 
     #[test]

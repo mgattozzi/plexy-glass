@@ -6,6 +6,7 @@ use plexy_glass_mux::{
 };
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 pub struct Window {
     pub id: WindowId,
@@ -52,6 +53,22 @@ pub struct Window {
     /// UNCONDITIONALLY every drain for every pane (so a toggle-on never
     /// backlogs history); a counter DECREASE (RIS) re-baselines silently.
     block_baselines: HashMap<PaneId, u64>,
+    /// Silence threshold (tmux's `monitor-silence`): `Some(N)` = alert after N
+    /// of no output; `None` = off. Set by `:monitor-silence <secs>`.
+    monitor_silence: Option<Duration>,
+    /// Last instant this window produced output, updated in the drain whenever
+    /// the activity signal fired. Seeds to construction time so a window that
+    /// never emits anything still ages toward its silence threshold.
+    last_output: Instant,
+    /// Sticky silence flag: set when the silence threshold is crossed in a
+    /// background window; surfaced as `~` in the status window-list, cleared on
+    /// view like activity/bell.
+    silence: bool,
+    /// Episode latch: fire at most once per silence EPISODE. Set when the
+    /// silence edge fires, reset ONLY when output resumes. Viewing clears the
+    /// `silence` FLAG but NOT this latch, so a view-while-still-silent does not
+    /// re-fire on the next tick (a 1 Hz loop); output resuming re-arms it.
+    silence_fired: bool,
 }
 
 impl Window {
@@ -95,6 +112,10 @@ impl Window {
             bell: false,
             done: None,
             block_baselines: HashMap::new(),
+            monitor_silence: None,
+            last_output: Instant::now(),
+            silence: false,
+            silence_fired: false,
         })
     }
 
@@ -380,6 +401,10 @@ impl Window {
             bell: false,
             done: None,
             block_baselines: HashMap::new(),
+            monitor_silence: None,
+            last_output: Instant::now(),
+            silence: false,
+            silence_fired: false,
         }
     }
 
@@ -413,6 +438,20 @@ impl Window {
         self.monitor_command
     }
 
+    /// Set (or clear, with `None`) the silence threshold. Clearing also resets
+    /// the sticky flag and the episode latch so a re-arm starts clean.
+    pub fn set_monitor_silence(&mut self, threshold: Option<Duration>) {
+        self.monitor_silence = threshold;
+        if threshold.is_none() {
+            self.silence = false;
+            self.silence_fired = false;
+        }
+    }
+
+    pub fn monitor_silence(&self) -> Option<Duration> {
+        self.monitor_silence
+    }
+
     pub fn activity_flag(&self) -> bool {
         self.activity
     }
@@ -427,11 +466,20 @@ impl Window {
         self.done
     }
 
-    /// Clear the sticky alert flags (the window became current).
+    /// The sticky silence flag (`~`).
+    pub fn silence_flag(&self) -> bool {
+        self.silence
+    }
+
+    /// Clear the sticky alert flags (the window became current). Clears the
+    /// silence FLAG but NOT the `silence_fired` episode latch: viewing a
+    /// still-silent window must not let the next tick re-fire (a 1 Hz loop);
+    /// only resuming output (`note_drain_output`) resets the latch.
     pub fn clear_alerts(&mut self) {
         self.activity = false;
         self.bell = false;
         self.done = None;
+        self.silence = false;
     }
 
     /// Set the sticky activity flag (called by the manager for a background
@@ -463,6 +511,40 @@ impl Window {
             }
         }
         (acted, belled)
+    }
+
+    /// Fold this drain's activity signal into silence-timing bookkeeping.
+    /// Called every drain for every window (so timing is uniform regardless of
+    /// monitor/active state): when output fired, refresh `last_output` and
+    /// reset the episode latch so the NEXT silence episode can fire again.
+    pub fn note_drain_output(&mut self, acted: bool) {
+        if acted {
+            self.last_output = Instant::now();
+            self.silence_fired = false;
+        }
+    }
+
+    /// Silence-tick check: if this window monitors silence and has produced no
+    /// output for at least the threshold AND has not already fired this
+    /// episode, set the sticky `~` flag and latch the episode. Returns whether
+    /// this was a fresh silence EDGE (so the tick notifies only on an edge).
+    /// The caller must exclude the active window (an idle active window would
+    /// otherwise flicker at 1 Hz: tick sets the flag → render clears it → tick
+    /// re-fires).
+    pub fn check_silence(&mut self, now: Instant) -> bool {
+        let Some(threshold) = self.monitor_silence else {
+            return false;
+        };
+        if self.silence_fired {
+            return false;
+        }
+        if now.duration_since(self.last_output) >= threshold {
+            self.silence = true;
+            self.silence_fired = true;
+            true
+        } else {
+            false
+        }
     }
 
     /// Set the sticky command-completion flag from a block's exit outcome

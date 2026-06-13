@@ -256,6 +256,14 @@ impl WindowManager {
                     format!("monitor-command {}", if on { "on" } else { "off" }),
                 );
             }
+            Command::SetMonitorSilence(secs) => {
+                let threshold = secs.map(std::time::Duration::from_secs);
+                self.active_window_mut().set_monitor_silence(threshold);
+                self.set_status_message(match secs {
+                    Some(n) => format!("monitor-silence {n}s"),
+                    None => "monitor-silence off".to_string(),
+                });
+            }
             Command::ResizePane(dir) => {
                 let active = self.active_window().active();
                 const STEP: i32 = 3;

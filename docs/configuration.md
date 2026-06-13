@@ -172,13 +172,29 @@ session { style fg="bg" bg="accent" bold=#true; padding 1 1 }
 
 #### `window-list`
 
-The window strip: index + name per window, with the activity/bell flags
-folded in. Needs both `active-style` (the focused window) and
+The window strip: index + name per window, with monitor flags appended after
+the name. Requires both `active-style` (the focused window) and
 `inactive-style`. No properties.
 
 ```kdl
 window-list { active-style fg="fg" bg="accent"; inactive-style fg="muted" bg="bg_bar" }
 ```
+
+Monitor flags (only ever shown on a non-current window; cleared when you view
+the window):
+
+| Flag | Meaning |
+|------|---------|
+| `!`  | bell (`monitor-bell`) |
+| `#`  | activity (`monitor-activity`) |
+| `~`  | silence, no output for the configured period (`monitor-silence`) |
+| `✓`  | a command completed with exit 0, or no exit code (`monitor-command`) |
+| `✗`  | a command completed with a nonzero exit (`monitor-command`) |
+
+Each flagged event also raises a transient status-line message (e.g.
+`activity in window 2 (api)`, `bell in window 3 (logs)`,
+`silence in window 1 (build)`, `done in window 2 (api): exit 1`). Messages are
+edge-triggered, so they fire once when the flag turns on, not continuously.
 
 #### `prefix-indicator`
 
@@ -448,6 +464,8 @@ themselves contain colons and spaces.
 | `toggle_sync_panes` | Toggle synchronized input to all panes in the window |
 | `toggle_monitor_activity` | Toggle activity monitoring for the window |
 | `toggle_monitor_bell` | Toggle bell monitoring for the window |
+| `toggle_monitor_command` | Toggle command-completion monitoring for the window |
+| `set_monitor_silence:<secs>` | Arm silence monitoring after `<secs>` (`:0` or no arg = off) |
 | `reload_config` | Reload `config.kdl` |
 | `cancel` | Do nothing (an explicit no-op, e.g. to neuter a default chord) |
 
@@ -626,7 +644,8 @@ cancels. Parse errors appear as a transient status-line message.
 | `save-buffer` | `[bufferN] <path…>` | Write a buffer (default: the newest) to a file, bytes verbatim |
 | `load-buffer` | `<path…>` | Read a file into a new paste buffer (regular files only, 10 MiB cap) |
 | `sync` | nothing | Toggle sync-panes |
-| `monitor-activity` / `monitor-bell` | nothing | Toggle window monitoring |
+| `monitor-activity` / `monitor-bell` / `monitor-command` | nothing | Toggle activity / bell / command-completion monitoring for the window |
+| `monitor-silence` | `[secs]` | Arm silence monitoring after `secs` of no output (`0` or no arg = off) |
 | `popup` | `[command line…]` | Open a popup (scratch shell if no command) |
 | `close-popup` | nothing | Close the popup |
 | `pipe-pane` | `[command line…]` | Stream the pane's raw output to a command (no command stops the pipe) |

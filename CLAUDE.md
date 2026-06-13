@@ -216,9 +216,17 @@ pane's live OSC-7 cwd (home-base fallback); modal (all keys to the child, every
 other chord swallowed), auto-closes on child exit, `Ctrl+a q` / `:close-popup`
 closes, and it is transient across detach (any client's teardown closes it) —
 `crates/daemon/src/popup.rs` + the `popup` field on `WindowManager`; and
-per-window **activity/bell
-monitoring** (`Ctrl+a M` / `:monitor-activity` / `:monitor-bell`) surfaced as
-`#`/`!` flags in the status window-list; and **keyboard-protocol negotiation** —
+per-window **monitoring** — activity/bell
+(`Ctrl+a M` / `:monitor-activity` / `:monitor-bell`, `#`/`!` flags),
+**silence** (`:monitor-silence <secs>`, `~` flag, a dedicated armed-only
+session-scope 1s tick task with a per-window episode latch), and
+**command-completion** (`:monitor-command`, OSC-133;D blocks vs a per-pane
+`blocks_completed` baseline, `✓`/`✗` flags) — each surfaced as a status
+window-list flag plus an **edge-triggered status-line alert message**
+(`activity in window 2 (api)` / `done in window 3 (logs): exit 1` / …; emitted
+under the held WM lock with the TTL wake scheduled after release via
+`Session::schedule_status_expiry_wake`); flags + toggles are runtime-only and
+clear when the window is viewed; and **keyboard-protocol negotiation** —
 the emulator is a correct negotiating terminal (guarded CSI-`m` dispatch so
 `CSI > 4 ; 2 m` is XTMODKEYS not SGR; per-pane modifyOtherKeys level + Kitty
 keyboard flags stacks; XTVERSION `CSI >q`, DECRQM `$p`, XTGETTCAP `DCS +q`
@@ -299,8 +307,13 @@ implementation; user-facing docs (README / the configuration reference) are
 updated as part of each feature, per **User documentation**. Workflows
 (`Workflow` tool) drive the review fan-outs.
 
-Not yet built (future work): silence monitoring + bell/activity alert messages;
-mark persistence across daemon restart; push notifications on run completion.
+Not yet built (future work): mark persistence across daemon restart.
+(Silence monitoring + bell/activity alert messages shipped with the 2026-06-12
+alerts feature; "push notifications on run completion" is cleared by
+monitor-command + the `run` CLI's synchronous exit code — a detached `run`
+completes in its session's active window with nobody to see a flag, and the
+exit code IS the notification for detached scripting, while monitor-command
+serves the attached-but-looking-elsewhere case.)
 Declarative-session v1 boundaries left for later: split ratios + active
 window/pane selection in the template, per-pane env maps, re-reading templates on
 `Ctrl+a R` reload, and `switch_session` auto-creating a not-yet-running declared
@@ -345,4 +358,11 @@ broadcast (`Pane::subscribe_output`), one drain task per pipe in `crate::pipe`;
 one pipe per pane (start replaces), too-slow consumers close (broadcast
 `Lagged` → kill+reap), every close path funnels through one kill→reap→clear-slot
 exit; cwd via the shared `WindowManager::pane_cwd(target)`; runtime-only (not
-persisted), popup pipes die on detach — shipped 2026-06-12 spec/plan.)
+persisted), popup pipes die on detach — shipped 2026-06-12 spec/plan; alerts —
+edge-triggered activity/bell/silence/command-completion alert messages +
+`~`/`✓`/`✗` window-list flags, `:monitor-command` / `:monitor-silence <secs>`
+(parse arity 0|1, pinned error text), per-window `blocks_completed` baselines
+(advance unconditionally, RIS decrease re-baselines silently), a dedicated
+armed-only session-scope 1s silence tick with a per-window episode latch,
+deadlock-aware message emission under the held WM lock +
+`Session::schedule_status_expiry_wake` — shipped 2026-06-12 spec/plan.)

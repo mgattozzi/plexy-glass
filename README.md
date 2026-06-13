@@ -31,7 +31,10 @@ is designed alongside Ghostty-style terminal integration.
   with `Ctrl+a ]` or a named one with `:paste bufferN`, pick one with
   `Ctrl+a =`, and bridge text/files with `:set-buffer`, `:save-buffer`, and
   `:load-buffer` (scriptable via `plexy-glass cmd`)
-- Per-window activity and bell monitoring, surfaced as flags in the status bar
+- Per-window monitoring: activity (`#`), bell (`!`), silence (`~`,
+  `:monitor-silence <secs>`), and command completion (`✓`/`✗`,
+  `:monitor-command`), all surfaced as status-bar window-list flags and
+  edge-triggered status-line alert messages
 - Configurable status bar with live config reload
 - KDL v2 configuration (`config.kdl`)
 - Declarative sessions: recursive `session → window → split/pane` layouts in

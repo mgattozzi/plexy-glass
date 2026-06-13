@@ -24,6 +24,9 @@ pub struct WindowSummary {
     /// `Some(false)` → `✗` (nonzero exit), `None` → no flag. Cleared upstream
     /// when the window becomes current, like activity/bell.
     pub done: Option<bool>,
+    /// Sticky silence flag (`~`): set when a monitored background window
+    /// produced no output for its silence threshold. Cleared on view.
+    pub silence: bool,
 }
 
 pub struct EvalContext<'a> {
@@ -424,7 +427,7 @@ mod tests {
         let inner = engine.inner();
         let ctx = EvalContext {
             session_name: "demo",
-            windows: &[WindowSummary { name: "shell0".into(), active: true, activity: false, bell: false, done: None }],
+            windows: &[WindowSummary { name: "shell0".into(), active: true, activity: false, bell: false, done: None, silence: false }],
             active_window: 0,
             attached_clients: 1,
             prefix_active: false,

@@ -166,6 +166,22 @@ pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
         "choose_buffer" => Command::ChooseBuffer,
         "toggle_monitor_activity" => Command::ToggleMonitorActivity,
         "toggle_monitor_bell" => Command::ToggleMonitorBell,
+        "toggle_monitor_command" => Command::ToggleMonitorCommand,
+        "set_monitor_silence" => {
+            // `set_monitor_silence:30` arms a 30s threshold; no arg or `:0`
+            // disables it.
+            let secs = match arg.filter(|a| !a.is_empty()) {
+                Some(a) => {
+                    let n: u64 = a.parse().map_err(|_| KeyParseError::BadArg {
+                        command: name.to_string(),
+                        arg: a.to_string(),
+                    })?;
+                    (n > 0).then_some(n)
+                }
+                None => None,
+            };
+            Command::SetMonitorSilence(secs)
+        }
         "popup" => Command::OpenPopup {
             command: arg.filter(|a| !a.is_empty()).map(str::to_string),
         },

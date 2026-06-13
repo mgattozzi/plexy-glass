@@ -140,6 +140,7 @@ pub(super) async fn render_coordinator(
                     activity: w.activity_flag(),
                     bell: w.bell_flag(),
                     done: w.done_flag(),
+                    silence: w.silence_flag(),
                 })
                 .collect();
             let active_pane_cwd = m

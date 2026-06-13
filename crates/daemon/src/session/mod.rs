@@ -62,6 +62,13 @@ pub struct Session {
     /// One-shot wake that repaints an expired status-line message away. Aborted
     /// and replaced each time a new message is set, and aborted on `Drop`.
     status_msg_handle: StdMutex<Option<JoinHandle<()>>>,
+    /// Dedicated 1s silence-monitor tick task. Spawned on the first
+    /// `monitor-silence` arm and aborted on the last disarm (armed-only, no
+    /// idle 1 Hz task), and aborted on teardown/`Drop`. Lives beside the other
+    /// tick handles. NOT the status tick: that cadence is widget-deadline
+    /// driven; a silent session is by definition not rendering, so silence
+    /// timing needs its own interval to drive the notify.
+    silence_tick_handle: StdMutex<Option<JoinHandle<()>>>,
 }
 
 impl Session {
@@ -199,6 +206,7 @@ impl Session {
             status_engine_slot: StdMutex::new(status_engine),
             status_tick_handle: StdMutex::new(None),
             status_msg_handle: StdMutex::new(None),
+            silence_tick_handle: StdMutex::new(None),
             config_slot: StdMutex::new(config),
             dirty: std::sync::atomic::AtomicBool::new(false),
             persist_notify: Arc::new(Notify::new()),
@@ -298,6 +306,14 @@ impl Session {
             .status_tick_handle
             .lock()
             .expect("status tick handle lock poisoned")
+            .take()
+        {
+            h.abort();
+        }
+        if let Some(h) = self
+            .silence_tick_handle
+            .lock()
+            .expect("silence tick handle lock poisoned")
             .take()
         {
             h.abort();
@@ -669,12 +685,22 @@ impl Session {
         self.window_manager.lock().await.has_popup()
     }
 
-    pub async fn handle_command(&self, cmd: plexy_glass_mux::Command) -> Result<(), DaemonError> {
-        let mut manager = self.window_manager.lock().await;
-        manager.handle_command(cmd)?;
-        drop(manager);
+    pub async fn handle_command(
+        self: &Arc<Self>,
+        cmd: plexy_glass_mux::Command,
+    ) -> Result<(), DaemonError> {
+        let armed = {
+            let mut manager = self.window_manager.lock().await;
+            manager.handle_command(cmd)?;
+            // Read the arm state under the same lock window so the silence-task
+            // reconciliation below is consistent with the command just applied.
+            manager.any_silence_monitored()
+        };
         self.notify.notify_one();
         self.mark_dirty();
+        // Arm/disarm the silence tick task in response to any monitor-silence
+        // change (cheap no-op for every other command).
+        self.reconcile_silence_task(armed);
         Ok(())
     }
 
@@ -710,6 +736,7 @@ impl Session {
             PromptCommand::ToggleMonitorActivity => Command::ToggleMonitorActivity,
             PromptCommand::ToggleMonitorBell => Command::ToggleMonitorBell,
             PromptCommand::ToggleMonitorCommand => Command::ToggleMonitorCommand,
+            PromptCommand::MonitorSilence(secs) => Command::SetMonitorSilence(secs),
             PromptCommand::JoinPane(dir) => Command::JoinPane(dir),
             PromptCommand::SwapPane(t) => {
                 Command::SwapPane(matches!(t, plexy_glass_mux::SwapTarget::Next))
@@ -868,6 +895,31 @@ impl Session {
             .status_msg_handle
             .lock()
             .expect("status_msg_handle poisoned") = Some(handle);
+    }
+
+    /// Spawn the silence tick task if `armed` and the task is not already
+    /// running; abort it if `!armed` and it is. Called after every command that
+    /// could toggle silence monitoring (armed-only: no idle 1 Hz task on a
+    /// session with no silence monitors). `armed` is read by the caller while
+    /// it still holds the WM lock (`WindowManager::any_silence_monitored`).
+    pub fn reconcile_silence_task(self: &Arc<Self>, armed: bool) {
+        let mut slot = self
+            .silence_tick_handle
+            .lock()
+            .expect("silence_tick_handle poisoned");
+        match (armed, slot.is_some()) {
+            (true, false) => {
+                let weak = Arc::downgrade(self);
+                let handle = tokio::spawn(silence_tick_loop(weak));
+                *slot = Some(handle);
+            }
+            (false, true) => {
+                if let Some(h) = slot.take() {
+                    h.abort();
+                }
+            }
+            _ => {}
+        }
     }
 
     pub async fn handle_mouse(
@@ -1118,6 +1170,42 @@ impl Drop for Session {
         {
             handle.abort();
         }
+        if let Some(handle) = self
+            .silence_tick_handle
+            .lock()
+            .expect("silence tick handle lock poisoned")
+            .take()
+        {
+            handle.abort();
+        }
+    }
+}
+
+/// Dedicated silence-monitor tick. Wakes every second, takes the WM lock
+/// briefly, and checks monitored non-active windows for the silence threshold.
+/// On a fresh silence EDGE it notifies the coordinator (a silent session is by
+/// definition not rendering, so the tick must drive the repaint) and schedules
+/// the message's TTL-expiry wake; it notifies ONLY on an edge, so an idle armed
+/// session produces no per-tick render churn. Exits when the session is dropped
+/// or `closing`; the handle is also aborted on the last `monitor-silence`
+/// disarm (`reconcile_silence_task`) and on teardown.
+async fn silence_tick_loop(weak: std::sync::Weak<Session>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let Some(session) = weak.upgrade() else { return };
+        if session.closing.load(Ordering::SeqCst) {
+            return;
+        }
+        let edge = {
+            let mut m = session.window_manager.lock().await;
+            m.check_silence_alerts()
+        };
+        if edge {
+            session.notify.notify_one();
+            session.schedule_status_expiry_wake();
+        }
     }
 }
 
@@ -1200,6 +1288,7 @@ async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::Snaps
             activity: w.activity_flag(),
             bell: w.bell_flag(),
             done: w.done_flag(),
+            silence: w.silence_flag(),
         })
         .collect();
     let active_pane_cwd = manager
@@ -1257,6 +1346,30 @@ mod tests {
         let s = Session::new("main".into(), spec(), size(), cfg()).expect("construct session");
         assert_eq!(s.name(), "main");
         assert!(!s.closing.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn silence_tick_task_is_armed_only() {
+        let _g = crate::test_env::isolate();
+        use plexy_glass_mux::Command;
+        let s = Session::new("sil".into(), spec(), size(), cfg()).unwrap();
+        // No silence monitors → no tick task running.
+        assert!(
+            s.silence_tick_handle.lock().unwrap().is_none(),
+            "no silence task before any monitor-silence arm"
+        );
+        // Arm silence on the active window → the task spawns.
+        s.handle_command(Command::SetMonitorSilence(Some(5))).await.unwrap();
+        assert!(
+            s.silence_tick_handle.lock().unwrap().is_some(),
+            "the silence task spawns on the first arm"
+        );
+        // Disarm (0/None) → the task is aborted (no idle 1 Hz task).
+        s.handle_command(Command::SetMonitorSilence(None)).await.unwrap();
+        assert!(
+            s.silence_tick_handle.lock().unwrap().is_none(),
+            "the silence task is aborted on the last disarm"
+        );
     }
 
     #[tokio::test]
