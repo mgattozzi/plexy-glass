@@ -92,6 +92,19 @@ impl<S: ScreenOps> Performer<'_, S> {
         if self.pending.is_empty() {
             return;
         }
+        // Bound a single pathologically-large grapheme cluster: a base char
+        // followed by an unbounded combining-mark run ("Zalgo" flood) never
+        // completes, so `pending` would grow without bound and each print()
+        // would re-clone + re-segment the whole buffer (O(n^2) time, O(n)
+        // memory). `pending` only ever retains the last (incomplete) cluster,
+        // so exceeding this cap means a single cluster has grown pathologically,
+        // and we force it onto the screen. Mirrors the DCS_CAP guard; adversarial
+        // input only, far above any legitimate cluster.
+        const PENDING_CAP: usize = 4096;
+        if self.pending.len() > PENDING_CAP {
+            self.flush_all();
+            return;
+        }
         let snapshot = self.pending.clone();
         let clusters: Vec<&str> = snapshot.graphemes(true).collect();
         if clusters.len() <= 1 {
@@ -292,5 +305,29 @@ mod tests {
         let s = drive("a\u{0301}b".as_bytes());
         // "á" should be flushed when "b" arrives.
         assert_eq!(s.graphemes, vec!["a\u{0301}"]);
+    }
+
+    #[test]
+    fn combining_mark_flood_is_bounded() {
+        // A base char + a long combining-mark run ("Zalgo") never completes a
+        // cluster, so `pending` would grow without bound and each print() would
+        // re-clone + re-segment the whole buffer. The cap force-flushes it,
+        // keeping `pending` bounded and making forward progress.
+        let mut p = Parser::new();
+        let mut s = MockScreen::default();
+        let mut input = String::from("a");
+        for _ in 0..5000 {
+            input.push('\u{0301}'); // COMBINING ACUTE ACCENT (2 bytes each)
+        }
+        p.advance(&mut s, input.as_bytes());
+        assert!(
+            !s.graphemes.is_empty(),
+            "the cap must force-flush the mega-cluster"
+        );
+        assert!(
+            p.pending.len() <= 8192,
+            "pending must stay bounded (cap 4096 + slack), got {}",
+            p.pending.len()
+        );
     }
 }
