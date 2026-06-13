@@ -258,14 +258,18 @@ impl CopyModeHandler {
                 state.cursor = (0, 0);
                 ensure_visible(state);
             }
-            (m, Key::Char('G')) if m == Modifiers::SHIFT => {
+            // Shifted printables (`G`, `$`, `N`) arrive with empty mods on
+            // legacy / modifyOtherKeys clients (the raw byte) and with SHIFT
+            // only under Kitty disambiguation, so accept both, like the search
+            // prompt's char handler below.
+            (m, Key::Char('G')) if m.is_empty() || m == Modifiers::SHIFT => {
                 state.cursor = (state.total_lines.saturating_sub(1), 0);
                 ensure_visible(state);
             }
             (m, Key::Char('0')) if m.is_empty() => {
                 state.cursor.1 = 0;
             }
-            (m, Key::Char('$')) if m == Modifiers::SHIFT => {
+            (m, Key::Char('$')) if m.is_empty() || m == Modifiers::SHIFT => {
                 state.cursor.1 = cols.saturating_sub(1);
             }
             (m, Key::Char('[')) if m.is_empty() => {
@@ -308,7 +312,7 @@ impl CopyModeHandler {
             (m, Key::Char('n')) if m.is_empty() => {
                 jump_to_next_match(state);
             }
-            (m, Key::Char('N')) if m == Modifiers::SHIFT => {
+            (m, Key::Char('N')) if m.is_empty() || m == Modifiers::SHIFT => {
                 jump_to_prev_match(state);
             }
             _ => {}
@@ -703,6 +707,45 @@ mod tests {
         let scr = screen(10, 80);
         CopyModeHandler::handle(&ev(Modifiers::SHIFT, Key::Char('$')), &mut s, &scr);
         assert_eq!(s.cursor.1, 79);
+    }
+
+    #[test]
+    fn shift_g_jumps_to_bottom_with_empty_mods() {
+        // Legacy / modifyOtherKeys clients deliver Shift+g as a bare 'G' byte
+        // with empty mods, so the motion must still fire (regression guard).
+        let mut s = CopyMode::new(50, 10, 10, 5);
+        let scr = screen(10, 80);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('G')), &mut s, &scr);
+        assert_eq!(s.cursor, (49, 0));
+    }
+
+    #[test]
+    fn dollar_jumps_to_last_col_with_empty_mods() {
+        let mut s = CopyMode::new(50, 10, 10, 0);
+        let scr = screen(10, 80);
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('$')), &mut s, &scr);
+        assert_eq!(s.cursor.1, 79);
+    }
+
+    #[test]
+    fn capital_n_cycles_to_prev_match_with_wrap() {
+        let scr = screen_with_lines(3, 30, &["foo", "foo bar foo", "foo baz"]);
+        let mut s = CopyMode::new(3, 3, 0, 0);
+        s.search.prompt_active = true;
+        s.search.prompt_buf = "foo".into();
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut s, &scr);
+        let len = s.search.matches.len();
+        assert!(len >= 2, "need multiple matches, got {len}");
+        // From the first match (index 0), previous wraps to the last match.
+        // Also exercises the empty-mods 'N' wire shape legacy clients send.
+        s.search.current = 0;
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('N')), &mut s, &scr);
+        assert_eq!(s.search.current, len - 1);
+        let last = &s.search.matches[len - 1];
+        assert_eq!(s.cursor, (last.line_idx, last.col_start));
+        // Stepping back once more lands on the second-to-last (no wrap).
+        CopyModeHandler::handle(&ev(Modifiers::empty(), Key::Char('N')), &mut s, &scr);
+        assert_eq!(s.search.current, len - 2);
     }
 
     #[test]
