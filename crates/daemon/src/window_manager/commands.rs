@@ -250,6 +250,12 @@ impl WindowManager {
                 let on = self.active_window_mut().toggle_monitor_bell();
                 self.set_status_message(format!("monitor-bell {}", if on { "on" } else { "off" }));
             }
+            Command::ToggleMonitorCommand => {
+                let on = self.active_window_mut().toggle_monitor_command();
+                self.set_status_message(
+                    format!("monitor-command {}", if on { "on" } else { "off" }),
+                );
+            }
             Command::ResizePane(dir) => {
                 let active = self.active_window().active();
                 const STEP: i32 = 3;

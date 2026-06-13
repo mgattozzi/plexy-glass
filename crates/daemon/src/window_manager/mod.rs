@@ -267,6 +267,11 @@ impl WindowManager {
         let mut message: Option<String> = None;
         for (i, w) in self.windows.iter_mut().enumerate() {
             let (acted, belled) = w.drain_pane_alerts();
+            // Command-completion baselines advance every drain for every
+            // window; the flag/edge is recorded only for a monitored non-active
+            // window (background completion you can't see).
+            let record_done = i != active && w.monitor_command();
+            let done_edge = w.drain_command_completion(record_done);
             if i == active {
                 w.clear_alerts();
             } else {
@@ -275,6 +280,12 @@ impl WindowManager {
                 }
                 if belled && w.monitor_bell() && w.set_bell() {
                     message = Some(format!("bell in window {} ({})", i + 1, w.name));
+                }
+                if let Some(exit) = done_edge {
+                    message = Some(match exit {
+                        Some(code) => format!("done in window {} ({}): exit {code}", i + 1, w.name),
+                        None => format!("done in window {} ({})", i + 1, w.name),
+                    });
                 }
             }
         }

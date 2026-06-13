@@ -66,6 +66,7 @@ pub enum PromptCommand {
     LoadBuffer { path: String },
     ToggleMonitorActivity,
     ToggleMonitorBell,
+    ToggleMonitorCommand,
     /// Open a floating popup running the given command line (`None` = scratch shell).
     Popup(Option<String>),
     /// Close the floating popup.
@@ -100,7 +101,7 @@ impl std::error::Error for ParseError {}
 pub const VERBS: &[&str] = &[
     "break", "buffers", "close-popup", "copy", "copy-output", "detach", "focus",
     "help", "join", "kill", "last", "layout", "load-buffer", "mark",
-    "monitor-activity", "monitor-bell", "new", "next", "next-prompt", "paste",
+    "monitor-activity", "monitor-bell", "monitor-command", "new", "next", "next-prompt", "paste",
     "pipe-pane", "popup", "prev", "prev-prompt", "reload", "rename", "rename-pane", "resize",
     "save-buffer", "sessions", "set-buffer", "split", "swap", "switch", "sync",
     "tree", "win", "zoom",
@@ -208,6 +209,7 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
         }
         "monitor-activity" => no_args(PromptCommand::ToggleMonitorActivity),
         "monitor-bell" => no_args(PromptCommand::ToggleMonitorBell),
+        "monitor-command" => no_args(PromptCommand::ToggleMonitorCommand),
         "prev-prompt" => no_args(PromptCommand::PrevPrompt),
         "next-prompt" => no_args(PromptCommand::NextPrompt),
         "copy-output" => no_args(PromptCommand::CopyOutput),
@@ -593,7 +595,9 @@ mod tests {
     fn monitor_verbs() {
         assert_eq!(p("monitor-activity").unwrap(), PromptCommand::ToggleMonitorActivity);
         assert_eq!(p("monitor-bell").unwrap(), PromptCommand::ToggleMonitorBell);
+        assert_eq!(p("monitor-command").unwrap(), PromptCommand::ToggleMonitorCommand);
         assert!(p("monitor-activity x").is_err());
+        assert!(p("monitor-command x").is_err());
     }
 
     #[test]

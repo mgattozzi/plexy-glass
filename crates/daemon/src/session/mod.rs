@@ -709,6 +709,7 @@ impl Session {
             PromptCommand::BreakPane => Command::BreakPane,
             PromptCommand::ToggleMonitorActivity => Command::ToggleMonitorActivity,
             PromptCommand::ToggleMonitorBell => Command::ToggleMonitorBell,
+            PromptCommand::ToggleMonitorCommand => Command::ToggleMonitorCommand,
             PromptCommand::JoinPane(dir) => Command::JoinPane(dir),
             PromptCommand::SwapPane(t) => {
                 Command::SwapPane(matches!(t, plexy_glass_mux::SwapTarget::Next))
@@ -1198,6 +1199,7 @@ async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::Snaps
             // update_monitor_flags; the tick task is not the drainer.
             activity: w.activity_flag(),
             bell: w.bell_flag(),
+            done: w.done_flag(),
         })
         .collect();
     let active_pane_cwd = manager

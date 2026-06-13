@@ -40,6 +40,8 @@ pub enum Command {
     ToggleMonitorActivity,
     /// Toggle monitor-bell on the active window.
     ToggleMonitorBell,
+    /// Toggle monitor-command (command-completion alerts) on the active window.
+    ToggleMonitorCommand,
     RenameWindow,
     RenamePane,
     ShowHelp,

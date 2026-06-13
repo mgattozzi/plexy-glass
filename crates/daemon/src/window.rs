@@ -31,15 +31,27 @@ pub struct Window {
     layout: LayoutTree,
     active: PaneId,
     focus_history: VecDeque<PaneId>,
-    /// Monitor options (tmux's `monitor-activity` / `monitor-bell`). When on, a
-    /// background occurrence sets the corresponding sticky flag below.
+    /// Monitor options (tmux's `monitor-activity` / `monitor-bell`, plus our
+    /// `monitor-command`). When on, a background occurrence sets the
+    /// corresponding sticky flag below.
     monitor_activity: bool,
     monitor_bell: bool,
+    /// Monitor command completion (OSC 133;D blocks). When on, a completed
+    /// command block in a background pane sets the sticky `done` flag.
+    monitor_command: bool,
     /// Sticky alert flags: set by `WindowManager::update_monitor_flags` when this
     /// (non-current) window had activity / a bell; cleared when it becomes the
     /// current window. Surfaced as `#`/`!` in the status window-list.
     activity: bool,
     bell: bool,
+    /// Sticky command-completion flag: `Some(true)` = completed OK (`✓`),
+    /// `Some(false)` = completed with a nonzero exit (`✗`), `None` = no
+    /// completion pending. Cleared on view like activity/bell.
+    done: Option<bool>,
+    /// Per-pane last-seen `Screen.blocks_completed` snapshot. Updated
+    /// UNCONDITIONALLY every drain for every pane (so a toggle-on never
+    /// backlogs history); a counter DECREASE (RIS) re-baselines silently.
+    block_baselines: HashMap<PaneId, u64>,
 }
 
 impl Window {
@@ -78,8 +90,11 @@ impl Window {
             focus_history: VecDeque::new(),
             monitor_activity: false,
             monitor_bell: true,
+            monitor_command: false,
             activity: false,
             bell: false,
+            done: None,
+            block_baselines: HashMap::new(),
         })
     }
 
@@ -360,8 +375,11 @@ impl Window {
             focus_history: VecDeque::new(),
             monitor_activity: false,
             monitor_bell: true,
+            monitor_command: false,
             activity: false,
             bell: false,
+            done: None,
+            block_baselines: HashMap::new(),
         }
     }
 
@@ -377,12 +395,22 @@ impl Window {
         self.monitor_bell
     }
 
+    /// Toggle monitor-command; returns the new state.
+    pub fn toggle_monitor_command(&mut self) -> bool {
+        self.monitor_command = !self.monitor_command;
+        self.monitor_command
+    }
+
     pub fn monitor_activity(&self) -> bool {
         self.monitor_activity
     }
 
     pub fn monitor_bell(&self) -> bool {
         self.monitor_bell
+    }
+
+    pub fn monitor_command(&self) -> bool {
+        self.monitor_command
     }
 
     pub fn activity_flag(&self) -> bool {
@@ -393,10 +421,17 @@ impl Window {
         self.bell
     }
 
+    /// The sticky command-completion flag: `Some(true)` = `✓`, `Some(false)` =
+    /// `✗`, `None` = none. Surfaced as `✓`/`✗` in the status window-list.
+    pub fn done_flag(&self) -> Option<bool> {
+        self.done
+    }
+
     /// Clear the sticky alert flags (the window became current).
     pub fn clear_alerts(&mut self) {
         self.activity = false;
         self.bell = false;
+        self.done = None;
     }
 
     /// Set the sticky activity flag (called by the manager for a background
@@ -428,6 +463,60 @@ impl Window {
             }
         }
         (acted, belled)
+    }
+
+    /// Set the sticky command-completion flag from a block's exit outcome
+    /// (`Some(code)` → `✓` for 0 / `✗` for nonzero; `None` codeless → `✓`).
+    /// Returns whether this was a false→`Some` EDGE so the drain messages once
+    /// per completion, not while the flag stays sticky.
+    pub fn set_done(&mut self, exit: Option<i32>) -> bool {
+        let ok = exit.map(|c| c == 0).unwrap_or(true);
+        let edge = self.done.is_none();
+        self.done = Some(ok);
+        edge
+    }
+
+    /// Compare every pane's live `blocks_completed` counter against its
+    /// per-pane baseline and fold the result into the sticky `done` flag.
+    ///
+    /// Baselines update UNCONDITIONALLY for every pane regardless of monitor /
+    /// active state (the same "always drains, never backlogs" convention as
+    /// `drain_pane_alerts`), so a toggle-on starts from the current counter and
+    /// never replays history. A counter DECREASE (a RIS reset the screen)
+    /// re-baselines silently and never alerts. On an INCREASE, the flag/edge is
+    /// set only when this is a monitored non-active window (`record_flag`); the
+    /// active or unmonitored case still advances the baseline but reports
+    /// nothing.
+    ///
+    /// Returns the alert outcome to message on (`Some(exit)`) when an edge fired
+    /// for a flagged window: `exit` is the latest completed block's exit payload
+    /// (`None` for a codeless `133;D`). The caller formats the message.
+    pub fn drain_command_completion(&mut self, record_flag: bool) -> Option<Option<i32>> {
+        // Prune baselines for panes that no longer exist (break/swap/kill).
+        let live: std::collections::HashSet<PaneId> = self.layout.panes().into_iter().collect();
+        self.block_baselines.retain(|id, _| live.contains(id));
+
+        let mut completed_exit: Option<Option<i32>> = None;
+        for id in self.layout.panes() {
+            let Some(p) = self.panes.get(&id) else { continue };
+            let (count, exit) = p.with_screen(|s| (s.blocks_completed, s.last_block_exit));
+            let baseline = self.block_baselines.entry(id).or_insert(0);
+            if count > *baseline {
+                // A new block (or several) completed since the last drain. We
+                // surface the latest exit payload, since the most recent outcome
+                // is what the user cares about.
+                completed_exit = Some(exit);
+            }
+            // Update the baseline unconditionally (increase OR decrease/RIS).
+            *baseline = count;
+        }
+        // Flag + edge only for a monitored non-active window; the active or
+        // unmonitored case still advances the baseline above but reports
+        // nothing.
+        match completed_exit {
+            Some(exit) if record_flag && self.set_done(exit) => Some(exit),
+            _ => None,
+        }
     }
 
     /// The active pane's DFS-leaf neighbor (wrapping): the next leaf if `next`,

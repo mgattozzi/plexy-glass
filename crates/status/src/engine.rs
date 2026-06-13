@@ -20,6 +20,10 @@ pub struct WindowSummary {
     /// so a marker never shows on it.
     pub activity: bool,
     pub bell: bool,
+    /// Sticky command-completion flag: `Some(true)` → `✓` (exit 0 / codeless),
+    /// `Some(false)` → `✗` (nonzero exit), `None` → no flag. Cleared upstream
+    /// when the window becomes current, like activity/bell.
+    pub done: Option<bool>,
 }
 
 pub struct EvalContext<'a> {
@@ -420,7 +424,7 @@ mod tests {
         let inner = engine.inner();
         let ctx = EvalContext {
             session_name: "demo",
-            windows: &[WindowSummary { name: "shell0".into(), active: true, activity: false, bell: false }],
+            windows: &[WindowSummary { name: "shell0".into(), active: true, activity: false, bell: false, done: None }],
             active_window: 0,
             attached_clients: 1,
             prefix_active: false,

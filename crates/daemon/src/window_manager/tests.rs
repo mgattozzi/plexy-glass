@@ -1816,6 +1816,134 @@ async fn activity_re_messages_after_view_clears_and_re_edges() {
     );
 }
 
+// ----- command-completion monitoring -----
+
+/// Set the background pane's completed-block counter + exit directly on the
+/// screen (the OSC-133;D → counter path is covered by the emulator's own
+/// tests; here we exercise the drain's reaction to a counter change without
+/// timing on `cat` echo).
+fn set_block_counter(m: &WindowManager, win: usize, count: u64, exit: Option<i32>) {
+    let pid = m.windows()[win].layout().panes()[0];
+    m.windows()[win].pane(pid).unwrap().with_screen_mut(|s| {
+        s.blocks_completed = count;
+        s.last_block_exit = exit;
+    });
+}
+
+#[tokio::test]
+async fn monitor_command_toggle_flips_and_messages() {
+    let mut m = mk_mgr();
+    assert!(!m.active_window().monitor_command(), "off by default");
+    m.handle_command(Command::ToggleMonitorCommand).unwrap();
+    assert_eq!(m.take_active_message(), Some("monitor-command on"));
+    assert!(m.active_window().monitor_command());
+    m.handle_command(Command::ToggleMonitorCommand).unwrap();
+    assert_eq!(m.take_active_message(), Some("monitor-command off"));
+    assert!(!m.active_window().monitor_command());
+}
+
+#[tokio::test]
+async fn command_completion_nonzero_exit_flags_failed_and_messages() {
+    let mut m = mk_mgr(); // window 0
+    m.new_window_with_spec(spec(), "api".into()).unwrap(); // window 1, active
+    m.handle_command(Command::ToggleMonitorCommand).unwrap(); // monitor-command on for window 1
+    m.handle_command(Command::SelectWindow(0)).unwrap(); // window 0 active; window 1 background
+    let _ = m.update_monitor_flags(); // baseline window 1 at 0
+    // A command completes in the background window with a nonzero exit.
+    set_block_counter(&m, 1, 1, Some(1));
+    assert!(m.update_monitor_flags(), "completion edge fires a message");
+    assert_eq!(m.take_active_message(), Some("done in window 2 (api): exit 1"));
+    assert_eq!(m.windows()[1].done_flag(), Some(false), "✗ flag (failed)");
+}
+
+#[tokio::test]
+async fn command_completion_exit_zero_flags_ok_and_messages() {
+    let mut m = mk_mgr();
+    m.new_window_with_spec(spec(), "api".into()).unwrap();
+    m.handle_command(Command::ToggleMonitorCommand).unwrap();
+    m.handle_command(Command::SelectWindow(0)).unwrap();
+    let _ = m.update_monitor_flags();
+    set_block_counter(&m, 1, 1, Some(0));
+    assert!(m.update_monitor_flags());
+    assert_eq!(m.take_active_message(), Some("done in window 2 (api): exit 0"));
+    assert_eq!(m.windows()[1].done_flag(), Some(true), "✓ flag (ok)");
+}
+
+#[tokio::test]
+async fn command_completion_codeless_d_flags_ok_with_no_exit_clause() {
+    let mut m = mk_mgr();
+    m.new_window_with_spec(spec(), "api".into()).unwrap();
+    m.handle_command(Command::ToggleMonitorCommand).unwrap();
+    m.handle_command(Command::SelectWindow(0)).unwrap();
+    let _ = m.update_monitor_flags();
+    // Codeless D: counter incremented but no exit payload.
+    set_block_counter(&m, 1, 1, None);
+    assert!(m.update_monitor_flags());
+    assert_eq!(
+        m.take_active_message(),
+        Some("done in window 2 (api)"),
+        "codeless completion → no exit clause"
+    );
+    assert_eq!(m.windows()[1].done_flag(), Some(true), "✓ flag (outcome unknown)");
+}
+
+#[tokio::test]
+async fn command_completion_in_active_window_neither_flags_nor_messages() {
+    let mut m = mk_mgr(); // window 0, active
+    m.handle_command(Command::ToggleMonitorCommand).unwrap(); // monitor-command on for the active window
+    let _ = m.update_monitor_flags(); // baseline at 0
+    set_block_counter(&m, 0, 1, Some(1)); // completion in the ACTIVE window
+    assert!(!m.update_monitor_flags(), "active window emits no completion message");
+    assert_eq!(m.active_window().done_flag(), None, "active window never flagged");
+}
+
+#[tokio::test]
+async fn command_completion_toggle_on_after_history_does_not_backlog() {
+    let mut m = mk_mgr();
+    m.new_window_with_spec(spec(), "api".into()).unwrap(); // window 1, active
+    m.handle_command(Command::SelectWindow(0)).unwrap();
+    // Completed history accumulates BEFORE monitor-command is on; the baseline
+    // still advances every drain.
+    set_block_counter(&m, 1, 3, Some(0));
+    let _ = m.update_monitor_flags();
+    let _ = m.update_monitor_flags();
+    // Now turn monitoring on for window 1 (via its own active-window toggle).
+    m.handle_command(Command::SelectWindow(1)).unwrap();
+    m.handle_command(Command::ToggleMonitorCommand).unwrap();
+    let _ = m.take_active_message();
+    m.handle_command(Command::SelectWindow(0)).unwrap();
+    // No NEW completion since toggle-on → no alert (no history replay).
+    assert!(!m.update_monitor_flags(), "toggle-on does not backlog completed history");
+    assert_eq!(m.windows()[1].done_flag(), None);
+}
+
+#[tokio::test]
+async fn command_completion_counter_decrease_re_baselines_silently() {
+    let mut m = mk_mgr();
+    m.new_window_with_spec(spec(), "api".into()).unwrap(); // window 1, active
+    m.handle_command(Command::ToggleMonitorCommand).unwrap();
+    m.handle_command(Command::SelectWindow(0)).unwrap();
+    set_block_counter(&m, 1, 5, Some(0));
+    let _ = m.update_monitor_flags(); // baseline at 5
+    let _ = m.take_active_message();
+    // A RIS resets the screen → counter drops below the baseline.
+    set_block_counter(&m, 1, 0, None);
+    assert!(
+        !m.update_monitor_flags(),
+        "a counter decrease (RIS) re-baselines silently, never alerts"
+    );
+    // View window 1 to clear its sticky done flag, then return to window 0. A
+    // fresh completion after the reset fires from the new (0) baseline.
+    m.handle_command(Command::SelectWindow(1)).unwrap();
+    let _ = m.update_monitor_flags(); // clears the now-active window's done flag
+    assert_eq!(m.windows()[1].done_flag(), None, "viewing cleared the done flag");
+    m.handle_command(Command::SelectWindow(0)).unwrap();
+    let _ = m.update_monitor_flags(); // re-baseline window 1 at 0 after the view
+    set_block_counter(&m, 1, 1, Some(2));
+    assert!(m.update_monitor_flags(), "post-reset completion alerts from the new baseline");
+    assert_eq!(m.take_active_message(), Some("done in window 2 (api): exit 2"));
+}
+
 #[tokio::test]
 async fn open_popup_sets_state_with_derived_size() {
     let notify = Arc::new(Notify::new());
