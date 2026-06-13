@@ -1979,6 +1979,177 @@ mod tests {
         assert_eq!(wm.windows()[1].home_cwd.as_deref(), Some("/session"));
     }
 
+    // --- v2: ratios, active, env ---
+
+    fn build_cfg(kdl: &str) -> Arc<plexy_glass_config::Config> {
+        Arc::new(plexy_glass_config::parse_config(kdl).expect("v2 declared-session config"))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_from_template_two_way_default_is_fifty_fifty() {
+        // Regression: a 2-way default split stays 50/50 (byte-identical to v1).
+        let _g = crate::test_env::isolate();
+        let cfg = build_cfg(r##"session "s" { window "w" { split vertical { pane; pane } } }"##);
+        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
+        {
+            let wm = s.window_manager.lock().await;
+            let win = &wm.windows()[0];
+            let vp = wm.viewport();
+            let leaves = win.layout().dfs_leaves();
+            let r0 = win.layout().rect_of(leaves[0], vp).unwrap();
+            let r1 = win.layout().rect_of(leaves[1], vp).unwrap();
+            // Equal within one cell (odd usable width splits off-by-one).
+            assert!((r0.cols as i32 - r1.cols as i32).abs() <= 1, "{r0:?} {r1:?}");
+        }
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_from_template_flat_three_way_default_is_even() {
+        // INTENTIONAL v2 change: a flat 3-way default builds 33/33/33, not v1's
+        // 50/25/25 right-lean cascade.
+        let _g = crate::test_env::isolate();
+        let cfg = build_cfg(r##"session "s" { window "w" { split vertical { pane; pane; pane } } }"##);
+        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
+        {
+            let wm = s.window_manager.lock().await;
+            let win = &wm.windows()[0];
+            let vp = wm.viewport();
+            let leaves = win.layout().dfs_leaves();
+            let widths: Vec<u16> = leaves
+                .iter()
+                .map(|p| win.layout().rect_of(*p, vp).unwrap().cols)
+                .collect();
+            // All three within ~2 cells of each other (gutters + rounding).
+            let max = *widths.iter().max().unwrap() as i32;
+            let min = *widths.iter().min().unwrap() as i32;
+            assert!(max - min <= 2, "expected ~even thirds, got {widths:?}");
+        }
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_from_template_two_to_one_ratio_honored() {
+        let _g = crate::test_env::isolate();
+        let cfg = build_cfg(
+            r##"session "s" { window "w" { split vertical { pane ratio=2; pane ratio=1 } } }"##,
+        );
+        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
+        {
+            let wm = s.window_manager.lock().await;
+            let win = &wm.windows()[0];
+            let vp = wm.viewport();
+            let leaves = win.layout().dfs_leaves();
+            let r0 = win.layout().rect_of(leaves[0], vp).unwrap();
+            let r1 = win.layout().rect_of(leaves[1], vp).unwrap();
+            // First pane should be ~2x the second (2:1).
+            assert!(
+                r0.cols as f32 / r1.cols as f32 > 1.6,
+                "expected ~2:1, got {} vs {}",
+                r0.cols,
+                r1.cols
+            );
+        }
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_from_template_nested_split_outer_weight_ignores_inner_leaf_count() {
+        // outer { pane ratio=2; split horizontal ratio=1 { pane; pane } }
+        // The outer split is 2:1 regardless of the inner split's 2 leaves.
+        let _g = crate::test_env::isolate();
+        let cfg = build_cfg(
+            r##"session "s" { window "w" { split vertical { pane ratio=2; split horizontal ratio=1 { pane; pane } } } }"##,
+        );
+        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
+        {
+            let wm = s.window_manager.lock().await;
+            let win = &wm.windows()[0];
+            let vp = wm.viewport();
+            let leaves = win.layout().dfs_leaves();
+            // leaf 0 = the big left pane; leaves 1,2 = the stacked right panes.
+            let left = win.layout().rect_of(leaves[0], vp).unwrap();
+            let right_top = win.layout().rect_of(leaves[1], vp).unwrap();
+            // Left pane is ~2x the right column's width (outer 2:1), and the
+            // right panes share the right column's width.
+            assert!(
+                left.cols as f32 / right_top.cols as f32 > 1.6,
+                "outer 2:1: left {} vs right {}",
+                left.cols,
+                right_top.cols
+            );
+        }
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_from_template_active_window_and_pane_selected() {
+        let _g = crate::test_env::isolate();
+        let cfg = build_cfg(
+            r##"session "s" {
+                window "a" { pane }
+                window "b" active=#true { split vertical { pane; pane active=#true } }
+            }"##,
+        );
+        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
+        {
+            let wm = s.window_manager.lock().await;
+            // Window "b" (index 1) is the active window.
+            assert_eq!(wm.active_window().name, "b");
+            // Its active pane is the SECOND leaf (DFS index 1), not the default first.
+            let win = &wm.windows()[1];
+            let leaves = win.layout().dfs_leaves();
+            assert_eq!(win.active(), leaves[1]);
+        }
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_from_template_env_overlays_inherited_path_and_term() {
+        // A declared pane's `env` must reach the child (FOO) while PATH and TERM
+        // are still INHERITED from the daemon environment (overlay, not wipe,
+        // the env_clear removal). The pane command writes $FOO/$PATH/$TERM to a
+        // file we then read back.
+        let _g = crate::test_env::isolate();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("env.txt");
+        let out_str = out.to_str().unwrap();
+        // Ensure TERM is set in the daemon environment for the inheritance check.
+        // SAFETY: single-threaded test setup before any pane spawn reads it.
+        unsafe {
+            std::env::set_var("TERM", "xterm-test-term");
+        }
+        // The pane command writes FOO/PATH/TERM as separate lines (built with
+        // newline echoes, no literal `\n` in the KDL string value, which KDL
+        // would reject). Inner double-quotes are KDL-escaped (`\"`).
+        let cmd = format!(
+            r#"echo FOO=$FOO > {out_str}; echo PATH=$PATH >> {out_str}; echo TERM=$TERM >> {out_str}"#
+        );
+        let kdl = format!(
+            "session \"s\" {{ window \"w\" {{ pane command=\"{cmd}\" {{ env {{ FOO \"bar\" }} }} }} }}"
+        );
+        let cfg = build_cfg(&kdl);
+        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
+        let wrote = crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+            std::fs::read_to_string(&out)
+                .map(|b| b.contains("FOO=") && b.contains("PATH=") && b.contains("TERM="))
+                .unwrap_or(false)
+        })
+        .await;
+        assert!(wrote, "pane command never wrote the env file");
+        let body = std::fs::read_to_string(&out).unwrap();
+        assert!(body.contains("FOO=bar"), "declared env reached the child: {body:?}");
+        assert!(
+            body.lines().any(|l| l.starts_with("PATH=") && l.len() > "PATH=".len()),
+            "inherited PATH survived the overlay: {body:?}"
+        );
+        assert!(
+            body.contains("TERM=xterm-test-term"),
+            "inherited TERM survived the overlay: {body:?}"
+        );
+        s.terminate_panes().await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn restore_from_round_trips_two_pane_split() {
         let _g = crate::test_env::isolate();

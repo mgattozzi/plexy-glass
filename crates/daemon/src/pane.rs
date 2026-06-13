@@ -93,11 +93,14 @@ impl Pane {
         if let Some(cwd) = &spec.cwd {
             cmd.cwd(cwd);
         }
-        if !spec.env.is_empty() {
-            cmd.env_clear();
-            for (k, v) in &spec.env {
-                cmd.env(k, v);
-            }
+        // OVERLAY, do not wipe: declared `env` keys are set ON TOP of the
+        // inherited daemon environment (CommandBuilder inherits the parent env
+        // unless env_clear is called). A previous version called env_clear()
+        // here, which would have dropped `PATH`/`HOME`/`TERM`/`SHELL` (breaking
+        // the child) the moment any env was declared. Overlaying preserves the
+        // inherited `TERM` (passthrough) and adds only the declared keys.
+        for (k, v) in &spec.env {
+            cmd.env(k, v);
         }
         cmd.env("PLEXY_GLASS", "1");
         // We deliberately do NOT force TERM: panes inherit the host terminal's
@@ -132,21 +135,15 @@ impl Pane {
         let master = pair.master;
 
         // XTGETTCAP `TN` must report the `$TERM` the child actually inherits.
-        // The child gets `spec.env`'s TERM if present (we `env_clear` then set
-        // spec.env), otherwise it inherits the daemon's environment (TERM
-        // passthrough), otherwise a 256-color xterm default.
+        // The child gets a declared `spec.env` TERM if present; otherwise the
+        // env is an overlay (no env_clear), so the daemon's inherited TERM
+        // survives (passthrough); otherwise a 256-color xterm default.
         let child_term = spec
             .env
             .iter()
             .find(|(k, _)| k == "TERM")
             .map(|(_, v)| v.clone())
-            .or_else(|| {
-                if spec.env.is_empty() {
-                    std::env::var("TERM").ok()
-                } else {
-                    None
-                }
-            })
+            .or_else(|| std::env::var("TERM").ok())
             .unwrap_or_else(|| "xterm-256color".to_string());
         let mut emu = Emulator::new(size.rows, size.cols);
         emu.screen_mut().set_term(child_term);
