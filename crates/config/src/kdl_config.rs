@@ -199,7 +199,7 @@ fn decode_session(node: &KdlNode, src: &str) -> Result<SessionTemplate, ConfigEr
     let name = string_arg(node, 0, src, "session name")?.to_string();
     ensure_only_props(node, &["cwd"], src)?;
     ensure_only_children(node, &["window", "env"], src)?;
-    let cwd = prop_str(node, "cwd").map(str::to_string);
+    let cwd = opt_prop_str(node, "cwd", src)?.map(str::to_string);
     let env = decode_env_child(node, src)?;
     let mut windows = Vec::new();
     if let Some(doc) = node.children() {
@@ -230,7 +230,7 @@ fn decode_session(node: &KdlNode, src: &str) -> Result<SessionTemplate, ConfigEr
 fn decode_window(node: &KdlNode, src: &str) -> Result<WindowTemplate, ConfigError> {
     let name = string_arg(node, 0, src, "window name")?.to_string();
     ensure_only_props(node, &["cwd", "active"], src)?;
-    let cwd = prop_str(node, "cwd").map(str::to_string);
+    let cwd = opt_prop_str(node, "cwd", src)?.map(str::to_string);
     let active = bool_prop(node, "active", src)?.unwrap_or(false);
     let env = decode_env_child(node, src)?;
     // The window's layout is its single non-`env` child node.
@@ -275,9 +275,9 @@ fn decode_pane(node: &KdlNode, allow_ratio: bool, src: &str) -> Result<PaneTempl
     ensure_only_props(node, allowed, src)?;
     ensure_only_children(node, &["env"], src)?;
     Ok(PaneTemplate {
-        command: prop_str(node, "command").map(str::to_string),
-        cwd: prop_str(node, "cwd").map(str::to_string),
-        name: prop_str(node, "name").map(str::to_string),
+        command: opt_prop_str(node, "command", src)?.map(str::to_string),
+        cwd: opt_prop_str(node, "cwd", src)?.map(str::to_string),
+        name: opt_prop_str(node, "name", src)?.map(str::to_string),
         active: bool_prop(node, "active", src)?.unwrap_or(false),
         env: decode_env_child(node, src)?,
     })
@@ -342,6 +342,16 @@ fn count_active_leaves(node: &PaneNode) -> usize {
 /// Decode an optional `env { KEY "value"; … }` child node into ordered
 /// `(key, value)` pairs. Mirrors `decode_palette`'s string-map child shape.
 fn decode_env_child(node: &KdlNode, src: &str) -> Result<Vec<(String, String)>, ConfigError> {
+    // Reject more than one `env` block (session/window/pane all route here).
+    // `find_child` only takes the first, so a second block would silently drop its
+    // vars, and we'd rather fail loud, matching the decoder's strictness elsewhere.
+    let env_count = node
+        .children()
+        .map(|d| d.nodes().iter().filter(|n| n.name().value() == "env").count())
+        .unwrap_or(0);
+    if env_count > 1 {
+        return Err(decode_err(src, node, "at most one `env` block is allowed"));
+    }
     let Some(env_node) = find_child(node, "env") else {
         return Ok(Vec::new());
     };
@@ -370,6 +380,24 @@ fn prop_val<'a>(node: &'a KdlNode, key: &str) -> Option<&'a KdlValue> {
 
 fn prop_str<'a>(node: &'a KdlNode, key: &str) -> Option<&'a str> {
     prop_val(node, key).and_then(|v| v.as_string())
+}
+
+/// An optional string property; absent ⇒ `None`. A present but non-string value
+/// is a decode error (consistent with `bool_prop`/`prop_u8`) rather than being
+/// silently dropped; a typo like `cwd=5` or `command=#true` should fail loud,
+/// not produce a pane with no command / no cwd.
+fn opt_prop_str<'a>(
+    node: &'a KdlNode,
+    key: &str,
+    src: &str,
+) -> Result<Option<&'a str>, ConfigError> {
+    match prop_val(node, key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_string()
+            .map(Some)
+            .ok_or_else(|| decode_err(src, node, &format!("`{key}` must be a string"))),
+    }
 }
 
 /// A `key=#true`/`key=#false` bool property; absent ⇒ `None`. A present
@@ -1310,6 +1338,58 @@ keymap {
     fn active_non_bool_is_a_decode_error() {
         // KDL v2 requires `#true`/`#false`; a string is a decode error.
         assert!(parse_config(r##"session "s" { window "w" active="yes" { pane } }"##).is_err());
+    }
+
+    #[test]
+    fn non_string_optional_props_are_decode_errors() {
+        // command/cwd/name with a non-string value used to be silently dropped;
+        // they must now fail loud like the other typed props.
+        assert!(
+            parse_config(r##"session "s" { window "w" { pane command=#true } }"##).is_err(),
+            "non-string command must error"
+        );
+        assert!(
+            parse_config(r##"session "s" { window "w" { pane cwd=5 } }"##).is_err(),
+            "non-string pane cwd must error"
+        );
+        assert!(
+            parse_config(r##"session "s" { window "w" { pane name=42 } }"##).is_err(),
+            "non-string pane name must error"
+        );
+        assert!(
+            parse_config(r##"session "s" cwd=5 { window "w" { pane } }"##).is_err(),
+            "non-string session cwd must error"
+        );
+        assert!(
+            parse_config(r##"session "s" { window "w" cwd=#false { pane } }"##).is_err(),
+            "non-string window cwd must error"
+        );
+        // A well-typed string still parses.
+        assert!(parse_config(r##"session "s" { window "w" { pane command="echo hi" } }"##).is_ok());
+    }
+
+    #[test]
+    fn duplicate_env_block_is_a_decode_error() {
+        // A second env block on session/window/pane silently dropped its vars;
+        // it must now be rejected.
+        assert!(
+            parse_config(
+                r##"session "s" { env { A "1" } env { B "2" } window "w" { pane } }"##
+            )
+            .is_err(),
+            "duplicate session env must error"
+        );
+        assert!(
+            parse_config(
+                r##"session "s" { window "w" { pane { env { A "1" } env { B "2" } } } }"##
+            )
+            .is_err(),
+            "duplicate pane env must error"
+        );
+        // A single env block still parses.
+        assert!(
+            parse_config(r##"session "s" { window "w" { pane { env { A "1" } } } }"##).is_ok()
+        );
     }
 
     #[test]
