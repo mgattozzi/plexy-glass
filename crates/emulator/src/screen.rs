@@ -266,14 +266,20 @@ impl Screen {
     pub fn advance_to_next_row(&mut self, soft_wrap: bool) {
         let (top, bottom) = self.scroll_region;
         if self.cursor.row >= bottom {
-            // Need to scroll.
+            // Need to scroll. Only the physical top line of the screen (region
+            // top at row 0) feeds scrollback. A partial scroll region (DECSTBM
+            // top>0) scrolls an interior region; rows leaving the top of THAT
+            // region are discarded, matching xterm/tmux/wezterm/VTE, not pushed
+            // into scrollback (which would corrupt history/block marks).
             let mut popped: Vec<crate::grid::Row> = Vec::new();
-            let target = if self.alt.is_some() { None } else { Some(&mut popped) };
+            let target = if self.alt.is_none() && top == 0 {
+                Some(&mut popped)
+            } else {
+                None
+            };
             self.active.scroll_up(top, bottom, 1, target);
-            if self.alt.is_none() {
-                for r in popped {
-                    self.scrollback.push(r);
-                }
+            for r in popped {
+                self.scrollback.push(r);
             }
             // Stay at the bottom; new content goes there.
             self.cursor.row = bottom;
@@ -432,14 +438,18 @@ impl Screen {
             'S' => {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 let (top, bottom) = self.scroll_region;
-                let alt_active = self.alt.is_some();
+                // Only a top-anchored region on the main screen feeds scrollback
+                // (see advance_to_next_row): interior-region scroll-out is
+                // discarded, not retained.
                 let mut popped = Vec::new();
-                let target = if alt_active { None } else { Some(&mut popped) };
+                let target = if self.alt.is_none() && top == 0 {
+                    Some(&mut popped)
+                } else {
+                    None
+                };
                 self.active.scroll_up(top, bottom, n, target);
-                if !alt_active {
-                    for r in popped {
-                        self.scrollback.push(r);
-                    }
+                for r in popped {
+                    self.scrollback.push(r);
                 }
             }
             'T' => {
@@ -717,17 +727,12 @@ impl Screen {
     }
 
     fn set_ansi_mode(&mut self, code: u16, on: bool) {
-        use crate::modes::Modes;
-        match code {
-            4 => {
-                if on {
-                    self.modes.insert(Modes::INSERT);
-                } else {
-                    self.modes.remove(Modes::INSERT);
-                }
-            }
-            _ => tracing::trace!(code, on, "unhandled ANSI mode"),
-        }
+        // No ANSI (non-private) modes are honored. IRM (mode 4) in particular is
+        // deliberately unsupported: the emulator has no insert/delete-cell
+        // operations (no ICH/DCH/IL/DL/ECH), and DECRQM already reports IRM
+        // unsupported, so we must not flip an INSERT bit that put_grapheme never
+        // reads, which would silently lie about insert-mode support.
+        tracing::trace!(code, on, "unhandled ANSI mode");
     }
 
     fn enter_alt_screen(&mut self) {
@@ -1594,6 +1599,53 @@ mod tests {
         p.flush(&mut s);
         p.advance(&mut s, b"\x1b[H\x1b[S");
         assert!(s.active.get_cell(3, 0).unwrap().is_blank());
+    }
+
+    #[test]
+    fn partial_region_scroll_does_not_pollute_scrollback() {
+        // A DECSTBM region with a non-zero top margin scrolls an INTERIOR
+        // region; rows leaving the top of that region must be discarded, not
+        // pushed into scrollback (which would corrupt command history / marks).
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(4, 4);
+        p.advance(&mut s, b"\x1b[2;4r"); // scroll_region = (1, 3), top margin > 0
+        p.advance(&mut s, b"\x1b[2;1H"); // cursor to the region top
+        p.advance(&mut s, b"L1\nL2\nL3\nL4\nL5"); // overflow the region via LF
+        p.flush(&mut s);
+        assert!(
+            s.scrollback.is_empty(),
+            "interior-region scroll must not feed scrollback, got {} rows",
+            s.scrollback.rows().len()
+        );
+
+        // Same via CSI S (SU) on a top>0 region.
+        let mut s2 = Screen::new(4, 4);
+        p.advance(&mut s2, b"\x1b[2;4r\x1b[2;1HXXXX\x1b[S\x1b[S\x1b[S");
+        p.flush(&mut s2);
+        assert!(s2.scrollback.is_empty());
+
+        // Sanity: a full-screen (top==0) region still feeds scrollback.
+        let mut s3 = Screen::new(2, 4);
+        p.advance(&mut s3, b"AAAA\nBBBB\nCCCC");
+        p.flush(&mut s3);
+        assert!(!s3.scrollback.is_empty());
+    }
+
+    #[test]
+    fn irm_insert_mode_is_not_honored() {
+        // IRM (ANSI mode 4) is deliberately unsupported: enabling it must not
+        // shift cells, since writing overwrites at the cursor.
+        let mut p = crate::parser::Parser::new();
+        let mut s = Screen::new(2, 8);
+        p.advance(&mut s, b"abc");
+        p.advance(&mut s, b"\x1b[H"); // home (0,0)
+        p.advance(&mut s, b"\x1b[4h"); // enable IRM (must be ignored)
+        p.advance(&mut s, b"X");
+        p.flush(&mut s);
+        // Overwrite, not insert: row 0 is "Xbc" (insert mode would give "Xabc").
+        assert_eq!(s.active.get_cell(0, 0).unwrap().grapheme.as_str(), "X");
+        assert_eq!(s.active.get_cell(0, 1).unwrap().grapheme.as_str(), "b");
+        assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "c");
     }
 
     #[test]

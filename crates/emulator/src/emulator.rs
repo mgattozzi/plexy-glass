@@ -37,6 +37,17 @@ impl Emulator {
                 rows,
                 cols,
             );
+            // Also reflow the PARKED main grid (held in `self.screen.alt`). Without
+            // this, leaving alt-screen after a resize (vim/less + resize + :q)
+            // restores the main grid at its stale pre-resize dimensions while the
+            // cursor/scroll_region reflect the new size. Its cursor lives in
+            // `saved_cursor`; reflow it too so the restored cursor stays in-bounds.
+            let mut parked_sb = crate::scrollback::Scrollback::with_cap(0);
+            let mut throwaway = crate::cursor::Cursor::default();
+            let parked_cursor = self.screen.saved_cursor.as_mut().unwrap_or(&mut throwaway);
+            if let Some(parked) = self.screen.alt.as_mut() {
+                reflow(parked, &mut parked_sb, parked_cursor, rows, cols);
+            }
         } else {
             reflow(
                 &mut self.screen.active,
@@ -144,6 +155,40 @@ mod tests {
                 .mark
                 .contains(crate::grid::RowMark::PROMPT_END),
             "PROMPT_END must survive reflow"
+        );
+    }
+
+    #[test]
+    fn leaving_alt_screen_after_resize_restores_new_dimensions() {
+        // Enter alt-screen, resize, then leave: the restored main grid must be
+        // at the NEW size, not the stale pre-resize dimensions. (vim/less +
+        // resize + :q.)
+        let mut e = Emulator::new(4, 8);
+        e.advance(b"main");
+        e.parser.flush(&mut e.screen);
+        e.advance(b"\x1b[?1049h"); // enter alt-screen (parks the 4x8 main grid)
+        e.advance(b"alt");
+        e.parser.flush(&mut e.screen);
+        e.resize(6, 20); // resize while on the alt-screen
+        assert_eq!(e.screen().active.num_cols(), 20);
+        assert_eq!(e.screen().active.num_rows(), 6);
+        e.advance(b"\x1b[?1049l"); // leave alt-screen -> restore the main grid
+        assert_eq!(
+            e.screen().active.num_cols(),
+            20,
+            "restored main grid must be at the new width"
+        );
+        assert_eq!(
+            e.screen().active.num_rows(),
+            6,
+            "restored main grid must be at the new height"
+        );
+        assert_eq!(e.screen().cols(), 20);
+        assert_eq!(e.screen().rows(), 6);
+        // Content survived the parked-grid reflow.
+        assert_eq!(
+            e.screen().active.get_cell(0, 0).unwrap().grapheme.as_str(),
+            "m"
         );
     }
 

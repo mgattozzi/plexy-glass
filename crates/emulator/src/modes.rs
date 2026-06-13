@@ -8,7 +8,8 @@ bitflags::bitflags! {
     pub struct Modes: u64 {
         const AUTOWRAP        = 1 << 0;  // DECAWM (?7)
         const ORIGIN          = 1 << 1;  // DECOM (?6)
-        const INSERT          = 1 << 2;  // IRM
+        // bit 2 (IRM / ANSI mode 4) intentionally unused: insert mode is not
+        // supported (no ICH/DCH/IL/DL/ECH) and DECRQM reports it unsupported.
         const ALT_SCREEN      = 1 << 3;  // ?1049
         const CURSOR_VISIBLE  = 1 << 4;  // ?25 (DECTCEM)
         const BRACKETED_PASTE = 1 << 5;  // ?2004
