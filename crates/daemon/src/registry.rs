@@ -667,7 +667,7 @@ mod tests {
                 sync_input: false,
                 home_cwd: None,
                 active_pane: 0,
-                panes: vec![crate::persist::PaneStateV1 { cwd: None, name: None }],
+                panes: vec![crate::persist::PaneStateV1 { cwd: None, name: None, scrollback: None }],
                 layout: crate::persist::LayoutStateV1::Leaf(0),
             }],
         };
@@ -738,7 +738,7 @@ mod tests {
                 sync_input: false,
                 home_cwd: None,
                 active_pane: 0,
-                panes: vec![crate::persist::PaneStateV1 { cwd: None, name: None }],
+                panes: vec![crate::persist::PaneStateV1 { cwd: None, name: None, scrollback: None }],
                 layout: crate::persist::LayoutStateV1::Leaf(0),
             }],
         };
@@ -845,7 +845,7 @@ mod tests {
                 sync_input: false,
                 home_cwd: None,
                 active_pane: 0,
-                panes: vec![crate::persist::PaneStateV1 { cwd: None, name: None }],
+                panes: vec![crate::persist::PaneStateV1 { cwd: None, name: None, scrollback: None }],
                 layout: crate::persist::LayoutStateV1::Leaf(0),
             }],
         };

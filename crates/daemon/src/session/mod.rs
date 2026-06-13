@@ -59,6 +59,16 @@ pub struct Session {
     pub persist_notify: Arc<Notify>,
     /// JoinHandle for the persist task; aborted in `Drop`.
     persist_handle: StdMutex<Option<JoinHandle<()>>>,
+    /// Held by the persist loop for the duration of each `spawn_blocking` save
+    /// (serialize + fsync + rename). `stop_persist` ACQUIRES this before
+    /// aborting the loop, so it blocks until any in-flight save completes. A
+    /// `spawn_blocking` task cannot be aborted once running, so aborting the
+    /// loop alone would only detach the blocking thread and let its write land
+    /// AFTER `kill`'s `delete_session`. Waiting on the guard first guarantees
+    /// the in-flight save finishes before the delete. `begin_close` sets
+    /// `closing` before `stop_persist`, so the loop's pre-save `closing` check
+    /// stops it from starting a NEW save while teardown is underway.
+    persist_in_flight: tokio::sync::Mutex<()>,
     /// One-shot wake that repaints an expired status-line message away. Aborted
     /// and replaced each time a new message is set, and aborted on `Drop`.
     status_msg_handle: StdMutex<Option<JoinHandle<()>>>,
@@ -130,7 +140,9 @@ impl Session {
                             .and_then(|p| p.with_screen(|s| s.cwd.clone()))
                             .and_then(|url| crate::popup::osc7_to_path(&url));
                         let name = pane.and_then(|p| p.name());
-                        PaneStateV1 { cwd, name }
+                        // Scrollback capture lands in P3; None here keeps the
+                        // additive field absent (old-file behavior) until then.
+                        PaneStateV1 { cwd, name, scrollback: None }
                     })
                     .collect();
                 let layout = layout_tree
@@ -211,6 +223,7 @@ impl Session {
             dirty: std::sync::atomic::AtomicBool::new(false),
             persist_notify: Arc::new(Notify::new()),
             persist_handle: StdMutex::new(None),
+            persist_in_flight: tokio::sync::Mutex::new(()),
             death_handle: StdMutex::new(None),
         });
         let coord_handle = tokio::spawn(render_coordinator(Arc::clone(&session), frame_tx));
@@ -327,6 +340,15 @@ impl Session {
     /// `save_session`, so without this await an in-flight save could land the
     /// file back on disk *after* `delete_session` removed it.
     pub async fn stop_persist(&self) {
+        // Acquire the in-flight-save guard BEFORE aborting the loop. A
+        // `spawn_blocking` save cannot be aborted once running, so aborting the
+        // loop first would only detach the blocking thread and let its write
+        // land after `delete_session`. Waiting on the guard blocks until any
+        // in-flight serialize+fsync completes; `closing` (set by `begin_close`
+        // before this) then stops the loop from starting a new one. The guard is
+        // released at the end of this scope, after the loop is dead, so no new
+        // save can sneak in.
+        let _guard = self.persist_in_flight.lock().await;
         let handle = self
             .persist_handle
             .lock()
@@ -1234,15 +1256,50 @@ async fn persist_loop(weak: std::sync::Weak<Session>) {
             let wm = session.window_manager.lock().await;
             session.snapshot_for_persist(&wm)
         };
-        if let Err(e) = crate::persist::save_session(&snap) {
-            tracing::warn!(error = %e, name = %session.name(), "session persist failed");
-            // `dirty` was already swapped to false above; without this the
-            // snapshot is silently lost until the next structural change.
-            // mark_dirty re-sets the flag AND notifies, so the next
-            // `notified().await` returns immediately (stored permit) and the
-            // 1500ms debounce sleep paces the retry, so we get a 1.5s retry
-            // cadence while the disk stays unwritable, not a busy loop.
-            session.mark_dirty();
+        // With persisted scrollback the serialize + fsync can move multiple MB,
+        // so run it on `spawn_blocking` rather than inline on a tokio worker.
+        // Ordering guarantee for `kill`: `begin_close` sets `closing` BEFORE
+        // `stop_persist().await` runs. `stop_persist` aborts THIS loop and then
+        // awaits the in-flight save handle stored in `persist_save_handle`, so a
+        // multi-MB serialize+fsync already dispatched to the blocking pool runs
+        // to completion before `delete_session`. Aborting the loop alone would
+        // only detach (not cancel) the blocking thread, letting its write land
+        // after the delete, hence the slot. The closure also re-checks
+        // `closing` immediately before writing so a save that began-then-saw-
+        // close becomes a no-op.
+        let name = session.name();
+        let session_for_save = Arc::clone(&session);
+        // Hold `persist_in_flight` across the whole save so `stop_persist` (which
+        // acquires it before aborting the loop) cannot proceed to
+        // `delete_session` until this serialize+fsync completes.
+        let save = {
+            let _guard = session.persist_in_flight.lock().await;
+            tokio::task::spawn_blocking(move || {
+                // Re-check under the guard: a save that began after `begin_close`
+                // set `closing` becomes a no-op write skip.
+                if session_for_save.closing.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                crate::persist::save_session(&snap)
+            })
+            .await
+        };
+        match save {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, name = %name, "session persist failed");
+                // `dirty` was already swapped to false above; without this the
+                // snapshot is silently lost until the next structural change.
+                // mark_dirty re-sets the flag AND notifies, so the next
+                // `notified().await` returns immediately (stored permit) and the
+                // 1500ms debounce sleep paces the retry, so we get a 1.5s retry
+                // cadence while the disk stays unwritable, not a busy loop.
+                session.mark_dirty();
+            }
+            Err(join_err) => {
+                tracing::warn!(error = %join_err, name = %name, "persist task join failed");
+                session.mark_dirty();
+            }
         }
     }
 }
@@ -2192,8 +2249,8 @@ mod tests {
                 home_cwd: None,
                 active_pane: 0,
                 panes: vec![
-                    PaneStateV1 { cwd: None, name: None },
-                    PaneStateV1 { cwd: None, name: None },
+                    PaneStateV1 { cwd: None, name: None, scrollback: None },
+                    PaneStateV1 { cwd: None, name: None, scrollback: None },
                 ],
                 layout: LayoutStateV1::Split {
                     dir: LayoutDirV1::Vertical,
@@ -2290,7 +2347,7 @@ mod tests {
                 sync_input: false,
                 home_cwd: Some("/tmp".into()),
                 active_pane: 0,
-                panes: vec![PaneStateV1 { cwd: None, name: None }],
+                panes: vec![PaneStateV1 { cwd: None, name: None, scrollback: None }],
                 layout: LayoutStateV1::Leaf(0),
             }],
         };

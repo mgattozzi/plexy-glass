@@ -3,6 +3,9 @@
 //! Writes are atomic (tempfile + fsync + rename). Restore is on-demand
 //! from `SessionRegistry::attach_or_create`.
 
+use plexy_glass_emulator::{
+    Attrs, Cell, Color, Row, RowMark, UnderlineStyle, WrapOrigin,
+};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
@@ -51,6 +54,322 @@ pub struct PaneStateV1 {
     /// `#[serde(default)]` fills it as `None`.
     #[serde(default)]
     pub name: Option<String>,
+    /// Persisted scrollback (text + attributes + OSC 133 block marks), if any.
+    /// Additive optional field, so old files restore blank (today's behavior).
+    /// On restore the rows become the fresh pane's *scrollback history*; the
+    /// new child draws into the live grid below them. See the 2026-06-12
+    /// scrollback-persistence spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrollback: Option<PaneScrollbackV1>,
+}
+
+/// One pane's persisted scrollback: the last N rows of `scrollback ++ main
+/// grid`, in display order, captured at width `cols`. Width is recorded only
+/// for sanity / documentation; restore seeds rows as-is (no reflow) when the
+/// spawn width differs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PaneScrollbackV1 {
+    pub cols: u16,
+    pub rows: Vec<RowV1>,
+}
+
+/// One persisted row. Trailing all-default cells are trimmed before serialize
+/// and re-padded to `cols` on load.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RowV1 {
+    pub cells: Vec<CellV1>,
+    #[serde(default, skip_serializing_if = "WrapV1::is_default")]
+    pub wrap: WrapV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<RowMarkV1>,
+}
+
+/// One persisted cell. Every field except `grapheme` is elided from the
+/// serialized form when it holds its default value, so a plain text cell
+/// serializes to just its grapheme, and that's the dominant size win for
+/// mostly-plain scrollback. `hyperlink_id` is deliberately NOT mirrored: it
+/// indexes the per-`Screen` `HyperlinkTable`, which is not persisted (a bare
+/// index would dangle on restore). Consequence: restored scrollback keeps
+/// text/styling but loses link clickability.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CellV1 {
+    pub grapheme: String,
+    #[serde(default, skip_serializing_if = "ColorV1::is_default")]
+    pub fg: ColorV1,
+    #[serde(default, skip_serializing_if = "ColorV1::is_default")]
+    pub bg: ColorV1,
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub attrs: u16,
+    /// SGR 58/59 underline color, independent of `attrs`'s UNDERLINE bit.
+    #[serde(default, skip_serializing_if = "ColorV1::is_default")]
+    pub underline_color: ColorV1,
+    /// SGR `4:0`..`4:5` underline shape, independent of the UNDERLINE bit and
+    /// of `underline_color`. Persisted so the diff renderer re-emits
+    /// `4:2`/`4:3`/`4:4`/`4:5` on restored rows instead of flattening to `4`.
+    #[serde(default, skip_serializing_if = "UnderlineStyleV1::is_default")]
+    pub underline_style: UnderlineStyleV1,
+}
+
+/// Persisted color (mirrors `emulator::color::Color`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum ColorV1 {
+    #[default]
+    Default,
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
+
+impl ColorV1 {
+    fn is_default(&self) -> bool {
+        matches!(self, ColorV1::Default)
+    }
+}
+
+/// Persisted underline shape (mirrors `emulator::attrs::UnderlineStyle`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum UnderlineStyleV1 {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+impl UnderlineStyleV1 {
+    fn is_default(&self) -> bool {
+        matches!(self, UnderlineStyleV1::None)
+    }
+}
+
+/// Persisted soft-wrap continuation marker (mirrors `emulator::grid::WrapOrigin`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum WrapV1 {
+    #[default]
+    Hard,
+    SoftFrom(u32),
+}
+
+impl WrapV1 {
+    fn is_default(&self) -> bool {
+        matches!(self, WrapV1::Hard)
+    }
+}
+
+/// Persisted OSC 133 block annotation (mirrors the public surface of
+/// `emulator::grid::RowMark`). `flags` carries only the public flag bits
+/// (PROMPT_START / OUTPUT_START / BLOCK_END / PROMPT_END); the live mark's
+/// private exit-presence bit is represented by `exit: Some(_)` here.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RowMarkV1 {
+    pub flags: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_end_col: Option<u16>,
+}
+
+fn is_zero_u16(v: &u16) -> bool {
+    *v == 0
+}
+
+// ── live ↔ DTO mappers ──────────────────────────────────────────────────
+// The emulator's `Cell`/`Color`/`Row`/`RowMark`/`UnderlineStyle` stay
+// serde-free; these explicit mappers convert at the persist boundary so the
+// on-disk format can evolve independently of the hot emulator core.
+
+impl From<Color> for ColorV1 {
+    fn from(c: Color) -> Self {
+        match c {
+            Color::Default => ColorV1::Default,
+            Color::Indexed(i) => ColorV1::Indexed(i),
+            Color::Rgb(r, g, b) => ColorV1::Rgb(r, g, b),
+        }
+    }
+}
+
+impl From<ColorV1> for Color {
+    fn from(c: ColorV1) -> Self {
+        match c {
+            ColorV1::Default => Color::Default,
+            ColorV1::Indexed(i) => Color::Indexed(i),
+            ColorV1::Rgb(r, g, b) => Color::Rgb(r, g, b),
+        }
+    }
+}
+
+impl From<UnderlineStyle> for UnderlineStyleV1 {
+    fn from(s: UnderlineStyle) -> Self {
+        match s {
+            UnderlineStyle::None => UnderlineStyleV1::None,
+            UnderlineStyle::Single => UnderlineStyleV1::Single,
+            UnderlineStyle::Double => UnderlineStyleV1::Double,
+            UnderlineStyle::Curly => UnderlineStyleV1::Curly,
+            UnderlineStyle::Dotted => UnderlineStyleV1::Dotted,
+            UnderlineStyle::Dashed => UnderlineStyleV1::Dashed,
+        }
+    }
+}
+
+impl From<UnderlineStyleV1> for UnderlineStyle {
+    fn from(s: UnderlineStyleV1) -> Self {
+        match s {
+            UnderlineStyleV1::None => UnderlineStyle::None,
+            UnderlineStyleV1::Single => UnderlineStyle::Single,
+            UnderlineStyleV1::Double => UnderlineStyle::Double,
+            UnderlineStyleV1::Curly => UnderlineStyle::Curly,
+            UnderlineStyleV1::Dotted => UnderlineStyle::Dotted,
+            UnderlineStyleV1::Dashed => UnderlineStyle::Dashed,
+        }
+    }
+}
+
+/// Convert a live cell to its DTO. `hyperlink_id` is dropped (see `CellV1`).
+// Wired into snapshot/restore in P3; this commit's tests exercise it.
+#[allow(dead_code)]
+pub(crate) fn cell_to_dto(c: &Cell) -> CellV1 {
+    CellV1 {
+        grapheme: c.grapheme.as_str().to_string(),
+        fg: c.fg.into(),
+        bg: c.bg.into(),
+        attrs: c.attrs.bits(),
+        underline_color: c.underline_color.into(),
+        underline_style: c.underline_style.into(),
+    }
+}
+
+/// Reconstruct a live cell from its DTO. `hyperlink_id` is always `None`
+/// (links are not persisted).
+// Wired into snapshot/restore in P3; this commit's tests exercise it.
+#[allow(dead_code)]
+pub(crate) fn cell_from_dto(c: &CellV1) -> Cell {
+    Cell {
+        grapheme: c.grapheme.as_str().into(),
+        fg: c.fg.into(),
+        bg: c.bg.into(),
+        underline_color: c.underline_color.into(),
+        underline_style: c.underline_style.into(),
+        // `from_bits_truncate` drops any bit the current build does not know, so a
+        // forward-compat read of a newer file never produces a bogus `Attrs`.
+        attrs: Attrs::from_bits_truncate(c.attrs),
+        hyperlink_id: None,
+    }
+}
+
+/// Convert a live `RowMark` to its DTO, or `None` when the row is unmarked.
+/// Only the public flag bits are persisted; the live mark's private
+/// exit-presence bit is captured by `exit`.
+// Wired into snapshot/restore in P3; this commit's tests exercise it.
+#[allow(dead_code)]
+pub(crate) fn mark_to_dto(m: RowMark) -> Option<RowMarkV1> {
+    if m.is_empty() {
+        return None;
+    }
+    let mut flags = 0u8;
+    for bit in [
+        RowMark::PROMPT_START,
+        RowMark::OUTPUT_START,
+        RowMark::BLOCK_END,
+        RowMark::PROMPT_END,
+    ] {
+        if m.contains(bit) {
+            flags |= bit;
+        }
+    }
+    Some(RowMarkV1 {
+        flags,
+        exit: m.exit(),
+        prompt_end_col: m.prompt_end_col(),
+    })
+}
+
+/// Reconstruct a live `RowMark` from its DTO.
+// Wired into snapshot/restore in P3; this commit's tests exercise it.
+#[allow(dead_code)]
+pub(crate) fn mark_from_dto(m: &RowMarkV1) -> RowMark {
+    let mut out = RowMark::default();
+    for bit in [
+        RowMark::PROMPT_START,
+        RowMark::OUTPUT_START,
+        RowMark::BLOCK_END,
+        RowMark::PROMPT_END,
+    ] {
+        if m.flags & bit != 0 {
+            out.set(bit);
+        }
+    }
+    if let Some(col) = m.prompt_end_col {
+        out.set_prompt_end(col);
+    }
+    // `set_exit(Some)` also sets the private `HAS_EXIT` bit; `set_exit(None)` is a
+    // no-op against a fresh mark (keeps it absent).
+    if let Some(code) = m.exit {
+        out.set_exit(Some(code));
+    }
+    out
+}
+
+// Wired into snapshot/restore in P3; this commit's tests exercise it.
+#[allow(dead_code)]
+fn wrap_to_dto(w: WrapOrigin) -> WrapV1 {
+    match w {
+        WrapOrigin::Hard => WrapV1::Hard,
+        WrapOrigin::SoftFrom(id) => WrapV1::SoftFrom(id),
+    }
+}
+
+// Wired into snapshot/restore in P3; this commit's tests exercise it.
+#[allow(dead_code)]
+fn wrap_from_dto(w: WrapV1) -> WrapOrigin {
+    match w {
+        WrapV1::Hard => WrapOrigin::Hard,
+        WrapV1::SoftFrom(id) => WrapOrigin::SoftFrom(id),
+    }
+}
+
+/// Convert a live row to its DTO, trimming trailing all-default cells (re-padded
+/// to `cols` on load). A wide grapheme's trailing `Cell::wide_spacer()` is an
+/// empty-grapheme cell, which is NOT default (default is a single space), so
+/// spacers are preserved by the trim.
+// Wired into snapshot/restore in P3; this commit's tests exercise it.
+#[allow(dead_code)]
+pub(crate) fn row_to_dto(row: &Row) -> RowV1 {
+    let default = Cell::default();
+    let keep = row
+        .cells
+        .iter()
+        .rposition(|c| *c != default)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let cells = row.cells[..keep].iter().map(cell_to_dto).collect();
+    RowV1 {
+        cells,
+        wrap: wrap_to_dto(row.wrap_origin),
+        mark: mark_to_dto(row.mark),
+    }
+}
+
+/// Reconstruct a live row from its DTO, re-padding to `cols` with default cells
+/// (the trim dropped the trailing defaults on save). Rows wider than `cols`
+/// (a width-mismatch restore) keep their captured cells; the first resize
+/// normalizes them.
+// Wired into snapshot/restore in P3; this commit's tests exercise it.
+#[allow(dead_code)]
+pub(crate) fn row_from_dto(row: &RowV1, cols: u16) -> Row {
+    let mut cells: Vec<Cell> = row.cells.iter().map(cell_from_dto).collect();
+    if cells.len() < cols as usize {
+        cells.resize(cols as usize, Cell::default());
+    }
+    Row {
+        cells,
+        wrap_origin: wrap_from_dto(row.wrap),
+        mark: row.mark.as_ref().map(mark_from_dto).unwrap_or_default(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -103,7 +422,12 @@ pub fn save_session(state: &SessionStateV1) -> Result<(), PersistError> {
     std::fs::create_dir_all(&dir)?;
     let final_path = dir.join(format!("{}.json", state.name));
     let tmp_path = dir.join(format!("{}.json.tmp", state.name));
-    let json = serde_json::to_vec_pretty(state)?;
+    // Compact (not pretty): the state file is machine-written and never
+    // hand-edited, so pretty-printing is pure overhead, and with persisted
+    // scrollback a styled pane is single-digit-to-tens of MB pretty vs a small
+    // fraction of that compact. Combined with per-cell default-field elision
+    // (see `CellV1`), most scrollback cells serialize to just their grapheme.
+    let json = serde_json::to_vec(state)?;
     {
         let mut f = std::fs::File::create(&tmp_path)?;
         f.write_all(&json)?;
@@ -182,7 +506,7 @@ mod tests {
                 sync_input: false,
                 home_cwd: None,
                 active_pane: 0,
-                panes: vec![PaneStateV1 { cwd: Some("/tmp".into()), name: None }],
+                panes: vec![PaneStateV1 { cwd: Some("/tmp".into()), name: None, scrollback: None }],
                 layout: LayoutStateV1::Leaf(0),
             }],
         }
@@ -305,5 +629,160 @@ mod tests {
         save_session(&second).expect("second save");
         let loaded = load_session("rep").expect("load").expect("present");
         assert_eq!(loaded.windows[0].panes[0].cwd.as_deref(), Some("/var"));
+    }
+
+    // ── scrollback DTO round-trip tests ────────────────────────────────────
+
+    /// Build a styled live cell with every persisted dimension set.
+    fn styled_cell(g: &str, ul: UnderlineStyle) -> Cell {
+        Cell {
+            grapheme: g.into(),
+            fg: Color::Rgb(10, 20, 30),
+            bg: Color::Indexed(42),
+            underline_color: Color::Rgb(200, 100, 50),
+            underline_style: ul,
+            attrs: Attrs::BOLD | Attrs::UNDERLINE | Attrs::ITALIC,
+            // Persistence is link-free: a non-`None` id here would break the
+            // equality compare since restore always produces `None`.
+            hyperlink_id: None,
+        }
+    }
+
+    #[test]
+    fn cell_dto_round_trips_styled_curly_and_dotted() {
+        for ul in [UnderlineStyle::Curly, UnderlineStyle::Dotted] {
+            let cell = styled_cell("Z", ul);
+            let dto = cell_to_dto(&cell);
+            let back = cell_from_dto(&dto);
+            assert_eq!(back, cell, "styled cell with {ul:?} must round-trip exactly");
+        }
+    }
+
+    #[test]
+    fn row_dto_round_trips_wide_grapheme_with_spacer() {
+        // A wide grapheme + its trailing spacer must both survive the trim.
+        let mut row = Row::blank(8);
+        row.cells[0] = Cell {
+            grapheme: "世".into(),
+            ..Cell::default()
+        };
+        row.cells[1] = Cell::wide_spacer();
+        let dto = row_to_dto(&row);
+        // Trim keeps through the spacer (col 1, non-default) and drops the
+        // trailing default spaces.
+        assert_eq!(dto.cells.len(), 2, "wide grapheme + spacer preserved, trailing trimmed");
+        let back = row_from_dto(&dto, 8);
+        assert_eq!(back.cells[0].grapheme.as_str(), "世");
+        assert!(back.cells[1].is_wide_spacer(), "spacer survives round-trip");
+        assert_eq!(back, row, "re-padded row equals the original (8 cols)");
+    }
+
+    #[test]
+    fn row_dto_round_trips_soft_and_hard_wrap() {
+        let mut hard = Row::blank(4);
+        hard.cells[0].grapheme = "a".into();
+        hard.wrap_origin = WrapOrigin::Hard;
+        let back_hard = row_from_dto(&row_to_dto(&hard), 4);
+        assert_eq!(back_hard.wrap_origin, WrapOrigin::Hard);
+        assert_eq!(back_hard, hard);
+
+        let mut soft = Row::blank(4);
+        soft.cells[0].grapheme = "b".into();
+        soft.wrap_origin = WrapOrigin::SoftFrom(7);
+        let back_soft = row_from_dto(&row_to_dto(&soft), 4);
+        assert_eq!(back_soft.wrap_origin, WrapOrigin::SoftFrom(7));
+        assert_eq!(back_soft, soft);
+    }
+
+    #[test]
+    fn row_mark_dto_round_trips_with_and_without_exit() {
+        // BLOCK_END + exit code.
+        let mut with_exit = Row::blank(4);
+        with_exit.cells[0].grapheme = "x".into();
+        with_exit.mark.set(RowMark::BLOCK_END);
+        with_exit.mark.set_exit(Some(7));
+        let back = row_from_dto(&row_to_dto(&with_exit), 4);
+        assert!(back.mark.contains(RowMark::BLOCK_END));
+        assert_eq!(back.mark.exit(), Some(7));
+        assert_eq!(back, with_exit);
+
+        // BLOCK_END with no parseable exit (D arrived without a code).
+        let mut no_exit = Row::blank(4);
+        no_exit.cells[0].grapheme = "y".into();
+        no_exit.mark.set(RowMark::BLOCK_END);
+        let back2 = row_from_dto(&row_to_dto(&no_exit), 4);
+        assert!(back2.mark.contains(RowMark::BLOCK_END));
+        assert_eq!(back2.mark.exit(), None);
+        assert_eq!(back2, no_exit);
+
+        // PROMPT_START + PROMPT_END with a column.
+        let mut prompt = Row::blank(4);
+        prompt.cells[0].grapheme = "$".into();
+        prompt.mark.set(RowMark::PROMPT_START);
+        prompt.mark.set_prompt_end(3);
+        let back3 = row_from_dto(&row_to_dto(&prompt), 4);
+        assert!(back3.mark.contains(RowMark::PROMPT_START));
+        assert_eq!(back3.mark.prompt_end_col(), Some(3));
+        assert_eq!(back3, prompt);
+    }
+
+    #[test]
+    fn plain_cell_serializes_to_just_its_grapheme() {
+        // A plain text cell elides every styled field, so only `grapheme` remains.
+        let dto = cell_to_dto(&Cell {
+            grapheme: "h".into(),
+            ..Cell::default()
+        });
+        let json = serde_json::to_string(&dto).expect("serialize");
+        assert_eq!(json, r#"{"grapheme":"h"}"#, "plain cell compacts to just its grapheme");
+        // And it still round-trips to an equal `Cell`.
+        let back: CellV1 = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(cell_from_dto(&back), Cell { grapheme: "h".into(), ..Cell::default() });
+    }
+
+    #[test]
+    fn plain_row_omits_wrap_and_mark_keys() {
+        let row = RowV1 {
+            cells: vec![cell_to_dto(&Cell { grapheme: "h".into(), ..Cell::default() })],
+            wrap: WrapV1::Hard,
+            mark: None,
+        };
+        let json = serde_json::to_string(&row).expect("serialize");
+        assert_eq!(json, r#"{"cells":[{"grapheme":"h"}]}"#);
+    }
+
+    #[test]
+    fn trailing_default_cells_trim_and_re_pad_losslessly() {
+        let mut row = Row::blank(10);
+        row.cells[0].grapheme = "a".into();
+        row.cells[1].grapheme = "b".into();
+        let dto = row_to_dto(&row);
+        assert_eq!(dto.cells.len(), 2, "trailing default cells trimmed");
+        let back = row_from_dto(&dto, 10);
+        assert_eq!(back, row, "re-padded to 10 cols equals the original");
+    }
+
+    #[test]
+    fn pane_scrollback_round_trips_through_save_load() {
+        let _g = isolate();
+        let mut row0 = Row::blank(8);
+        row0.cells[0] = styled_cell("A", UnderlineStyle::Curly);
+        row0.mark.set(RowMark::PROMPT_START);
+        let mut row1 = Row::blank(8);
+        row1.cells[0].grapheme = "o".into();
+        row1.mark.set(RowMark::OUTPUT_START);
+        let sb = PaneScrollbackV1 {
+            cols: 8,
+            rows: vec![row_to_dto(&row0), row_to_dto(&row1)],
+        };
+        let mut s = sample_state("sb");
+        s.windows[0].panes[0].scrollback = Some(sb.clone());
+        save_session(&s).expect("save");
+        let loaded = load_session("sb").expect("load").expect("present");
+        let loaded_sb = loaded.windows[0].panes[0].scrollback.as_ref().expect("scrollback present");
+        assert_eq!(loaded_sb, &sb, "scrollback DTO round-trips through save/load");
+        // And the live rows reconstruct exactly.
+        assert_eq!(row_from_dto(&loaded_sb.rows[0], 8), row0);
+        assert_eq!(row_from_dto(&loaded_sb.rows[1], 8), row1);
     }
 }
