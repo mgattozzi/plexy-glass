@@ -338,7 +338,9 @@ keymap {
 
 A *chord* is zero or more modifiers and one key, joined with `+`:
 `Ctrl+a`, `Alt+Left`, `Ctrl+Shift+F5`, `x`. A *chord sequence* is one or more
-chords separated by spaces: `"Ctrl+a c"` means press `Ctrl+a`, then `c`.
+chords separated by spaces: `"Ctrl+a c"` means press `Ctrl+a`, then `c`. The
+literal `+` key can be bound too, write it as the last token, e.g. `"+"` or
+`"Ctrl++"` (the trailing `+` is the key, not a separator).
 
 The bare word `prefix` (case-insensitive: `prefix`, `Prefix`, `PREFIX`) is a
 chord alias that resolves to `keymap.prefix`. It is valid at any position in

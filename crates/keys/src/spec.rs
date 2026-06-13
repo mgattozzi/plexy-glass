@@ -28,6 +28,23 @@ pub fn parse_chord(s: &str) -> Result<ChordSpec, KeyParseError> {
     if s.is_empty() {
         return Err(KeyParseError::Empty);
     }
+    // A literal `+` key. `+` is the modifier separator, so the key token "+"
+    // alone (or after modifiers, e.g. "Ctrl++") would otherwise split into empty
+    // tokens and fail. Peel a trailing "+" off as the key and parse the prefix
+    // as modifiers.
+    if s == "+" {
+        return Ok((Modifiers::empty(), parse_named_key("+")?));
+    }
+    if let Some(prefix) = s.strip_suffix("++") {
+        let mut mods = Modifiers::empty();
+        for m in prefix.split('+') {
+            match Modifiers::alias_meta_as_alt(m.trim()) {
+                Some(flag) => mods |= flag,
+                None => return Err(KeyParseError::UnknownToken(m.to_string())),
+            }
+        }
+        return Ok((mods, parse_named_key("+")?));
+    }
     let mut mods = Modifiers::empty();
     let parts: Vec<&str> = s.split('+').collect();
     // invariant: split on a non-empty string always yields at least one element
@@ -243,6 +260,13 @@ mod tests {
         let (mods, key) = parse_chord("Ctrl+Shift+Right").unwrap();
         assert_eq!(mods, Modifiers::CTRL | Modifiers::SHIFT);
         assert_eq!(key, Key::Arrow(Direction::Right));
+    }
+
+    #[test]
+    fn parses_literal_plus_key() {
+        // `+` is the modifier separator; binding it as a key must still work.
+        assert_eq!(parse_chord("+").unwrap(), (Modifiers::empty(), Key::Char('+')));
+        assert_eq!(parse_chord("Ctrl++").unwrap(), (Modifiers::CTRL, Key::Char('+')));
     }
 
     #[test]

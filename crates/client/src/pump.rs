@@ -17,6 +17,12 @@ pub enum OuterEvent {
 /// Strip outer-terminal focus (`\e[I`/`\e[O`) and color-scheme
 /// (`\e[?997;1n`/`\e[?997;2n`) sequences from `buf` *in place*, returning them in
 /// order. Remaining bytes are ordinary input forwarded to the daemon.
+///
+/// Scans a single chunk in isolation with no cross-call state: a sequence split
+/// across two `stdin.read`s (the `\e[` at the tail of one chunk, the rest at the
+/// head of the next) is NOT recognized, so its bytes pass through as input.
+/// Terminals emit these notifications atomically, so a split is rare; the pin
+/// test below locks this so adding carry-over later is a deliberate change.
 pub fn scan_outer_events(buf: &mut Vec<u8>) -> Vec<OuterEvent> {
     let mut events = Vec::new();
     let mut kept = Vec::with_capacity(buf.len());
@@ -332,6 +338,19 @@ mod tests {
         let _ = feeder.await;
         let _ = server.await;
         let _ = drain.await;
+    }
+
+    #[test]
+    fn scan_outer_events_does_not_reassemble_split_sequences() {
+        // Per-chunk scan with no cross-call state: a focus sequence split across
+        // two calls is NOT recognized; the bytes pass through as ordinary input.
+        // Pins the current behavior (terminals emit these atomically).
+        let mut first = b"abc\x1b[".to_vec();
+        assert!(super::scan_outer_events(&mut first).is_empty());
+        assert_eq!(first, b"abc\x1b[", "incomplete trailing sequence passes through");
+        let mut second = b"Idef".to_vec();
+        assert!(super::scan_outer_events(&mut second).is_empty());
+        assert_eq!(second, b"Idef", "the split head is not recognized as an event");
     }
 
     #[test]
