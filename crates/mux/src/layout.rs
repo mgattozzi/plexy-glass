@@ -239,7 +239,7 @@ impl LayoutTree {
         viewport: Rect,
     ) {
         let Some(root) = self.root.take() else { return };
-        let (new_root, _) = resize_in(root, toward, axis, delta_cells, viewport);
+        let (new_root, _, _) = resize_in(root, toward, axis, delta_cells, viewport);
         self.root = Some(new_root);
     }
 
@@ -560,24 +560,33 @@ fn overlap_len(a_lo: u16, a_hi: u16, b_lo: u16, b_hi: u16) -> u16 {
     if hi >= lo { hi - lo + 1 } else { 0 }
 }
 
-/// Returns `(new_node, contains_target)`.
+/// Returns `(new_node, contains_target, handled)`. `handled` becomes true once
+/// some same-axis split on the path to `target` has consumed the resize, so only
+/// the NEAREST enclosing same-axis split adjusts its ratio (the documented
+/// single-border contract) instead of the change compounding across every
+/// same-axis ancestor, which moved unrelated panes.
 fn resize_in(
     node: LayoutNode,
     target: PaneId,
     axis: SplitDir,
     delta_cells: i32,
     viewport: Rect,
-) -> (LayoutNode, bool) {
+) -> (LayoutNode, bool, bool) {
     match node {
-        LayoutNode::Leaf(p) => (LayoutNode::Leaf(p), p == target),
+        LayoutNode::Leaf(p) => (LayoutNode::Leaf(p), p == target, false),
         LayoutNode::Split { dir, ratio, first, second } => {
             let (a_rect, b_rect) = viewport.subdivide(dir, ratio);
-            let (new_first, in_first) = resize_in(*first, target, axis, delta_cells, a_rect);
-            let (new_second, in_second) =
+            let (new_first, in_first, handled_first) =
+                resize_in(*first, target, axis, delta_cells, a_rect);
+            let (new_second, in_second, handled_second) =
                 resize_in(*second, target, axis, delta_cells, b_rect);
 
+            let descendant_handled = handled_first || handled_second;
             let mut new_ratio = ratio;
-            if dir == axis && (in_first || in_second) {
+            let mut handled = descendant_handled;
+            // Adjust only at the nearest enclosing same-axis split: skip if a
+            // deeper same-axis split already consumed the resize.
+            if dir == axis && (in_first || in_second) && !descendant_handled {
                 let size = match axis {
                     SplitDir::Horizontal => viewport.rows.saturating_sub(1).max(1) as i32,
                     SplitDir::Vertical => viewport.cols.saturating_sub(1).max(1) as i32,
@@ -588,6 +597,7 @@ fn resize_in(
                 } else {
                     new_ratio = (ratio - dr).clamp(0.1, 0.9);
                 }
+                handled = true;
             }
 
             (
@@ -598,6 +608,7 @@ fn resize_in(
                     second: Box::new(new_second),
                 },
                 in_first || in_second,
+                handled,
             )
         }
     }
@@ -820,6 +831,36 @@ mod tests {
         t.resize_split(PaneId(0), SplitDir::Vertical, 3, vp);
         let after = t.rect_of(PaneId(0), vp).unwrap().cols;
         assert!(after > before, "pane 0 should have grown");
+    }
+
+    #[test]
+    fn resize_split_only_moves_nearest_same_axis_border() {
+        // (A | (B | C)) all vertical. Resizing toward C must move only the B|C
+        // boundary, pane A must be untouched. (Was: the ratio change compounded
+        // across every same-axis ancestor and also shrank the unrelated pane A.)
+        let mut t = LayoutTree::single(PaneId(0));
+        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After)
+            .unwrap();
+        t.split(PaneId(1), SplitDir::Vertical, PaneId(2), SplitPosition::After)
+            .unwrap();
+        let vp = Rect::new(0, 0, 24, 80);
+
+        let a_before = t.rect_of(PaneId(0), vp).unwrap();
+        let b_before = t.rect_of(PaneId(1), vp).unwrap();
+        let c_before = t.rect_of(PaneId(2), vp).unwrap();
+
+        t.resize_split(PaneId(2), SplitDir::Vertical, 4, vp);
+
+        let a_after = t.rect_of(PaneId(0), vp).unwrap();
+        let b_after = t.rect_of(PaneId(1), vp).unwrap();
+        let c_after = t.rect_of(PaneId(2), vp).unwrap();
+
+        // A is unrelated to the B|C boundary: its position and width are fixed.
+        assert_eq!(a_before.col, a_after.col, "A must not move");
+        assert_eq!(a_before.cols, a_after.cols, "A width must not change");
+        // Only the nearest (B|C) border moved: C grew, B shrank.
+        assert!(c_after.cols > c_before.cols, "C should have grown");
+        assert!(b_after.cols < b_before.cols, "B should have shrunk");
     }
 
     /// L | TR / BR: vertical split, then horizontal split on the right side.
