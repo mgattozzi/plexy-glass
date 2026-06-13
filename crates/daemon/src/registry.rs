@@ -182,13 +182,26 @@ impl SessionRegistry {
         config: Arc<plexy_glass_config::Config>,
     ) -> Result<Arc<Session>, DaemonError> {
         validate_name(&name)?;
-        // Fast path: already running.
+        // Fast path: already running. A still-mapped but *closing* entry must be
+        // PRUNED here (mirroring `get`), not merely skipped, otherwise it
+        // lingers in the map and the fresh-create fallback below is rejected by
+        // `create`'s contains_key check (SessionAlreadyExists). This is the
+        // default `plexy-glass` (no args) re-launch after exiting the sole
+        // "main" session: it calls attach_or_create directly with no preceding
+        // `get` to do the pruning.
         {
-            let map = self.inner.lock().await;
-            if let Some(s) = map.get(&name)
-                && !s.closing.load(std::sync::atomic::Ordering::SeqCst)
-            {
-                return Ok(Arc::clone(s));
+            let mut map = self.inner.lock().await;
+            let closing = match map.get(&name) {
+                Some(s) => {
+                    if !s.closing.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Ok(Arc::clone(s));
+                    }
+                    true
+                }
+                None => false,
+            };
+            if closing {
+                map.remove(&name);
             }
         }
         // Config wins: a declared session name is (re)built from its template,
@@ -488,6 +501,43 @@ mod tests {
         s.closing.store(true, std::sync::atomic::Ordering::SeqCst);
         let got = r.get("dead").await;
         assert!(got.is_none(), "closing session should be pruned on get");
+    }
+
+    #[tokio::test]
+    async fn attach_or_create_replaces_a_closing_entry() {
+        let _g = crate::test_env::isolate();
+        let r = Arc::new(SessionRegistry::new());
+        let s = r.create("main".into(), spec(), size(), cfg()).await.unwrap();
+        // Mark closing DIRECTLY (not via get/list, which would prune it) to
+        // reproduce the lingering-entry state after a natural session close.
+        s.closing.store(true, std::sync::atomic::Ordering::SeqCst);
+        // The default `plexy-glass` (no args) relaunch calls `attach_or_create`
+        // with no preceding get, so it must yield a fresh live session rather
+        // than failing with `SessionAlreadyExists` on the stale closing entry.
+        let fresh = r
+            .attach_or_create("main".into(), spec(), size(), cfg())
+            .await
+            .expect("must replace a closing entry, not error");
+        assert!(!fresh.closing.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(r.get("main").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn attach_or_create_falls_back_to_fresh_on_corrupt_saved_file() {
+        let _g = crate::test_env::isolate();
+        let dir = crate::persist::sessions_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        // A malformed saved file makes `load_session` return `Err` (not `Ok(None)`);
+        // `attach_or_create` must warn and fall back to a fresh create rather than
+        // propagate the error and lock the user out.
+        std::fs::write(dir.join("corrupt.json"), b"{not json").unwrap();
+        let r = Arc::new(SessionRegistry::new());
+        let s = r
+            .attach_or_create("corrupt".into(), spec(), size(), cfg())
+            .await
+            .expect("corrupt saved file must fall back to a fresh create");
+        assert_eq!(s.name(), "corrupt");
+        assert!(r.get("corrupt").await.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread")]
