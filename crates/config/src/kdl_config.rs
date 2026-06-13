@@ -1474,6 +1474,55 @@ session "dev" cwd="~/projects/app" {
         assert!(err.is_err(), "unknown window property must error");
     }
 
+    /// The v2 worked example from `docs/configuration.md` (~line 514). Kept
+    /// verbatim-identical to the docs so a future schema tweak that breaks the
+    /// most-copied declarative-sessions snippet fails here. Update both together.
+    const DOCS_V2_SECTION_EXAMPLE: &str = r##"
+session "dev" cwd="~/projects/app" {
+    env { RUST_LOG "debug" }
+    window "edit" active=#true {
+        pane active=#true command="hx ."
+    }
+    window "run" cwd="~/projects/app/svc" {
+        split vertical {
+            pane ratio=2 command="cargo watch -x check" name="check"
+            pane ratio=1 { env { PORT "8080" } }
+        }
+    }
+}
+"##;
+
+    #[test]
+    fn docs_v2_section_example_parses() {
+        let cfg =
+            parse_config(DOCS_V2_SECTION_EXAMPLE).expect("docs v2 declarative example must parse");
+        assert_eq!(cfg.sessions.len(), 1);
+        let s = &cfg.sessions[0];
+        assert_eq!(s.env, vec![("RUST_LOG".to_string(), "debug".to_string())]);
+        assert_eq!(s.windows.len(), 2);
+        // window "edit" is the active window, its sole pane is active.
+        assert!(s.windows[0].active);
+        match &s.windows[0].layout {
+            PaneNode::Leaf(p) => assert!(p.active, "edit pane is active"),
+            other => panic!("expected leaf, got {other:?}"),
+        }
+        assert!(!s.windows[1].active);
+        // window "run": a 2:1 vertical split; the second pane carries env.
+        match &s.windows[1].layout {
+            PaneNode::Split { dir: SplitDirection::Vertical, children, weights } => {
+                assert_eq!(weights, &vec![2, 1]);
+                assert_eq!(children.len(), 2);
+                match &children[1] {
+                    PaneNode::Leaf(p) => {
+                        assert_eq!(p.env, vec![("PORT".to_string(), "8080".to_string())]);
+                    }
+                    other => panic!("expected leaf, got {other:?}"),
+                }
+            }
+            other => panic!("expected vertical Split, got {other:?}"),
+        }
+    }
+
     // --- blocks ---
 
     #[test]
