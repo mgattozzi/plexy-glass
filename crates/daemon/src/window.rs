@@ -90,6 +90,7 @@ impl Window {
         output_notify: std::sync::Arc<tokio::sync::Notify>,
         death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
         config: std::sync::Arc<plexy_glass_config::Config>,
+        preseed: Option<Vec<plexy_glass_emulator::Row>>,
     ) -> Result<Self, DaemonError> {
         let size = PtySize {
             rows: rect.rows,
@@ -97,7 +98,7 @@ impl Window {
             pixel_width: 0,
             pixel_height: 0,
         };
-        let pane = Pane::spawn(first_pane_id, spec, size, output_notify, death_tx, config)?;
+        let pane = Pane::spawn(first_pane_id, spec, size, output_notify, death_tx, config, preseed)?;
         let mut panes = HashMap::new();
         panes.insert(first_pane_id, pane);
         Ok(Self {
@@ -192,6 +193,7 @@ impl Window {
         output_notify: std::sync::Arc<tokio::sync::Notify>,
         death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
         config: std::sync::Arc<plexy_glass_config::Config>,
+        preseed: Option<Vec<plexy_glass_emulator::Row>>,
     ) -> Result<(), DaemonError> {
         self.split_at(
             self.active,
@@ -202,6 +204,7 @@ impl Window {
             output_notify,
             death_tx,
             config,
+            preseed,
         )
     }
 
@@ -219,6 +222,7 @@ impl Window {
         output_notify: std::sync::Arc<tokio::sync::Notify>,
         death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
         config: std::sync::Arc<plexy_glass_config::Config>,
+        preseed: Option<Vec<plexy_glass_emulator::Row>>,
     ) -> Result<(), DaemonError> {
         self.layout
             .split(target_pane_id, dir, new_pane_id, SplitPosition::After)
@@ -233,7 +237,7 @@ impl Window {
             pixel_width: 0,
             pixel_height: 0,
         };
-        let pane = match Pane::spawn(new_pane_id, spec, size, output_notify, death_tx, config) {
+        let pane = match Pane::spawn(new_pane_id, spec, size, output_notify, death_tx, config, preseed) {
             Ok(p) => p,
             Err(e) => {
                 // Roll the layout node back: a failed spawn must not leave a
@@ -738,6 +742,7 @@ mod tests {
             notify(),
             None,
             cfg(),
+            None,
         )
         .expect("spawn");
         assert_eq!(w.active(), PaneId(0));
@@ -756,9 +761,10 @@ mod tests {
             notify(),
             None,
             cfg(),
+            None,
         )
         .unwrap();
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
+        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg(), None)
             .expect("split");
         assert_eq!(w.active(), PaneId(1));
         assert!(w.layout().panes().contains(&PaneId(0)));
@@ -777,9 +783,10 @@ mod tests {
             notify(),
             None,
             cfg(),
+            None,
         )
         .unwrap();
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
+        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg(), None)
             .unwrap();
         let outcome = w.close_active().unwrap();
         assert_eq!(outcome, CloseOutcome::SiblingPromoted);
@@ -798,9 +805,10 @@ mod tests {
             notify(),
             None,
             cfg(),
+            None,
         )
         .unwrap();
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
+        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg(), None)
             .unwrap();
         assert!(w.toggle_zoom(), "active pane is now zoomed");
         // A subsequent host resize must keep the zoomed pane at the full
@@ -826,9 +834,10 @@ mod tests {
             notify(),
             None,
             cfg(),
+            None,
         )
         .unwrap();
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
+        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg(), None)
             .unwrap();
         assert!(w.toggle_zoom());
         assert!(w.is_zoomed());
@@ -848,9 +857,10 @@ mod tests {
             notify(),
             None,
             cfg(),
+            None,
         )
         .unwrap();
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
+        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg(), None)
             .unwrap(); // active = PaneId(1); leaves [0, 1]
         w
     }
@@ -879,6 +889,7 @@ mod tests {
             notify(),
             None,
             cfg(),
+            None,
         )
         .unwrap();
         let pane = w.detach_pane(PaneId(0)).expect("present");
@@ -900,6 +911,7 @@ mod tests {
             notify(),
             None,
             cfg(),
+            None,
         )
         .unwrap();
         dst.adopt_split(PaneId(2), SplitDir::Vertical, moved, viewport).unwrap();
@@ -932,6 +944,7 @@ mod tests {
             notify(),
             None,
             cfg(),
+            None,
         )
         .unwrap();
         w.detach_pane(id).expect("donor pane present")
@@ -977,7 +990,7 @@ mod tests {
         // entry 0 would be filtered and focus would fall to 1 instead.
         let viewport = Rect::new(0, 0, 24, 80);
         let mut w = two_pane_window(); // h=[0], active 1
-        w.split(SplitDir::Vertical, PaneId(2), shell_spec(), viewport, notify(), None, cfg())
+        w.split(SplitDir::Vertical, PaneId(2), shell_spec(), viewport, notify(), None, cfg(), None)
             .unwrap(); // h=[0,1], active 2
         w.focus(PaneId(0)); // h=[0,1,2], active 0
         w.focus(PaneId(2)); // h=[0,1,2,0], active 2
@@ -1014,10 +1027,11 @@ mod tests {
             notify(),
             None,
             cfg(),
+            None,
         )
         .unwrap();
         assert_eq!(w.neighbor_leaf(true), None, "single pane has no neighbor");
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
+        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg(), None)
             .unwrap(); // active = PaneId(1), leaves [0, 1]
         assert_eq!(w.neighbor_leaf(true), Some(PaneId(0)));
         assert_eq!(w.neighbor_leaf(false), Some(PaneId(0)));

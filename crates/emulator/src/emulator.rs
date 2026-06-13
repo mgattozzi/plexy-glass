@@ -54,6 +54,13 @@ impl Emulator {
         self.screen.scroll_region = (0, rows.saturating_sub(1));
     }
 
+    /// Seed restored scrollback into the screen (session restore).
+    /// Forwards to [`Screen::preseed_scrollback`]; see its docs for the cap and
+    /// counter-defaults rules. Called once, before any `advance`.
+    pub fn preseed_scrollback(&mut self, rows: Vec<crate::grid::Row>) {
+        self.screen.preseed_scrollback(rows);
+    }
+
     pub fn screen(&self) -> &Screen {
         &self.screen
     }
@@ -195,5 +202,80 @@ mod tests {
         let drained = e.take_color_queries();
         assert_eq!(drained, vec![crate::screen::ColorQuery::Background]);
         assert!(e.take_color_queries().is_empty());
+    }
+
+    fn seed_row(text: &str, cols: u16) -> crate::grid::Row {
+        let mut r = crate::grid::Row::blank(cols);
+        for (i, ch) in text.chars().enumerate() {
+            if (i as u16) < cols {
+                r.cells[i].grapheme = ch.to_string().into();
+            }
+        }
+        r
+    }
+
+    #[test]
+    fn preseed_pushes_rows_into_scrollback_active_blank() {
+        let mut e = Emulator::new(4, 8);
+        let rows = vec![seed_row("hist1", 8), seed_row("hist2", 8)];
+        e.preseed_scrollback(rows);
+        let s = e.screen();
+        assert_eq!(s.scrollback.len(), 2, "both seeded rows land in scrollback");
+        let texts: Vec<String> = s
+            .scrollback
+            .iter()
+            .map(|r| r.cells.iter().map(|c| c.grapheme.as_str()).collect::<String>().trim_end().to_string())
+            .collect();
+        assert_eq!(texts, vec!["hist1".to_string(), "hist2".to_string()]);
+        // Active grid stays blank.
+        assert!(s.active.rows.iter().all(|r| r.cells.iter().all(|c| c.is_blank())));
+        // Counters untouched.
+        assert_eq!(s.blocks_completed, 0);
+        assert_eq!(s.last_block_exit, None);
+    }
+
+    #[test]
+    fn preseed_marks_ride_into_scrollback() {
+        let mut e = Emulator::new(4, 8);
+        let mut prompt = seed_row("$ ls", 8);
+        prompt.mark.set(crate::grid::RowMark::PROMPT_START);
+        let mut out = seed_row("file", 8);
+        out.mark.set(crate::grid::RowMark::OUTPUT_START);
+        e.preseed_scrollback(vec![prompt, out]);
+        let s = e.screen();
+        assert!(s.scrollback.rows()[0].mark.contains(crate::grid::RowMark::PROMPT_START));
+        assert!(s.scrollback.rows()[1].mark.contains(crate::grid::RowMark::OUTPUT_START));
+    }
+
+    #[test]
+    fn preseed_over_cap_keeps_newest() {
+        // Tiny scrollback so we can overflow it deterministically.
+        let mut e = Emulator::new(2, 4);
+        e.screen_mut().scrollback = crate::scrollback::Scrollback::with_cap(2);
+        let rows = vec![seed_row("A", 4), seed_row("B", 4), seed_row("C", 4)];
+        e.preseed_scrollback(rows);
+        let s = e.screen();
+        assert_eq!(s.scrollback.len(), 2, "cap holds only 2 rows");
+        let texts: Vec<String> = s
+            .scrollback
+            .iter()
+            .map(|r| r.cells[0].grapheme.as_str().to_string())
+            .collect();
+        assert_eq!(texts, vec!["B".to_string(), "C".to_string()], "newest rows kept");
+    }
+
+    #[test]
+    fn preseed_then_advance_output_goes_below_history() {
+        let mut e = Emulator::new(4, 8);
+        e.preseed_scrollback(vec![seed_row("OLD", 8)]);
+        // Child draws into the grid; history stays in scrollback above it.
+        e.advance(b"NEW");
+        e.parser.flush(&mut e.screen);
+        let s = e.screen();
+        assert_eq!(s.scrollback.len(), 1, "history still in scrollback");
+        assert_eq!(s.scrollback.rows()[0].cells[0].grapheme.as_str(), "O");
+        // The new bytes land in the active grid (row 0).
+        let row0: String = s.active.rows[0].cells.iter().map(|c| c.grapheme.as_str()).collect();
+        assert!(row0.starts_with("NEW"), "child output is in the live grid: {row0:?}");
     }
 }

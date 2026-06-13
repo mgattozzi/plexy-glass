@@ -27,6 +27,7 @@ impl WindowManager {
                     notify,
                     death,
                     config,
+                    None,
                 )?;
             }
             Command::SplitH => {
@@ -44,6 +45,7 @@ impl WindowManager {
                     notify,
                     death,
                     config,
+                    None,
                 )?;
             }
             Command::SelectNextPane => self.active_window_mut().select_next(),
@@ -85,6 +87,7 @@ impl WindowManager {
                     Arc::clone(&self.notify),
                     self.death_tx.clone(),
                     Arc::clone(&self.config),
+                    None,
                 )?;
                 window.home_cwd = home;
                 self.windows.push(window);

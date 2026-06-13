@@ -110,6 +110,7 @@ impl WindowManager {
             Arc::clone(&notify),
             death_tx.clone(),
             Arc::clone(&config),
+            None,
         )?;
         Ok(Self {
             windows: vec![first],
@@ -379,6 +380,18 @@ impl WindowManager {
         spec: SpawnSpec,
         name: String,
     ) -> Result<(), DaemonError> {
+        self.new_window_with_spec_preseed(spec, name, None)
+    }
+
+    /// Like `new_window_with_spec`, but seeds the first pane's restored
+    /// scrollback (session restore). `preseed` is `None` for interactive
+    /// new-windows.
+    pub fn new_window_with_spec_preseed(
+        &mut self,
+        spec: SpawnSpec,
+        name: String,
+        preseed: Option<Vec<plexy_glass_emulator::Row>>,
+    ) -> Result<(), DaemonError> {
         let id = WindowId(self.next_window_id);
         self.next_window_id += 1;
         let first_pane = self.alloc_pane_id();
@@ -392,6 +405,7 @@ impl WindowManager {
             Arc::clone(&self.notify),
             self.death_tx.clone(),
             Arc::clone(&self.config),
+            preseed,
         )?;
         self.windows.push(window);
         self.active = self.windows.len() - 1;
@@ -406,6 +420,19 @@ impl WindowManager {
         target_dfs_idx: u32,
         dir: SplitDir,
         spec: SpawnSpec,
+    ) -> Result<(), DaemonError> {
+        self.split_window_at_dfs_preseed(window_idx, target_dfs_idx, dir, spec, None)
+    }
+
+    /// Like `split_window_at_dfs`, but seeds the new pane's restored scrollback
+    /// (session restore). `preseed` is `None` for declared-template builds.
+    pub fn split_window_at_dfs_preseed(
+        &mut self,
+        window_idx: usize,
+        target_dfs_idx: u32,
+        dir: SplitDir,
+        spec: SpawnSpec,
+        preseed: Option<Vec<plexy_glass_emulator::Row>>,
     ) -> Result<(), DaemonError> {
         let viewport = self.viewport();
         let new_id = self.alloc_pane_id();
@@ -426,6 +453,7 @@ impl WindowManager {
             Arc::clone(&self.notify),
             self.death_tx.clone(),
             Arc::clone(&self.config),
+            preseed,
         )
     }
 
@@ -529,6 +557,7 @@ impl WindowManager {
             Arc::clone(&self.notify),
             self.death_tx.clone(),
             Arc::clone(&self.config),
+            None,
         )?;
         // Last-wins: only replace (and kill) the old popup once the new one
         // actually spawned, so a spawn failure can't destroy the old popup.
