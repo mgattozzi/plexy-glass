@@ -6,7 +6,13 @@ use plexy_glass_mux::{
 };
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// `tokio::time::Instant` is used for `last_output` so that tokio's mock-time
+// clock (`start_paused = true` / `time::advance`) controls silence-threshold
+// checks in unit tests without real wall-clock sleeps. Production behaviour is
+// unchanged: `tokio::time::Instant::now()` delegates to the real clock when
+// mock-time is off.
+use tokio::time::Instant;
 
 pub struct Window {
     pub id: WindowId,

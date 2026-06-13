@@ -3115,23 +3115,101 @@ fn cli_monitor_command_alerts_background_completion() {
     // when the completion fires ~1s later.
     sess.send_prefix(b'c');
 
-    // Poll the status line for the alert message. The diff renderer skips
-    // UNCHANGED cells (incl. spaces) between frames, so the message can render
-    // with leading chars clobbered by the prior "monitor-command on" message at
-    // the same column and with its inter-word spaces dropped (the documented
-    // "27 48 never renders contiguously" behavior). So we match a contiguous
-    // fragment downstream of that collision that survives, "in window 1 (shell)",
-    // rather than the full "done in window 1 …" prefix.
+    // The `✗` flag is the load-bearing assertion: a single non-space glyph in the
+    // window list, immune to diff-renderer space-skipping. The message needle
+    // ("in window 1 (shell)") is a space-free contiguous fragment that avoids the
+    // blank-row collision risk (diff renderer skips unchanged cells, which can
+    // drop inter-word spaces when a new message overwrites a same-column old one).
     assert!(
         sess.wait_for(b"in window 1 (shell)", Duration::from_secs(15)),
         "monitor-command alert message never appeared. pty: {}",
         sess.snapshot_str()
     );
-    // The window list shows the `✗` (nonzero-exit) flag on window 1. A single
-    // non-space glyph, so it's immune to the space-skipping diff artifact.
     assert!(
         sess.wait_for("✗".as_bytes(), Duration::from_secs(15)),
         "the ✗ done flag never appeared in the window list. pty: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// `monitor-silence` surfaces a background window's silence (no output for ≥ the
+/// threshold) as a `~` window-list flag and a status message. This test drives
+/// the real `silence_tick_loop` → `notify_one` → coordinator render path; the
+/// unit tests in `window_manager/tests.rs` bypass it by calling
+/// `check_silence_alerts` directly.
+///
+/// We use a 1s threshold (the minimum accepted by the parse path) so the tick
+/// loop fires within a short wall-clock window. The `~` flag is the load-bearing
+/// assertion (a single stable glyph); the message fragment is secondary.
+#[test]
+fn cli_monitor_silence_alerts_background_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Turn monitor-silence on with a 1s threshold for window 1 (the active
+    // window). The CLI `cmd` verb uses the prompt grammar: "monitor-silence 1".
+    let (status, _o, stderr) = run_cli(&env, &["cmd", "monitor-silence 1"]);
+    assert!(status.success(), "cmd monitor-silence 1 failed: {stderr}");
+
+    // Switch to a new window so window 1 drops to the background. From this
+    // point we stop sending any input to window 1, so it becomes silent.
+    sess.send_prefix(b'c');
+
+    // Poll for the `~` silence flag in the window list. The silence_tick_loop
+    // fires every 1s; with a 1s threshold the edge fires on the first or second
+    // tick. Give a generous 20s ceiling so the test is not flaky under load.
+    assert!(
+        sess.wait_for(b"~", Duration::from_secs(20)),
+        "the ~ silence flag never appeared in the window list. pty: {}",
+        sess.snapshot_str()
+    );
+    // Secondary: the status message contains a space-free contiguous fragment.
+    // "silence in window 1 (shell)" has "(shell)", which survives the
+    // diff-renderer's space-skipping since it has no inter-word spaces.
+    assert!(
+        sess.wait_for(b"(shell)", Duration::from_secs(5)),
+        "silence alert message fragment never appeared. pty: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// `monitor-bell` surfaces a background window's bell (BEL byte from the child)
+/// as a `!` window-list flag and a status message. `monitor-bell` is ON by
+/// default, so we schedule a delayed `printf '\a'` into window 1 before
+/// switching away.
+///
+/// The `!` flag is the load-bearing assertion (a single stable glyph); the
+/// message fragment is secondary.
+#[test]
+fn cli_monitor_bell_alerts_background_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // `monitor-bell` is ON by default; no toggle needed.
+    // Schedule a delayed BEL in window 1's shell: after ~1s, emit a BEL byte.
+    // Backgrounded so the shell returns immediately and we can switch windows.
+    let printf = r"( sleep 1; printf '\a' ) &";
+    let (status, _o, stderr) = run_cli(&env, &["send", "--enter", printf]);
+    assert!(status.success(), "send backgrounded printf failed: {stderr}");
+
+    // Switch to a new window so window 1 is in the background when the BEL fires.
+    sess.send_prefix(b'c');
+
+    // Poll for the `!` bell flag. A single non-space glyph, immune to
+    // diff-renderer space-skipping.
+    assert!(
+        sess.wait_for(b"!", Duration::from_secs(15)),
+        "the ! bell flag never appeared in the window list. pty: {}",
+        sess.snapshot_str()
+    );
+    // Secondary: the status message contains the space-free fragment "(shell)".
+    assert!(
+        sess.wait_for(b"(shell)", Duration::from_secs(5)),
+        "bell alert message fragment never appeared. pty: {}",
         sess.snapshot_str()
     );
 }

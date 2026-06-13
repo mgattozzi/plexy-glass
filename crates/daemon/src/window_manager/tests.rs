@@ -1967,7 +1967,7 @@ async fn any_silence_monitored_reflects_arm_state() {
     assert!(!m.any_silence_monitored(), "disarmed after clear");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn silence_edge_in_background_window_flags_and_messages() {
     let mut m = mk_mgr(); // window 0
     m.new_window_with_spec(spec(), "build".into()).unwrap(); // window 1, active
@@ -1975,9 +1975,10 @@ async fn silence_edge_in_background_window_flags_and_messages() {
     // 1s-minimum parse path), then switch away so window 1 is background.
     m.windows_mut()[1].set_monitor_silence(Some(Duration::from_millis(80)));
     m.handle_command(Command::SelectWindow(0)).unwrap();
-    // Before the threshold elapses: no edge.
+    // Before the threshold elapses: no edge. start_paused = true means no real
+    // time has passed yet (tokio::time::Instant::now() has not advanced).
     assert!(!m.check_silence_alerts(), "no silence before the threshold");
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    tokio::time::advance(Duration::from_millis(120)).await;
     assert!(m.check_silence_alerts(), "silence edge fires past the threshold");
     assert_eq!(m.take_active_message(), Some("silence in window 2 (build)"));
     assert!(m.windows()[1].silence_flag(), "the ~ flag is set");
@@ -1985,23 +1986,23 @@ async fn silence_edge_in_background_window_flags_and_messages() {
     assert!(!m.check_silence_alerts(), "no re-fire within the same silence episode");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn silence_active_window_never_fires() {
     let mut m = mk_mgr(); // window 0, active
     m.active_window_mut().set_monitor_silence(Some(Duration::from_millis(50)));
-    tokio::time::sleep(Duration::from_millis(90)).await;
+    tokio::time::advance(Duration::from_millis(90)).await;
     // The active window is excluded (else an idle active window flickers 1 Hz).
     assert!(!m.check_silence_alerts(), "active window never silence-fires");
     assert!(!m.active_window().silence_flag());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn silence_output_resets_timer_and_latch() {
     let mut m = mk_mgr();
     m.new_window_with_spec(spec(), "build".into()).unwrap(); // window 1, active
     m.windows_mut()[1].set_monitor_silence(Some(Duration::from_millis(80)));
     m.handle_command(Command::SelectWindow(0)).unwrap();
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    tokio::time::advance(Duration::from_millis(120)).await;
     assert!(m.check_silence_alerts(), "first silence episode fires");
     let _ = m.take_active_message();
     // Output resumes: refresh `last_output` + reset the latch.
@@ -2009,18 +2010,18 @@ async fn silence_output_resets_timer_and_latch() {
     // Right after output, no silence (timer reset) and no re-fire.
     assert!(!m.check_silence_alerts(), "output reset the timer");
     // A NEW silence episode after output resumes can fire again.
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    tokio::time::advance(Duration::from_millis(120)).await;
     assert!(m.check_silence_alerts(), "a new silence episode after output re-fires");
     assert_eq!(m.take_active_message(), Some("silence in window 2 (build)"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn silence_viewing_clears_flag_but_not_latch() {
     let mut m = mk_mgr();
     m.new_window_with_spec(spec(), "build".into()).unwrap(); // window 1, active
     m.windows_mut()[1].set_monitor_silence(Some(Duration::from_millis(80)));
     m.handle_command(Command::SelectWindow(0)).unwrap();
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    tokio::time::advance(Duration::from_millis(120)).await;
     assert!(m.check_silence_alerts(), "silence fires");
     let _ = m.take_active_message();
     assert!(m.windows()[1].silence_flag());
@@ -2035,13 +2036,13 @@ async fn silence_viewing_clears_flag_but_not_latch() {
     assert!(!m.windows()[1].silence_flag(), "flag stays clear without a re-fire");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn silence_disable_clears_flag_and_threshold() {
     let mut m = mk_mgr();
     m.new_window_with_spec(spec(), "build".into()).unwrap();
     m.windows_mut()[1].set_monitor_silence(Some(Duration::from_millis(60)));
     m.handle_command(Command::SelectWindow(0)).unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::advance(Duration::from_millis(100)).await;
     assert!(m.check_silence_alerts());
     let _ = m.take_active_message();
     assert!(m.windows()[1].silence_flag());

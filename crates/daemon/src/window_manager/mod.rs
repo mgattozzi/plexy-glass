@@ -5,8 +5,11 @@ use mouse::{ClickHistory, ResizeDrag};
 use plexy_glass_mux::{Overlay, PaneId, Rect, Selection, SplitDir, WindowId};
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// See window.rs: tokio::time::Instant is used so unit tests with
+// start_paused = true / time::advance control silence checks without real sleeps.
 use tokio::sync::{Notify, mpsc};
+use tokio::time::Instant;
 
 /// How long a transient status-line message stays visible before it is cleared
 /// on the next recompose. Mirrored by the `Session` wake timer.

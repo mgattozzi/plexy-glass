@@ -420,6 +420,32 @@ mod tests {
         assert_eq!(parse_command("copy_output").unwrap().command, Command::CopyOutput);
     }
 
+    #[test]
+    fn parses_monitor_verbs() {
+        // toggle_monitor_command: bare verb, no arg.
+        assert_eq!(
+            parse_command("toggle_monitor_command").unwrap().command,
+            Command::ToggleMonitorCommand,
+        );
+        // set_monitor_silence: no arg → None (disable).
+        assert_eq!(
+            parse_command("set_monitor_silence").unwrap().command,
+            Command::SetMonitorSilence(None),
+        );
+        // set_monitor_silence:0 → None (zero also disables).
+        assert_eq!(
+            parse_command("set_monitor_silence:0").unwrap().command,
+            Command::SetMonitorSilence(None),
+        );
+        // set_monitor_silence:30 → Some(30).
+        assert_eq!(
+            parse_command("set_monitor_silence:30").unwrap().command,
+            Command::SetMonitorSilence(Some(30)),
+        );
+        // set_monitor_silence with a non-numeric arg is an error.
+        assert!(parse_command("set_monitor_silence:abc").is_err());
+    }
+
     // ── prefix token tests ──────────────────────────────────────────
 
     fn ctrl_a() -> ChordSpec {
