@@ -112,6 +112,32 @@ mod tests {
     }
 
     #[test]
+    fn invalid_command_binding_is_skipped() {
+        // Valid keys + an unknown command must be skipped (the (_, Err) arm),
+        // not partially bound or fatal. The valid sibling binding still fires.
+        let cfg = KeymapConfig {
+            prefix: "Ctrl+a".into(),
+            inherit_defaults: false,
+            bindings: vec![
+                KeymapBinding { keys: "Ctrl+a c".into(), command: "new_window".into() },
+                KeymapBinding { keys: "Ctrl+a x".into(), command: "frobnicate".into() },
+            ],
+        };
+        let mut km = build_keymap(&cfg);
+        // The valid binding fires.
+        km.consume(KeyEvent::new(Key::Char('a'), Modifiers::CTRL), vec![0x01]);
+        assert!(matches!(
+            km.consume(KeyEvent::new(Key::Char('c'), Modifiers::empty()), b"c".to_vec()),
+            KeymapAction::Command(Command::NewWindow)
+        ));
+        // The bogus-command chord never registered: Ctrl+a is a prefix, then 'x'
+        // is unbound under it → Cancel (nothing fired, frobnicate was skipped).
+        km.consume(KeyEvent::new(Key::Char('a'), Modifiers::CTRL), vec![0x01]);
+        let action = km.consume(KeyEvent::new(Key::Char('x'), Modifiers::empty()), b"x".to_vec());
+        assert!(matches!(action, KeymapAction::Cancel), "got {action:?}");
+    }
+
+    #[test]
     fn default_bindings_include_popup_chords() {
         let km_cfg = plexy_glass_config::built_in_keymap();
         let mut km = build_keymap(&km_cfg);

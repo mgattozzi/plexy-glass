@@ -313,6 +313,20 @@ mod tests {
     }
 
     #[test]
+    fn dcs_payload_is_capped_at_dcs_cap() {
+        // A DCS payload larger than DCS_CAP (64 KiB) must be truncated, not
+        // grown unbounded, and still dispatch exactly once without panic.
+        const DCS_CAP: usize = 64 * 1024;
+        let mut input = Vec::from(&b"\x1bP+q"[..]);
+        input.extend(std::iter::repeat_n(b'a', DCS_CAP + 100));
+        input.extend_from_slice(b"\x1b\\");
+        let s = drive(&input);
+        assert_eq!(s.dcs.len(), 1, "one DCS dispatched");
+        let (_ints, _action, _params, payload) = &s.dcs[0];
+        assert_eq!(payload.len(), DCS_CAP, "payload truncated to the cap");
+    }
+
+    #[test]
     fn combining_mark_flood_is_bounded() {
         // A base char + a long combining-mark run ("Zalgo") never completes a
         // cluster, so `pending` would grow without bound and each print() would

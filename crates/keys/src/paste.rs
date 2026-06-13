@@ -293,6 +293,30 @@ mod tests {
     }
 
     #[test]
+    fn flush_back_respects_truncation_cap() {
+        // Cap = 4. Fill exactly the cap, then a PARTIAL closer ("\x1b[201Q")
+        // whose held bytes flush back as content (they must NOT leak past the
+        // cap), then a real closer. The emitted paste is exactly the first 4.
+        let mut p = PasteParser::with_cap(4);
+        let mut outs = Vec::new();
+        for &b in b"\x1b[200~abcd" {
+            outs.push(p.consume(b)); // opener + 4 content bytes (== cap)
+        }
+        for &b in b"\x1b[201Q" {
+            outs.push(p.consume(b)); // partial closer → held bytes flush back
+        }
+        for &b in b"\x1b[201~" {
+            outs.push(p.consume(b)); // real closer
+        }
+        let pastes = collect_pastes(&outs);
+        assert_eq!(
+            pastes,
+            vec![b"abcd".to_vec()],
+            "flushed-back held bytes must respect the cap"
+        );
+    }
+
+    #[test]
     fn closer_like_bytes_inside_content() {
         let outs = drive(b"\x1b[200~a\x1b[201Qb\x1b[201~");
         let pastes = collect_pastes(&outs);

@@ -284,6 +284,39 @@ mod tests {
     }
 
     #[test]
+    fn wide_grapheme_full_repaint_skips_spacer() {
+        let mut d = DiffRenderer::new();
+        let mut v = VirtualScreen::blank(1, 4);
+        v.put(0, 0, Cell { grapheme: SmolStr::new("世"), ..Cell::default() });
+        v.put(0, 1, Cell::wide_spacer());
+        v.put(0, 2, Cell { grapheme: SmolStr::new("X"), ..Cell::default() });
+        let bytes = d.render(&v);
+        let s = String::from_utf8_lossy(&bytes);
+        assert_eq!(s.matches('世').count(), 1, "wide grapheme emitted once: {s:?}");
+        assert!(s.contains("世X"), "spacer skipped; X immediately follows 世: {s:?}");
+        assert!(!s.contains("世 X"), "no stray space painted for the spacer: {s:?}");
+    }
+
+    #[test]
+    fn wide_grapheme_incremental_diff_targets_only_changed_cell() {
+        let mut d = DiffRenderer::new();
+        let mut v1 = VirtualScreen::blank(1, 4);
+        v1.put(0, 0, Cell { grapheme: SmolStr::new("世"), ..Cell::default() });
+        v1.put(0, 1, Cell::wide_spacer());
+        v1.put(0, 2, Cell { grapheme: SmolStr::new("a"), ..Cell::default() });
+        let _ = d.render(&v1);
+        let mut v2 = VirtualScreen::blank(1, 4);
+        v2.put(0, 0, Cell { grapheme: SmolStr::new("世"), ..Cell::default() });
+        v2.put(0, 1, Cell::wide_spacer());
+        v2.put(0, 2, Cell { grapheme: SmolStr::new("b"), ..Cell::default() });
+        let bytes = d.render(&v2);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains('b'), "changed cell emitted: {s:?}");
+        assert!(!s.contains('世'), "unchanged wide grapheme not re-emitted: {s:?}");
+        assert!(s.contains("\x1b[1;3H"), "CUP targets the changed cell at col 3: {s:?}");
+    }
+
+    #[test]
     fn underline_color_rgb_emits_58_2() {
         let mut d = DiffRenderer::new();
         let mut v = VirtualScreen::blank(1, 2);

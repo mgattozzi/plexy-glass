@@ -116,5 +116,10 @@ mod tests {
         assert!(a.cols >= 1);
         let (_, b) = r.subdivide(SplitDir::Vertical, 0.999);
         assert!(b.cols >= 1);
+        // Horizontal mirrors the clamp on the row axis.
+        let (a, _) = r.subdivide(SplitDir::Horizontal, 0.001);
+        assert!(a.rows >= 1);
+        let (_, b) = r.subdivide(SplitDir::Horizontal, 0.999);
+        assert!(b.rows >= 1);
     }
 }

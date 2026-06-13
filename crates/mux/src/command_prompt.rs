@@ -489,6 +489,11 @@ mod tests {
         assert_eq!(p("resize x").unwrap_err().to_string(), "resize: expected a direction l/r/u/d");
         assert_eq!(p("resize l 0").unwrap_err().to_string(), "resize: count must be >= 1");
         assert_eq!(p("resize l z").unwrap_err().to_string(), "resize: count must be a number");
+        // Invalid direction with a VALID count gets the direction rejected.
+        assert_eq!(p("resize x 5").unwrap_err().to_string(), "resize: expected a direction l/r/u/d");
+        // Invalid direction AND a non-numeric count: the count is parsed first,
+        // so its error wins (pins the parse-count-before-validate-dir order).
+        assert_eq!(p("resize x z").unwrap_err().to_string(), "resize: count must be a number");
     }
 
     #[test]

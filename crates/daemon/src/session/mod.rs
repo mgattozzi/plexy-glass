@@ -1853,6 +1853,10 @@ mod tests {
         let s2 = Arc::clone(&s);
         let cid_a = a.client_id;
         tokio::task::spawn_blocking(move || s2.deregister_client(cid_a)).await.unwrap();
+        // No clients left → effective_size falls back to the WM host size.
+        let s2 = Arc::clone(&s);
+        let eff_none = tokio::task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+        assert_eq!((eff_none.rows, eff_none.cols), (24, 80), "no-clients fallback to host size");
     }
 
     #[tokio::test]

@@ -656,6 +656,33 @@ mod tests {
         assert_eq!(status[7], None, "last row of running block");
     }
 
+    #[test]
+    fn vbs_completed_block_straddles_scrollback_grid_boundary() {
+        // 3-row grid: a completed block's prompt + first output scroll into
+        // scrollback while its closing D lands in the active grid. A viewport
+        // whose top is in scrollback and which crosses into the grid must show
+        // the block's Ok status on BOTH sides of the boundary.
+        let s = screen_from(
+            3,
+            20,
+            b"\x1b]133;A\x07p1\r\no1\r\no2\r\no3\r\n\x1b]133;D;0\x07done",
+        );
+        let sb = s.scrollback.rows().len();
+        assert_eq!(sb, 2, "setup: prompt p1 + o1 scrolled into scrollback");
+        // Unified lines: 0=p1(A), 1=o1 [scrollback]; 2=o2, 3=o3, 4=done(D;0) [grid].
+        // Output rows o1 (scrollback) .. o3 (grid) are all inside the Ok block.
+        let status = viewport_block_status(&s, 1, 3);
+        assert_eq!(
+            status,
+            vec![
+                Some(BlockLineStatus::Ok),
+                Some(BlockLineStatus::Ok),
+                Some(BlockLineStatus::Ok),
+            ],
+            "completed-block status must span the scrollback->grid boundary"
+        );
+    }
+
     /// Failed block: D;1 closes block, whole block → Failed.
     #[test]
     fn vbs_failed_block() {

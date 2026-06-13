@@ -232,13 +232,22 @@ mod tests {
 
     #[test]
     fn main_horizontal_gives_first_pane_the_major_top_share() {
-        let rs = rects(LayoutPreset::MainHorizontal, 3);
-        let main = rs[0];
-        assert_eq!((main.row, main.col), (0, 0));
-        assert_eq!(main.cols, 120);
-        assert!(main.rows >= 21 && main.rows <= 26, "main height {main:?}");
-        for r in &rs[1..] {
-            assert!(r.row > main.rows, "row pane above main: {r:?}");
+        for n in 2..=5u32 {
+            let rs = rects(LayoutPreset::MainHorizontal, n);
+            let main = rs[0];
+            assert_eq!((main.row, main.col), (0, 0));
+            assert_eq!(main.cols, 120, "main pane spans full width");
+            assert!(main.rows >= 21 && main.rows <= 26, "{n}: main height {main:?}");
+            // The rest tile below the main pane, evenly.
+            for r in &rs[1..] {
+                assert!(r.row > main.rows, "{n}: row pane above main: {r:?}");
+            }
+            let min = rs[1..].iter().map(|r| r.rows).min().unwrap();
+            let max = rs[1..].iter().map(|r| r.rows).max().unwrap();
+            assert!(max - min <= 1, "{n}: row heights {rs:?}");
+            let wmin = rs[1..].iter().map(|r| r.cols).min().unwrap();
+            let wmax = rs[1..].iter().map(|r| r.cols).max().unwrap();
+            assert!(wmax - wmin <= 1, "{n}: row widths {rs:?}");
         }
     }
 

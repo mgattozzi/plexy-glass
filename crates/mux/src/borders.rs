@@ -303,6 +303,27 @@ mod tests {
     }
 
     #[test]
+    fn title_paints_wide_grapheme_with_spacer() {
+        let band = Rect::new(0, 0, 5, 12);
+        let pane = Rect::new(1, 1, 3, 10);
+        let mut screen = VirtualScreen::blank(5, 12);
+        draw(&[frame(pane, false, Some("好"))], band, &mut screen, None);
+        // Title " 好 ": the wide grapheme occupies its cell plus a wide spacer.
+        assert_eq!(screen.cell(0, 3).unwrap().grapheme.as_str(), "好");
+        assert!(screen.cell(0, 4).unwrap().is_wide_spacer());
+    }
+
+    #[test]
+    fn long_title_does_not_overrun_the_right_corner() {
+        let band = Rect::new(0, 0, 5, 7);
+        let pane = Rect::new(1, 1, 3, 5);
+        let mut screen = VirtualScreen::blank(5, 7);
+        draw(&[frame(pane, false, Some("a very long title"))], band, &mut screen, None);
+        // The title clips before the right border, so the corner glyph survives.
+        assert_eq!(screen.cell(0, 6).unwrap().grapheme.as_str(), "\u{2510}"); // ┐
+    }
+
+    #[test]
     fn active_pane_frame_highlights_corners() {
         use plexy_glass_emulator::Attrs;
         let band = Rect::new(0, 0, 5, 7);

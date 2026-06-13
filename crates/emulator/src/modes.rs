@@ -96,7 +96,13 @@ mod tests {
         let m = Modes::default();
         assert!(!m.any_mouse_mode_active());
         // Each mouse bit individually flips the helper to true.
-        for bit in [Modes::MOUSE_X10, Modes::MOUSE_BTN, Modes::MOUSE_ANY, Modes::MOUSE_SGR] {
+        for bit in [
+            Modes::MOUSE_X10,
+            Modes::MOUSE_BTN,
+            Modes::MOUSE_BTN_EVENT,
+            Modes::MOUSE_ANY,
+            Modes::MOUSE_SGR,
+        ] {
             let m = bit;
             assert!(m.any_mouse_mode_active(), "{bit:?} should mark mouse reporting active");
         }

@@ -518,6 +518,27 @@ mod tests {
     }
 
     #[test]
+    fn command_tab_completion_preserves_leading_whitespace() {
+        let mut o = cmd();
+        for c in " zo".chars() {
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+        }
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
+        assert_eq!(buf_of(&o), " zoom ", "leading whitespace is preserved on completion");
+    }
+
+    #[test]
+    fn command_tab_completes_bare_switch_to_prefix() {
+        let mut o = cmd_with(vec![], vec!["work", "web"]);
+        for c in "switch".chars() {
+            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+        }
+        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
+        // No trailing space yet → the verb branch bootstraps the "switch " prefix.
+        assert_eq!(buf_of(&o), "switch ");
+    }
+
+    #[test]
     fn command_history_up_down() {
         let mut o = cmd_with(vec!["new", "split h"], vec![]);
         // Up -> newest ("split h"), Up again -> older ("new"), clamp.

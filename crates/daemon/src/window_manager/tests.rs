@@ -747,6 +747,36 @@ async fn resize_drag_release_clears_state() {
     assert!(m.resize_drag.is_none());
 }
 
+#[tokio::test]
+async fn resize_drag_move_changes_the_split_border() {
+    let mut m = make_two_pane_manager().await; // vertical split: pane 0 | pane 1
+    let gutter = gutter_col_for(&m);
+    let vp = m.viewport();
+    let before = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
+    m.handle_mouse(MouseEvent {
+        kind: MouseKind::Press,
+        button: MouseButton::Left,
+        modifiers: plexy_glass_mux::MouseModifiers::default(),
+        row: 5,
+        col: gutter,
+    })
+    .await
+    .unwrap();
+    assert!(m.resize_drag.is_some(), "premise: drag started");
+    // Drag the gutter several columns right → the left pane widens.
+    m.handle_mouse(MouseEvent {
+        kind: MouseKind::Move,
+        button: MouseButton::Left,
+        modifiers: plexy_glass_mux::MouseModifiers::default(),
+        row: 5,
+        col: gutter + 5,
+    })
+    .await
+    .unwrap();
+    let after = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
+    assert!(after.cols > before.cols, "drag right widened pane 0: {before:?} -> {after:?}");
+}
+
 // Regression: a pane running an app that enabled mouse reporting (less, hx,
 // a TUI) must still be focusable by left-clicking it. Previously Rule 5
 // forwarded *every* event to the child before the focus-on-click rule could

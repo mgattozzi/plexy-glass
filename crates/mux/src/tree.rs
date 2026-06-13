@@ -629,6 +629,16 @@ mod tests {
         assert_eq!(s.selected, 0);
     }
 
+    #[test]
+    fn ctrl_n_p_navigate_like_j_k() {
+        let mut s = sample();
+        s.selected = 0;
+        handle_tree(&ev(Modifiers::CTRL, Key::Char('n')), &mut s);
+        assert_eq!(s.selected, 1, "Ctrl+n moves down like j");
+        handle_tree(&ev(Modifiers::CTRL, Key::Char('p')), &mut s);
+        assert_eq!(s.selected, 0, "Ctrl+p moves up like k");
+    }
+
     // ── filter ──────────────────────────────────────────────────────────────
 
     fn type_str(s: &mut TreeState, text: &str) {
@@ -645,6 +655,29 @@ mod tests {
         type_str(&mut s, "pane 2");
         // "pane 2" matches only A's second pane; its window + session stay.
         assert_eq!(s.visible_indices(), vec![0, 1, 3]);
+    }
+
+    #[test]
+    fn collapse_suppresses_a_filter_match_under_it() {
+        // Collapse + filter compete: a row whose label matches the filter but
+        // whose ancestor is collapsed stays HIDDEN (collapse wins).
+        let mut s = sample();
+        s.selected = 0;
+        handle_tree(&ev(Modifiers::empty(), Key::Char('h')), &mut s); // collapse session A
+        handle_tree(&ev(Modifiers::empty(), Key::Char('/')), &mut s);
+        type_str(&mut s, "win"); // matches index 1 (A's window), a descendant of A
+        assert!(
+            !s.visible_indices().contains(&1),
+            "a filter match under a collapsed ancestor must stay hidden"
+        );
+        // Expand A and the filter match reappears.
+        handle_tree(&ev(Modifiers::empty(), Key::Enter), &mut s); // keep filter, → Navigate
+        s.selected = 0;
+        handle_tree(&ev(Modifiers::empty(), Key::Char('l')), &mut s); // expand A
+        assert!(
+            s.visible_indices().contains(&1),
+            "expanding the ancestor reveals the filter match"
+        );
     }
 
     #[test]

@@ -379,6 +379,45 @@ mod tests {
     }
 
     #[test]
+    fn wide_char_wraps_whole_not_split() {
+        // "a好" in a 4-col grid reflowed to 2 cols: 好 (width 2) can't share row 0
+        // with 'a', so it wraps WHOLE to the next row (row 0 padded), never split.
+        let mut active = Grid {
+            cols: 4,
+            rows: vec![Row {
+                cells: vec![cell("a"), cell("好"), Cell::wide_spacer(), Cell::default()],
+                wrap_origin: WrapOrigin::Hard,
+                mark: crate::grid::RowMark::default(),
+            }],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor::default();
+        reflow(&mut active, &mut sb, &mut c, 4, 2);
+        assert_eq!(active.cols, 2);
+        assert_eq!(row_text(&active.rows[0]), "a");
+        assert_eq!(row_text(&active.rows[1]), "好");
+        // Row 1 holds the wide char + its spacer (rectangular, not split).
+        assert_eq!(active.rows[1].cells.len(), 2);
+        assert!(active.rows[1].cells[1].is_wide_spacer());
+    }
+
+    #[test]
+    fn combining_mark_cell_survives_reflow() {
+        // A precomposed combining-mark grapheme ("a" + U+0301) is a single
+        // width-1 cell; reflow must carry it intact, not split or drop the mark.
+        let mut active = Grid {
+            cols: 4,
+            rows: vec![fill_row(&["a\u{0301}", "b", " ", " "], WrapOrigin::Hard)],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor::default();
+        reflow(&mut active, &mut sb, &mut c, 4, 8);
+        assert_eq!(active.cols, 8);
+        assert_eq!(active.rows[0].cells[0].grapheme.as_str(), "a\u{0301}");
+        assert_eq!(active.rows[0].cells[1].grapheme.as_str(), "b");
+    }
+
+    #[test]
     fn wide_to_narrow_re_wraps() {
         // 11-col line "Hello World"
         let mut active = Grid {

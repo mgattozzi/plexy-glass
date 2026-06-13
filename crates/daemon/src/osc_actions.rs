@@ -193,6 +193,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_clipboard_returns_bounded_without_panic() {
+        // No helper is guaranteed in the test env; whatever happens (empty,
+        // real contents, or a missing tool) it must return quickly without panic.
+        let start = std::time::Instant::now();
+        let _ = read_clipboard().await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "read_clipboard must be bounded"
+        );
+    }
+
+    #[tokio::test]
     async fn write_clipboard_is_bounded_when_helper_hangs() {
         use std::os::unix::fs::PermissionsExt;
         // Stub every clipboard helper to hang well past the 2s bound; `exec` so

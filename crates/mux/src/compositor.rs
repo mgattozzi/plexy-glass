@@ -1442,6 +1442,131 @@ mod tests {
         }
     }
 
+    #[test]
+    fn copy_mode_search_match_sets_highlight() {
+        use plexy_glass_emulator::{Attrs, Emulator};
+        let mut e = Emulator::new(5, 20);
+        e.advance(b"hello world");
+        let screen = e.screen().clone();
+        let cm = crate::CopyMode {
+            cursor: (0, 0),
+            anchor: None,
+            search: crate::SearchState {
+                query: "ell".into(),
+                matches: vec![crate::MatchSpan { line_idx: 0, col_start: 1, col_end: 3 }],
+                current: 0,
+                prompt_active: false,
+                prompt_buf: String::new(),
+            },
+            viewport_top: 0,
+            pane_rows: 5,
+            total_lines: 5,
+        };
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 4, 20),
+            screen: &screen,
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: Some(&cm),
+            title: None,
+            marked: false,
+        };
+        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
+        for c in 1..=3 {
+            assert!(vs.cell(0, c).unwrap().attrs.contains(Attrs::HIGHLIGHT), "col {c} highlighted");
+        }
+        assert!(!vs.cell(0, 0).unwrap().attrs.contains(Attrs::HIGHLIGHT), "col 0 not highlighted");
+        assert!(!vs.cell(0, 4).unwrap().attrs.contains(Attrs::HIGHLIGHT), "col 4 not highlighted");
+    }
+
+    #[test]
+    fn copy_mode_search_match_out_of_viewport_not_painted() {
+        use plexy_glass_emulator::{Attrs, Emulator};
+        let mut e = Emulator::new(5, 20);
+        e.advance(b"hello");
+        let screen = e.screen().clone();
+        // viewport covers lines 2..=5; a match on line 0 is above it.
+        let cm = crate::CopyMode {
+            cursor: (3, 0),
+            anchor: None,
+            search: crate::SearchState {
+                query: "h".into(),
+                matches: vec![crate::MatchSpan { line_idx: 0, col_start: 0, col_end: 0 }],
+                current: 0,
+                prompt_active: false,
+                prompt_buf: String::new(),
+            },
+            viewport_top: 2,
+            pane_rows: 4,
+            total_lines: 6,
+        };
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 4, 20),
+            screen: &screen,
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: Some(&cm),
+            title: None,
+            marked: false,
+        };
+        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
+        // The out-of-viewport match must not paint any HIGHLIGHT in the band.
+        for r in 0..4 {
+            for c in 0..20 {
+                assert!(
+                    !vs.cell(r, c).unwrap().attrs.contains(Attrs::HIGHLIGHT),
+                    "no highlight expected at ({r},{c})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn copy_mode_search_prompt_paints_reverse_bar() {
+        use plexy_glass_emulator::{Attrs, Emulator};
+        let mut e = Emulator::new(5, 20);
+        e.advance(b"hello");
+        let screen = e.screen().clone();
+        let cm = crate::CopyMode {
+            cursor: (0, 0),
+            anchor: None,
+            search: crate::SearchState {
+                query: String::new(),
+                matches: vec![],
+                current: 0,
+                prompt_active: true,
+                prompt_buf: "foo".into(),
+            },
+            viewport_top: 0,
+            pane_rows: 5,
+            total_lines: 5,
+        };
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 4, 20),
+            screen: &screen,
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: Some(&cm),
+            title: None,
+            marked: false,
+        };
+        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
+        // Prompt bar on the pane's bottom row (rect.row + rect.rows - 1 = 3).
+        let row: Vec<String> = (0..4)
+            .map(|c| vs.cell(3, c).unwrap().grapheme.to_string())
+            .collect();
+        assert_eq!(row.join(""), "/foo");
+        for c in 0..4 {
+            assert!(
+                vs.cell(3, c).unwrap().attrs.contains(Attrs::REVERSE),
+                "prompt cell {c} is REVERSE"
+            );
+        }
+    }
+
     fn status_with_left(text: &str) -> StatusLine {
         StatusLine {
             left: vec![plexy_glass_status::Segment {
