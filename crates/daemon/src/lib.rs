@@ -173,15 +173,13 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
     let registry = std::sync::Arc::new(SessionRegistry::new());
 
     // Build config-declared default sessions eagerly (Feature B). A failure to
-    // build one is logged and skipped, so it never blocks the accept loop.
+    // build one is logged and skipped, so it never blocks the accept loop. The
+    // 24×80 default size is resized when a client attaches, and the reload
+    // path (`reload_config`) reuses the same `build_declared` for
+    // newly-declared names.
     {
         let boot_size = plexy_glass_protocol::PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
-        for template in &config.sessions {
-            match registry.create_declared(template, std::sync::Arc::clone(&config), boot_size).await {
-                Ok(_) => info!(session = %template.name, "built declared session"),
-                Err(e) => tracing::warn!(session = %template.name, error = %e, "skipping declared session"),
-            }
-        }
+        registry.build_declared(&config, boot_size).await;
     }
 
     info!(foreground = args.foreground, "daemon ready, entering accept loop");

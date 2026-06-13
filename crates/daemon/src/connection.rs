@@ -707,9 +707,36 @@ impl ClientCtx<'_> {
     /// not unique across sessions, applying the target's ids to the source
     /// would silently mutate the wrong session.
     async fn switch_session(&mut self, name: String) -> bool {
-        let Some(target) = self.registry.get(&name).await else {
-            self.session.set_status_message(format!("no session: {name}")).await;
-            return false;
+        let target = match self.registry.get(&name).await {
+            Some(t) => t,
+            // Not live: auto-create it if it's a declared template. The config
+            // comes from the live session's own per-session snapshot (the
+            // ClientCtx has no config field), and the build uses this client's
+            // real size. Unknown-AND-undeclared names keep the existing error.
+            None => {
+                let config = self.session.config_snapshot();
+                match config.sessions.iter().find(|t| t.name == name) {
+                    Some(template) => {
+                        match self
+                            .registry
+                            .create_declared(template, Arc::clone(&config), self.size)
+                            .await
+                        {
+                            Ok(t) => t,
+                            Err(e) => {
+                                self.session
+                                    .set_status_message(format!("cannot switch to {name}: {e}"))
+                                    .await;
+                                return false;
+                            }
+                        }
+                    }
+                    None => {
+                        self.session.set_status_message(format!("no session: {name}")).await;
+                        return false;
+                    }
+                }
+            }
         };
         if target.name() == self.session.name() {
             self.session.set_status_message(format!("already on {name}")).await;
@@ -1806,6 +1833,79 @@ mod tests {
         // The client has moved: b now has it, a has none.
         wait_until(0, 1).await;
 
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn command_prompt_switch_auto_creates_declared_session() {
+        // `:switch dev` when "dev" is declared but NOT running builds it from
+        // the template (sourcing config from the live session's snapshot), then
+        // switches. No boot loop here, so "dev" is not live until the switch.
+        let _g = crate::test_env::isolate();
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, split};
+
+        let registry = Arc::new(crate::SessionRegistry::new());
+        // Config declares "dev" (a 2-pane split) but it is never pre-built.
+        let cfg = Arc::new(
+            plexy_glass_config::parse_config(
+                r##"session "dev" { window "w" { split vertical { pane; pane } } }"##,
+            )
+            .unwrap(),
+        );
+        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+
+        // "dev" is not live yet.
+        assert!(registry.get("dev").await.is_none(), "precondition: dev not built");
+
+        let (server_side, client_side) = duplex(64 * 1024);
+        let reg = Arc::clone(&registry);
+        let cfg2 = Arc::clone(&cfg);
+        let server = tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+
+        let (mut cr, mut cw) = split(client_side);
+        let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
+        let attach = ClientMsg::AttachOrCreate {
+            name: Some("a".into()),
+            create_if_missing: true,
+            cmd: Some(cat()),
+            size,
+        };
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&attach).unwrap()).await.unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while cr.read(&mut buf).await.unwrap_or(0) > 0 {}
+        });
+
+        let wait_dev_has_client = || {
+            let registry = Arc::clone(&registry);
+            async move {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let entries = registry.list().await;
+                    if let Some(dev) = entries.iter().find(|e| e.name == "dev")
+                        && dev.clients == 1
+                    {
+                        // dev was auto-built as the 2-pane template and the
+                        // client moved onto it.
+                        assert_eq!(dev.panes, 2, "auto-built from the 2-pane template");
+                        return;
+                    }
+                    if Instant::now() > deadline {
+                        panic!("dev never auto-created + switched: {entries:?}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+
+        // Give the attach a moment, then switch to the declared-not-running name.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let input = ClientMsg::Input(bytes::Bytes::from_static(b"\x01:switch dev\r"));
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&input).unwrap()).await.unwrap();
+
+        wait_dev_has_client().await;
         server.abort();
     }
 

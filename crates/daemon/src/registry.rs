@@ -145,6 +145,30 @@ impl SessionRegistry {
         Ok(session)
     }
 
+    /// Build every config-declared session that is NOT already live, from its
+    /// template (Feature B / declarative v2).
+    ///
+    /// Idempotent: a name already live is skipped by `create_declared`'s
+    /// short-circuit, so this never rebuilds a running session and never races
+    /// a concurrent attach of the same name. A per-session build failure is
+    /// logged and skipped, it never aborts the rest. Shared by daemon boot and
+    /// `reload_config`; both pass the 24×80 default `size` (resized when a
+    /// client later attaches).
+    pub async fn build_declared(
+        &self,
+        config: &Arc<plexy_glass_config::Config>,
+        size: PtySize,
+    ) {
+        for template in &config.sessions {
+            match self.create_declared(template, Arc::clone(config), size).await {
+                Ok(_) => tracing::info!(session = %template.name, "built declared session"),
+                Err(e) => {
+                    tracing::warn!(session = %template.name, error = %e, "skipping declared session")
+                }
+            }
+        }
+    }
+
     /// Attach-or-create with restore.
     ///
     /// An existing in-memory session wins; else try the saved file; else fresh
@@ -337,11 +361,21 @@ impl SessionRegistry {
             tracing::warn!(error = %e, "reload: parse error; using fallback");
         }
         let new_config = Arc::new(new_config);
-        let map = self.inner.lock().await;
-        for session in map.values() {
-            session.swap_config(Arc::clone(&new_config)).await;
+        {
+            let map = self.inner.lock().await;
+            for session in map.values() {
+                session.swap_config(Arc::clone(&new_config)).await;
+            }
         }
-        drop(map);
+        // Re-read templates: build any NEWLY-declared session names not yet
+        // live, so `:switch new` / `attach -n new` find them (matching boot).
+        // Live sessions are NOT rebuilt (`build_declared` skips live names),
+        // so a changed template for a running session is deferred to its next
+        // build (after kill + reattach), and a removed-but-live name is left
+        // alone. The reload build has no client size, so it uses the same
+        // 24×80 default as boot (resized on the first attach).
+        let reload_size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
+        self.build_declared(&new_config, reload_size).await;
         match err {
             None => Ok(()),
             Some(e) => Err(DaemonError::from(e)),
@@ -738,6 +772,46 @@ mod tests {
         assert_eq!(s.name(), "dev");
         assert!(r.get("dev").await.is_some());
         s.terminate_panes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_declared_builds_all_new_names() {
+        let _g = crate::test_env::isolate();
+        let r = Arc::new(SessionRegistry::new());
+        let cfg = cfg_with_session(
+            "session \"alpha\" { window \"w\" { pane } }\nsession \"beta\" { window \"w\" { pane } }",
+        );
+        r.build_declared(&cfg, size()).await;
+        let alpha = r.get("alpha").await.expect("alpha built");
+        let beta = r.get("beta").await.expect("beta built");
+        alpha.terminate_panes().await;
+        beta.terminate_panes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_declared_skips_live_names_no_rebuild() {
+        // A name already live (with a 2-pane shape) is NOT rebuilt even if the
+        // template now differs, `build_declared` returns the existing session
+        // (the reload "live sessions are never rebuilt" guarantee).
+        let _g = crate::test_env::isolate();
+        let r = Arc::new(SessionRegistry::new());
+        let cfg_v1 = cfg_with_session(r##"session "dev" { window "w" { split vertical { pane; pane } } }"##);
+        let live = r.create_declared(&cfg_v1.sessions[0], Arc::clone(&cfg_v1), size()).await.unwrap();
+        let live_ptr = Arc::as_ptr(&live);
+        {
+            let wm = live.window_manager.lock().await;
+            assert_eq!(wm.windows()[0].layout().panes().len(), 2);
+        }
+        // A reloaded config with a CHANGED (1-pane) "dev" template.
+        let cfg_v2 = cfg_with_session(r##"session "dev" { window "w" { pane } }"##);
+        r.build_declared(&cfg_v2, size()).await;
+        let still = r.get("dev").await.expect("dev still live");
+        assert!(std::ptr::eq(Arc::as_ptr(&still), live_ptr), "same session Arc (not rebuilt)");
+        {
+            let wm = still.window_manager.lock().await;
+            assert_eq!(wm.windows()[0].layout().panes().len(), 2, "live shape unchanged by reload");
+        }
+        live.terminate_panes().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
