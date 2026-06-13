@@ -930,6 +930,24 @@ impl ClientCtx<'_> {
                 self.session.notify.notify_one();
             }
             TreeAction::RenameSession { old, new } => {
+                // Refuse renames TO a config-declared name. The template is
+                // rebuilt fresh under that name at every daemon boot
+                // (attach_or_create routes declared names to the template,
+                // never the saved file), so the renamed session's persisted
+                // state would be silently shadowed, and a hard no now beats
+                // silent data loss later. (The FROM direction, renaming a
+                // declared session away, stays allowed and merely decouples
+                // it from its template, per the spec.)
+                let cfg = self.session.config_snapshot();
+                if cfg.sessions.iter().any(|t| t.name == new) {
+                    self.session
+                        .set_status_message(format!(
+                            "'{new}' is a declared session name — choose another"
+                        ))
+                        .await;
+                    self.session.notify.notify_one();
+                    return;
+                }
                 match self.registry.rename_session(&old, &new).await {
                     Ok(()) => {
                         // Commit-on-success: the tree model was NOT mutated at
@@ -2190,6 +2208,57 @@ mod tests {
             panic!("tree overlay must still be open");
         };
         assert_eq!(state.nodes, nodes_before, "failed rename leaves the tree untouched");
+    }
+
+    // RenameSession refusal path: renaming TO a config-declared session name
+    // is refused outright (the template would shadow the renamed session's
+    // saved state at next boot, silent data loss), with the exact status
+    // message and the registry untouched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tree_rename_session_to_declared_name_is_refused() {
+        let _g = crate::test_env::isolate();
+        use plexy_glass_mux::TreeAction;
+        let registry = Arc::new(crate::SessionRegistry::new());
+        // "dev" is declared in config but not running, so the refusal must not
+        // depend on a live collision.
+        let cfg = Arc::new(
+            plexy_glass_config::parse_config(r##"session "dev" { window "w" { pane } }"##)
+                .expect("declared-session config"),
+        );
+        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let mut session = registry
+            .attach_or_create("alpha".into(), cat(), size, Arc::clone(&cfg))
+            .await
+            .unwrap();
+
+        let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
+        let mut client_id = 0u64;
+        let prefix_armed = Arc::new(AtomicBool::new(false));
+        let mut ctx = ClientCtx {
+            session: &mut session,
+            client_id: &mut client_id,
+            size,
+            registry: &registry,
+            switch_tx: &switch_tx,
+            prefix_armed: &prefix_armed,
+        };
+        ctx.dispatch_tree_action(TreeAction::RenameSession {
+            old: "alpha".into(),
+            new: "dev".into(),
+        })
+        .await;
+
+        assert!(registry.get("alpha").await.is_some(), "refused rename leaves the key alone");
+        assert!(registry.get("dev").await.is_none(), "no session appears under the declared name");
+        let mut m = session.window_manager.lock().await;
+        let msg = m.take_active_message().expect("refusal must set a status message");
+        assert_eq!(msg, "'dev' is a declared session name — choose another");
     }
 
     // Drive break-pane and join-pane through the full key/verb path and assert

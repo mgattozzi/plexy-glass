@@ -579,10 +579,19 @@ and press `Enter` to commit. The rename propagates live everywhere: the
 registry re-keys, and the status bar, `plexy-glass list`, and `-n` resolution
 all follow immediately. `Esc` cancels.
 
+Session names must be 1–64 characters of ASCII letters, digits, `-`, or `_`,
+with no spaces (unlike window/pane rename, which allows any text). An invalid
+name, a collision with a live session, or a config-declared name is refused:
+a transient status message explains why and the tree is left unchanged.
+
 **Declarative sessions note:** renaming a session that was built from a
 `session` template in `config.kdl` decouples it from the template, so at the
 next daemon boot the template name gets built fresh as a new session and the
-renamed session restores from its own saved file under the new name.
+renamed session restores from its own saved file under the new name. The
+reverse is refused outright: renaming any session *to* a declared name fails
+with `'<name>' is a declared session name — choose another`, since otherwise
+the template would silently shadow that session's saved state at the next
+daemon boot.
 
 ## The command prompt
 

@@ -123,7 +123,10 @@ impl Session {
             }
             wm.set_active_window(0);
         }
-        // Persist the built shape (harmless; declared names are never restored).
+        // Persist the built shape. Harmless: declared names are never
+        // restored (attach_or_create routes them to the template, never the
+        // file), and no other session can come to own this file, since renaming
+        // TO a declared name is refused at the connection layer.
         session.mark_dirty();
         Ok(session)
     }
