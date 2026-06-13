@@ -95,6 +95,21 @@ impl InputRouter {
     /// `SawEsc`, so we never synthesize a bogus Escape from a half-finished
     /// sequence. Returns the first resulting event (the idle-flush case is a
     /// single lone ESC).
+    ///
+    /// # Invariants
+    ///
+    /// The three steps are **load-bearing in order**, all must run unconditionally
+    /// (no early return between them):
+    ///
+    /// 1. `paste.flush_open` re-feeds the held `\x1b` (and any partial `[200~`
+    ///    prefix) INTO the mouse parser, parking it at `SawEsc`.
+    /// 2. `mouse.is_mid_sequence` (which reads parser state mutated by step 1)
+    ///    then drains that `\x1b` INTO the key parser.
+    /// 3. `keys.flush` turns the lone `SawEsc` into `Key(Escape)`.
+    ///
+    /// Reordering or short-circuiting on the first non-empty step would silently
+    /// swallow a lone ESC: the byte would stall in whichever speculative buffer
+    /// was non-empty first, never reaching the key parser.
     pub fn flush_keys(&mut self) -> Option<InputEvent> {
         let mut events = Vec::new();
         // 1. Drain a partial paste-open back through mouse → key.
@@ -104,6 +119,8 @@ impl InputRouter {
             }
         }
         // 2. Drain the mouse parser's speculatively-held bytes through key.
+        //    This must run after step 1, since step 1 may have just parked an ESC
+        //    in the mouse parser, making `is_mid_sequence()` newly true.
         if self.mouse.is_mid_sequence() {
             for byte in self.mouse.flush() {
                 self.feed_key(byte, &mut events);

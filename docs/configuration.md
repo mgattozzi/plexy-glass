@@ -460,11 +460,11 @@ themselves contain colons and spaces.
 | `detach` | Detach this client |
 
 Every overlay (the pickers, choose-tree, help, the rename prompts, the
-command prompt) cancels on **`Esc`**, and this now works on **all
-terminals**, including legacy / Terminal.app-class ones that send a bare
-`\x1b` byte, not just Kitty-capable terminals. While an overlay is open it
-is modal: keystrokes, pastes, and raw bytes go to the overlay, never to the
-pane's shell behind it.
+command prompt) cancels on `Esc`, and that works on *all* terminals now,
+including legacy / Terminal.app-class ones that send a bare `\x1b` byte, not
+just Kitty-capable terminals. While an overlay is open it is modal:
+keystrokes go to the overlay, and pastes / raw bytes are swallowed, so
+nothing reaches the pane's shell behind it.
 
 **Misc**
 

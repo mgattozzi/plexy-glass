@@ -559,6 +559,21 @@ fn esc_cancels_overlay_and_paste_does_not_leak_on_legacy_client() {
         sess.snapshot_str()
     );
 
+    // --- Positive control: an un-swallowed paste DOES echo in this shell. ---
+    // Before re-opening the overlay, prove that a bracketed paste sent while NO
+    // overlay is active actually echoes from the shell. Without this, the Part 2
+    // negative assertion could pass vacuously (e.g. because the shell ignores
+    // bracketed pastes entirely, not because the overlay swallowed them).
+    let before_proof = sess.buffer_len();
+    sess.send(b"\x1b[200~ECHO_PROOF_MARKER\n\x1b[201~");
+    assert!(
+        sess.wait_for_from(before_proof, b"ECHO_PROOF_MARKER", Duration::from_secs(10)),
+        "positive control failed: a bracketed paste did not echo from the shell \
+         when no overlay was open — the Part 2 negative assertion would be \
+         vacuous. raw: {}",
+        sess.snapshot_str()
+    );
+
     // --- Part 2: a paste behind an open overlay does NOT reach the shell. ---
     // Re-open the tree, then send a bracketed paste. Behind the modal it must
     // be discarded; the marker must never echo from the shell.
@@ -1475,10 +1490,13 @@ fn scrollback_marks_persist_across_daemon_restart() {
     // --last-command must return the pre-restart block output.
     {
         let s2 = TestSession::builder(&env_run2).args(&["attach", "-n", "sbpersist"]).start();
-        if !s2.wait_ready("sbpersist", Duration::from_secs(20)) {
-            eprintln!("note: restored daemon never rendered — fail-soft.");
-            return;
-        }
+        // The file-contains check above already proved the data persisted, so a
+        // restored daemon that never renders is a genuine restore regression, not a
+        // timing flake, and must be a hard failure.
+        assert!(
+            s2.wait_ready("sbpersist", Duration::from_secs(20)),
+            "restored daemon never rendered — restore regression"
+        );
         // The restored history is in the FIRST pane's scrollback. capture
         // --last-command reads the most recent completed block off the seeded
         // Row.marks. Poll: restore + first render can lag.

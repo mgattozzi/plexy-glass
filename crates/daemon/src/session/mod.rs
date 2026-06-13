@@ -1281,14 +1281,15 @@ async fn persist_loop(weak: std::sync::Weak<Session>) {
         // With persisted scrollback the serialize + fsync can move multiple MB,
         // so run it on `spawn_blocking` rather than inline on a tokio worker.
         // Ordering guarantee for `kill`: `begin_close` sets `closing` BEFORE
-        // `stop_persist().await` runs. `stop_persist` aborts THIS loop and then
-        // awaits the in-flight save handle stored in `persist_save_handle`, so a
-        // multi-MB serialize+fsync already dispatched to the blocking pool runs
-        // to completion before `delete_session`. Aborting the loop alone would
-        // only detach (not cancel) the blocking thread, letting its write land
-        // after the delete, hence the slot. The closure also re-checks
-        // `closing` immediately before writing so a save that began-then-saw-
-        // close becomes a no-op.
+        // `stop_persist().await` runs. `stop_persist` acquires `persist_in_flight`
+        // FIRST (blocking until any in-flight save completes), THEN aborts this
+        // loop. Because `spawn_blocking` tasks cannot be cancelled once started,
+        // aborting the loop alone would only detach the blocking thread and let its
+        // write land AFTER `delete_session`. Holding the `persist_in_flight` guard
+        // across the whole save (below) ensures `stop_persist` waits for the
+        // write to finish before the delete proceeds. The closure also re-checks
+        // `closing` before writing so a save that started after `begin_close` set
+        // the flag becomes a no-op.
         let name = session.name();
         let session_for_save = Arc::clone(&session);
         // Hold `persist_in_flight` across the whole save so `stop_persist` (which

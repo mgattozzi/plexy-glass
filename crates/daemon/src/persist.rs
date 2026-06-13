@@ -16,7 +16,8 @@ use std::path::PathBuf;
 /// still load (the missing field defaults to `None`) so loads accept either.
 ///
 /// Additive optional fields added since v2 do not bump the version (older files
-/// default them to `None` via `#[serde(default)]`): `WindowStateV1.home_cwd`.
+/// default them to `None` via `#[serde(default)]`): `WindowStateV1.home_cwd`,
+/// `PaneStateV1.scrollback`.
 pub const SCHEMA_VERSION: u32 = 2;
 
 /// Oldest on-disk schema this build can still load (older files are rejected).
@@ -818,5 +819,126 @@ mod tests {
         // And the live rows reconstruct exactly.
         assert_eq!(row_from_dto(&loaded_sb.rows[0], 8), row0);
         assert_eq!(row_from_dto(&loaded_sb.rows[1], 8), row1);
+    }
+
+    // ── RowMarkV1 exit Some(0) vs None presence test ───────────────────────
+    // The danger: `exit_code` is 0 for BOTH `Some(0)` (`HAS_EXIT` set, code=0)
+    // and `None` (`HAS_EXIT` absent, code=0 by default). Only the DTO's
+    // `exit: Some(0)` vs absent (`skip_serializing_if = Option::is_none`)
+    // distinguishes them. This test proves the JSON payload byte 0 is not
+    // confused with the absent case.
+
+    #[test]
+    fn row_mark_dto_exit_some_zero_is_not_none() {
+        // BLOCK_END + exit code 0 (success): `Some(0)` must survive the round-trip
+        // as `Some(0)`, NOT be collapsed to `None`.
+        let mut mark = RowMark::default();
+        mark.set(RowMark::BLOCK_END);
+        mark.set_exit(Some(0));
+
+        let dto = mark_to_dto(mark).expect("BLOCK_END mark must produce a DTO");
+        // The DTO must carry the `exit` field (`Some(0)`, not `None`).
+        assert_eq!(dto.exit, Some(0), "Some(0) must be present in the DTO");
+        // Serialized JSON must contain the `exit` key with value 0.
+        let json = serde_json::to_string(&dto).expect("serialize");
+        assert!(
+            json.contains("\"exit\":0"),
+            "Some(0) must serialize as '\"exit\":0', got: {json}"
+        );
+        // Deserialize back: exit must still be `Some(0)`, not `None`.
+        let dto2: RowMarkV1 = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(dto2.exit, Some(0), "Some(0) must survive JSON round-trip");
+        // Reconstruct the live mark: `exit()` must return `Some(0)`, not `None`.
+        let live = mark_from_dto(&dto2);
+        assert!(live.contains(RowMark::BLOCK_END), "BLOCK_END flag must survive");
+        assert_eq!(live.exit(), Some(0), "live mark must have exit Some(0)");
+    }
+
+    #[test]
+    fn row_mark_dto_exit_none_round_trips_as_none() {
+        // BLOCK_END with no exit (D arrived without a code): must remain `None`.
+        let mut mark = RowMark::default();
+        mark.set(RowMark::BLOCK_END);
+        // Explicitly leave exit unset (`None`).
+
+        let dto = mark_to_dto(mark).expect("BLOCK_END mark must produce a DTO");
+        assert_eq!(dto.exit, None, "absent exit must be None in the DTO");
+        // Serialized JSON must NOT contain the `exit` key.
+        let json = serde_json::to_string(&dto).expect("serialize");
+        assert!(
+            !json.contains("\"exit\""),
+            "None exit must be omitted from JSON, got: {json}"
+        );
+        // Deserialize back: exit must still be `None`.
+        let dto2: RowMarkV1 = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(dto2.exit, None, "None must survive JSON round-trip");
+        // Reconstruct the live mark: `exit()` must return `None`.
+        let live = mark_from_dto(&dto2);
+        assert!(live.contains(RowMark::BLOCK_END), "BLOCK_END flag must survive");
+        assert_eq!(live.exit(), None, "live mark must have exit None");
+    }
+
+    // ── capture_scrollback direct tests ───────────────────────────────────
+    // Tests for the N-cap, blank-row drop, and None (empty/blank pane) branches.
+
+    /// Build a minimal `Screen` with `n` non-blank rows in the scrollback and
+    /// a blank main grid (rows × cols), suitable for testing `capture_scrollback`.
+    fn screen_with_scrollback(scrollback_rows: usize, grid_rows: u16, cols: u16) -> plexy_glass_emulator::Screen {
+        use plexy_glass_emulator::Screen;
+        let mut s = Screen::new(grid_rows, cols);
+        for i in 0..scrollback_rows {
+            let mut row = Row::blank(cols);
+            // Give each row a distinct non-default grapheme so it is NOT trimmed.
+            row.cells[0].grapheme = format!("{}", (b'A' + (i % 26) as u8) as char).into();
+            s.scrollback.push(row);
+        }
+        s
+    }
+
+    #[test]
+    fn capture_scrollback_n_cap_returns_newest_n() {
+        // 30 non-blank rows in scrollback only; grid is 1 row (also non-blank
+        // to avoid the trailing-blank trim). n = 10 → capture the last 10 of 31
+        // total rows. The blank-trailing-drop does NOT fire because all captured
+        // rows carry a non-default grapheme.
+        let mut screen = screen_with_scrollback(30, 1, 20);
+        // Make the single main-grid row non-blank so it is not dropped by the
+        // trailing-blank trim and counts toward the cap.
+        screen.active.rows[0].cells[0].grapheme = "Z".into();
+
+        let sb = capture_scrollback(&screen, 10).expect("non-empty screen must yield Some");
+        assert_eq!(sb.rows.len(), 10, "exactly n=10 rows captured");
+        // Total rows = 30 scrollback + 1 grid = 31; skip = 31-10 = 21.
+        // Captured scrollback rows: indices 21..29 (8 rows), then the 1 grid row.
+        // Row 21 → grapheme 'V' (21 % 26 = 21 → ord('A')+21).
+        let first_grapheme = &sb.rows[0].cells[0].grapheme;
+        assert_eq!(first_grapheme.as_str(), "V", "oldest captured scrollback row must be index 21 → 'V'");
+        // Last row is the main-grid row.
+        let last_grapheme = &sb.rows[9].cells[0].grapheme;
+        assert_eq!(last_grapheme.as_str(), "Z", "last captured row must be the main-grid row → 'Z'");
+    }
+
+    #[test]
+    fn capture_scrollback_drops_blank_trailing_rows() {
+        // 3 non-blank rows followed by 2 blank grid rows (default = space, no mark).
+        // The blank grid rows must be trimmed from the tail.
+        let mut screen = screen_with_scrollback(0, 5, 10);
+        // Put 3 non-blank rows in the main grid and leave the rest blank.
+        for i in 0..3usize {
+            screen.active.rows[i].cells[0].grapheme =
+                format!("{}", (b'X' + i as u8) as char).into();
+        }
+        // Rows 3 and 4 remain blank (all-default, no mark).
+        let sb = capture_scrollback(&screen, 1000).expect("non-blank rows must yield Some");
+        assert_eq!(sb.rows.len(), 3, "blank trailing rows must be dropped, leaving 3");
+    }
+
+    #[test]
+    fn capture_scrollback_blank_pane_returns_none() {
+        // A completely blank screen (no scrollback, default main grid) should
+        // return None, there is nothing worth persisting.
+        let screen = screen_with_scrollback(0, 5, 20);
+        let result = capture_scrollback(&screen, 1000);
+        assert!(result.is_none(), "a blank pane must return None, got: {result:?}");
     }
 }
