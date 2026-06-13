@@ -109,6 +109,7 @@ pub mod pane;
 pub mod paste_buffers;
 pub mod paths;
 pub mod persist;
+pub mod pipe;
 pub mod popup;
 pub mod registry;
 pub mod renderer;

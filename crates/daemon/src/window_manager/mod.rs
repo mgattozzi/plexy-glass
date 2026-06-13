@@ -405,15 +405,32 @@ impl WindowManager {
         }
     }
 
+    /// The live cwd of `pane`: its OSC-7 location (`screen.cwd`), falling
+    /// back to the active window's home base. The shared per-pane helper
+    /// behind `popup_cwd` (active pane) and pipe-pane (the input TARGET pane,
+    /// which is the popup's pane while one is open), one definition so the
+    /// two cannot drift.
+    pub fn pane_cwd(&self, pane: &crate::pane::Pane) -> Option<String> {
+        pane.with_screen(|s| s.cwd.clone())
+            .and_then(|url| crate::popup::osc7_to_path(&url))
+            .or_else(|| self.active_window().home_cwd.clone())
+    }
+
     /// The cwd the popup spawns at: the active pane's live OSC-7 location,
     /// falling back to the window home base. This intentionally diverges from
     /// `split_cwd` (home base only): a popup acts on the current context.
     pub fn popup_cwd(&self) -> Option<String> {
-        self.active_window()
-            .active_pane()
-            .and_then(|p| p.with_screen(|s| s.cwd.clone()))
-            .and_then(|url| crate::popup::osc7_to_path(&url))
-            .or_else(|| self.active_window().home_cwd.clone())
+        match self.active_window().active_pane() {
+            Some(p) => self.pane_cwd(p),
+            None => self.active_window().home_cwd.clone(),
+        }
+    }
+
+    /// The program new panes, windows, popups, and pipe-pane consumers run
+    /// (the user's `$SHELL` in production; pinnable via `set_default_program`
+    /// in tests).
+    pub fn default_program(&self) -> String {
+        self.default_spec.program.clone()
     }
 
     /// Open the floating popup (last-wins: an existing popup is replaced, but

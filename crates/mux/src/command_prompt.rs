@@ -70,6 +70,8 @@ pub enum PromptCommand {
     Popup(Option<String>),
     /// Close the floating popup.
     ClosePopup,
+    /// Stream the target pane's raw output to a command (`None` = stop the pipe).
+    PipePane(Option<String>),
     /// Rearrange the active window's panes into a preset layout.
     Layout(crate::LayoutPreset),
     /// Scroll the viewport back to the previous OSC 133 prompt.
@@ -99,7 +101,7 @@ pub const VERBS: &[&str] = &[
     "break", "buffers", "close-popup", "copy", "copy-output", "detach", "focus",
     "help", "join", "kill", "last", "layout", "load-buffer", "mark",
     "monitor-activity", "monitor-bell", "new", "next", "next-prompt", "paste",
-    "popup", "prev", "prev-prompt", "reload", "rename", "rename-pane", "resize",
+    "pipe-pane", "popup", "prev", "prev-prompt", "reload", "rename", "rename-pane", "resize",
     "save-buffer", "sessions", "set-buffer", "split", "swap", "switch", "sync",
     "tree", "win", "zoom",
 ];
@@ -297,6 +299,13 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
             }
         }
         "popup" => Ok(PromptCommand::Popup(if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_string())
+        })),
+        // Popup-style free-text tail: the rest of the line is the consumer
+        // command verbatim; no tail means "stop the pipe".
+        "pipe-pane" => Ok(PromptCommand::PipePane(if rest.is_empty() {
             None
         } else {
             Some(rest.to_string())
@@ -616,6 +625,23 @@ mod tests {
         assert_eq!(
             p("popup git log --oneline").unwrap(),
             PromptCommand::Popup(Some("git log --oneline".into()))
+        );
+    }
+
+    #[test]
+    fn parses_pipe_pane_verb() {
+        // No tail = stop the pipe.
+        assert_eq!(p("pipe-pane").unwrap(), PromptCommand::PipePane(None));
+        assert_eq!(p("pipe-pane   ").unwrap(), PromptCommand::PipePane(None));
+        // The tail is the consumer command line.
+        assert_eq!(
+            p("pipe-pane tee /tmp/session.log").unwrap(),
+            PromptCommand::PipePane(Some("tee /tmp/session.log".into()))
+        );
+        // Internal spaces are preserved verbatim (popup's free-text convention).
+        assert_eq!(
+            p("pipe-pane tee -a  my log.txt").unwrap(),
+            PromptCommand::PipePane(Some("tee -a  my log.txt".into()))
         );
     }
 

@@ -50,6 +50,10 @@ struct Inner {
     activity: Arc<AtomicBool>,
     /// Set by the reader when the emulator saw a BEL; drained for bell monitoring.
     bell: Arc<AtomicBool>,
+    /// The pipe-pane slot (one pipe per pane, see `crate::pipe`). Shared as its
+    /// own `Arc` so the drain task and the reader thread hold it WITHOUT
+    /// keeping the whole pane (and its broadcast sender) alive.
+    pipe: crate::pipe::PipeSlot,
 }
 
 impl Pane {
@@ -155,6 +159,11 @@ impl Pane {
         let bell = Arc::new(AtomicBool::new(false));
         let activity_for_reader = Arc::clone(&activity);
         let bell_for_reader = Arc::clone(&bell);
+        // Pipe-pane slot; the reader thread closes any pipe on EOF/Err (the
+        // natural child-exit teardown path, which never goes through
+        // `kill_child`).
+        let pipe: crate::pipe::PipeSlot = Arc::new(Mutex::new(None));
+        let pipe_for_reader = Arc::clone(&pipe);
 
         let output_tx_clone = output_tx.clone();
         let emulator_for_reader = Arc::clone(&emulator);
@@ -179,6 +188,11 @@ impl Pane {
                 match reader.read(&mut buf) {
                     Ok(0) => {
                         debug!("pane reader EOF");
+                        // No more output can ever flow: close any pipe.
+                        crate::pipe::cancel_slot(
+                            &pipe_for_reader,
+                            crate::pipe::PipeCloseReason::PaneClosed,
+                        );
                         // Final notify so the renderer can pick up any
                         // unprocessed bytes before the connection tears down.
                         reader_notify_for_self.notify_one();
@@ -238,6 +252,10 @@ impl Pane {
                     }
                     Err(e) => {
                         debug!(error = %e, "pane reader closed");
+                        crate::pipe::cancel_slot(
+                            &pipe_for_reader,
+                            crate::pipe::PipeCloseReason::PaneClosed,
+                        );
                         return;
                     }
                 }
@@ -287,6 +305,7 @@ impl Pane {
                 config: config_slot,
                 activity,
                 bell,
+                pipe,
             }),
         })
     }
@@ -307,7 +326,14 @@ impl Pane {
     /// error which we ignore. Used by session teardown (`kill`): dropping the
     /// pane does NOT reliably terminate the child, because the detached reader
     /// thread holds the PTY master open until the child exits.
+    ///
+    /// Also closes any pipe-pane explicitly: `kill_child` knows nothing about
+    /// the pipe's consumer child, so the pipe must be cancelled here (the
+    /// drain task then kills and reaps the consumer). Every production
+    /// teardown site (`terminate_panes`, `close_popup`, `kill_window_panes`,
+    /// `kill_pane_child`) flows through this method.
     pub fn kill_child(&self) {
+        crate::pipe::cancel_slot(&self.inner.pipe, crate::pipe::PipeCloseReason::PaneClosed);
         // invariant: child_killer mutex briefly held; kill never blocks.
         let mut killer = self
             .inner
@@ -315,6 +341,31 @@ impl Pane {
             .lock()
             .expect("child_killer mutex poisoned");
         let _ = killer.kill();
+    }
+
+    /// The pipe-pane slot (an `Arc` clone, safe for the drain task to hold
+    /// without keeping the pane alive).
+    pub(crate) fn pipe_slot(&self) -> crate::pipe::PipeSlot {
+        Arc::clone(&self.inner.pipe)
+    }
+
+    /// Stop a running pipe (cancel + the drain kills/reaps the consumer).
+    /// Returns whether a pipe was running.
+    pub fn stop_pipe(&self, reason: crate::pipe::PipeCloseReason) -> bool {
+        crate::pipe::cancel_slot(&self.inner.pipe, reason)
+    }
+
+    /// Whether a pipe is currently installed on this pane.
+    pub fn has_pipe(&self) -> bool {
+        // invariant: pipe slot mutex held briefly; no await, no nested locks.
+        self.inner.pipe.lock().expect("pipe slot poisoned").is_some()
+    }
+
+    /// The running pipe consumer's pid, if a pipe is installed. Test
+    /// observability for the kill/reap (no-zombie) assertions.
+    pub fn pipe_pid(&self) -> Option<u32> {
+        // invariant: pipe slot mutex held briefly; no await, no nested locks.
+        self.inner.pipe.lock().expect("pipe slot poisoned").as_ref().and_then(|h| h.pid())
     }
 
     pub fn id(&self) -> PaneId {

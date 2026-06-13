@@ -683,8 +683,11 @@ impl Session {
     /// apply directly. Connection-level verbs (`Detach`/`Reload`/`Switch`) are
     /// handled by the caller and reach here only defensively. Returns an
     /// optional confirmation message for the status line.
+    ///
+    /// Takes `&Arc<Self>` (not `&self`): the pipe-pane arm hands a
+    /// `Weak<Session>` to the drain task for async close-reason reporting.
     pub async fn handle_prompt_command(
-        &self,
+        self: &Arc<Self>,
         cmd: plexy_glass_mux::PromptCommand,
     ) -> Result<Option<String>, DaemonError> {
         use plexy_glass_mux::{Command, FocusTarget, PromptCommand};
@@ -765,6 +768,44 @@ impl Session {
             }
             PromptCommand::Popup(cmd) => Command::OpenPopup { command: cmd },
             PromptCommand::ClosePopup => Command::ClosePopup,
+            // pipe-pane targets the input target pane (popup-else-active, the
+            // scripting convention). One pipe per pane: starting replaces
+            // (kills) any running one; no command line stops. Both the
+            // attached and headless paths surface the returned message.
+            PromptCommand::PipePane(cmd) => {
+                let msg = {
+                    let m = self.window_manager.lock().await;
+                    let Some(pane) = m.input_target_pane() else {
+                        return Ok(Some(crate::pipe::MSG_NO_PIPE.to_string()));
+                    };
+                    match cmd {
+                        Some(line) => {
+                            let shell = m.default_program();
+                            // The TARGET pane's cwd, not popup_cwd (the
+                            // ACTIVE pane's), which silently diverges
+                            // whenever a popup owns input.
+                            let cwd = m.pane_cwd(pane);
+                            crate::pipe::start_pipe(
+                                pane,
+                                Arc::downgrade(self),
+                                &shell,
+                                &line,
+                                cwd,
+                            )?;
+                            format!("pipe-pane → {line}")
+                        }
+                        None => {
+                            if pane.stop_pipe(crate::pipe::PipeCloseReason::Stopped) {
+                                crate::pipe::MSG_STOPPED.to_string()
+                            } else {
+                                crate::pipe::MSG_NO_PIPE.to_string()
+                            }
+                        }
+                    }
+                };
+                self.notify.notify_one();
+                return Ok(Some(msg));
+            }
             PromptCommand::Layout(preset) => Command::SelectLayout(preset),
             PromptCommand::PrevPrompt => Command::PrevPrompt,
             PromptCommand::NextPrompt => Command::NextPrompt,
@@ -2147,6 +2188,268 @@ mod tests {
             !s.dirty.load(std::sync::atomic::Ordering::Relaxed),
             "successful retry should leave dirty clear"
         );
+    }
+
+    // ---- pipe-pane (spec: 2026-06-12-pipe-pane-design.md) ----
+
+    use crate::pipe::{MSG_CONSUMER_EXITED, MSG_NO_PIPE, MSG_STOPPED};
+    use plexy_glass_mux::PromptCommand;
+
+    /// `kill -0` semantics: a zombie still counts as alive until reaped, so
+    /// `!pid_alive` asserts killed AND reaped (no zombie).
+    fn pid_alive(pid: u32) -> bool {
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
+    }
+
+    /// A pane spec whose child is `cat`: it echoes input back as pane OUTPUT,
+    /// which is what the pipe streams.
+    fn cat_spec() -> SpawnSpec {
+        SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None }
+    }
+
+    async fn active_pane(s: &Arc<Session>) -> crate::pane::Pane {
+        let m = s.window_manager.lock().await;
+        m.active_window().active_pane().cloned().expect("active pane")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pipe_pane_streams_subsequent_output_to_consumer() {
+        let _g = crate::test_env::isolate();
+        let s = Session::new("t-pipe-happy".into(), cat_spec(), size(), cfg()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("pipe.out");
+        // isolate() pins SHELL=/bin/sh, so the consumer is `/bin/sh -c "cat > …"`.
+        let msg = s
+            .handle_prompt_command(PromptCommand::PipePane(Some(format!(
+                "cat > {}",
+                file.display()
+            ))))
+            .await
+            .unwrap();
+        assert_eq!(msg.as_deref(), Some(format!("pipe-pane → cat > {}", file.display()).as_str()));
+        assert!(active_pane(&s).await.has_pipe(), "pipe installed on the target pane");
+
+        // Output produced AFTER pipe start flows to the consumer verbatim.
+        s.handle_input_bytes(b"pipe_needle\n").await.unwrap();
+        let f = file.clone();
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), move || {
+                std::fs::read_to_string(&f).unwrap_or_default().contains("pipe_needle")
+            })
+            .await,
+            "consumer file never received the pane output"
+        );
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pipe_pane_replace_kills_old_consumer() {
+        let _g = crate::test_env::isolate();
+        let s = Session::new("t-pipe-replace".into(), cat_spec(), size(), cfg()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let f1 = tmp.path().join("one.out");
+        let f2 = tmp.path().join("two.out");
+        s.handle_prompt_command(PromptCommand::PipePane(Some(format!("cat > {}", f1.display()))))
+            .await
+            .unwrap();
+        let pane = active_pane(&s).await;
+        let pid1 = pane.pipe_pid().expect("first consumer pid");
+
+        // Starting a new pipe replaces (kills + reaps) the old one.
+        s.handle_prompt_command(PromptCommand::PipePane(Some(format!("cat > {}", f2.display()))))
+            .await
+            .unwrap();
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || !pid_alive(pid1))
+                .await,
+            "old consumer survived (or zombied) after replace"
+        );
+        let pid2 = pane.pipe_pid().expect("second consumer pid");
+        assert_ne!(pid1, pid2, "slot holds the new consumer");
+
+        // Post-replace output reaches only the new consumer.
+        s.handle_input_bytes(b"second_needle\n").await.unwrap();
+        let f2c = f2.clone();
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), move || {
+                std::fs::read_to_string(&f2c).unwrap_or_default().contains("second_needle")
+            })
+            .await,
+            "new consumer never received post-replace output"
+        );
+        assert!(
+            !std::fs::read_to_string(&f1).unwrap_or_default().contains("second_needle"),
+            "replaced consumer kept receiving output"
+        );
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pipe_pane_stop_clears_and_double_stop_reports_none() {
+        let _g = crate::test_env::isolate();
+        let s = Session::new("t-pipe-stop".into(), cat_spec(), size(), cfg()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("stop.out");
+        // Stop with no pipe running → distinct no-pipe status.
+        let msg = s.handle_prompt_command(PromptCommand::PipePane(None)).await.unwrap();
+        assert_eq!(msg.as_deref(), Some(MSG_NO_PIPE));
+
+        s.handle_prompt_command(PromptCommand::PipePane(Some(format!(
+            "cat > {}",
+            file.display()
+        ))))
+        .await
+        .unwrap();
+        let pane = active_pane(&s).await;
+        let pid = pane.pipe_pid().expect("consumer pid");
+        let msg = s.handle_prompt_command(PromptCommand::PipePane(None)).await.unwrap();
+        assert_eq!(msg.as_deref(), Some(MSG_STOPPED));
+        assert!(!pane.has_pipe(), "stop clears the slot synchronously");
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || !pid_alive(pid))
+                .await,
+            "stopped consumer survived (or zombied)"
+        );
+        s.terminate_panes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pipe_pane_consumer_exit_clears_slot_and_reports() {
+        let _g = crate::test_env::isolate();
+        let s = Session::new("t-pipe-exit".into(), cat_spec(), size(), cfg()).unwrap();
+        // A consumer that exits immediately without reading.
+        s.handle_prompt_command(PromptCommand::PipePane(Some("true".into())))
+            .await
+            .unwrap();
+        let pane = active_pane(&s).await;
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || !pane.has_pipe())
+                .await,
+            "slot never cleared after the consumer exited"
+        );
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+                let Ok(mut m) = s.window_manager.try_lock() else { return false };
+                m.take_active_message() == Some(MSG_CONSUMER_EXITED)
+            })
+            .await,
+            "consumer-exited status never surfaced"
+        );
+        s.terminate_panes().await;
+    }
+
+    // Pane teardown with a NEVER-reading consumer: the pane child floods
+    // >200 KiB through the pipe so the drain's stdin write is genuinely
+    // parked (the OS pipe buffer holds ~64 KiB and `sleep` never reads), then
+    // `kill_child` must cancel the pipe, unpark the drain, and kill + reap
+    // the consumer, no zombie left behind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pipe_pane_pane_kill_reaps_never_reading_consumer() {
+        let _g = crate::test_env::isolate();
+        let spec = SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                // Wait for a trigger line (so the pipe attaches FIRST), flood,
+                // mark (the trailing \n flushes the emulator's buffered last
+                // grapheme), then stay alive: the PANE must outlive the flood
+                // so kill_child is what tears it down.
+                "read line; head -c 200000 /dev/zero | tr '\\0' x; printf 'FLOODED\\n'; exec sleep 100"
+                    .into(),
+            ],
+            env: vec![],
+            cwd: None,
+        };
+        let s = Session::new("t-pipe-kill".into(), spec, size(), cfg()).unwrap();
+        let pane = active_pane(&s).await;
+        s.handle_prompt_command(PromptCommand::PipePane(Some("exec sleep 1000".into())))
+            .await
+            .unwrap();
+        let pid = pane.pipe_pid().expect("consumer pid");
+        // Trigger the flood now that the pipe is attached.
+        s.handle_input_bytes(b"go\n").await.unwrap();
+        // Wait until the flood has fully flowed through the pane (the marker
+        // prints after it), so the drain is parked mid-write.
+        let pane_for_poll = pane.clone();
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(15), move || {
+                pane_for_poll.with_screen(|scr| {
+                    (0..scr.rows()).any(|r| {
+                        let row: String = scr.active.rows[r as usize]
+                            .cells
+                            .iter()
+                            .filter(|c| !c.is_wide_spacer())
+                            .map(|c| c.grapheme.as_str())
+                            .collect();
+                        row.contains("FLOODED")
+                    })
+                })
+            })
+            .await,
+            "pane never finished flooding"
+        );
+        assert!(pid_alive(pid), "never-reading consumer still parked before the kill");
+
+        pane.kill_child();
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), || !pid_alive(pid))
+                .await,
+            "consumer survived (or zombied) after pane kill — kill_child must close the pipe"
+        );
+        assert!(!pane.has_pipe(), "kill_child cleared the pipe slot");
+    }
+
+    // The cwd pin: pipe-pane resolves the TARGET pane's cwd (the popup's
+    // while one owns input), not popup_cwd's ACTIVE-pane read, and the two
+    // diverge exactly when a popup is open.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pipe_pane_consumer_spawns_at_popup_cwd_when_popup_owns_input() {
+        let _g = crate::test_env::isolate();
+        let s = Session::new("t-pipe-cwd".into(), cat_spec(), size(), cfg()).unwrap();
+        let active_dir = tempfile::tempdir().unwrap();
+        let popup_dir = tempfile::tempdir().unwrap();
+        // Canonicalize: the consumer's `pwd` reports the resolved path
+        // (macOS tempdirs live under the /var → /private/var symlink).
+        let popup_real = popup_dir.path().canonicalize().unwrap();
+        let out = active_dir.path().join("cwd.out");
+
+        s.handle_command(plexy_glass_mux::Command::OpenPopup { command: Some("cat".into()) })
+            .await
+            .unwrap();
+        {
+            let m = s.window_manager.lock().await;
+            // Distinct OSC-7 cwds: layout pane vs popup pane.
+            m.active_window().active_pane().unwrap().with_screen_mut(|scr| {
+                scr.cwd = Some(format!("file://localhost{}", active_dir.path().display()));
+            });
+            m.popup().unwrap().pane.with_screen_mut(|scr| {
+                scr.cwd = Some(format!("file://localhost{}", popup_dir.path().display()));
+            });
+        }
+        // The consumer command writes its own cwd (its stdout is /dev/null;
+        // the in-command redirection bypasses that).
+        s.handle_prompt_command(PromptCommand::PipePane(Some(format!(
+            "pwd > {}",
+            out.display()
+        ))))
+        .await
+        .unwrap();
+        let out_c = out.clone();
+        assert!(
+            crate::test_env::poll_until(std::time::Duration::from_secs(10), move || {
+                std::fs::read_to_string(&out_c).is_ok_and(|t| !t.trim().is_empty())
+            })
+            .await,
+            "consumer never wrote its cwd"
+        );
+        let got = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(
+            std::path::Path::new(got.trim()),
+            popup_real.as_path(),
+            "consumer must spawn at the POPUP (input target) pane's cwd"
+        );
+        s.handle_command(plexy_glass_mux::Command::ClosePopup).await.unwrap();
+        s.terminate_panes().await;
     }
 
     #[tokio::test]
