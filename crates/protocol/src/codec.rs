@@ -112,6 +112,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_frame_rejects_oversized_payload() {
+        // Symmetric with the read guard: an over-cap payload must be refused
+        // before any bytes are emitted, with the exact FrameTooLarge shape.
+        let mut sink = tokio::io::sink();
+        let payload = vec![0u8; (MAX_FRAME_BYTES + 1) as usize];
+        let err = Codec::write_frame(&mut sink, &payload).await.unwrap_err();
+        match err {
+            CodecError::FrameTooLarge { max, got } => {
+                assert_eq!(max, MAX_FRAME_BYTES);
+                assert_eq!(got, MAX_FRAME_BYTES + 1);
+            }
+            other => panic!("expected FrameTooLarge, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn handles_split_reads() {
         // Use a tiny duplex buffer so writes get split across the read calls.
         let (mut a, mut b) = duplex(2);

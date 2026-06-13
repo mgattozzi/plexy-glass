@@ -32,7 +32,14 @@ where
 
     let frame = Codec::read_frame(reader).await?.ok_or(HandshakeError::PeerClosed)?;
     let server: ServerHello = postcard::from_bytes(&frame).map_err(CodecError::from)?;
-    if server.version != PROTOCOL_VERSION {
+    // Symmetric with server_handshake's policy: a NEWER server gracefully
+    // downgrades to serve us (it forces kbd=Legacy in its hello), so accept any
+    // server whose version is >= ours (we speak our older subset). Reject only an
+    // OLDER server: it cannot have produced a hello our newer code can rely on,
+    // and there is no forward-compat guarantee in that direction. (The ServerHello
+    // itself already decoded above; a genuinely incompatible wire layout surfaces
+    // as HandshakeError::Codec, a clean failure, before this check.)
+    if server.version < PROTOCOL_VERSION {
         return Err(HandshakeError::VersionMismatch {
             ours: PROTOCOL_VERSION,
             peer: server.version,
@@ -156,6 +163,40 @@ mod tests {
             HandshakeError::VersionMismatch { ours, peer } => {
                 assert_eq!(ours, PROTOCOL_VERSION);
                 assert_eq!(peer, 999);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn client_accepts_newer_server() {
+        // A newer server gracefully downgrades to serve us; the client must
+        // accept a ServerHello whose version is >= ours (the previously-dead
+        // downgrade path). Drives only the client side.
+        let (mut a, client_side) = duplex(1024);
+        let (mut cr, mut cw) = tokio::io::split(client_side);
+        let newer = ServerHello { version: PROTOCOL_VERSION + 1, daemon_pid: 7 };
+        Codec::write_frame(&mut a, &postcard::to_allocvec(&newer).unwrap()).await.unwrap();
+        let hello =
+            ClientHello { version: PROTOCOL_VERSION, term: "x".into(), kbd: NegotiatedKbd::Legacy };
+        let got = client_handshake_with(&mut cr, &mut cw, hello).await.unwrap();
+        assert_eq!(got.version, PROTOCOL_VERSION + 1);
+    }
+
+    #[tokio::test]
+    async fn client_rejects_older_server() {
+        // An OLDER server cannot serve our newer protocol → VersionMismatch.
+        let (mut a, client_side) = duplex(1024);
+        let (mut cr, mut cw) = tokio::io::split(client_side);
+        let older = ServerHello { version: PROTOCOL_VERSION - 1, daemon_pid: 7 };
+        Codec::write_frame(&mut a, &postcard::to_allocvec(&older).unwrap()).await.unwrap();
+        let hello =
+            ClientHello { version: PROTOCOL_VERSION, term: "x".into(), kbd: NegotiatedKbd::Legacy };
+        let err = client_handshake_with(&mut cr, &mut cw, hello).await.unwrap_err();
+        match err {
+            HandshakeError::VersionMismatch { ours, peer } => {
+                assert_eq!(ours, PROTOCOL_VERSION);
+                assert_eq!(peer, PROTOCOL_VERSION - 1);
             }
             other => panic!("unexpected: {other:?}"),
         }

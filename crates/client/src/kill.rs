@@ -9,7 +9,10 @@
 //! crashed kill, or an aborted `plexy-glass daemon --foreground`.
 //!
 //! Both send SIGTERM, poll briefly for graceful exit, then SIGKILL anything
-//! still alive, and finally remove the socket and pidfile.
+//! still alive. Cleanup scrubs only the *current* runtime dir's socket/pidfile:
+//! a SIGKILL'd daemon under a different runtime dir leaves its socket/pidfile
+//! behind, but they are harmless, a new daemon unlinks a stale socket on bind
+//! and rewrites the pidfile.
 
 use crate::error::ClientError;
 use plexy_glass_daemon::RuntimePaths;
@@ -44,12 +47,20 @@ pub async fn kill() -> Result<KillOutcome, ClientError> {
     // it is actually one of our live daemons (guards against PID reuse).
     let target = read_pidfile(&paths.pidfile);
     let live = find_all_daemons()?;
-    let pids: Vec<i32> = match target {
-        Some(p) if live.contains(&p) => vec![p],
-        _ => Vec::new(),
-    };
+    let pids = select_pids(target, &live);
 
     terminate(pids, &paths).await
+}
+
+/// Choose which PIDs the scoped `kill` terminates: the pidfile's PID, but only
+/// if it is actually one of our live daemons, so a stale pidfile whose PID was
+/// reused by an unrelated process is ignored (the central safety property).
+/// Pure, for testability.
+fn select_pids(target: Option<i32>, live: &[i32]) -> Vec<i32> {
+    match target {
+        Some(p) if live.contains(&p) => vec![p],
+        _ => Vec::new(),
+    }
 }
 
 /// Stop *every* plexy-glass daemon owned by the current user, regardless of
@@ -145,9 +156,14 @@ fn find_all_daemons() -> Result<Vec<i32>, ClientError> {
 }
 
 fn is_alive(pid: i32) -> bool {
+    // ESRCH = no such process. EPERM = the PID exists but isn't ours (the
+    // original daemon died and the PID was reused by another user). In both
+    // cases it is not our daemon, so stop waiting on it, otherwise an EPERM
+    // straggler would spin out the full grace/SIGKILL windows and mislabel the
+    // outcome as ForceKilled for a process we never signalled.
     !matches!(
         nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
-        Err(nix::errno::Errno::ESRCH)
+        Err(nix::errno::Errno::ESRCH) | Err(nix::errno::Errno::EPERM)
     )
 }
 
@@ -161,4 +177,44 @@ fn cleanup(paths: &RuntimePaths) {
 fn cleanup_socket_only(paths: &RuntimePaths) {
     // No matching processes; still scrub any orphaned socket file.
     let _ = std::fs::remove_file(&paths.socket);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_pids_ignores_a_reused_stale_pid() {
+        // pidfile PID is one of our live daemons → target it.
+        assert_eq!(select_pids(Some(42), &[10, 42, 99]), vec![42]);
+        // pidfile PID is NOT live (stale, possibly reused) → ignore it.
+        assert_eq!(select_pids(Some(42), &[10, 99]), Vec::<i32>::new());
+        // No pidfile → nothing.
+        assert_eq!(select_pids(None, &[10, 42]), Vec::<i32>::new());
+        // No live daemons → nothing, even with a pidfile.
+        assert_eq!(select_pids(Some(42), &[]), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn read_pidfile_trims_self_excludes_and_handles_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("daemon.pid");
+        // Foreign PID with trailing newline → Some after trim.
+        std::fs::write(&f, "12345\n").unwrap();
+        assert_eq!(read_pidfile(&f), Some(12345));
+        // Our own PID → None (self-exclusion guard).
+        std::fs::write(&f, format!("{}\n", std::process::id())).unwrap();
+        assert_eq!(read_pidfile(&f), None);
+        // Garbage → None.
+        std::fs::write(&f, "not-a-pid").unwrap();
+        assert_eq!(read_pidfile(&f), None);
+        // Missing → None.
+        assert_eq!(read_pidfile(&dir.path().join("nope.pid")), None);
+    }
+
+    #[test]
+    fn is_alive_classifies_self_and_impossible_pid() {
+        assert!(is_alive(std::process::id() as i32), "our own process is alive");
+        assert!(!is_alive(i32::MAX), "an impossible PID is not alive (ESRCH)");
+    }
 }
