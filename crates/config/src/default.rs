@@ -49,11 +49,21 @@ pub fn built_in_default() -> Config {
             refresh: Duration::from_secs(5),
             left: vec![
                 WidgetSpec::Session {
-                    style: StyleConfig::new("bg", "accent").bold(),
+                    style: StyleConfig {
+                        fg: Some("bg".into()),
+                        bg: Some("accent".into()),
+                        bold: true,
+                        ..Default::default()
+                    },
                     padding: Padding { left: 1, right: 1 },
                 },
                 WidgetSpec::PrefixIndicator {
-                    style: StyleConfig::new("bg", "highlight").bold(),
+                    style: StyleConfig {
+                        fg: Some("bg".into()),
+                        bg: Some("highlight".into()),
+                        bold: true,
+                        ..Default::default()
+                    },
                     content: " PFX ".into(),
                 },
                 WidgetSpec::Text {
@@ -62,42 +72,82 @@ pub fn built_in_default() -> Config {
                 },
             ],
             middle: vec![WidgetSpec::WindowList {
-                active_style: StyleConfig::new("fg", "accent"),
-                inactive_style: StyleConfig::new("muted", "bg_bar"),
+                active_style: StyleConfig {
+                    fg: Some("fg".into()),
+                    bg: Some("accent".into()),
+                    ..Default::default()
+                },
+                inactive_style: StyleConfig {
+                    fg: Some("muted".into()),
+                    bg: Some("bg_bar".into()),
+                    ..Default::default()
+                },
             }],
             right: vec![
                 WidgetSpec::AttachedClients {
-                    style: StyleConfig::new("fg", "bg_bar"),
+                    style: StyleConfig {
+                        fg: Some("fg".into()),
+                        bg: Some("bg_bar".into()),
+                        ..Default::default()
+                    },
                     min_count: 2,
                 },
                 WidgetSpec::Text {
                     value: "  ".into(),
-                    style: StyleConfig::new("muted", "bg_bar"),
+                    style: StyleConfig {
+                        fg: Some("muted".into()),
+                        bg: Some("bg_bar".into()),
+                        ..Default::default()
+                    },
                 },
                 WidgetSpec::CpuLoad {
-                    style: StyleConfig::new("fg", "bg_bar"),
+                    style: StyleConfig {
+                        fg: Some("fg".into()),
+                        bg: Some("bg_bar".into()),
+                        ..Default::default()
+                    },
                     interval: None,
                 },
                 WidgetSpec::Text {
                     value: " | ".into(),
-                    style: StyleConfig::new("muted", "bg_bar"),
+                    style: StyleConfig {
+                        fg: Some("muted".into()),
+                        bg: Some("bg_bar".into()),
+                        ..Default::default()
+                    },
                 },
                 WidgetSpec::Battery {
-                    style: StyleConfig::new("fg", "bg_bar"),
+                    style: StyleConfig {
+                        fg: Some("fg".into()),
+                        bg: Some("bg_bar".into()),
+                        ..Default::default()
+                    },
                     interval: None,
                 },
                 WidgetSpec::Text {
                     value: " | ".into(),
-                    style: StyleConfig::new("muted", "bg_bar"),
+                    style: StyleConfig {
+                        fg: Some("muted".into()),
+                        bg: Some("bg_bar".into()),
+                        ..Default::default()
+                    },
                 },
                 WidgetSpec::Time {
-                    style: StyleConfig::new("fg", "bg_bar"),
+                    style: StyleConfig {
+                        fg: Some("fg".into()),
+                        bg: Some("bg_bar".into()),
+                        ..Default::default()
+                    },
                     format: "%H:%M".into(),
                     interval: None,
                 },
                 WidgetSpec::Text {
                     value: " ".into(),
-                    style: StyleConfig::new("muted", "bg_bar"),
+                    style: StyleConfig {
+                        fg: Some("muted".into()),
+                        bg: Some("bg_bar".into()),
+                        ..Default::default()
+                    },
                 },
             ],
         },

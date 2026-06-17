@@ -31,14 +31,6 @@ impl HyperlinkTable {
     pub fn get(&self, id: u16) -> Option<&str> {
         self.urls.get(id as usize).map(|s| s.as_str())
     }
-
-    pub fn len(&self) -> usize {
-        self.urls.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.urls.is_empty()
-    }
 }
 
 #[cfg(test)]
@@ -51,7 +43,9 @@ mod tests {
         let id1 = t.intern("https://example.com").unwrap();
         let id2 = t.intern("https://example.com").unwrap();
         assert_eq!(id1, id2);
-        assert_eq!(t.len(), 1);
+        // Only one distinct URL is interned, so id 0 maps and id 1 does not exist.
+        assert_eq!(t.get(0), Some("https://example.com"));
+        assert_eq!(t.get(1), None);
     }
 
     #[test]

@@ -2,7 +2,6 @@
 
 use super::Session;
 use plexy_glass_mux::VirtualScreen;
-use plexy_glass_protocol::PtySize;
 use std::sync::{Arc, atomic::Ordering};
 use tokio::sync::watch;
 
@@ -23,7 +22,7 @@ pub(super) async fn render_coordinator(
     session: Arc<Session>,
     frame_tx: watch::Sender<Arc<VirtualScreen>>,
 ) {
-    use plexy_glass_mux::{Compositor, PaneView, StatusLine};
+    use plexy_glass_mux::{PaneView, StatusLine};
     use std::time::Duration;
     const DEBOUNCE: Duration = Duration::from_millis(16);
 
@@ -42,7 +41,7 @@ pub(super) async fn render_coordinator(
         // frame and exit so frame_tx drops and attached clients detach.
         if session.closing.load(Ordering::SeqCst) {
             let host = { session.window_manager.lock().await.host_size() };
-            let _ = frame_tx.send(Arc::new(build_session_end_frame(host)));
+            let _ = frame_tx.send(Arc::new(VirtualScreen::blank(host.rows, host.cols)));
             break;
         }
 
@@ -56,8 +55,7 @@ pub(super) async fn render_coordinator(
             let mut m = session.window_manager.lock().await;
             if m.is_empty() {
                 let host = m.host_size();
-                let virt = build_session_end_frame(host);
-                let _ = frame_tx.send(Arc::new(virt));
+                let _ = frame_tx.send(Arc::new(VirtualScreen::blank(host.rows, host.cols)));
                 break;
             }
             // Sole drainer of the per-pane activity/bell signals → per-window
@@ -133,10 +131,8 @@ pub(super) async fn render_coordinator(
             let windows_data: Vec<plexy_glass_status::WindowSummary> = m
                 .windows()
                 .iter()
-                .enumerate()
-                .map(|(i, w)| plexy_glass_status::WindowSummary {
+                .map(|w| plexy_glass_status::WindowSummary {
                     name: w.name.clone(),
-                    active: i == m.active_idx(),
                     activity: w.activity_flag(),
                     bell: w.bell_flag(),
                     done: w.done_flag(),
@@ -247,7 +243,7 @@ pub(super) async fn render_coordinator(
             // so that live-reload updates apply for free on the next compose call.
             let block_colors = block_border_colors(&session.config_snapshot());
 
-            Compositor::compose(
+            plexy_glass_mux::compositor::compose(
                 &views,
                 (host.rows, host.cols),
                 Some(&status),
@@ -269,10 +265,6 @@ pub(super) async fn render_coordinator(
     session.closing.store(true, Ordering::SeqCst);
     // frame_tx drops here; subscribers will see frame_rx.changed() return Err
     // and exit their loops, which closes their sockets and lets clients restore.
-}
-
-fn build_session_end_frame(host: PtySize) -> plexy_glass_mux::VirtualScreen {
-    plexy_glass_mux::VirtualScreen::blank(host.rows, host.cols)
 }
 
 /// Substitute the `prefix` token (word-wise, case-insensitive) with the

@@ -268,6 +268,7 @@ mod tests {
         assert_eq!(s.scrollback.len(), 2, "both seeded rows land in scrollback");
         let texts: Vec<String> = s
             .scrollback
+            .rows()
             .iter()
             .map(|r| r.cells.iter().map(|c| c.grapheme.as_str()).collect::<String>().trim_end().to_string())
             .collect();
@@ -303,6 +304,7 @@ mod tests {
         assert_eq!(s.scrollback.len(), 2, "cap holds only 2 rows");
         let texts: Vec<String> = s
             .scrollback
+            .rows()
             .iter()
             .map(|r| r.cells[0].grapheme.as_str().to_string())
             .collect();

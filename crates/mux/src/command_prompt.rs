@@ -268,15 +268,15 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
             let [t] = args.as_slice() else {
                 return Err(err("focus: expected l/r/u/d/next/prev/last"));
             };
-            let ft = match *t {
-                "l" => FocusTarget::Dir(Direction::Left),
-                "r" => FocusTarget::Dir(Direction::Right),
-                "u" => FocusTarget::Dir(Direction::Up),
-                "d" => FocusTarget::Dir(Direction::Down),
-                "next" => FocusTarget::Next,
-                "prev" => FocusTarget::Prev,
-                "last" => FocusTarget::Last,
-                _ => return Err(err("focus: expected l/r/u/d/next/prev/last")),
+            let ft = if let Some(dir) = dir_from_letter(t) {
+                FocusTarget::Dir(dir)
+            } else {
+                match *t {
+                    "next" => FocusTarget::Next,
+                    "prev" => FocusTarget::Prev,
+                    "last" => FocusTarget::Last,
+                    _ => return Err(err("focus: expected l/r/u/d/next/prev/last")),
+                }
             };
             Ok(PromptCommand::Focus(ft))
         }

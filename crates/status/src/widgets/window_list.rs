@@ -62,8 +62,8 @@ mod tests {
             inactive_style: ResolvedStyle::default(),
         };
         let windows = vec![
-            WindowSummary { name: "shell0".into(), active: true, activity: false, bell: false, done: None, silence: false },
-            WindowSummary { name: "shell1".into(), active: false, activity: false, bell: false, done: None, silence: false },
+            WindowSummary { name: "shell0".into(), activity: false, bell: false, done: None, silence: false },
+            WindowSummary { name: "shell1".into(), activity: false, bell: false, done: None, silence: false },
         ];
         let ctx = EvalContext {
             session_name: "main",
@@ -89,8 +89,8 @@ mod tests {
             inactive_style: ResolvedStyle::default(),
         };
         let windows = vec![
-            WindowSummary { name: "alpha".into(), active: true, activity: false, bell: false, done: None, silence: false },
-            WindowSummary { name: "beta".into(), active: false, activity: false, bell: false, done: None, silence: false },
+            WindowSummary { name: "alpha".into(), activity: false, bell: false, done: None, silence: false },
+            WindowSummary { name: "beta".into(), activity: false, bell: false, done: None, silence: false },
         ];
         let ctx = EvalContext {
             session_name: "main",
@@ -116,9 +116,9 @@ mod tests {
             inactive_style: ResolvedStyle::default(),
         };
         let windows = vec![
-            WindowSummary { name: "clean".into(), active: true, activity: false, bell: false, done: None, silence: false },
-            WindowSummary { name: "belled".into(), active: false, activity: false, bell: true, done: None, silence: false },
-            WindowSummary { name: "noisy".into(), active: false, activity: true, bell: true, done: None, silence: false },
+            WindowSummary { name: "clean".into(), activity: false, bell: false, done: None, silence: false },
+            WindowSummary { name: "belled".into(), activity: false, bell: true, done: None, silence: false },
+            WindowSummary { name: "noisy".into(), activity: true, bell: true, done: None, silence: false },
         ];
         let ctx = EvalContext {
             session_name: "main",
@@ -144,9 +144,9 @@ mod tests {
             inactive_style: ResolvedStyle::default(),
         };
         let windows = vec![
-            WindowSummary { name: "cur".into(), active: true, activity: false, bell: false, done: None, silence: false },
-            WindowSummary { name: "ok".into(), active: false, activity: false, bell: false, done: Some(true), silence: false },
-            WindowSummary { name: "bad".into(), active: false, activity: false, bell: false, done: Some(false), silence: false },
+            WindowSummary { name: "cur".into(), activity: false, bell: false, done: None, silence: false },
+            WindowSummary { name: "ok".into(), activity: false, bell: false, done: Some(true), silence: false },
+            WindowSummary { name: "bad".into(), activity: false, bell: false, done: Some(false), silence: false },
         ];
         let ctx = EvalContext {
             session_name: "main",

@@ -278,23 +278,23 @@ impl WindowManager {
             }
             Command::Detach | Command::Cancel => {}
             Command::ReloadConfig => {
-                // Handled by Connection::serve_attach (needs registry access).
+                // Handled by serve_attach (needs registry access).
             }
             Command::CommandPrompt => {
                 // Opened at the connection layer (needs the live session list
-                // for Tab-completion); see `Connection::serve_attach`.
+                // for Tab-completion); see serve_attach.
             }
             Command::ChooseSession => {
                 // Opened at the connection layer (needs the live session list);
-                // see `Connection::serve_attach`.
+                // see serve_attach.
             }
             Command::ChooseTree => {
                 // Opened at the connection layer (needs the live session list);
-                // see `Connection::serve_attach`.
+                // see serve_attach.
             }
             Command::PasteBuffer | Command::ChooseBuffer => {
                 // Handled at the connection layer (needs the registry's paste
-                // buffers); see Connection::serve_attach.
+                // buffers); see serve_attach.
             }
             Command::EnterCopyMode => {
                 if let Some(pane) = self.active_window().active_pane() {
@@ -369,7 +369,7 @@ impl WindowManager {
             Command::CopyOutput => {
                 // Handled at the connection layer (needs the registry's paste
                 // buffers and the async clipboard write); see
-                // Connection::serve_attach / run_connection_verb.
+                // serve_attach / run_connection_verb.
             }
         }
         self.notify.notify_one();

@@ -40,20 +40,12 @@ impl Scrollback {
         self.rows.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Row> {
-        self.rows.iter()
-    }
-
     pub fn rows(&self) -> &VecDeque<Row> {
         &self.rows
     }
 
     pub fn rows_mut(&mut self) -> &mut VecDeque<Row> {
         &mut self.rows
-    }
-
-    pub fn cap(&self) -> usize {
-        self.cap
     }
 }
 
@@ -82,14 +74,13 @@ mod tests {
         s.push(a);
         s.push(b);
         s.push(c);
-        let texts: Vec<&str> = s.iter().map(|r| r.cells[0].grapheme.as_str()).collect();
+        let texts: Vec<&str> = s.rows().iter().map(|r| r.cells[0].grapheme.as_str()).collect();
         assert_eq!(texts, vec!["B", "C"]);
     }
 
     #[test]
     fn empty_default() {
         let s = Scrollback::default();
-        assert_eq!(s.cap(), DEFAULT_SCROLLBACK_LINES);
         assert!(s.is_empty());
     }
 }

@@ -14,7 +14,6 @@ use tokio::sync::Mutex;
 #[derive(Debug, Clone)]
 pub struct WindowSummary {
     pub name: String,
-    pub active: bool,
     /// Sticky monitor flags (tmux's `#`/`!`): set when a background window had
     /// activity / a bell. The current window's flags are always cleared upstream,
     /// so a marker never shows on it.
@@ -39,13 +38,6 @@ pub struct EvalContext<'a> {
     pub copy_mode_active: bool,
     pub sync_active: bool,
     pub zoom_active: bool,
-}
-
-#[allow(dead_code)] // Zone enum reserved for future per-zone APIs; not used yet.
-pub enum Zone {
-    Left,
-    Middle,
-    Right,
 }
 
 struct WidgetSlot {
@@ -429,7 +421,7 @@ mod tests {
         let inner = engine.inner();
         let ctx = EvalContext {
             session_name: "demo",
-            windows: &[WindowSummary { name: "shell0".into(), active: true, activity: false, bell: false, done: None, silence: false }],
+            windows: &[WindowSummary { name: "shell0".into(), activity: false, bell: false, done: None, silence: false }],
             active_window: 0,
             attached_clients: 1,
             prefix_active: false,

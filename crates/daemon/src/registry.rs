@@ -353,11 +353,6 @@ impl SessionRegistry {
         Ok(())
     }
 
-    pub async fn prune_empty(&self) {
-        let mut map = self.inner.lock().await;
-        map.retain(|_, s| !s.closing.load(std::sync::atomic::Ordering::SeqCst));
-    }
-
     /// Re-read config from disk and apply to every session.
     ///
     /// The KDL loader (`plexy_glass_config::load_or_default`) returns

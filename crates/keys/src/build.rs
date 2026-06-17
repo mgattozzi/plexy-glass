@@ -51,8 +51,8 @@ pub fn build_keymap(cfg: &KeymapConfig) -> Keymap {
 fn apply(km: &mut Keymap, bindings: &[plexy_glass_config::KeymapBinding], prefix: ChordSpec) {
     for (i, b) in bindings.iter().enumerate() {
         match (parse_chord_seq_with_prefix(&b.keys, prefix), parse_command(&b.command)) {
-            (Ok(chords), Ok(cmd_spec)) => {
-                km.bind(&chords, cmd_spec.command);
+            (Ok(chords), Ok(command)) => {
+                km.bind(&chords, command);
             }
             (Err(e), _) => {
                 tracing::warn!(

@@ -46,11 +46,6 @@ impl Default for Cell {
 }
 
 impl Cell {
-    /// A blank cell (single space, default attrs).
-    pub fn blank() -> Self {
-        Self::default()
-    }
-
     /// The right half of a wide character. Carries no grapheme of its own.
     pub fn wide_spacer() -> Self {
         Self {
@@ -96,10 +91,5 @@ mod tests {
         let s = Cell::wide_spacer();
         assert!(s.is_wide_spacer());
         assert!(!s.is_blank());
-    }
-
-    #[test]
-    fn blank_returns_default() {
-        assert_eq!(Cell::blank(), Cell::default());
     }
 }

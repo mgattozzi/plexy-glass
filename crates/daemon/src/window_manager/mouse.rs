@@ -2,7 +2,7 @@ use super::WindowManager;
 use crate::error::DaemonError;
 use plexy_glass_mux::{
     BorderHit, BorderSide, Command, MouseButton, MouseEncoding, MouseEvent, MouseKind, PaneId,
-    Rect, Selection, SelectionKind, encode_for_child, extract_text, prev_prompt_line,
+    Rect, Selection, encode_for_child, extract_text, prev_prompt_line,
 };
 use std::time::Instant;
 
@@ -80,7 +80,12 @@ impl WindowManager {
             && event.button == MouseButton::Left
             && let Some(hit) = self.layout_border_at(event.row, event.col)
         {
-            return self.begin_resize_drag(hit, event.row, event.col).await;
+            self.resize_drag = Some(ResizeDrag {
+                adjacent_pane: hit.adjacent_pane,
+                side: hit.side,
+                last_pos: (event.row, event.col),
+            });
+            return Ok(());
         }
         // Rule 4: copy-mode pane.
         let viewport = self.viewport();
@@ -174,20 +179,6 @@ impl WindowManager {
         self.active_window()
             .layout()
             .border_at(self.viewport(), row, col)
-    }
-
-    async fn begin_resize_drag(
-        &mut self,
-        hit: BorderHit,
-        row: u16,
-        col: u16,
-    ) -> Result<(), DaemonError> {
-        self.resize_drag = Some(ResizeDrag {
-            adjacent_pane: hit.adjacent_pane,
-            side: hit.side,
-            last_pos: (row, col),
-        });
-        Ok(())
     }
 
     async fn handle_resize_drag_event(
@@ -512,14 +503,7 @@ impl WindowManager {
         } else {
             None
         };
-        self.selection = new_sel.or_else(|| {
-            Some(Selection::start(
-                pane_id,
-                local_row,
-                local_col,
-                SelectionKind::Char,
-            ))
-        });
+        self.selection = new_sel.or_else(|| Some(Selection::start(pane_id, local_row, local_col)));
         Ok(())
     }
 

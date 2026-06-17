@@ -6,7 +6,7 @@
 
 use plexy_glass_mux::{Direction, Key, KeyEvent, KeyEventKind, Modifiers};
 
-pub fn legacy_bytes(event: KeyEvent) -> Vec<u8> {
+fn legacy_bytes(event: KeyEvent) -> Vec<u8> {
     // Text-producing events (plain or shifted chars) type their text. This
     // covers down-converting a rich outer's `Shift+i` to "I" for a legacy
     // pane (previously the Shift case fell through and ATE the key).
@@ -81,7 +81,7 @@ fn with_mods(_ss3_byte: u8, csi_byte: u8, mods: Modifiers) -> Vec<u8> {
     if mods.is_empty() {
         return vec![0x1b, b'[', csi_byte];
     }
-    let m = encode_xterm_mods(mods);
+    let m = mods_param(mods);
     format!("\x1b[1;{m}{}", csi_byte as char).into_bytes()
 }
 
@@ -89,7 +89,7 @@ fn tilde(n: u32, mods: Modifiers) -> Vec<u8> {
     if mods.is_empty() {
         format!("\x1b[{n}~").into_bytes()
     } else {
-        let m = encode_xterm_mods(mods);
+        let m = mods_param(mods);
         format!("\x1b[{n};{m}~").into_bytes()
     }
 }
@@ -106,14 +106,9 @@ fn f1_to_f4(n: u8, mods: Modifiers) -> Vec<u8> {
     if mods.is_empty() {
         vec![0x1b, b'O', final_byte]
     } else {
-        let m = encode_xterm_mods(mods);
+        let m = mods_param(mods);
         format!("\x1b[1;{m}{}", final_byte as char).into_bytes()
     }
-}
-
-fn encode_xterm_mods(mods: Modifiers) -> u32 {
-    // Shares the one body with the public `mods_param` so they cannot drift.
-    mods_param(mods)
 }
 
 /// Where a canonical `KeyEvent` is being re-encoded to. The `u8` is the
@@ -126,7 +121,7 @@ pub enum KeyboardTarget {
 }
 
 /// Wire modifier param = `1 + (bits & 0xFF)`. Inverse of
-/// `parser::KeyboardProtocol::decode_mods_param`.
+/// `parser::decode_xterm_mods`.
 pub fn mods_param(mods: Modifiers) -> u32 {
     1 + u32::from(mods.bits())
 }
@@ -567,7 +562,7 @@ mod tests {
             Modifiers::CTRL | Modifiers::SHIFT,
             Modifiers::ALT | Modifiers::SUPER,
         ] {
-            assert_eq!(KeyboardProtocol::decode_mods_param(mods_param(m)), m);
+            assert_eq!(crate::parser::decode_xterm_mods(mods_param(m)), m);
         }
     }
 

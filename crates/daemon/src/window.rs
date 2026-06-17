@@ -105,7 +105,25 @@ impl Window {
         let pane = Pane::spawn(first_pane_id, spec, size, output_notify, death_tx, config, preseed)?;
         let mut panes = HashMap::new();
         panes.insert(first_pane_id, pane);
-        Ok(Self {
+        Ok(Self::assemble(
+            id,
+            name,
+            panes,
+            LayoutTree::single(first_pane_id),
+            first_pane_id,
+        ))
+    }
+
+    /// Construct a `Window` from its variable parts, filling every monitor /
+    /// alert / sync / zoom default. Shared by `spawn_first` and `from_pane`.
+    fn assemble(
+        id: WindowId,
+        name: String,
+        panes: HashMap<PaneId, Pane>,
+        layout: LayoutTree,
+        active: PaneId,
+    ) -> Self {
+        Self {
             id,
             name,
             sync_input: false,
@@ -113,8 +131,8 @@ impl Window {
             home_cwd: None,
             last_preset: None,
             panes,
-            layout: LayoutTree::single(first_pane_id),
-            active: first_pane_id,
+            layout,
+            active,
             focus_history: VecDeque::new(),
             monitor_activity: false,
             monitor_bell: true,
@@ -127,7 +145,7 @@ impl Window {
             last_output: Instant::now(),
             silence: false,
             silence_fired: false,
-        })
+        }
     }
 
     pub fn active(&self) -> PaneId {
@@ -274,7 +292,15 @@ impl Window {
         if self.zoomed == Some(id) {
             self.zoomed = None;
         }
-        if id == self.active {
+        self.fixup_active_after_removal(id);
+        Ok(outcome)
+    }
+
+    /// After a pane `removed` was taken out of the pane map and layout, repair
+    /// the active-pane pointer (if it was the removed one) and prune dead
+    /// focus-history entries. Shared by `close_pane` and `detach_pane`.
+    fn fixup_active_after_removal(&mut self, removed: PaneId) {
+        if removed == self.active {
             // Collect history first to avoid simultaneous borrows of self.
             let alive_history: Vec<PaneId> = self
                 .focus_history
@@ -290,7 +316,6 @@ impl Window {
                 .unwrap_or(PaneId(0));
         }
         self.focus_history.retain(|p| self.panes.contains_key(p));
-        Ok(outcome)
     }
 
     pub fn close_active(&mut self) -> Result<CloseOutcome, DaemonError> {
@@ -309,21 +334,7 @@ impl Window {
         if self.zoomed == Some(id) {
             self.zoomed = None;
         }
-        if id == self.active {
-            let alive_history: Vec<PaneId> = self
-                .focus_history
-                .iter()
-                .rev()
-                .filter(|p| self.panes.contains_key(p))
-                .copied()
-                .collect();
-            self.active = alive_history
-                .first()
-                .copied()
-                .or_else(|| self.layout.panes().into_iter().next())
-                .unwrap_or(PaneId(0));
-        }
-        self.focus_history.retain(|p| self.panes.contains_key(p));
+        self.fixup_active_after_removal(id);
         Some(pane)
     }
 
@@ -417,29 +428,7 @@ impl Window {
         let pid = pane.id();
         let mut panes = HashMap::new();
         panes.insert(pid, pane);
-        Self {
-            id,
-            name,
-            sync_input: false,
-            zoomed: None,
-            home_cwd: None,
-            last_preset: None,
-            panes,
-            layout: LayoutTree::single(pid),
-            active: pid,
-            focus_history: VecDeque::new(),
-            monitor_activity: false,
-            monitor_bell: true,
-            monitor_command: false,
-            activity: false,
-            bell: false,
-            done: None,
-            block_baselines: HashMap::new(),
-            monitor_silence: None,
-            last_output: Instant::now(),
-            silence: false,
-            silence_fired: false,
-        }
+        Self::assemble(id, name, panes, LayoutTree::single(pid), pid)
     }
 
     /// Toggle monitor-activity; returns the new state.

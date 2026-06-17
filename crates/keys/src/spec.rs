@@ -18,11 +18,6 @@ pub enum KeyParseError {
 
 pub type ChordSpec = (Modifiers, Key);
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct CommandSpec {
-    pub command: Command,
-}
-
 pub fn parse_chord(s: &str) -> Result<ChordSpec, KeyParseError> {
     let s = s.trim();
     if s.is_empty() {
@@ -135,7 +130,7 @@ fn parse_named_key(s: &str) -> Result<Key, KeyParseError> {
     Ok(key)
 }
 
-pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
+pub fn parse_command(s: &str) -> Result<Command, KeyParseError> {
     let s = s.trim();
     let mut parts = s.splitn(2, ':');
     // invariant: splitn(2, …) on any string always yields >= 1 element
@@ -231,7 +226,7 @@ pub fn parse_command(s: &str) -> Result<CommandSpec, KeyParseError> {
         }
         other => return Err(KeyParseError::UnknownCommand(other.to_string())),
     };
-    Ok(CommandSpec { command })
+    Ok(command)
 }
 
 #[cfg(test)]
@@ -311,32 +306,32 @@ mod tests {
     #[test]
     fn command_no_arg() {
         let c = parse_command("new_window").unwrap();
-        assert_eq!(c.command, Command::NewWindow);
+        assert_eq!(c, Command::NewWindow);
     }
 
     #[test]
     fn command_with_arg() {
         let c = parse_command("select_window:0").unwrap();
-        assert_eq!(c.command, Command::SelectWindow(0));
+        assert_eq!(c, Command::SelectWindow(0));
     }
 
     #[test]
     fn parses_resize_pane_commands() {
-        assert_eq!(parse_command("resize_pane_right").unwrap().command, Command::ResizePane(Direction::Right));
-        assert_eq!(parse_command("resize_pane_up").unwrap().command, Command::ResizePane(Direction::Up));
+        assert_eq!(parse_command("resize_pane_right").unwrap(), Command::ResizePane(Direction::Right));
+        assert_eq!(parse_command("resize_pane_up").unwrap(), Command::ResizePane(Direction::Up));
     }
 
     #[test]
     fn parses_last_window_pane_commands() {
-        assert_eq!(parse_command("select_last_window").unwrap().command, Command::SelectLastWindow);
-        assert_eq!(parse_command("select_last_pane").unwrap().command, Command::SelectLastPane);
+        assert_eq!(parse_command("select_last_window").unwrap(), Command::SelectLastWindow);
+        assert_eq!(parse_command("select_last_pane").unwrap(), Command::SelectLastPane);
     }
 
     #[test]
     fn parses_overlay_commands() {
-        assert_eq!(parse_command("rename_window").unwrap().command, Command::RenameWindow);
-        assert_eq!(parse_command("rename_pane").unwrap().command, Command::RenamePane);
-        assert_eq!(parse_command("show_help").unwrap().command, Command::ShowHelp);
+        assert_eq!(parse_command("rename_window").unwrap(), Command::RenameWindow);
+        assert_eq!(parse_command("rename_pane").unwrap(), Command::RenamePane);
+        assert_eq!(parse_command("show_help").unwrap(), Command::ShowHelp);
     }
 
     #[test]
@@ -365,58 +360,58 @@ mod tests {
     #[test]
     fn parses_enter_copy_mode_command() {
         let c = parse_command("enter_copy_mode").unwrap();
-        assert_eq!(c.command, Command::EnterCopyMode);
+        assert_eq!(c, Command::EnterCopyMode);
     }
 
     #[test]
     fn parses_toggle_sync_panes_command() {
         let c = parse_command("toggle_sync_panes").unwrap();
-        assert_eq!(c.command, Command::ToggleSyncPanes);
+        assert_eq!(c, Command::ToggleSyncPanes);
     }
 
     #[test]
     fn parses_reload_config_command() {
         let c = parse_command("reload_config").unwrap();
-        assert_eq!(c.command, Command::ReloadConfig);
+        assert_eq!(c, Command::ReloadConfig);
     }
 
     #[test]
     fn parses_popup_bare() {
         let c = parse_command("popup").unwrap();
-        assert_eq!(c.command, Command::OpenPopup { command: None });
+        assert_eq!(c, Command::OpenPopup { command: None });
     }
 
     #[test]
     fn parses_popup_with_command_preserving_spaces_and_colons() {
         let c = parse_command("popup:git log --oneline").unwrap();
         assert_eq!(
-            c.command,
+            c,
             Command::OpenPopup { command: Some("git log --oneline".into()) }
         );
         // splitn(2, ':') keeps later colons intact.
         let c = parse_command("popup:rg foo:bar").unwrap();
-        assert_eq!(c.command, Command::OpenPopup { command: Some("rg foo:bar".into()) });
+        assert_eq!(c, Command::OpenPopup { command: Some("rg foo:bar".into()) });
     }
 
     #[test]
     fn parses_popup_empty_arg_as_bare() {
         let c = parse_command("popup:").unwrap();
-        assert_eq!(c.command, Command::OpenPopup { command: None });
+        assert_eq!(c, Command::OpenPopup { command: None });
     }
 
     #[test]
     fn parses_close_popup() {
         let c = parse_command("close_popup").unwrap();
-        assert_eq!(c.command, Command::ClosePopup);
+        assert_eq!(c, Command::ClosePopup);
     }
 
     #[test]
     fn parses_layout_with_name() {
         use plexy_glass_mux::LayoutPreset;
         let c = parse_command("layout:tiled").unwrap();
-        assert_eq!(c.command, Command::SelectLayout(LayoutPreset::Tiled));
+        assert_eq!(c, Command::SelectLayout(LayoutPreset::Tiled));
         let c = parse_command("layout:even-horizontal").unwrap();
-        assert_eq!(c.command, Command::SelectLayout(LayoutPreset::EvenHorizontal));
+        assert_eq!(c, Command::SelectLayout(LayoutPreset::EvenHorizontal));
     }
 
     #[test]
@@ -434,36 +429,36 @@ mod tests {
     #[test]
     fn parses_next_layout() {
         let c = parse_command("next_layout").unwrap();
-        assert_eq!(c.command, Command::NextLayout);
+        assert_eq!(c, Command::NextLayout);
     }
 
     #[test]
     fn parses_block_scroll_verbs() {
-        assert_eq!(parse_command("prev_prompt").unwrap().command, Command::PrevPrompt);
-        assert_eq!(parse_command("next_prompt").unwrap().command, Command::NextPrompt);
-        assert_eq!(parse_command("copy_output").unwrap().command, Command::CopyOutput);
+        assert_eq!(parse_command("prev_prompt").unwrap(), Command::PrevPrompt);
+        assert_eq!(parse_command("next_prompt").unwrap(), Command::NextPrompt);
+        assert_eq!(parse_command("copy_output").unwrap(), Command::CopyOutput);
     }
 
     #[test]
     fn parses_monitor_verbs() {
         // toggle_monitor_command: bare verb, no arg.
         assert_eq!(
-            parse_command("toggle_monitor_command").unwrap().command,
+            parse_command("toggle_monitor_command").unwrap(),
             Command::ToggleMonitorCommand,
         );
         // set_monitor_silence: no arg → None (disable).
         assert_eq!(
-            parse_command("set_monitor_silence").unwrap().command,
+            parse_command("set_monitor_silence").unwrap(),
             Command::SetMonitorSilence(None),
         );
         // set_monitor_silence:0 → None (zero also disables).
         assert_eq!(
-            parse_command("set_monitor_silence:0").unwrap().command,
+            parse_command("set_monitor_silence:0").unwrap(),
             Command::SetMonitorSilence(None),
         );
         // set_monitor_silence:30 → Some(30).
         assert_eq!(
-            parse_command("set_monitor_silence:30").unwrap().command,
+            parse_command("set_monitor_silence:30").unwrap(),
             Command::SetMonitorSilence(Some(30)),
         );
         // set_monitor_silence with a non-numeric arg is an error.

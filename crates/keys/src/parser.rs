@@ -27,14 +27,6 @@ pub enum KeyboardProtocol {
     Permissive,
 }
 
-impl KeyboardProtocol {
-    /// Decode a wire modifier param (`1 + bitset`) into `Modifiers`. Shared with
-    /// the encoder (`encode::mods_param` is its inverse) so they cannot drift.
-    pub fn decode_mods_param(param: u32) -> Modifiers {
-        decode_xterm_mods(param)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Idle,
@@ -98,10 +90,6 @@ impl KeyParser {
     pub fn with_protocol(mut self, protocol: KeyboardProtocol) -> Self {
         self.protocol = protocol;
         self
-    }
-
-    pub fn set_protocol(&mut self, protocol: KeyboardProtocol) {
-        self.protocol = protocol;
     }
 
     pub fn consume(&mut self, byte: u8) -> KeyParseOutput {
@@ -379,7 +367,7 @@ impl KeyParser {
     }
 }
 
-fn decode_xterm_mods(raw: u32) -> Modifiers {
+pub(crate) fn decode_xterm_mods(raw: u32) -> Modifiers {
     // Wire modifier param = 1 + bitset:
     //   1=shift 2=alt 4=ctrl 8=super 16=hyper 32=meta 64=caps_lock 128=num_lock
     let bits = (raw.saturating_sub(1) & 0xFF) as u8;

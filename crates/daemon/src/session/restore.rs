@@ -1,7 +1,7 @@
 //! Session restore and declared-template construction helpers.
 
 use super::Session;
-use crate::{error::DaemonError, window_manager::WindowManager};
+use crate::{declared::BuildOp, error::DaemonError, window_manager::WindowManager};
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
 
@@ -265,7 +265,7 @@ fn replay_window_layout(
     saved: &crate::persist::WindowStateV1,
     base_spec: &SpawnSpec,
 ) -> Result<(), DaemonError> {
-    let mut ops: Vec<ReplayOp> = Vec::new();
+    let mut ops: Vec<BuildOp> = Vec::new();
     collect_replay_ops(&saved.layout, 0, &mut ops);
     for op in ops {
         let mut spec = base_spec.clone();
@@ -293,14 +293,6 @@ fn replay_window_layout(
     Ok(())
 }
 
-struct ReplayOp {
-    /// DFS index of the existing pane being split.
-    target_dfs_idx: u32,
-    /// DFS index that the newly-spawned pane will occupy AFTER the split.
-    new_pane_dfs_idx: u32,
-    dir: plexy_glass_mux::SplitDir,
-}
-
 /// Collect split ratios in preorder (root, first subtree, second), the same
 /// order `set_ratios_preorder` consumes.
 fn preorder_ratios(node: &crate::persist::LayoutStateV1, out: &mut Vec<f32>) {
@@ -314,7 +306,7 @@ fn preorder_ratios(node: &crate::persist::LayoutStateV1, out: &mut Vec<f32>) {
 fn collect_replay_ops(
     node: &crate::persist::LayoutStateV1,
     base_dfs: u32,
-    out: &mut Vec<ReplayOp>,
+    out: &mut Vec<BuildOp>,
 ) {
     use crate::persist::{LayoutDirV1, LayoutStateV1};
     match node {
@@ -323,7 +315,7 @@ fn collect_replay_ops(
             let target = leftmost_leaf_dfs(first, base_dfs);
             let first_size = count_leaves(first);
             let new_pane = base_dfs + first_size;
-            out.push(ReplayOp {
+            out.push(BuildOp {
                 target_dfs_idx: target,
                 new_pane_dfs_idx: new_pane,
                 dir: match dir {

@@ -60,7 +60,7 @@ pub struct WindowManager {
     /// tick via `set_status_hits`.
     status_hits: Vec<plexy_glass_status::StatusHit>,
     /// Set when a status-bar click on the session widget fires `Detach`.
-    /// `Connection::serve_attach` polls this each iteration of its input loop
+    /// serve_attach polls this each iteration of its input loop
     /// and exits when true.
     pub detach_requested: bool,
     /// Previously-active window index, for `select_last_window`. Updated on

@@ -105,21 +105,6 @@ pub struct StyleConfig {
     pub reverse: bool,
 }
 
-impl StyleConfig {
-    pub fn new<S: Into<String>, T: Into<String>>(fg: S, bg: T) -> Self {
-        Self {
-            fg: Some(fg.into()),
-            bg: Some(bg.into()),
-            ..Self::default()
-        }
-    }
-
-    pub fn bold(mut self) -> Self {
-        self.bold = true;
-        self
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Padding {
     pub left: u8,

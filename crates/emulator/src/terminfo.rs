@@ -74,9 +74,8 @@ pub fn lookup(name: &str, term: &str) -> Capability {
         "kDC" => Capability::Str("\\E[3;2~".to_string()),
         "kPRV" => Capability::Str("\\E[5;2~".to_string()),
         "kNXT" => Capability::Str("\\E[6;2~".to_string()),
-        // Explicitly unsupported (we ship the RGB `Setulc` only; no indexed
-        // variant / palette-reset / hyperlink terminfo cap).
-        "Setulc1" | "ol" | "oc" | "bce" => Capability::Unsupported,
+        // Everything else (e.g. `Setulc1` / `ol` / `oc` / `bce`: no indexed `Setulc`
+        // variant, palette-reset, or hyperlink terminfo cap) is unsupported.
         _ => Capability::Unsupported,
     }
 }

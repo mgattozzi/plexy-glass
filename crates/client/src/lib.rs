@@ -126,15 +126,26 @@ pub async fn run(
     std::process::exit(code);
 }
 
-/// Send `ReloadConfig` to the daemon and print the result.
-pub async fn client_reload_config() -> Result<(), ClientError> {
-    let socket = default_socket_path()?;
-    let stream = connect_or_spawn(&socket).await?;
-    let (mut reader, mut writer) = tokio::io::split(stream);
+/// How the request/reply scaffold opens its connection.
+enum Connect {
+    /// Auto-spawn the daemon if it isn't already running (interactive/list paths).
+    Spawn,
+    /// Fail with `ClientError::Connect` when no daemon is running (scripting verbs).
+    Only,
+}
 
+/// Shared request/reply scaffold: open one connection (spawning the daemon or
+/// not, per `connect`), handshake, encode + write `msg`, then read and decode
+/// exactly one reply frame. Callers do their own per-message reply branching.
+async fn request_reply(connect: Connect, msg: ClientMsg) -> Result<ServerMsg, ClientError> {
+    let socket = default_socket_path()?;
+    let stream = match connect {
+        Connect::Spawn => connect_or_spawn(&socket).await?,
+        Connect::Only => connect_only(&socket).await?,
+    };
+    let (mut reader, mut writer) = tokio::io::split(stream);
     client_handshake(&mut reader, &mut writer).await?;
 
-    let msg = ClientMsg::ReloadConfig;
     let payload = postcard::to_allocvec(&msg)
         .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
     Codec::write_frame(&mut writer, &payload).await?;
@@ -142,8 +153,13 @@ pub async fn client_reload_config() -> Result<(), ClientError> {
     let frame = Codec::read_frame(&mut reader)
         .await?
         .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
-    let reply: ServerMsg = postcard::from_bytes(&frame)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    postcard::from_bytes(&frame)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()).into())
+}
+
+/// Send `ReloadConfig` to the daemon and print the result.
+pub async fn client_reload_config() -> Result<(), ClientError> {
+    let reply = request_reply(Connect::Spawn, ClientMsg::ReloadConfig).await?;
     match reply {
         ServerMsg::ConfigReloaded { error: None } => {
             println!("config reloaded");
@@ -162,22 +178,7 @@ pub async fn client_reload_config() -> Result<(), ClientError> {
 
 /// Send `KillSession { name }` to the daemon and print the result.
 pub async fn client_kill_session(name: String) -> Result<(), ClientError> {
-    let socket = default_socket_path()?;
-    let stream = connect_or_spawn(&socket).await?;
-    let (mut reader, mut writer) = tokio::io::split(stream);
-
-    client_handshake(&mut reader, &mut writer).await?;
-
-    let msg = ClientMsg::KillSession { name };
-    let payload = postcard::to_allocvec(&msg)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
-    Codec::write_frame(&mut writer, &payload).await?;
-
-    let frame = Codec::read_frame(&mut reader)
-        .await?
-        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
-    let reply: ServerMsg = postcard::from_bytes(&frame)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    let reply = request_reply(Connect::Spawn, ClientMsg::KillSession { name }).await?;
     match reply {
         ServerMsg::SessionKilled { name: n } => {
             println!("killed session: {n}");
@@ -211,21 +212,7 @@ pub fn print_sessions_table(entries: &[plexy_glass_protocol::SessionEntry]) {
 
 /// Shared helper: open a connection, handshake, send `ListSessions`, return entries.
 async fn list_sessions_inline() -> Result<Vec<plexy_glass_protocol::SessionEntry>, ClientError> {
-    let socket = default_socket_path()?;
-    let stream = connect_or_spawn(&socket).await?;
-    let (mut reader, mut writer) = tokio::io::split(stream);
-    client_handshake(&mut reader, &mut writer).await?;
-
-    let msg = ClientMsg::ListSessions;
-    let payload = postcard::to_allocvec(&msg)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
-    Codec::write_frame(&mut writer, &payload).await?;
-
-    let frame = Codec::read_frame(&mut reader)
-        .await?
-        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
-    let reply: ServerMsg = postcard::from_bytes(&frame)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    let reply = request_reply(Connect::Spawn, ClientMsg::ListSessions).await?;
     match reply {
         ServerMsg::SessionList { entries } => Ok(entries),
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
@@ -237,20 +224,7 @@ async fn list_sessions_inline() -> Result<Vec<plexy_glass_protocol::SessionEntry
 
 /// List sessions persisted on disk (running or not) and print a table.
 pub async fn client_list_saved() -> Result<(), ClientError> {
-    let socket = default_socket_path()?;
-    let stream = connect_or_spawn(&socket).await?;
-    let (mut reader, mut writer) = tokio::io::split(stream);
-    client_handshake(&mut reader, &mut writer).await?;
-
-    let payload = postcard::to_allocvec(&ClientMsg::ListSavedSessions)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
-    Codec::write_frame(&mut writer, &payload).await?;
-
-    let frame = Codec::read_frame(&mut reader)
-        .await?
-        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
-    let reply: ServerMsg = postcard::from_bytes(&frame)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    let reply = request_reply(Connect::Spawn, ClientMsg::ListSavedSessions).await?;
     match reply {
         ServerMsg::SavedSessionList { entries } => {
             if entries.is_empty() {
@@ -294,22 +268,9 @@ pub async fn client_run_commands(
     name: Option<String>,
     lines: Vec<String>,
 ) -> Result<bool, ClientError> {
-    let socket = default_socket_path()?;
     for line in lines {
-        let stream = connect_only(&socket).await?;
-        let (mut reader, mut writer) = tokio::io::split(stream);
-        client_handshake(&mut reader, &mut writer).await?;
-
         let msg = ClientMsg::RunCommand { session: name.clone(), line };
-        let payload = postcard::to_allocvec(&msg)
-            .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
-        Codec::write_frame(&mut writer, &payload).await?;
-
-        let frame = Codec::read_frame(&mut reader)
-            .await?
-            .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
-        let reply: ServerMsg = postcard::from_bytes(&frame)
-            .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+        let reply = request_reply(Connect::Only, msg).await?;
         match reply {
             ServerMsg::CommandResult { ok: true, message } => {
                 if let Some(m) = message {
@@ -342,24 +303,11 @@ pub async fn client_send_input(
     name: Option<String>,
     bytes: Vec<u8>,
 ) -> Result<bool, ClientError> {
-    let socket = default_socket_path()?;
-    let stream = connect_only(&socket).await?;
-    let (mut reader, mut writer) = tokio::io::split(stream);
-    client_handshake(&mut reader, &mut writer).await?;
-
     let msg = ClientMsg::SendInput {
         session: name,
         bytes: bytes::Bytes::from(bytes),
     };
-    let payload = postcard::to_allocvec(&msg)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
-    Codec::write_frame(&mut writer, &payload).await?;
-
-    let frame = Codec::read_frame(&mut reader)
-        .await?
-        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
-    let reply: ServerMsg = postcard::from_bytes(&frame)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    let reply = request_reply(Connect::Only, msg).await?;
     match reply {
         ServerMsg::CommandResult { ok: true, message } => {
             if let Some(m) = message {
@@ -391,25 +339,12 @@ pub async fn client_send_input(
 /// Returns `Ok(true)` on success, `Ok(false)` when the daemon reports an error
 /// (message on stderr). No daemon → `Err`.
 pub async fn client_capture(name: Option<String>, last_command: bool) -> Result<bool, ClientError> {
-    let socket = default_socket_path()?;
-    let stream = connect_only(&socket).await?;
-    let (mut reader, mut writer) = tokio::io::split(stream);
-    client_handshake(&mut reader, &mut writer).await?;
-
     let msg = if last_command {
         ClientMsg::CaptureLastCommand { session: name }
     } else {
         ClientMsg::CapturePane { session: name }
     };
-    let payload = postcard::to_allocvec(&msg)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
-    Codec::write_frame(&mut writer, &payload).await?;
-
-    let frame = Codec::read_frame(&mut reader)
-        .await?
-        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
-    let reply: ServerMsg = postcard::from_bytes(&frame)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    let reply = request_reply(Connect::Only, msg).await?;
     match reply {
         ServerMsg::PaneCapture { text } => {
             println!("{text}");
@@ -441,21 +376,7 @@ pub async fn client_capture(name: Option<String>, last_command: bool) -> Result<
 /// (plain message on stderr, since errors are not results they are never JSON).
 /// No daemon → `Err`.
 pub async fn client_capture_block(name: Option<String>) -> Result<bool, ClientError> {
-    let socket = default_socket_path()?;
-    let stream = connect_only(&socket).await?;
-    let (mut reader, mut writer) = tokio::io::split(stream);
-    client_handshake(&mut reader, &mut writer).await?;
-
-    let msg = ClientMsg::CaptureLastBlock { session: name };
-    let payload = postcard::to_allocvec(&msg)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
-    Codec::write_frame(&mut writer, &payload).await?;
-
-    let frame = Codec::read_frame(&mut reader)
-        .await?
-        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
-    let reply: ServerMsg = postcard::from_bytes(&frame)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    let reply = request_reply(Connect::Only, ClientMsg::CaptureLastBlock { session: name }).await?;
     match reply {
         ServerMsg::BlockCapture { text, exit, command_line } => {
             // The user-facing JSON key is `output` (unified with `run --json`);
@@ -507,26 +428,13 @@ pub async fn client_exec(
     timeout_secs: Option<u64>,
     json: bool,
 ) -> Result<i32, ClientError> {
-    let socket = default_socket_path()?;
-    let stream = connect_only(&socket).await?;
-    let (mut reader, mut writer) = tokio::io::split(stream);
-    client_handshake(&mut reader, &mut writer).await?;
-
     let command_line = text.clone();
     let msg = ClientMsg::ExecCommand {
         session: name,
         text,
         timeout_ms: timeout_secs.map(|s| s.saturating_mul(1000)),
     };
-    let payload = postcard::to_allocvec(&msg)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
-    Codec::write_frame(&mut writer, &payload).await?;
-
-    let frame = Codec::read_frame(&mut reader)
-        .await?
-        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
-    let reply: ServerMsg = postcard::from_bytes(&frame)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+    let reply = request_reply(Connect::Only, msg).await?;
     match reply {
         ServerMsg::ExecDone { exit, output, timed_out } => {
             if json {

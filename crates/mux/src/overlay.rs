@@ -43,19 +43,6 @@ pub fn picker_filtered_indices(entries: &[PickerEntry], filter: &str) -> Vec<usi
         .collect()
 }
 
-/// Count of filtered entries without allocating the index Vec, for the
-/// navigation/clamp paths that only need the length.
-fn picker_filtered_len(entries: &[PickerEntry], filter: &str) -> usize {
-    if filter.is_empty() {
-        return entries.len();
-    }
-    let needle = filter.to_lowercase();
-    entries
-        .iter()
-        .filter(|e| e.name.to_lowercase().contains(&needle))
-        .count()
-}
-
 /// An active overlay. `None` (on the holder) means no overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlay {
@@ -85,7 +72,7 @@ pub enum Overlay {
     },
     /// A fully-expanded session → window → pane tree (`choose-tree`). The daemon
     /// drives it via `crate::tree::handle_tree` directly (not through
-    /// `OverlayHandler::handle`), because its actions are cross-session and need
+    /// `overlay::handle`), because its actions are cross-session and need
     /// the registry; the state lives here so the compositor can render it.
     Tree(crate::tree::TreeState),
     /// The choose-buffer overlay. Driven by `crate::buffer::handle_buffers` at the
@@ -110,26 +97,22 @@ pub enum OverlayAction {
 /// height, so it uses a fixed step and the renderer clamps the result.
 const PAGE_STEP: u16 = 10;
 
-pub struct OverlayHandler;
-
-impl OverlayHandler {
-    /// Apply one key event to `overlay`. Pure: mutates `overlay` in place and
-    /// returns the action for the caller to act on.
-    pub fn handle(event: &KeyEvent, overlay: &mut Overlay) -> OverlayAction {
-        match overlay {
-            Overlay::Rename { buf, .. } => handle_rename(event, buf),
-            Overlay::Help { scroll } => handle_help(event, scroll),
-            Overlay::Command { buf, history, hist_idx, completions } => {
-                handle_command_prompt(event, buf, history, hist_idx, completions)
-            }
-            Overlay::SessionPicker { entries, filter, selected } => {
-                handle_session_picker(event, entries, filter, selected)
-            }
-            // Tree / buffer-picker overlays are handled by the daemon via their own
-            // pure handlers (actions need the registry); these arms only keep the
-            // match exhaustive and are never reached.
-            Overlay::Tree(_) | Overlay::BufferPicker(_) => OverlayAction::None,
+/// Apply one key event to `overlay`. Pure: mutates `overlay` in place and
+/// returns the action for the caller to act on.
+pub fn handle(event: &KeyEvent, overlay: &mut Overlay) -> OverlayAction {
+    match overlay {
+        Overlay::Rename { buf, .. } => handle_rename(event, buf),
+        Overlay::Help { scroll } => handle_help(event, scroll),
+        Overlay::Command { buf, history, hist_idx, completions } => {
+            handle_command_prompt(event, buf, history, hist_idx, completions)
         }
+        Overlay::SessionPicker { entries, filter, selected } => {
+            handle_session_picker(event, entries, filter, selected)
+        }
+        // Tree / buffer-picker overlays are handled by the daemon via their own
+        // pure handlers (actions need the registry); these arms only keep the
+        // match exhaustive and are never reached.
+        Overlay::Tree(_) | Overlay::BufferPicker(_) => OverlayAction::None,
     }
 }
 
@@ -328,7 +311,7 @@ fn handle_session_picker(
     filter: &mut String,
     selected: &mut usize,
 ) -> OverlayAction {
-    let filtered_len = picker_filtered_len(entries, filter);
+    let filtered_len = picker_filtered_indices(entries, filter).len();
     match (event.mods, event.key) {
         (m, Key::Escape) if m.is_empty() => OverlayAction::Cancel,
         (_, Key::Enter) | (_, Key::KeypadEnter) => {
@@ -346,7 +329,7 @@ fn handle_session_picker(
         (m, Key::End) if m.is_empty() => set_picker(selected, filtered_len.saturating_sub(1)),
         (m, Key::Backspace) if m.is_empty() => {
             if filter.pop().is_some() {
-                let len = picker_filtered_len(entries, filter);
+                let len = picker_filtered_indices(entries, filter).len();
                 *selected = (*selected).min(len.saturating_sub(1));
                 OverlayAction::Redraw
             } else {
@@ -433,10 +416,10 @@ mod tests {
     fn command_types_and_commits_trimmed() {
         let mut o = cmd();
         for c in "  new  ".chars() {
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+            handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
         }
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
+            handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
             OverlayAction::Commit("new".into())
         );
     }
@@ -445,14 +428,14 @@ mod tests {
     fn command_empty_enter_cancels() {
         let mut o = cmd();
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
+            handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
             OverlayAction::Cancel
         );
         // Whitespace-only too.
         let mut o = cmd();
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(' ')), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Char(' ')), &mut o);
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
+            handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
             OverlayAction::Cancel
         );
     }
@@ -465,16 +448,16 @@ mod tests {
             hist_idx: None,
             completions: Vec::new(),
         };
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Backspace), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Backspace), &mut o);
         assert_eq!(buf_of(&o), "split ");
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::CTRL, Key::Char('u')), &mut o),
+            handle(&ev(Modifiers::CTRL, Key::Char('u')), &mut o),
             OverlayAction::Redraw
         );
         assert_eq!(buf_of(&o), "");
         // Ctrl+U on an empty buffer is a no-op.
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::CTRL, Key::Char('u')), &mut o),
+            handle(&ev(Modifiers::CTRL, Key::Char('u')), &mut o),
             OverlayAction::None
         );
     }
@@ -483,7 +466,7 @@ mod tests {
     fn command_escape_cancels() {
         let mut o = cmd();
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Escape), &mut o),
+            handle(&ev(Modifiers::empty(), Key::Escape), &mut o),
             OverlayAction::Cancel
         );
     }
@@ -491,8 +474,8 @@ mod tests {
     #[test]
     fn command_tab_completes_unique_verb_with_space() {
         let mut o = cmd();
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char('z')), &mut o);
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Char('z')), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
         assert_eq!(buf_of(&o), "zoom ");
     }
 
@@ -501,9 +484,9 @@ mod tests {
         let mut o = cmd();
         // "ren" -> "rename" (shared by rename / rename-pane), no trailing space.
         for c in "ren".chars() {
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+            handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
         }
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
         assert_eq!(buf_of(&o), "rename");
     }
 
@@ -511,9 +494,9 @@ mod tests {
     fn command_tab_completes_switch_session_name() {
         let mut o = cmd_with(vec![], vec!["work", "web"]);
         for c in "switch we".chars() {
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+            handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
         }
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
         assert_eq!(buf_of(&o), "switch web");
     }
 
@@ -521,9 +504,9 @@ mod tests {
     fn command_tab_completion_preserves_leading_whitespace() {
         let mut o = cmd();
         for c in " zo".chars() {
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+            handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
         }
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
         assert_eq!(buf_of(&o), " zoom ", "leading whitespace is preserved on completion");
     }
 
@@ -531,9 +514,9 @@ mod tests {
     fn command_tab_completes_bare_switch_to_prefix() {
         let mut o = cmd_with(vec![], vec!["work", "web"]);
         for c in "switch".chars() {
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+            handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
         }
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
         // No trailing space yet → the verb branch bootstraps the "switch " prefix.
         assert_eq!(buf_of(&o), "switch ");
     }
@@ -542,16 +525,16 @@ mod tests {
     fn command_history_up_down() {
         let mut o = cmd_with(vec!["new", "split h"], vec![]);
         // Up -> newest ("split h"), Up again -> older ("new"), clamp.
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut o);
         assert_eq!(buf_of(&o), "split h");
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut o);
         assert_eq!(buf_of(&o), "new");
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut o);
         assert_eq!(buf_of(&o), "new"); // clamped at oldest
         // Down -> newer ("split h"), Down again -> fresh empty line.
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o);
         assert_eq!(buf_of(&o), "split h");
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o);
         assert_eq!(buf_of(&o), "");
     }
 
@@ -559,7 +542,7 @@ mod tests {
     fn command_down_on_fresh_line_is_noop() {
         let mut o = cmd_with(vec!["new"], vec![]);
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o),
+            handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o),
             OverlayAction::None
         );
     }
@@ -615,38 +598,38 @@ mod tests {
         let mut o = picker(&["a", "b", "c"]);
         // Up at top is a no-op.
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut o),
+            handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut o),
             OverlayAction::None
         );
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o);
-        OverlayHandler::handle(&ev(Modifiers::CTRL, Key::Char('n')), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o);
+        handle(&ev(Modifiers::CTRL, Key::Char('n')), &mut o);
         assert_eq!(picker_state(&o).1, 2);
         // Down at bottom is a no-op.
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o),
+            handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o),
             OverlayAction::None
         );
-        OverlayHandler::handle(&ev(Modifiers::CTRL, Key::Char('p')), &mut o);
+        handle(&ev(Modifiers::CTRL, Key::Char('p')), &mut o);
         assert_eq!(picker_state(&o).1, 1);
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Home), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Home), &mut o);
         assert_eq!(picker_state(&o).1, 0);
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::End), &mut o);
+        handle(&ev(Modifiers::empty(), Key::End), &mut o);
         assert_eq!(picker_state(&o).1, 2);
     }
 
     #[test]
     fn picker_typing_filters_and_resets_selection() {
         let mut o = picker(&["work", "web", "personal"]);
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::End), &mut o); // selected -> 2
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char('w')), &mut o);
+        handle(&ev(Modifiers::empty(), Key::End), &mut o); // selected -> 2
+        handle(&ev(Modifiers::empty(), Key::Char('w')), &mut o);
         let (f, sel) = picker_state(&o);
         assert_eq!(f, "w");
         assert_eq!(sel, 0, "filter change resets selection to top");
         // "we" now matches only "web": navigating down stays put.
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char('e')), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Char('e')), &mut o);
         assert_eq!(picker_state(&o).0, "we");
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o),
+            handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o),
             OverlayAction::None
         );
     }
@@ -655,15 +638,15 @@ mod tests {
     fn picker_backspace_reclamps_selection() {
         let mut o = picker(&["alpha", "alpine", "beta"]);
         for c in "alp".chars() {
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+            handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
         }
         // "alp" matches alpha, alpine; select the second.
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o);
         assert_eq!(picker_state(&o).1, 1);
         // Narrow to "alph" -> only "alpha"; selection must clamp to 0.
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char('h')), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Char('h')), &mut o);
         // (typing reset it to 0 anyway); backspace back to "alp" keeps it valid.
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Backspace), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Backspace), &mut o);
         assert!(picker_state(&o).1 <= 1);
     }
 
@@ -671,10 +654,10 @@ mod tests {
     fn picker_ctrl_u_clears_filter() {
         let mut o = picker(&["a", "b"]);
         for c in "xyz".chars() {
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+            handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
         }
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::CTRL, Key::Char('u')), &mut o),
+            handle(&ev(Modifiers::CTRL, Key::Char('u')), &mut o),
             OverlayAction::Redraw
         );
         assert_eq!(picker_state(&o).0, "");
@@ -683,9 +666,9 @@ mod tests {
     #[test]
     fn picker_enter_commits_selected_name() {
         let mut o = picker(&["work", "web", "personal"]);
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o); // -> "web"
+        handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o); // -> "web"
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
+            handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
             OverlayAction::Commit("web".into())
         );
     }
@@ -694,10 +677,10 @@ mod tests {
     fn picker_enter_on_empty_filtered_list_is_noop() {
         let mut o = picker(&["work", "web"]);
         for c in "zzz".chars() {
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+            handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
         }
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
+            handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
             OverlayAction::None
         );
     }
@@ -706,7 +689,7 @@ mod tests {
     fn picker_escape_cancels() {
         let mut o = picker(&["a"]);
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Escape), &mut o),
+            handle(&ev(Modifiers::empty(), Key::Escape), &mut o),
             OverlayAction::Cancel
         );
     }
@@ -718,10 +701,10 @@ mod tests {
         let mut o = picker(&["alpha", "beta", "gamma"]);
         for c in "amm".chars() {
             // "gamma" contains "amm"
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
+            handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
         }
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
+            handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
             OverlayAction::Commit("gamma".into())
         );
     }
@@ -733,8 +716,8 @@ mod tests {
     #[test]
     fn rename_appends_printable_chars() {
         let mut o = rename();
-        assert_eq!(OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char('h')), &mut o), OverlayAction::Redraw);
-        OverlayHandler::handle(&ev(Modifiers::SHIFT, Key::Char('I')), &mut o);
+        assert_eq!(handle(&ev(Modifiers::empty(), Key::Char('h')), &mut o), OverlayAction::Redraw);
+        handle(&ev(Modifiers::SHIFT, Key::Char('I')), &mut o);
         let Overlay::Rename { buf, .. } = &o else { panic!("expected rename") };
         assert_eq!(buf, "hI");
     }
@@ -742,19 +725,19 @@ mod tests {
     #[test]
     fn rename_backspace_pops_and_is_noop_when_empty() {
         let mut o = Overlay::Rename { target: RenameTarget::Pane, buf: "ab".into() };
-        assert_eq!(OverlayHandler::handle(&ev(Modifiers::empty(), Key::Backspace), &mut o), OverlayAction::Redraw);
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Backspace), &mut o);
+        assert_eq!(handle(&ev(Modifiers::empty(), Key::Backspace), &mut o), OverlayAction::Redraw);
+        handle(&ev(Modifiers::empty(), Key::Backspace), &mut o);
         let Overlay::Rename { buf, .. } = &o else { panic!() };
         assert!(buf.is_empty());
         // Backspace on empty: no change.
-        assert_eq!(OverlayHandler::handle(&ev(Modifiers::empty(), Key::Backspace), &mut o), OverlayAction::None);
+        assert_eq!(handle(&ev(Modifiers::empty(), Key::Backspace), &mut o), OverlayAction::None);
     }
 
     #[test]
     fn rename_enter_commits_trimmed() {
         let mut o = Overlay::Rename { target: RenameTarget::Window, buf: "  build  ".into() };
         assert_eq!(
-            OverlayHandler::handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
+            handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
             OverlayAction::Commit("build".into())
         );
     }
@@ -763,16 +746,16 @@ mod tests {
     fn rename_escape_cancels_but_q_is_a_character() {
         let mut o = rename();
         // 'q' must be typed, not treated as dismiss.
-        assert_eq!(OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char('q')), &mut o), OverlayAction::Redraw);
+        assert_eq!(handle(&ev(Modifiers::empty(), Key::Char('q')), &mut o), OverlayAction::Redraw);
         let Overlay::Rename { buf, .. } = &o else { panic!() };
         assert_eq!(buf, "q");
-        assert_eq!(OverlayHandler::handle(&ev(Modifiers::empty(), Key::Escape), &mut o), OverlayAction::Cancel);
+        assert_eq!(handle(&ev(Modifiers::empty(), Key::Escape), &mut o), OverlayAction::Cancel);
     }
 
     #[test]
     fn rename_ignores_control_combos() {
         let mut o = rename();
-        assert_eq!(OverlayHandler::handle(&ev(Modifiers::CTRL, Key::Char('c')), &mut o), OverlayAction::None);
+        assert_eq!(handle(&ev(Modifiers::CTRL, Key::Char('c')), &mut o), OverlayAction::None);
         let Overlay::Rename { buf, .. } = &o else { panic!() };
         assert!(buf.is_empty());
     }
@@ -781,8 +764,8 @@ mod tests {
     fn help_scrolls_and_saturates_at_top() {
         let mut o = Overlay::Help { scroll: 0 };
         // At the top, scrolling up is a no-op.
-        assert_eq!(OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char('k')), &mut o), OverlayAction::None);
-        assert_eq!(OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char('j')), &mut o), OverlayAction::Redraw);
+        assert_eq!(handle(&ev(Modifiers::empty(), Key::Char('k')), &mut o), OverlayAction::None);
+        assert_eq!(handle(&ev(Modifiers::empty(), Key::Char('j')), &mut o), OverlayAction::Redraw);
         let Overlay::Help { scroll } = &o else { panic!() };
         assert_eq!(*scroll, 1);
     }
@@ -790,13 +773,13 @@ mod tests {
     #[test]
     fn help_page_and_jump_keys() {
         let mut o = Overlay::Help { scroll: 0 };
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::PageDown), &mut o);
+        handle(&ev(Modifiers::empty(), Key::PageDown), &mut o);
         let Overlay::Help { scroll } = &o else { panic!() };
         assert_eq!(*scroll, PAGE_STEP);
-        OverlayHandler::handle(&ev(Modifiers::SHIFT, Key::Char('G')), &mut o);
+        handle(&ev(Modifiers::SHIFT, Key::Char('G')), &mut o);
         let Overlay::Help { scroll } = &o else { panic!() };
         assert_eq!(*scroll, u16::MAX);
-        OverlayHandler::handle(&ev(Modifiers::empty(), Key::Char('g')), &mut o);
+        handle(&ev(Modifiers::empty(), Key::Char('g')), &mut o);
         let Overlay::Help { scroll } = &o else { panic!() };
         assert_eq!(*scroll, 0);
     }
@@ -805,7 +788,7 @@ mod tests {
     fn help_dismiss_keys() {
         for key in [Key::Escape, Key::Char('q'), Key::Enter] {
             let mut o = Overlay::Help { scroll: 3 };
-            assert_eq!(OverlayHandler::handle(&ev(Modifiers::empty(), key), &mut o), OverlayAction::Cancel);
+            assert_eq!(handle(&ev(Modifiers::empty(), key), &mut o), OverlayAction::Cancel);
         }
     }
 }

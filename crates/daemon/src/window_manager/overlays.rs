@@ -1,7 +1,7 @@
 use super::{COMMAND_HISTORY_CAP, WindowManager};
 use plexy_glass_mux::{
     BufferAction, BufferEntry, BufferOutcome, BufferPickerState, KeyEvent, NodeKey, Overlay,
-    OverlayAction, OverlayHandler, PickerEntry, RenameTarget, TreeAction, TreeKind, TreeNode,
+    OverlayAction, PickerEntry, RenameTarget, TreeAction, TreeKind, TreeNode,
     TreeOutcome, TreeState, handle_buffers, handle_tree, session_label,
 };
 
@@ -198,7 +198,7 @@ impl WindowManager {
             let Some(overlay) = self.overlay.as_mut() else {
                 return OverlayKeyResult::Ignored;
             };
-            let action = OverlayHandler::handle(event, overlay);
+            let action = plexy_glass_mux::overlay::handle(event, overlay);
             let target = match overlay {
                 Overlay::Rename { target, .. } => Some(*target),
                 _ => None,

@@ -3,13 +3,6 @@
 
 use crate::{pane_id::PaneId, rect::Rect};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelectionKind {
-    Char,
-    Word,
-    Line,
-}
-
 #[derive(Debug, Clone)]
 pub struct Selection {
     pub source_pane: PaneId,
@@ -17,16 +10,14 @@ pub struct Selection {
     /// click-down point; head is the current end (moves while dragging).
     pub anchor: (u16, u16),
     pub head: (u16, u16),
-    pub kind: SelectionKind,
 }
 
 impl Selection {
-    pub fn start(source_pane: PaneId, row: u16, col: u16, kind: SelectionKind) -> Self {
+    pub fn start(source_pane: PaneId, row: u16, col: u16) -> Self {
         Self {
             source_pane,
             anchor: (row, col),
             head: (row, col),
-            kind,
         }
     }
 
@@ -156,7 +147,6 @@ pub fn word_at(
         source_pane,
         anchor: (row, start),
         head: (row, end),
-        kind: SelectionKind::Word,
     })
 }
 
@@ -181,7 +171,6 @@ pub fn line_at(
         source_pane,
         anchor: (row, 0),
         head: (row, end),
-        kind: SelectionKind::Line,
     })
 }
 
@@ -252,21 +241,21 @@ mod tests {
 
     #[test]
     fn start_then_extend_within_bounds() {
-        let mut s = Selection::start(PaneId(0), 1, 2, SelectionKind::Char);
+        let mut s = Selection::start(PaneId(0), 1, 2);
         s.extend(3, 5, Rect::new(0, 0, 10, 10));
         assert_eq!(s.head, (3, 5));
     }
 
     #[test]
     fn extend_clamps_to_rect() {
-        let mut s = Selection::start(PaneId(0), 1, 2, SelectionKind::Char);
+        let mut s = Selection::start(PaneId(0), 1, 2);
         s.extend(99, 99, Rect::new(0, 0, 10, 10));
         assert_eq!(s.head, (9, 9));
     }
 
     #[test]
     fn normalized_orders_anchor_before_head() {
-        let mut s = Selection::start(PaneId(0), 5, 5, SelectionKind::Char);
+        let mut s = Selection::start(PaneId(0), 5, 5);
         s.extend(2, 3, Rect::new(0, 0, 10, 10));
         let (a, b) = s.normalized();
         assert_eq!(a, (2, 3));
@@ -275,7 +264,7 @@ mod tests {
 
     #[test]
     fn cells_walks_inclusive_left_to_right_top_to_bottom() {
-        let mut s = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
+        let mut s = Selection::start(PaneId(0), 0, 0);
         s.extend(1, 2, Rect::new(0, 0, 3, 3));
         let cells: Vec<_> = s.cells(3).collect();
         // Row 0: (0,0), (0,1), (0,2); Row 1: (1,0), (1,1), (1,2).
@@ -287,7 +276,7 @@ mod tests {
 
     #[test]
     fn cells_on_single_row_is_inclusive() {
-        let mut s = Selection::start(PaneId(0), 2, 1, SelectionKind::Char);
+        let mut s = Selection::start(PaneId(0), 2, 1);
         s.extend(2, 4, Rect::new(0, 0, 10, 10));
         let cells: Vec<_> = s.cells(10).collect();
         assert_eq!(cells, vec![(2, 1), (2, 2), (2, 3), (2, 4)]);
@@ -295,7 +284,7 @@ mod tests {
 
     #[test]
     fn empty_selection_when_anchor_equals_head() {
-        let s = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
+        let s = Selection::start(PaneId(0), 0, 0);
         assert!(s.is_empty());
     }
 
@@ -318,7 +307,7 @@ mod tests {
     #[test]
     fn extract_simple_word() {
         let screen = screen_from(2, 10, &["hello", ""]);
-        let mut s = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
+        let mut s = Selection::start(PaneId(0), 0, 0);
         s.extend(0, 4, Rect::new(0, 0, 2, 10));
         assert_eq!(extract_text(&s, &screen), "hello");
     }
@@ -326,7 +315,7 @@ mod tests {
     #[test]
     fn extract_across_rows_joins_with_newline() {
         let screen = screen_from(2, 10, &["abc", "def"]);
-        let mut s = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
+        let mut s = Selection::start(PaneId(0), 0, 0);
         s.extend(1, 2, Rect::new(0, 0, 2, 10));
         let txt = extract_text(&s, &screen);
         assert!(txt.starts_with("abc"));
@@ -338,7 +327,6 @@ mod tests {
     fn word_at_returns_word_range() {
         let screen = screen_from(1, 20, &["hello world.foo"]);
         let s = word_at(PaneId(0), &screen, 0, 2).expect("on 'hello'");
-        assert_eq!(s.kind, SelectionKind::Word);
         assert_eq!(s.anchor, (0, 0));
         assert_eq!(s.head, (0, 4));
     }
@@ -376,7 +364,6 @@ mod tests {
     fn line_at_trims_trailing_blanks() {
         let screen = screen_from(1, 20, &["hello"]);
         let s = line_at(PaneId(0), &screen, 0).expect("non-blank row");
-        assert_eq!(s.kind, SelectionKind::Line);
         assert_eq!(s.anchor, (0, 0));
         assert_eq!(s.head, (0, 4));
     }

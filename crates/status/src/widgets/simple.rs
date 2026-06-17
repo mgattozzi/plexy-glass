@@ -85,7 +85,7 @@ impl Widget for HostnameWidget {
     }
     async fn evaluate(&mut self, _ctx: &EvalContext<'_>) -> StyledText {
         if self.cached.is_none() {
-            let name = hostname::get()
+            let name = nix::unistd::gethostname()
                 .ok()
                 .and_then(|s| s.into_string().ok())
                 .unwrap_or_default();

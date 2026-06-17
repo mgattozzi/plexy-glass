@@ -7,10 +7,6 @@ use std::sync::Arc;
 use tokio::io::AsyncWrite;
 use tokio::sync::{mpsc, watch};
 
-/// A new frame source delivered to a live renderer when its client switches
-/// sessions: the target session's frame receiver.
-pub type FrameSwitch = watch::Receiver<Arc<VirtualScreen>>;
-
 pub struct Renderer {
     diff: DiffRenderer,
 }
@@ -25,7 +21,7 @@ impl Renderer {
     pub async fn run<W>(
         mut self,
         mut frame_rx: watch::Receiver<Arc<VirtualScreen>>,
-        mut switch_rx: mpsc::UnboundedReceiver<FrameSwitch>,
+        mut switch_rx: mpsc::UnboundedReceiver<watch::Receiver<Arc<VirtualScreen>>>,
         mut writer: W,
     ) -> Result<(), DaemonError>
     where

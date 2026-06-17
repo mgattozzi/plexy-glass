@@ -118,17 +118,12 @@ pub mod window;
 pub mod window_manager;
 
 pub use args::DaemonArgs;
-pub use connection::Connection;
 pub use error::DaemonError;
 pub use input_router::{InputEvent, InputRouter};
-pub use listener::Listener;
 pub use pane::Pane;
 pub use paths::RuntimePaths;
 pub use registry::SessionRegistry;
-pub use renderer::Renderer;
-pub use session::{ClientHandle, Session};
-pub use window::Window;
-pub use window_manager::WindowManager;
+pub use session::Session;
 
 use tracing::{error, info};
 
@@ -136,10 +131,8 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
     let paths = RuntimePaths::for_current_user()?;
     paths.create_dirs()?;
 
-    let _log_guard = if args.foreground {
-        // Logs already initialized by the top-level binary; nothing to do.
-        None
-    } else {
+    // Logs are already initialized by the top-level binary when foregrounded.
+    if !args.foreground {
         use tracing_subscriber::Layer;
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
@@ -147,9 +140,8 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
             .create(true)
             .append(true)
             .open(&paths.log_file)?;
-        let (writer, guard) = tracing_appender::non_blocking(file);
         let layer = tracing_subscriber::fmt::layer()
-            .with_writer(writer)
+            .with_writer(file)
             .with_ansi(false)
             .with_target(true)
             .with_filter(
@@ -159,8 +151,7 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
         // Best-effort: if a global subscriber is already set (e.g., the top-level
         // binary in tests), keep using it.
         let _ = tracing_subscriber::registry().with(layer).try_init();
-        Some(guard)
-    };
+    }
 
     let (config, cfg_err) = plexy_glass_config::load_or_default();
     if let Some(e) = cfg_err {
@@ -168,7 +159,7 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
     }
     let config = std::sync::Arc::new(config);
 
-    let listener = Listener::bind(paths)?;
+    let listener = listener::Listener::bind(paths)?;
     let daemon_pid = std::process::id();
     let registry = std::sync::Arc::new(SessionRegistry::new());
 
@@ -194,7 +185,7 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
         let registry = std::sync::Arc::clone(&registry);
         let config = std::sync::Arc::clone(&config);
         tokio::spawn(async move {
-            if let Err(e) = Connection::serve(stream, daemon_pid, registry, config).await {
+            if let Err(e) = connection::serve(stream, daemon_pid, registry, config).await {
                 error!(error = %e, "connection ended with error");
             }
         });

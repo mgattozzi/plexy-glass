@@ -463,13 +463,11 @@ impl Pane {
 
     pub async fn wait(&self) -> ExitStatus {
         let mut rx = self.inner.exit_rx.clone();
-        loop {
-            if let Some(status) = *rx.borrow() {
-                return status;
-            }
-            if rx.changed().await.is_err() {
-                return ExitStatus::Unknown;
-            }
+        // Err only if the sender (the child-exit watch) dropped without a
+        // value; the old loop returned Unknown in that case, so match it.
+        match rx.wait_for(|s| s.is_some()).await {
+            Ok(s) => s.unwrap_or(ExitStatus::Unknown),
+            Err(_) => ExitStatus::Unknown,
         }
     }
 
@@ -512,18 +510,11 @@ impl Pane {
     /// Adjust the scroll offset by `delta` rows (positive = up into
     /// scrollback, negative = down toward live). Clamps to `[0, max]`.
     pub fn scroll_by(&self, delta: i32, max_offset: u32) {
-        loop {
-            let current = self.inner.scroll_offset.load(Ordering::SeqCst);
-            let new = (current as i64 + delta as i64).clamp(0, max_offset as i64) as u32;
-            if self
-                .inner
-                .scroll_offset
-                .compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                return;
-            }
-        }
+        let _ = self.inner.scroll_offset.fetch_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |current| Some((current as i64 + delta as i64).clamp(0, max_offset as i64) as u32),
+        );
     }
 
     pub fn reset_scroll(&self) {

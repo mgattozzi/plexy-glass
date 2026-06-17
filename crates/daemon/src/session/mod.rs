@@ -1387,10 +1387,8 @@ async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::Snaps
     let windows: Vec<plexy_glass_status::WindowSummary> = manager
         .windows()
         .iter()
-        .enumerate()
-        .map(|(i, w)| plexy_glass_status::WindowSummary {
+        .map(|w| plexy_glass_status::WindowSummary {
             name: w.name.clone(),
-            active: i == active_idx,
             // Read the sticky flags maintained by the coordinator's
             // update_monitor_flags; the tick task is not the drainer.
             activity: w.activity_flag(),
@@ -2453,6 +2451,7 @@ mod tests {
             let lcb = plexy_glass_mux::blocks::last_completed_block(scr);
             let joined: String = scr
                 .scrollback
+                .rows()
                 .iter()
                 .flat_map(|r| r.cells.iter().map(|c| c.grapheme.as_str().to_string()))
                 .collect();

@@ -13,200 +13,196 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 
-pub struct Connection;
+pub async fn serve<S>(
+    stream: S,
+    daemon_pid: u32,
+    registry: Arc<SessionRegistry>,
+    config: Arc<plexy_glass_config::Config>,
+) -> Result<(), DaemonError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let client_hello = server_handshake(&mut reader, &mut writer, daemon_pid).await?;
 
-impl Connection {
-    pub async fn serve<S>(
-        stream: S,
-        daemon_pid: u32,
-        registry: Arc<SessionRegistry>,
-        config: Arc<plexy_glass_config::Config>,
-    ) -> Result<(), DaemonError>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    {
-        let (mut reader, mut writer) = tokio::io::split(stream);
-        let client_hello = server_handshake(&mut reader, &mut writer, daemon_pid).await?;
+    let frame = Codec::read_frame(&mut reader).await?.ok_or_else(|| {
+        DaemonError::Io(std::io::Error::other("client closed before first message"))
+    })?;
+    let msg: ClientMsg = postcard::from_bytes(&frame)
+        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
 
-        let frame = Codec::read_frame(&mut reader).await?.ok_or_else(|| {
-            DaemonError::Io(std::io::Error::other("client closed before first message"))
-        })?;
-        let msg: ClientMsg = postcard::from_bytes(&frame)
-            .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
-
-        match msg {
-            ClientMsg::ListSessions => {
-                let entries = registry.list().await;
-                send_msg(&mut writer, &ServerMsg::SessionList { entries }).await?;
-                Ok(())
+    match msg {
+        ClientMsg::ListSessions => {
+            let entries = registry.list().await;
+            send_msg(&mut writer, &ServerMsg::SessionList { entries }).await?;
+            Ok(())
+        }
+        ClientMsg::ListSavedSessions => {
+            let entries = crate::persist::list_saved()
+                .into_iter()
+                .map(|(name, windows, panes)| plexy_glass_protocol::SavedSessionEntry {
+                    name,
+                    windows,
+                    panes,
+                })
+                .collect();
+            send_msg(&mut writer, &ServerMsg::SavedSessionList { entries }).await?;
+            Ok(())
+        }
+        ClientMsg::KillSession { name } => match registry.kill(&name).await {
+            Ok(()) => send_msg(&mut writer, &ServerMsg::SessionKilled { name }).await,
+            Err(DaemonError::Protocol(perr)) => {
+                send_msg(&mut writer, &ServerMsg::Error(perr)).await
             }
-            ClientMsg::ListSavedSessions => {
-                let entries = crate::persist::list_saved()
-                    .into_iter()
-                    .map(|(name, windows, panes)| plexy_glass_protocol::SavedSessionEntry {
-                        name,
-                        windows,
-                        panes,
-                    })
-                    .collect();
-                send_msg(&mut writer, &ServerMsg::SavedSessionList { entries }).await?;
-                Ok(())
-            }
-            ClientMsg::KillSession { name } => match registry.kill(&name).await {
-                Ok(()) => send_msg(&mut writer, &ServerMsg::SessionKilled { name }).await,
-                Err(DaemonError::Protocol(perr)) => {
-                    send_msg(&mut writer, &ServerMsg::Error(perr)).await
+            Err(e) => Err(e),
+        },
+        ClientMsg::AttachOrCreate { name, create_if_missing, cmd, size } => {
+            serve_attach(
+                reader, writer, registry, name, create_if_missing, cmd, size, config,
+                client_hello,
+            )
+            .await
+        }
+        ClientMsg::ReloadConfig => {
+            let error = match registry.reload_config().await {
+                Ok(()) => None,
+                Err(e) => Some(e.to_string()),
+            };
+            send_msg(&mut writer, &ServerMsg::ConfigReloaded { error }).await?;
+            Ok(())
+        }
+        ClientMsg::RunCommand { session, line } => {
+            let (ok, message) = match resolve_session(&registry, session).await {
+                Err(msg) => (false, Some(msg)),
+                Ok(sess) => run_prompt_line(&sess, &registry, &line).await,
+            };
+            send_msg(&mut writer, &ServerMsg::CommandResult { ok, message }).await?;
+            Ok(())
+        }
+        ClientMsg::SendInput { session, bytes } => {
+            let (ok, message) = match resolve_session(&registry, session).await {
+                Err(msg) => (false, Some(msg)),
+                Ok(sess) => match sess.handle_input_bytes(&bytes).await {
+                    Ok(()) => (true, None),
+                    Err(e) => (false, Some(e.to_string())),
+                },
+            };
+            send_msg(&mut writer, &ServerMsg::CommandResult { ok, message }).await?;
+            Ok(())
+        }
+        ClientMsg::CapturePane { session } => {
+            // Response-type asymmetry by design: success replies
+            // `PaneCapture`, every error replies `CommandResult{ok:false}`,
+            // and the CLI client matches on either.
+            let reply = match resolve_session(&registry, session).await {
+                Err(msg) => ServerMsg::CommandResult { ok: false, message: Some(msg) },
+                Ok(sess) => {
+                    let text = {
+                        let manager = sess.window_manager.lock().await;
+                        manager
+                            .input_target_pane()
+                            .map(|p| p.with_screen(plexy_glass_mux::screen_text))
+                    };
+                    match text {
+                        Some(text) => ServerMsg::PaneCapture { text },
+                        // Unreachable in practice: a session with no panes
+                        // tears itself down.
+                        None => ServerMsg::CommandResult {
+                            ok: false,
+                            message: Some("no focused pane".into()),
+                        },
+                    }
                 }
-                Err(e) => Err(e),
-            },
-            ClientMsg::AttachOrCreate { name, create_if_missing, cmd, size } => {
-                serve_attach(
-                    reader, writer, registry, name, create_if_missing, cmd, size, config,
-                    client_hello,
-                )
-                .await
-            }
-            ClientMsg::ReloadConfig => {
-                let error = match registry.reload_config().await {
-                    Ok(()) => None,
-                    Err(e) => Some(e.to_string()),
-                };
-                send_msg(&mut writer, &ServerMsg::ConfigReloaded { error }).await?;
-                Ok(())
-            }
-            ClientMsg::RunCommand { session, line } => {
-                let (ok, message) = match resolve_session(&registry, session).await {
-                    Err(msg) => (false, Some(msg)),
-                    Ok(sess) => run_prompt_line(&sess, &registry, &line).await,
-                };
-                send_msg(&mut writer, &ServerMsg::CommandResult { ok, message }).await?;
-                Ok(())
-            }
-            ClientMsg::SendInput { session, bytes } => {
-                let (ok, message) = match resolve_session(&registry, session).await {
-                    Err(msg) => (false, Some(msg)),
-                    Ok(sess) => match sess.handle_input_bytes(&bytes).await {
-                        Ok(()) => (true, None),
-                        Err(e) => (false, Some(e.to_string())),
-                    },
-                };
-                send_msg(&mut writer, &ServerMsg::CommandResult { ok, message }).await?;
-                Ok(())
-            }
-            ClientMsg::CapturePane { session } => {
-                // Response-type asymmetry by design: success replies
-                // `PaneCapture`, every error replies `CommandResult{ok:false}`,
-                // and the CLI client matches on either.
-                let reply = match resolve_session(&registry, session).await {
-                    Err(msg) => ServerMsg::CommandResult { ok: false, message: Some(msg) },
-                    Ok(sess) => {
-                        let text = {
-                            let manager = sess.window_manager.lock().await;
-                            manager
-                                .input_target_pane()
-                                .map(|p| p.with_screen(plexy_glass_mux::screen_text))
-                        };
-                        match text {
-                            Some(text) => ServerMsg::PaneCapture { text },
-                            // Unreachable in practice: a session with no panes
-                            // tears itself down.
-                            None => ServerMsg::CommandResult {
-                                ok: false,
-                                message: Some("no focused pane".into()),
-                            },
-                        }
-                    }
-                };
-                send_msg(&mut writer, &reply).await?;
-                Ok(())
-            }
-            ClientMsg::CaptureLastCommand { session } => {
-                // Response-type asymmetry by design: success replies
-                // `PaneCapture`, every error (no session, no pane, no completed
-                // block) replies `CommandResult{ok:false}`, and the CLI client
-                // matches on either.
-                let reply = match resolve_session(&registry, session).await {
-                    Err(msg) => ServerMsg::CommandResult { ok: false, message: Some(msg) },
-                    Ok(sess) => {
-                        let text = {
-                            let manager = sess.window_manager.lock().await;
-                            manager.input_target_pane().and_then(|p| {
-                                p.with_screen(|s| {
-                                    plexy_glass_mux::last_completed_block(s)
-                                        .map(|range| plexy_glass_mux::block_text(s, range))
-                                })
+            };
+            send_msg(&mut writer, &reply).await?;
+            Ok(())
+        }
+        ClientMsg::CaptureLastCommand { session } => {
+            // Response-type asymmetry by design: success replies
+            // `PaneCapture`, every error (no session, no pane, no completed
+            // block) replies `CommandResult{ok:false}`, and the CLI client
+            // matches on either.
+            let reply = match resolve_session(&registry, session).await {
+                Err(msg) => ServerMsg::CommandResult { ok: false, message: Some(msg) },
+                Ok(sess) => {
+                    let text = {
+                        let manager = sess.window_manager.lock().await;
+                        manager.input_target_pane().and_then(|p| {
+                            p.with_screen(|s| {
+                                plexy_glass_mux::last_completed_block(s)
+                                    .map(|range| plexy_glass_mux::block_text(s, range))
                             })
-                        };
-                        match text {
-                            Some(text) => ServerMsg::PaneCapture { text },
-                            None => ServerMsg::CommandResult {
-                                ok: false,
-                                message: Some(NO_BLOCKS_MSG.into()),
-                            },
-                        }
+                        })
+                    };
+                    match text {
+                        Some(text) => ServerMsg::PaneCapture { text },
+                        None => ServerMsg::CommandResult {
+                            ok: false,
+                            message: Some(NO_BLOCKS_MSG.into()),
+                        },
                     }
-                };
-                send_msg(&mut writer, &reply).await?;
-                Ok(())
-            }
-            ClientMsg::ExecCommand { session, text, timeout_ms } => {
-                serve_exec(&mut reader, &mut writer, &registry, session, text, timeout_ms).await
-            }
-            ClientMsg::CaptureLastBlock { session } => {
-                // Response-type asymmetry by design: success replies
-                // `BlockCapture`, every error (no session, no pane, no completed
-                // block) replies `CommandResult{ok:false}`, and the CLI client
-                // matches on either.
-                let reply = match resolve_session(&registry, session).await {
-                    Err(msg) => ServerMsg::CommandResult { ok: false, message: Some(msg) },
-                    Ok(sess) => {
-                        let parts = {
-                            let manager = sess.window_manager.lock().await;
-                            manager.input_target_pane().and_then(|p| {
-                                p.with_screen(|s| {
-                                    plexy_glass_mux::blocks::last_completed_prompt(s).map(
-                                        |prompt| {
-                                            // `block_output_range` only returns None when no
-                                            // `PROMPT_START` exists at or above the line, and
-                                            // `prompt` IS a `PROMPT_START` line, so the fallback is
-                                            // unreachable. Kept defensive per the no-unwrap rule.
-                                            let range =
-                                                plexy_glass_mux::block_output_range(s, prompt)
-                                                    .unwrap_or((prompt, prompt));
-                                            (
-                                                plexy_glass_mux::block_text(s, range),
-                                                plexy_glass_mux::blocks::closing_exit(s, prompt),
-                                                plexy_glass_mux::blocks::block_command_line(
-                                                    s, prompt,
-                                                ),
-                                            )
-                                        },
-                                    )
-                                })
+                }
+            };
+            send_msg(&mut writer, &reply).await?;
+            Ok(())
+        }
+        ClientMsg::ExecCommand { session, text, timeout_ms } => {
+            serve_exec(&mut reader, &mut writer, &registry, session, text, timeout_ms).await
+        }
+        ClientMsg::CaptureLastBlock { session } => {
+            // Response-type asymmetry by design: success replies
+            // `BlockCapture`, every error (no session, no pane, no completed
+            // block) replies `CommandResult{ok:false}`, and the CLI client
+            // matches on either.
+            let reply = match resolve_session(&registry, session).await {
+                Err(msg) => ServerMsg::CommandResult { ok: false, message: Some(msg) },
+                Ok(sess) => {
+                    let parts = {
+                        let manager = sess.window_manager.lock().await;
+                        manager.input_target_pane().and_then(|p| {
+                            p.with_screen(|s| {
+                                plexy_glass_mux::blocks::last_completed_prompt(s).map(
+                                    |prompt| {
+                                        // `block_output_range` only returns None when no
+                                        // `PROMPT_START` exists at or above the line, and
+                                        // `prompt` IS a `PROMPT_START` line, so the fallback is
+                                        // unreachable. Kept defensive per the no-unwrap rule.
+                                        let range =
+                                            plexy_glass_mux::block_output_range(s, prompt)
+                                                .unwrap_or((prompt, prompt));
+                                        (
+                                            plexy_glass_mux::block_text(s, range),
+                                            plexy_glass_mux::blocks::closing_exit(s, prompt),
+                                            plexy_glass_mux::blocks::block_command_line(
+                                                s, prompt,
+                                            ),
+                                        )
+                                    },
+                                )
                             })
-                        };
-                        match parts {
-                            Some((text, exit, command_line)) => {
-                                ServerMsg::BlockCapture { text, exit, command_line }
-                            }
-                            None => ServerMsg::CommandResult {
-                                ok: false,
-                                message: Some(NO_BLOCKS_MSG.into()),
-                            },
+                        })
+                    };
+                    match parts {
+                        Some((text, exit, command_line)) => {
+                            ServerMsg::BlockCapture { text, exit, command_line }
                         }
+                        None => ServerMsg::CommandResult {
+                            ok: false,
+                            message: Some(NO_BLOCKS_MSG.into()),
+                        },
                     }
-                };
-                send_msg(&mut writer, &reply).await?;
-                Ok(())
-            }
-            other => {
-                send_msg(
-                    &mut writer,
-                    &ServerMsg::Error(ProtocolError::UnexpectedMessage(format!("{other:?}"))),
-                )
-                .await?;
-                Ok(())
-            }
+                }
+            };
+            send_msg(&mut writer, &reply).await?;
+            Ok(())
+        }
+        other => {
+            send_msg(
+                &mut writer,
+                &ServerMsg::Error(ProtocolError::UnexpectedMessage(format!("{other:?}"))),
+            )
+            .await?;
+            Ok(())
         }
     }
 }
@@ -239,10 +235,6 @@ where
 {
     // Per-connection decode context from the handshake. `kbd` scopes THIS
     // client's key decode (deterministic, replacing the Permissive default).
-    // `term` is informational only: XTGETTCAP TN comes from the pane's own
-    // `$TERM` at spawn, never a per-client value (multi-client), so it stays
-    // unused here.
-    let _client_term = client_hello.term;
     let client_kbd = client_hello.kbd;
 
     // Resolve or create the session. `session` is reassigned in place by
@@ -644,7 +636,7 @@ async fn dispatch_input_event(
                             pane_opt.and_then(|p| {
                                 let screen = p.with_screen(|s| s.clone());
                                 p.with_copy_mode_mut(|state| {
-                                    plexy_glass_mux::CopyModeHandler::handle(
+                                    plexy_glass_mux::copy_mode::handle(
                                         &event_ke, state, &screen,
                                     )
                                 })
@@ -1776,7 +1768,7 @@ mod tests {
         let _g = crate::test_env::isolate();
         let (server_side, client_side) = duplex(64 * 1024);
         let server = tokio::spawn(async move {
-            Connection::serve(
+            serve(
                 server_side,
                 7,
                 Arc::new(crate::SessionRegistry::new()),
@@ -1861,7 +1853,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -1948,7 +1940,7 @@ mod tests {
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server = tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -2018,7 +2010,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -2108,7 +2100,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -2190,7 +2182,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -2326,7 +2318,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -2629,7 +2621,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -2731,7 +2723,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -2844,7 +2836,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -2952,7 +2944,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3024,7 +3016,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3147,7 +3139,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3241,7 +3233,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3323,7 +3315,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3415,7 +3407,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3502,7 +3494,7 @@ mod tests {
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg2).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3614,14 +3606,14 @@ mod tests {
         PtySize { rows: 8, cols: 40, pixel_width: 0, pixel_height: 0 }
     }
 
-    /// Drive one one-shot scripting message through `Connection::serve` over a
+    /// Drive one one-shot scripting message through `serve` over a
     /// duplex (handshake → one frame → one reply), like a CLI invocation does.
     async fn one_shot(registry: &Arc<crate::SessionRegistry>, msg: &ClientMsg) -> ServerMsg {
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(registry);
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg).await });
         let (mut cr, mut cw) = tokio::io::split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
         Codec::write_frame(&mut cw, &postcard::to_allocvec(msg).unwrap()).await.unwrap();
@@ -4999,7 +4991,7 @@ mod tests {
         let reg = Arc::clone(registry);
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let server =
-            tokio::spawn(async move { Connection::serve(server_side, 7, reg, cfg).await });
+            tokio::spawn(async move { serve(server_side, 7, reg, cfg).await });
         let (mut cr, mut cw) = tokio::io::split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
         Codec::write_frame(&mut cw, &postcard::to_allocvec(msg).unwrap()).await.unwrap();

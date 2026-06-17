@@ -86,9 +86,8 @@ fn closing_block_end_line(screen: &Screen, prompt_line: u32) -> Option<u32> {
     // shared D+A row still counts.
     let last = total.saturating_sub(1);
     let search_end = next_p.map(|np| np.min(last)).unwrap_or(last);
-    (prompt_line + 1..=search_end).find(|&l| {
-        l < total && row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::BLOCK_END))
-    })
+    (prompt_line + 1..=search_end)
+        .find(|&l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::BLOCK_END)))
 }
 
 /// Prompt line of the most recent **completed** block (internal helper).
@@ -188,15 +187,9 @@ pub fn block_command_line(screen: &Screen, prompt_line: u32) -> Option<String> {
         .find(|&l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::OUTPUT_START)))?;
 
     // Find the PROMPT_END row (B): first row at-or-after prompt_line with the
-    // flag, strictly before the C row.
+    // flag, strictly before the C row. The range excludes c_row, so b_row < c_row.
     let b_row = (prompt_line..c_row)
         .find(|&l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::PROMPT_END)))?;
-
-    // b_row is always < c_row here (the range excludes c_row), but the spec
-    // asks for an explicit B-and-C-same-row guard, so we keep it for clarity.
-    if b_row == c_row {
-        return None;
-    }
 
     // B col: the cell index at which command text begins on the B row.
     // Cell index == display column (invariant: each cell occupies one column,

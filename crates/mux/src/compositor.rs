@@ -96,304 +96,300 @@ pub struct PopupView<'a> {
     pub title: &'a str,
 }
 
-pub struct Compositor;
+// One optional layer per frame element (status/selection/overlay/message/
+// popup/blocks); a params struct would just rename the same nine positions.
+#[allow(clippy::too_many_arguments)] // nine optional frame layers; a params struct would just rename them
+pub fn compose(
+    panes: &[PaneView<'_>],
+    host_size: (u16, u16),
+    status: Option<&StatusLine>,
+    placement: StatusPlacement,
+    selection: Option<&crate::selection::Selection>,
+    overlay: Option<&OverlayView<'_>>,
+    message: Option<&str>,
+    popup: Option<&PopupView<'_>>,
+    // blocks: None = feature disabled (no block work per frame).
+    blocks: Option<&BlockBorderColors>,
+) -> VirtualScreen {
+    let (host_rows, host_cols) = host_size;
+    let host_rows = host_rows.max(1);
+    let host_cols = host_cols.max(1);
+    let mut screen = VirtualScreen::blank(host_rows, host_cols);
 
-impl Compositor {
-    // One optional layer per frame element (status/selection/overlay/message/
-    // popup/blocks); a params struct would just rename the same nine positions.
-    #[allow(clippy::too_many_arguments)]
-    pub fn compose(
-        panes: &[PaneView<'_>],
-        host_size: (u16, u16),
-        status: Option<&StatusLine>,
-        placement: StatusPlacement,
-        selection: Option<&crate::selection::Selection>,
-        overlay: Option<&OverlayView<'_>>,
-        message: Option<&str>,
-        popup: Option<&PopupView<'_>>,
-        // blocks: None = feature disabled (no block work per frame).
-        blocks: Option<&BlockBorderColors>,
-    ) -> VirtualScreen {
-        let (host_rows, host_cols) = host_size;
-        let host_rows = host_rows.max(1);
-        let host_cols = host_cols.max(1);
-        let mut screen = VirtualScreen::blank(host_rows, host_cols);
+    let pane_area_rows = if status.is_some() {
+        host_rows.saturating_sub(1).max(1)
+    } else {
+        host_rows
+    };
+    // Panes are laid out in a LOGICAL band `0..pane_area_rows` (all the
+    // clips below operate on that logical row). When the status bar is on
+    // top, the physical screen rows are shifted down by one and the status
+    // is painted at row 0; on the bottom, no shift and status at the last
+    // row. `pane_row_offset` is added at each physical write site only.
+    let (pane_row_offset, status_row): (u16, u16) = match (status.is_some(), placement) {
+        (true, StatusPlacement::Top) => (1, 0),
+        (true, StatusPlacement::Bottom) => (0, host_rows.saturating_sub(1)),
+        (false, _) => (0, 0),
+    };
 
-        let pane_area_rows = if status.is_some() {
-            host_rows.saturating_sub(1).max(1)
-        } else {
-            host_rows
-        };
-        // Panes are laid out in a LOGICAL band `0..pane_area_rows` (all the
-        // clips below operate on that logical row). When the status bar is on
-        // top, the physical screen rows are shifted down by one and the status
-        // is painted at row 0; on the bottom, no shift and status at the last
-        // row. `pane_row_offset` is added at each physical write site only.
-        let (pane_row_offset, status_row): (u16, u16) = match (status.is_some(), placement) {
-            (true, StatusPlacement::Top) => (1, 0),
-            (true, StatusPlacement::Bottom) => (0, host_rows.saturating_sub(1)),
-            (false, _) => (0, 0),
-        };
-
-        // Copy each pane's emulator cells into its rect, mixing in scrollback
-        // when scroll_offset > 0 (or when copy-mode overrides the viewport).
-        // `effective_scroll` is hoisted so the block-status scan (below) uses
-        // the exact same value as the content copy.
-        for view in panes {
-            let effective_scroll = effective_scroll_for(view);
-            let max_r = view.rect.rows;
-            let max_c = view.rect.cols.min(view.screen.active.num_cols());
-            for r in 0..max_r {
-                if view.rect.row.saturating_add(r) >= pane_area_rows {
-                    continue;
-                }
-                let cells_src: Option<&[plexy_glass_emulator::Cell]> =
-                    if effective_scroll > 0 {
-                        let scroll_len = view.screen.scrollback.len() as u32;
-                        let want_from_scrollback = effective_scroll.min(scroll_len);
-                        if (r as u32) < want_from_scrollback {
-                            // This row comes from scrollback.
-                            let sb_idx =
-                                (scroll_len - want_from_scrollback + r as u32) as usize;
-                            // VecDeque::get is O(1); iter().nth(sb_idx) was
-                            // O(sb_idx) per row → O(rows × offset) per frame.
-                            view.screen
-                                .scrollback
-                                .rows()
-                                .get(sb_idx)
-                                .map(|row| row.cells.as_slice())
-                        } else {
-                            // This row comes from the active grid (offset by the
-                            // number of scrollback rows shown above).
-                            let active_r = r - want_from_scrollback as u16;
-                            view.screen
-                                .active
-                                .rows
-                                .get(active_r as usize)
-                                .map(|row| row.cells.as_slice())
-                        }
+    // Copy each pane's emulator cells into its rect, mixing in scrollback
+    // when scroll_offset > 0 (or when copy-mode overrides the viewport).
+    // `effective_scroll` is hoisted so the block-status scan (below) uses
+    // the exact same value as the content copy.
+    for view in panes {
+        let effective_scroll = effective_scroll_for(view);
+        let max_r = view.rect.rows;
+        let max_c = view.rect.cols.min(view.screen.active.num_cols());
+        for r in 0..max_r {
+            if view.rect.row.saturating_add(r) >= pane_area_rows {
+                continue;
+            }
+            let cells_src: Option<&[plexy_glass_emulator::Cell]> =
+                if effective_scroll > 0 {
+                    let scroll_len = view.screen.scrollback.len() as u32;
+                    let want_from_scrollback = effective_scroll.min(scroll_len);
+                    if (r as u32) < want_from_scrollback {
+                        // This row comes from scrollback.
+                        let sb_idx =
+                            (scroll_len - want_from_scrollback + r as u32) as usize;
+                        // VecDeque::get is O(1); iter().nth(sb_idx) was
+                        // O(sb_idx) per row → O(rows × offset) per frame.
+                        view.screen
+                            .scrollback
+                            .rows()
+                            .get(sb_idx)
+                            .map(|row| row.cells.as_slice())
                     } else {
+                        // This row comes from the active grid (offset by the
+                        // number of scrollback rows shown above).
+                        let active_r = r - want_from_scrollback as u16;
                         view.screen
                             .active
                             .rows
-                            .get(r as usize)
+                            .get(active_r as usize)
                             .map(|row| row.cells.as_slice())
-                    };
-                let Some(cells) = cells_src else { continue };
-                for c in 0..max_c {
-                    if view.rect.col.saturating_add(c) >= host_cols {
-                        continue;
                     }
-                    if let Some(cell) = cells.get(c as usize) {
-                        screen.put(
-                            pane_row_offset + view.rect.row.saturating_add(r),
-                            view.rect.col.saturating_add(c),
-                            cell.clone(),
-                        );
-                    }
+                } else {
+                    view.screen
+                        .active
+                        .rows
+                        .get(r as usize)
+                        .map(|row| row.cells.as_slice())
+                };
+            let Some(cells) = cells_src else { continue };
+            for c in 0..max_c {
+                if view.rect.col.saturating_add(c) >= host_cols {
+                    continue;
+                }
+                if let Some(cell) = cells.get(c as usize) {
+                    screen.put(
+                        pane_row_offset + view.rect.row.saturating_add(r),
+                        view.rect.col.saturating_add(c),
+                        cell.clone(),
+                    );
                 }
             }
         }
+    }
 
-        // Selection overlay: OR REVERSE onto selected cells.
-        if let Some(sel) = selection
-            && let Some(view) = panes.iter().find(|v| v.id == sel.source_pane)
-        {
-            let cols = view.screen.active.num_cols();
-            for (row, col) in sel.cells(cols) {
-                let logical_r = view.rect.row.saturating_add(row);
-                let host_c = view.rect.col.saturating_add(col);
-                if logical_r >= pane_area_rows || host_c >= host_cols {
-                    continue;
-                }
-                let host_r = pane_row_offset + logical_r;
+    // Selection overlay: OR REVERSE onto selected cells.
+    if let Some(sel) = selection
+        && let Some(view) = panes.iter().find(|v| v.id == sel.source_pane)
+    {
+        let cols = view.screen.active.num_cols();
+        for (row, col) in sel.cells(cols) {
+            let logical_r = view.rect.row.saturating_add(row);
+            let host_c = view.rect.col.saturating_add(col);
+            if logical_r >= pane_area_rows || host_c >= host_cols {
+                continue;
+            }
+            let host_r = pane_row_offset + logical_r;
+            if let Some(cell) = screen.cell_mut(host_r, host_c) {
+                cell.attrs |= plexy_glass_emulator::Attrs::REVERSE;
+            }
+        }
+    }
+
+    // Copy-mode selection overlay (per pane).
+    for view in panes {
+        let Some(cm) = view.copy_mode else { continue };
+        let Some(anchor) = cm.anchor else { continue };
+        let (start, end) = if anchor <= cm.cursor {
+            (anchor, cm.cursor)
+        } else {
+            (cm.cursor, anchor)
+        };
+        let viewport_lo = cm.viewport_top;
+        let viewport_hi = cm.viewport_top + u32::from(view.rect.rows);
+        for line in start.0..=end.0 {
+            if line < viewport_lo || line >= viewport_hi {
+                continue;
+            }
+            let local_row = (line - viewport_lo) as u16;
+            let host_r = pane_row_offset + view.rect.row + local_row;
+            let row_start = if line == start.0 { start.1 } else { 0 };
+            let row_end = if line == end.0 {
+                end.1
+            } else {
+                view.rect.cols.saturating_sub(1)
+            };
+            for c in row_start..=row_end {
+                let host_c = view.rect.col + c;
                 if let Some(cell) = screen.cell_mut(host_r, host_c) {
                     cell.attrs |= plexy_glass_emulator::Attrs::REVERSE;
                 }
             }
         }
+    }
 
-        // Copy-mode selection overlay (per pane).
-        for view in panes {
-            let Some(cm) = view.copy_mode else { continue };
-            let Some(anchor) = cm.anchor else { continue };
-            let (start, end) = if anchor <= cm.cursor {
-                (anchor, cm.cursor)
-            } else {
-                (cm.cursor, anchor)
-            };
-            let viewport_lo = cm.viewport_top;
-            let viewport_hi = cm.viewport_top + u32::from(view.rect.rows);
-            for line in start.0..=end.0 {
-                if line < viewport_lo || line >= viewport_hi {
-                    continue;
-                }
-                let local_row = (line - viewport_lo) as u16;
-                let host_r = pane_row_offset + view.rect.row + local_row;
-                let row_start = if line == start.0 { start.1 } else { 0 };
-                let row_end = if line == end.0 {
-                    end.1
-                } else {
-                    view.rect.cols.saturating_sub(1)
-                };
-                for c in row_start..=row_end {
-                    let host_c = view.rect.col + c;
-                    if let Some(cell) = screen.cell_mut(host_r, host_c) {
-                        cell.attrs |= plexy_glass_emulator::Attrs::REVERSE;
-                    }
-                }
-            }
+    // Copy-mode search match highlights.
+    for view in panes {
+        let Some(cm) = view.copy_mode else { continue };
+        if cm.search.matches.is_empty() {
+            continue;
         }
-
-        // Copy-mode search match highlights.
-        for view in panes {
-            let Some(cm) = view.copy_mode else { continue };
-            if cm.search.matches.is_empty() {
+        let viewport_lo = cm.viewport_top;
+        let viewport_hi = cm.viewport_top + u32::from(view.rect.rows);
+        for m in &cm.search.matches {
+            if m.line_idx < viewport_lo || m.line_idx >= viewport_hi {
                 continue;
             }
-            let viewport_lo = cm.viewport_top;
-            let viewport_hi = cm.viewport_top + u32::from(view.rect.rows);
-            for m in &cm.search.matches {
-                if m.line_idx < viewport_lo || m.line_idx >= viewport_hi {
-                    continue;
+            let local_row = (m.line_idx - viewport_lo) as u16;
+            let host_r = pane_row_offset + view.rect.row + local_row;
+            // Clamp to the pane's own columns: a match's `col_end` is captured
+            // at search time against the grid width, so a column-shrinking
+            // resize while copy mode stays open can leave `col_end` past the
+            // pane rect. `cell_mut` is only bounds-safe against the whole host
+            // screen, so without this the HIGHLIGHT would bleed onto the
+            // pane border / a neighbouring pane (mirrors the content path).
+            let last_col = m.col_end.min(view.rect.cols.saturating_sub(1));
+            for c in m.col_start..=last_col {
+                let host_c = view.rect.col + c;
+                if host_c >= host_cols {
+                    break;
                 }
-                let local_row = (m.line_idx - viewport_lo) as u16;
-                let host_r = pane_row_offset + view.rect.row + local_row;
-                // Clamp to the pane's own columns: a match's `col_end` is captured
-                // at search time against the grid width, so a column-shrinking
-                // resize while copy mode stays open can leave `col_end` past the
-                // pane rect. `cell_mut` is only bounds-safe against the whole host
-                // screen, so without this the HIGHLIGHT would bleed onto the
-                // pane border / a neighbouring pane (mirrors the content path).
-                let last_col = m.col_end.min(view.rect.cols.saturating_sub(1));
-                for c in m.col_start..=last_col {
-                    let host_c = view.rect.col + c;
-                    if host_c >= host_cols {
-                        break;
-                    }
-                    if let Some(cell) = screen.cell_mut(host_r, host_c) {
-                        cell.attrs |= plexy_glass_emulator::Attrs::HIGHLIGHT;
-                    }
+                if let Some(cell) = screen.cell_mut(host_r, host_c) {
+                    cell.attrs |= plexy_glass_emulator::Attrs::HIGHLIGHT;
                 }
             }
         }
-
-        // Full pane frames. Offset each pane rect by `pane_row_offset` so the
-        // frame lands on the physical pane band (matters for top status). The
-        // band is the whole physical pane area; the layout already inset pane
-        // rects by one cell on every side to leave room for the frame.
-        let band = Rect::new(pane_row_offset, 0, pane_area_rows, host_cols);
-        let frames: Vec<borders::PaneFrame<'_>> = panes
-            .iter()
-            .map(|v| {
-                let mut r = v.rect;
-                r.row = r.row.saturating_add(pane_row_offset);
-                // Per-viewport block status, computed from the same
-                // `effective_scroll` as the content copy so they always agree.
-                let block_rows = if blocks.is_some() {
-                    let es = effective_scroll_for(v);
-                    let sb_len = v.screen.scrollback.len() as u32;
-                    let top = sb_len.saturating_sub(es);
-                    viewport_block_status(v.screen, top, v.rect.rows)
-                } else {
-                    vec![]
-                };
-                borders::PaneFrame {
-                    rect: r,
-                    active: v.is_active,
-                    marked: v.marked,
-                    title: v.title,
-                    block_rows,
-                }
-            })
-            .collect();
-        borders::draw(&frames, band, &mut screen, blocks);
-
-        // Status bar.
-        if let Some(s) = status {
-            paint_status_row(&mut screen, s, host_cols, status_row);
-        }
-
-        // Cursor from the active pane, overridden by the copy-mode cursor when present.
-        if let Some(active) = panes.iter().find(|v| v.is_active) {
-            let cursor_pos = match active.copy_mode {
-                Some(cm) => {
-                    if cm.cursor.0 >= cm.viewport_top
-                        && cm.cursor.0 < cm.viewport_top + u32::from(active.rect.rows)
-                    {
-                        let local_row = (cm.cursor.0 - cm.viewport_top) as u16;
-                        let host_r = active.rect.row.saturating_add(local_row);
-                        let host_c = active.rect.col.saturating_add(cm.cursor.1);
-                        Some((host_r, host_c))
-                    } else {
-                        None
-                    }
-                }
-                None => {
-                    let cur = &active.screen.cursor;
-                    let r = active.rect.row.saturating_add(cur.row);
-                    let c = active.rect.col.saturating_add(cur.col);
-                    if r < pane_area_rows && c < host_cols {
-                        Some((r, c))
-                    } else {
-                        None
-                    }
-                }
-            };
-            if let Some((r, c)) = cursor_pos
-                && r < pane_area_rows && c < host_cols
-            {
-                screen.cursor = Some((pane_row_offset + r, c));
-            }
-            screen.cursor_visible = match active.copy_mode {
-                Some(_) => true,
-                None => active
-                    .screen
-                    .modes
-                    .contains(plexy_glass_emulator::Modes::CURSOR_VISIBLE),
-            };
-        }
-
-        // Copy-mode search prompt overlay on the active pane.
-        if let Some(active) = panes.iter().find(|v| v.is_active)
-            && let Some(cm) = active.copy_mode
-            && cm.search.prompt_active
-        {
-            let prompt_row = pane_row_offset + active.rect.row + active.rect.rows.saturating_sub(1);
-            let mut text = String::from("/");
-            text.push_str(&cm.search.prompt_buf);
-            let prompt_attrs = plexy_glass_emulator::Attrs::REVERSE;
-            put_str(&mut screen, prompt_row, active.rect.col, &text, prompt_attrs, host_cols);
-        }
-
-        // Transient status-line message: a full-width REVERSE bar on the bottom
-        // content row, shown only when no interactive overlay is open (the
-        // overlay owns that row when present).
-        if let Some(msg) = message
-            && overlay.is_none()
-        {
-            let row = pane_row_offset + pane_area_rows.saturating_sub(1);
-            let attrs = plexy_glass_emulator::Attrs::REVERSE;
-            for c in 0..host_cols {
-                put_char(&mut screen, row, c, ' ', attrs);
-            }
-            put_str(&mut screen, row, 0, &format!(" {msg}"), attrs, host_cols);
-        }
-
-        // Floating popup pane: above panes/borders/status/cursor, below any
-        // static overlay (mutually exclusive with overlays in practice).
-        if let Some(p) = popup {
-            paint_popup(&mut screen, p, pane_row_offset, pane_area_rows, host_cols, blocks);
-        }
-
-        // Interactive overlay (rename prompt / help), painted last so it sits
-        // on top of panes, borders, and the cursor logic above.
-        if let Some(ov) = overlay {
-            paint_overlay(&mut screen, ov, pane_row_offset, pane_area_rows, host_cols);
-        }
-
-        screen
     }
+
+    // Full pane frames. Offset each pane rect by `pane_row_offset` so the
+    // frame lands on the physical pane band (matters for top status). The
+    // band is the whole physical pane area; the layout already inset pane
+    // rects by one cell on every side to leave room for the frame.
+    let band = Rect::new(pane_row_offset, 0, pane_area_rows, host_cols);
+    let frames: Vec<borders::PaneFrame<'_>> = panes
+        .iter()
+        .map(|v| {
+            let mut r = v.rect;
+            r.row = r.row.saturating_add(pane_row_offset);
+            // Per-viewport block status, computed from the same
+            // `effective_scroll` as the content copy so they always agree.
+            let block_rows = if blocks.is_some() {
+                let es = effective_scroll_for(v);
+                let sb_len = v.screen.scrollback.len() as u32;
+                let top = sb_len.saturating_sub(es);
+                viewport_block_status(v.screen, top, v.rect.rows)
+            } else {
+                vec![]
+            };
+            borders::PaneFrame {
+                rect: r,
+                active: v.is_active,
+                marked: v.marked,
+                title: v.title,
+                block_rows,
+            }
+        })
+        .collect();
+    borders::draw(&frames, band, &mut screen, blocks);
+
+    // Status bar.
+    if let Some(s) = status {
+        paint_status_row(&mut screen, s, host_cols, status_row);
+    }
+
+    // Cursor from the active pane, overridden by the copy-mode cursor when present.
+    if let Some(active) = panes.iter().find(|v| v.is_active) {
+        let cursor_pos = match active.copy_mode {
+            Some(cm) => {
+                if cm.cursor.0 >= cm.viewport_top
+                    && cm.cursor.0 < cm.viewport_top + u32::from(active.rect.rows)
+                {
+                    let local_row = (cm.cursor.0 - cm.viewport_top) as u16;
+                    let host_r = active.rect.row.saturating_add(local_row);
+                    let host_c = active.rect.col.saturating_add(cm.cursor.1);
+                    Some((host_r, host_c))
+                } else {
+                    None
+                }
+            }
+            None => {
+                let cur = &active.screen.cursor;
+                let r = active.rect.row.saturating_add(cur.row);
+                let c = active.rect.col.saturating_add(cur.col);
+                if r < pane_area_rows && c < host_cols {
+                    Some((r, c))
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some((r, c)) = cursor_pos
+            && r < pane_area_rows && c < host_cols
+        {
+            screen.cursor = Some((pane_row_offset + r, c));
+        }
+        screen.cursor_visible = match active.copy_mode {
+            Some(_) => true,
+            None => active
+                .screen
+                .modes
+                .contains(plexy_glass_emulator::Modes::CURSOR_VISIBLE),
+        };
+    }
+
+    // Copy-mode search prompt overlay on the active pane.
+    if let Some(active) = panes.iter().find(|v| v.is_active)
+        && let Some(cm) = active.copy_mode
+        && cm.search.prompt_active
+    {
+        let prompt_row = pane_row_offset + active.rect.row + active.rect.rows.saturating_sub(1);
+        let mut text = String::from("/");
+        text.push_str(&cm.search.prompt_buf);
+        let prompt_attrs = plexy_glass_emulator::Attrs::REVERSE;
+        put_str(&mut screen, prompt_row, active.rect.col, &text, prompt_attrs, host_cols);
+    }
+
+    // Transient status-line message: a full-width REVERSE bar on the bottom
+    // content row, shown only when no interactive overlay is open (the
+    // overlay owns that row when present).
+    if let Some(msg) = message
+        && overlay.is_none()
+    {
+        let row = pane_row_offset + pane_area_rows.saturating_sub(1);
+        let attrs = plexy_glass_emulator::Attrs::REVERSE;
+        for c in 0..host_cols {
+            put_char(&mut screen, row, c, ' ', attrs);
+        }
+        put_str(&mut screen, row, 0, &format!(" {msg}"), attrs, host_cols);
+    }
+
+    // Floating popup pane: above panes/borders/status/cursor, below any
+    // static overlay (mutually exclusive with overlays in practice).
+    if let Some(p) = popup {
+        paint_popup(&mut screen, p, pane_row_offset, pane_area_rows, host_cols, blocks);
+    }
+
+    // Interactive overlay (rename prompt / help), painted last so it sits
+    // on top of panes, borders, and the cursor logic above.
+    if let Some(ov) = overlay {
+        paint_overlay(&mut screen, ov, pane_row_offset, pane_area_rows, host_cols);
+    }
+
+    screen
 }
 
 /// Compute the effective scroll offset for a pane view. This is the single
@@ -477,6 +473,66 @@ fn paint_overlay(
     }
 }
 
+/// Draw a centered box's scaffolding: the border frame (cleared interior) plus
+/// a centered `title` on the top border and `footer` on the bottom border. All
+/// four overlay boxes share this exact framing; only their interior content
+/// differs. Painted with empty attrs (no reverse), matching every caller.
+fn draw_box(
+    screen: &mut VirtualScreen,
+    row0: u16,
+    col0: u16,
+    box_h: u16,
+    box_w: u16,
+    title: &str,
+    footer: &str,
+) {
+    let attrs = plexy_glass_emulator::Attrs::empty();
+    let dw = |s: &str| display_width(s) as usize;
+    for r in 0..box_h {
+        for c in 0..box_w {
+            put_char(screen, row0 + r, col0 + c, border_glyph(r, c, box_h, box_w), attrs);
+        }
+    }
+    // Title centered on the top border, footer centered on the bottom border.
+    let tcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(title)) / 2) as u16;
+    put_str(screen, row0, tcol, title, attrs, col0 + box_w - 1);
+    let fcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(footer)) / 2) as u16;
+    put_str(screen, row0 + box_h - 1, fcol, footer, attrs, col0 + box_w - 1);
+}
+
+/// Paint a scrollable list of `rows` into a box interior, the `sel` row drawn
+/// REVERSE (its background filled to the box edges). `first_row` is the physical
+/// row of the first visible entry; `top`/`visible` are the scroll window. Shared
+/// by the session-picker, tree, and buffer overlays, since their selectable
+/// bodies are otherwise identical.
+// ponytail: 8 grid-geometry args (box interior rect + scroll window + selection);
+// a wrapper struct would be pure transient call-site noise (cf. `compose`'s allow).
+#[allow(clippy::too_many_arguments)]
+fn paint_selectable_rows(
+    screen: &mut VirtualScreen,
+    rows: &[String],
+    first_row: u16,
+    inner_left: u16,
+    inner_right: u16,
+    top: usize,
+    visible: usize,
+    sel: usize,
+) {
+    let plain = plexy_glass_emulator::Attrs::empty();
+    let rev = plexy_glass_emulator::Attrs::REVERSE;
+    let end = (top + visible).min(rows.len());
+    for (vis_i, row_idx) in (top..end).enumerate() {
+        let r = first_row + vis_i as u16;
+        let row_attrs = if row_idx == sel { rev } else { plain };
+        if row_idx == sel {
+            for c in inner_left..inner_right {
+                put_char(screen, r, c, ' ', row_attrs);
+            }
+        }
+        put_str(screen, r, inner_left, &rows[row_idx], row_attrs, inner_right);
+    }
+}
+
 /// Draw a centered bordered help box listing `(keys, description)` rows.
 fn paint_help_box(
     screen: &mut VirtualScreen,
@@ -518,19 +574,7 @@ fn paint_help_box(
     let col0 = (cols.saturating_sub(box_w)) / 2;
     let attrs = plexy_glass_emulator::Attrs::empty();
 
-    // Clear interior + draw border frame.
-    for r in 0..box_h {
-        for c in 0..box_w {
-            let ch = border_glyph(r, c, box_h, box_w);
-            put_char(screen, row0 + r, col0 + c, ch, attrs);
-        }
-    }
-    // Title centered on the top border.
-    let tcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(title)) / 2) as u16;
-    put_str(screen, row0, tcol, title, attrs, col0 + box_w - 1);
-    // Footer centered on the bottom border.
-    let fcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(footer)) / 2) as u16;
-    put_str(screen, row0 + box_h - 1, fcol, footer, attrs, col0 + box_w - 1);
+    draw_box(screen, row0, col0, box_h, box_w, title, footer);
 
     // Content rows. Pad the key column to `key_w` *display* columns (keys are
     // ASCII today, but pad by width so a wide glyph would still align).
@@ -598,19 +642,8 @@ fn paint_session_picker(
     let row0 = pane_row_offset + (pane_area_rows.saturating_sub(box_h)) / 2;
     let col0 = (cols.saturating_sub(box_w)) / 2;
     let plain = plexy_glass_emulator::Attrs::empty();
-    let rev = plexy_glass_emulator::Attrs::REVERSE;
 
-    // Border frame.
-    for r in 0..box_h {
-        for c in 0..box_w {
-            put_char(screen, row0 + r, col0 + c, border_glyph(r, c, box_h, box_w), plain);
-        }
-    }
-    // Title + footer centered on the borders.
-    let tcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(title)) / 2) as u16;
-    put_str(screen, row0, tcol, title, plain, col0 + box_w - 1);
-    let fcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(footer)) / 2) as u16;
-    put_str(screen, row0 + box_h - 1, fcol, footer, plain, col0 + box_w - 1);
+    draw_box(screen, row0, col0, box_h, box_w, title, footer);
 
     let inner_left = col0 + 1;
     let inner_right = col0 + box_w - 1; // exclusive max_col for put_str
@@ -618,21 +651,12 @@ fn paint_session_picker(
     // Filter line with a block cursor.
     put_str(screen, row0 + 1, inner_left, &format!("{filter_line}\u{2588}"), plain, inner_right);
 
-    // Session rows (or the empty-state message).
+    // Session rows (or the empty-state message). Rows start below the filter
+    // line, at row0 + 2.
     if rows.is_empty() {
         put_str(screen, row0 + 2, inner_left, empty_msg, plain, inner_right);
     } else {
-        let end = (top + visible).min(rows.len());
-        for (vis_i, row_idx) in (top..end).enumerate() {
-            let r = row0 + 2 + vis_i as u16;
-            let row_attrs = if row_idx == sel { rev } else { plain };
-            if row_idx == sel {
-                for c in inner_left..inner_right {
-                    put_char(screen, r, c, ' ', row_attrs);
-                }
-            }
-            put_str(screen, r, inner_left, &rows[row_idx], row_attrs, inner_right);
-        }
+        paint_selectable_rows(screen, &rows, row0 + 2, inner_left, inner_right, top, visible, sel);
     }
 }
 
@@ -712,18 +736,8 @@ fn paint_tree(
 
     let row0 = pane_row_offset + (pane_area_rows.saturating_sub(box_h)) / 2;
     let col0 = (cols.saturating_sub(box_w)) / 2;
-    let plain = plexy_glass_emulator::Attrs::empty();
-    let rev = plexy_glass_emulator::Attrs::REVERSE;
 
-    for r in 0..box_h {
-        for c in 0..box_w {
-            put_char(screen, row0 + r, col0 + c, border_glyph(r, c, box_h, box_w), plain);
-        }
-    }
-    let tcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(title)) / 2) as u16;
-    put_str(screen, row0, tcol, title, plain, col0 + box_w - 1);
-    let fcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(&footer)) / 2) as u16;
-    put_str(screen, row0 + box_h - 1, fcol, &footer, plain, col0 + box_w - 1);
+    draw_box(screen, row0, col0, box_h, box_w, title, &footer);
 
     let inner_left = col0 + 1;
     let inner_right = col0 + box_w - 1; // exclusive max_col for put_str
@@ -733,17 +747,7 @@ fn paint_tree(
     if rows.is_empty() {
         return;
     }
-    let end = (top + visible).min(rows.len());
-    for (vis_i, row_idx) in (top..end).enumerate() {
-        let r = row0 + 1 + vis_i as u16;
-        let row_attrs = if row_idx == sel { rev } else { plain };
-        if row_idx == sel {
-            for c in inner_left..inner_right {
-                put_char(screen, r, c, ' ', row_attrs);
-            }
-        }
-        put_str(screen, r, inner_left, &rows[row_idx], row_attrs, inner_right);
-    }
+    paint_selectable_rows(screen, &rows, row0 + 1, inner_left, inner_right, top, visible, sel);
 }
 
 /// Draw the centered choose-buffer box: one `name: preview` row per buffer, the
@@ -788,17 +792,8 @@ fn paint_buffers(
     let row0 = pane_row_offset + (pane_area_rows.saturating_sub(box_h)) / 2;
     let col0 = (cols.saturating_sub(box_w)) / 2;
     let plain = plexy_glass_emulator::Attrs::empty();
-    let rev = plexy_glass_emulator::Attrs::REVERSE;
 
-    for r in 0..box_h {
-        for c in 0..box_w {
-            put_char(screen, row0 + r, col0 + c, border_glyph(r, c, box_h, box_w), plain);
-        }
-    }
-    let tcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(title)) / 2) as u16;
-    put_str(screen, row0, tcol, title, plain, col0 + box_w - 1);
-    let fcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(footer)) / 2) as u16;
-    put_str(screen, row0 + box_h - 1, fcol, footer, plain, col0 + box_w - 1);
+    draw_box(screen, row0, col0, box_h, box_w, title, footer);
 
     let inner_left = col0 + 1;
     let inner_right = col0 + box_w - 1;
@@ -807,17 +802,7 @@ fn paint_buffers(
         put_str(screen, row0 + 1, inner_left, empty_msg, plain, inner_right);
         return;
     }
-    let end = (top + visible).min(rows.len());
-    for (vis_i, row_idx) in (top..end).enumerate() {
-        let r = row0 + 1 + vis_i as u16;
-        let row_attrs = if row_idx == sel { rev } else { plain };
-        if row_idx == sel {
-            for c in inner_left..inner_right {
-                put_char(screen, r, c, ' ', row_attrs);
-            }
-        }
-        put_str(screen, r, inner_left, &rows[row_idx], row_attrs, inner_right);
-    }
+    paint_selectable_rows(screen, &rows, row0 + 1, inner_left, inner_right, top, visible, sel);
 }
 
 /// Paint the floating popup: a bordered, titled box at `popup.rect` whose
@@ -1163,7 +1148,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
         assert_eq!(vs.cursor, Some((0, 2)));
     }
@@ -1212,7 +1197,7 @@ mod tests {
         pane(&mut pe, b"hi ");
         let rect = Rect::new(2, 10, 8, 22); // interior 6x20
         let pv = PopupView { rect, screen: pe.screen(), title: "cat" };
-        let vs = Compositor::compose(
+        let vs = compose(
             &[view],
             (10, 40),
             None,
@@ -1261,7 +1246,7 @@ mod tests {
         let rect = Rect::new(2, 10, 5, 12); // interior 3x10
         let pv = PopupView { rect, screen: pe.screen(), title: "t" };
         let status = status_with_left("AB");
-        let vs = Compositor::compose(
+        let vs = compose(
             &[view],
             (10, 40),
             Some(&status),
@@ -1285,7 +1270,7 @@ mod tests {
 
     #[test]
     fn selection_overlay_sets_reverse_attr() {
-        use crate::selection::{Selection, SelectionKind};
+        use crate::selection::Selection;
         use plexy_glass_emulator::Attrs;
         let mut e = Emulator::new(4, 6);
         pane(&mut e, b"hello ");
@@ -1299,9 +1284,9 @@ mod tests {
             title: None,
             marked: false,
         };
-        let mut sel = Selection::start(PaneId(0), 0, 0, SelectionKind::Char);
+        let mut sel = Selection::start(PaneId(0), 0, 0);
         sel.extend(0, 4, Rect::new(0, 0, 4, 6));
-        let vs = Compositor::compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel), None, None, None, None);
+        let vs = compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel), None, None, None, None);
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -1341,7 +1326,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "L");
         assert_eq!(vs.cell(0, 4).unwrap().grapheme.as_str(), "R");
         // Border column.
@@ -1371,7 +1356,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None, None, None, None);
         // Row 0 should be the last scrollback row (BBBB), not CCCC.
         let r0: String = (0..4)
             .map(|c| vs.cell(0, c).unwrap().grapheme.as_str().to_string())
@@ -1404,7 +1389,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
         assert_eq!(vs.cursor, Some((3, 7)));
     }
 
@@ -1432,7 +1417,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -1472,7 +1457,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
         for c in 1..=3 {
             assert!(vs.cell(0, c).unwrap().attrs.contains(Attrs::HIGHLIGHT), "col {c} highlighted");
         }
@@ -1511,7 +1496,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
         // The out-of-viewport match must not paint any HIGHLIGHT in the band.
         for r in 0..4 {
             for c in 0..20 {
@@ -1553,7 +1538,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
         // Prompt bar on the pane's bottom row (rect.row + rect.rows - 1 = 3).
         let row: Vec<String> = (0..4)
             .map(|c| vs.cell(3, c).unwrap().grapheme.to_string())
@@ -1611,7 +1596,7 @@ mod tests {
             marked: false,
         };
         let status = status_with_left("中B");
-        let vs = Compositor::compose(&[view], (3, 8), Some(&status), StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (3, 8), Some(&status), StatusPlacement::Bottom, None, None, None, None, None);
         assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "中");
         assert!(vs.cell(2, 1).unwrap().grapheme.is_empty(), "wide spacer after 中");
         assert_eq!(vs.cell(2, 2).unwrap().grapheme.as_str(), "B");
@@ -1634,7 +1619,7 @@ mod tests {
             marked: false,
         };
         let status = status_with_left("AB");
-        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None, None, None, None);
+        let vs = compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "A", "status at row 0");
         assert_eq!(vs.cell(0, 1).unwrap().grapheme.as_str(), "B");
         assert_eq!(vs.cell(1, 0).unwrap().grapheme.as_str(), "X", "pane shifted to row 1");
@@ -1656,7 +1641,7 @@ mod tests {
             marked: false,
         };
         let status = status_with_left("AB");
-        let vs = Compositor::compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None, None, None, None);
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "X", "pane stays at row 0");
         assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "A", "status at last row");
     }
@@ -1677,7 +1662,7 @@ mod tests {
             marked: false,
         };
         let ov = OverlayView::RenamePrompt { label: "rename window", buf: "hi" };
-        let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         // Bottom row (3) is a REVERSE prompt bar.
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "prompt bar is REVERSE");
         // Text " rename window \u{25b8} hi", with 'r' at col 1.
@@ -1700,7 +1685,7 @@ mod tests {
             marked: false,
         };
         let ov = OverlayView::Command { buf: "spl" };
-        let vs = Compositor::compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "command bar is REVERSE");
         // Text " :spl": ':' at col 1, 's' at col 2.
         assert_eq!(vs.cell(3, 1).unwrap().grapheme.as_str(), ":");
@@ -1722,7 +1707,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(
+        let vs = compose(
             &[view],
             (4, 20),
             None,
@@ -1755,7 +1740,7 @@ mod tests {
             marked: false,
         };
         let ov = OverlayView::RenamePrompt { label: "rename window", buf: "hi" };
-        let vs = Compositor::compose(
+        let vs = compose(
             &[view],
             (4, 20),
             None,
@@ -1788,7 +1773,7 @@ mod tests {
         };
         let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
-        let vs = Compositor::compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut found_corner = false;
         let mut found_text = false;
         for r in 0..10 {
@@ -1834,7 +1819,7 @@ mod tests {
             picker_view("work", "work - 2 win", false),
         ];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "", selected: 1 };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
 
         let mut found_corner = false;
         let mut found_marker = false;
@@ -1873,7 +1858,7 @@ mod tests {
         // A CJK session name must be sized and placed as one cell + a spacer.
         let entries = vec![picker_view("中文", "中文", false)];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "", selected: 0 };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut found = false;
         for r in 0..10 {
             for c in 0..49 {
@@ -1906,7 +1891,7 @@ mod tests {
         };
         let entries = vec![picker_view("main", "main", true)];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "zzz", selected: 0 };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut text = String::new();
         for r in 0..10 {
             for c in 0..50 {
@@ -1937,7 +1922,7 @@ mod tests {
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
         let status = status_with_left("S");
         let vs =
-            Compositor::compose(&[view], (4, 40), Some(&status), StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+            compose(&[view], (4, 40), Some(&status), StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut found_corner = false;
         for r in 0..4 {
             for c in 0..40 {
@@ -1995,7 +1980,7 @@ mod tests {
             ..Default::default()
         };
         let ov = OverlayView::Tree { state: &state };
-        let vs = Compositor::compose(&[view], (12, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (12, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
 
         let mut found_corner = false;
         let mut found_marker = false;
@@ -2061,7 +2046,7 @@ mod tests {
             selected: 1,
         };
         let ov = OverlayView::Buffer { state: &state };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut text = String::new();
         let mut selected_reverse = false;
         for r in 0..10 {
@@ -2095,7 +2080,7 @@ mod tests {
         };
         let state = crate::buffer::BufferPickerState { entries: vec![], selected: 0 };
         let ov = OverlayView::Buffer { state: &state };
-        let vs = Compositor::compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut text = String::new();
         for r in 0..10 {
             for c in 0..50 {
@@ -2121,7 +2106,7 @@ mod tests {
             title: None,
             marked: true,
         };
-        let vs = Compositor::compose(&[view], (3, 8), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (3, 8), None, StatusPlacement::Bottom, None, None, None, None, None);
         let mut magenta = false;
         for r in 0..3 {
             for c in 0..8 {
@@ -2154,7 +2139,7 @@ mod tests {
             ..Default::default()
         };
         let ov = OverlayView::Tree { state: &state };
-        let vs = Compositor::compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut text = String::new();
         for r in 0..12 {
             for c in 0..60 {
@@ -2179,7 +2164,7 @@ mod tests {
             marked: false,
         };
         let ov = OverlayView::Tree { state };
-        let vs = Compositor::compose(&[view], (rows, cols), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (rows, cols), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
         let mut text = String::new();
         for r in 0..rows {
             for c in 0..cols {
@@ -2273,7 +2258,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(
+        let vs = compose(
             &[view],
             (3, 20),
             None,
@@ -2315,8 +2300,8 @@ mod tests {
             marked: false,
         };
         let colors = block_colors();
-        let vs_some = Compositor::compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors));
-        let vs_none = Compositor::compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs_some = compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors));
+        let vs_none = compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None);
         for r in 0..4u16 {
             for c in 0..6u16 {
                 let c1 = vs_some.cell(r, c).unwrap().clone();
@@ -2363,7 +2348,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs_scrolled = Compositor::compose(
+        let vs_scrolled = compose(
             &[view_scrolled],
             (5, 20),
             None,
@@ -2396,7 +2381,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs_live = Compositor::compose(
+        let vs_live = compose(
             &[view_live],
             (5, 20),
             None,
@@ -2447,7 +2432,7 @@ mod tests {
             marked: false,
         };
         let status = status_with_left("AB");
-        let vs = Compositor::compose(
+        let vs = compose(
             &[view],
             (6, 20),
             Some(&status),
@@ -2515,7 +2500,7 @@ mod tests {
             title: None,
             marked: false,
         };
-        let vs = Compositor::compose(
+        let vs = compose(
             &[view],
             (5, 20),
             None,
@@ -2570,7 +2555,7 @@ mod tests {
         // Outer box 8 rows × 22 cols at (2, 10); interior = 6 rows × 20 cols.
         let rect = Rect::new(2, 10, 8, 22);
         let pv = PopupView { rect, screen: popup_screen, title: "test" };
-        Compositor::compose(
+        compose(
             &[view],
             (12, 40),
             None,
