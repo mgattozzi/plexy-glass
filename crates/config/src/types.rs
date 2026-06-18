@@ -1,13 +1,29 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Which glyph repertoire the status surface and widgets use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GlyphTier {
+    /// Box-drawing + simple symbols; renders on any font. Default.
+    #[default]
+    Unicode,
+    /// Nerd Font icons + powerline separators.
+    Nerd,
+    /// Lowest-common-denominator ASCII fallback.
+    Ascii,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub palette: PaletteConfig,
     pub status: StatusConfig,
     pub keymap: KeymapConfig,
     pub sessions: Vec<SessionTemplate>,
     pub blocks: BlocksConfig,
+    pub glyph_tier: GlyphTier,
+    /// tmux's `automatic-rename`: when true, unpinned windows auto-name from
+    /// their active pane (command → cwd → shell). Default true.
+    pub auto_rename: bool,
 }
 
 /// Configuration for the block exit-status border feature.

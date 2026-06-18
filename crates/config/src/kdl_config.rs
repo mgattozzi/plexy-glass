@@ -3,9 +3,9 @@
 //! every downstream consumer are unchanged.
 
 use crate::{
-    BlocksConfig, Config, ConfigError, KeymapBinding, KeymapConfig, Padding, PaletteConfig,
-    PaneNode, PaneTemplate, Position, SessionTemplate, SplitDirection, StatusConfig, StyleConfig,
-    WidgetSpec, WindowTemplate,
+    BlocksConfig, Config, ConfigError, GlyphTier, KeymapBinding, KeymapConfig, Padding,
+    PaletteConfig, PaneNode, PaneTemplate, Position, SessionTemplate, SplitDirection, StatusConfig,
+    StyleConfig, WidgetSpec, WindowTemplate,
 };
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use std::time::Duration;
@@ -23,6 +23,8 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
     let mut seen_status = false;
     let mut seen_keymap = false;
     let mut seen_blocks = false;
+    let mut seen_glyphs = false;
+    let mut seen_auto_rename = false;
     for node in doc.nodes() {
         match node.name().value() {
             "palette" => {
@@ -44,6 +46,16 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
                 dup_check(seen_blocks, "blocks", node, src)?;
                 seen_blocks = true;
                 config.blocks = decode_blocks(node, src)?;
+            }
+            "glyphs" => {
+                dup_check(seen_glyphs, "glyphs", node, src)?;
+                seen_glyphs = true;
+                config.glyph_tier = decode_glyph_tier(node, src)?;
+            }
+            "auto-rename" => {
+                dup_check(seen_auto_rename, "auto-rename", node, src)?;
+                seen_auto_rename = true;
+                config.auto_rename = bool_arg(node, 0, src, "#true or #false")?;
             }
             "session" => {
                 let template = decode_session(node, src)?;
@@ -192,6 +204,27 @@ fn decode_blocks(node: &KdlNode, src: &str) -> Result<BlocksConfig, ConfigError>
         }
     }
     Ok(blocks)
+}
+
+// --- glyph tier ---
+
+fn decode_glyph_tier(node: &KdlNode, src: &str) -> Result<GlyphTier, ConfigError> {
+    let v = node
+        .entries()
+        .iter()
+        .find(|e| e.name().is_none())
+        .and_then(|e| e.value().as_string())
+        .ok_or_else(|| decode_err(src, node, "`glyphs` takes one string: unicode | nerd | ascii"))?;
+    match v {
+        "unicode" => Ok(GlyphTier::Unicode),
+        "nerd" => Ok(GlyphTier::Nerd),
+        "ascii" => Ok(GlyphTier::Ascii),
+        other => Err(decode_err(
+            src,
+            node,
+            &format!("`glyphs`: unknown tier `{other}` (expected unicode | nerd | ascii)"),
+        )),
+    }
 }
 
 // --- sessions (declarative defaults, Feature B) ---
@@ -1670,5 +1703,24 @@ session "dev" cwd="~/projects/app" {
     fn blocks_property_form_rejected() {
         // blocks takes no properties on the node itself.
         assert!(parse_config(r##"blocks enabled=#true"##).is_err());
+    }
+
+    // --- glyph tier + auto-rename ---
+
+    #[test]
+    fn decodes_glyph_tier_and_auto_rename() {
+        let cfg = parse_config(r#"glyphs "nerd"
+auto-rename #false"#).expect("decode");
+        assert_eq!(cfg.glyph_tier, crate::GlyphTier::Nerd);
+        assert!(!cfg.auto_rename);
+    }
+
+    #[test]
+    fn glyph_tier_defaults_unicode_and_unknown_errors() {
+        let cfg = parse_config("").expect("empty decodes");
+        assert_eq!(cfg.glyph_tier, crate::GlyphTier::Unicode);
+        assert!(cfg.auto_rename);
+        let err = parse_config(r#"glyphs "wingdings""#).unwrap_err();
+        assert!(err.to_string().contains("glyphs"), "msg names the node: {err}");
     }
 }
