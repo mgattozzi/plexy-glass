@@ -1,5 +1,6 @@
 //! The built-in default config renders a frame with the session name in the status row,
-//! and uses the lean divider-free segment set (`GitBranch` / `Cwd` / `Time` on the right).
+//! and uses the lean divider-free segment set (`CpuLoad` / `Battery` / `Hostname` / weather
+//! on the right).
 
 use plexy_glass_config::WidgetSpec;
 use plexy_glass_daemon::Session;
@@ -58,50 +59,44 @@ async fn default_status_includes_session_name() {
 }
 
 #[test]
-fn default_right_cluster_is_git_cwd_time_no_dividers() {
+fn default_right_cluster_is_cpu_battery_host_weather() {
     let cfg = plexy_glass_config::built_in_default();
 
-    // New lean right cluster: `GitBranch`, `Cwd`, `Time`, and no `Text` dividers.
+    // New lean right cluster: `CpuLoad`, `Battery`, `Hostname`, `Shell(weather)`, and no
+    // `Text` dividers.
     assert!(
         cfg.status.right.iter().all(|w| !matches!(w, WidgetSpec::Text { .. })),
         "right cluster must not contain Text dividers"
     );
     assert!(
-        cfg.status.right.iter().any(|w| matches!(w, WidgetSpec::GitBranch { .. })),
-        "right cluster must include GitBranch"
+        cfg.status.right.iter().any(|w| matches!(w, WidgetSpec::CpuLoad { .. })),
+        "right cluster must include CpuLoad"
     );
     assert!(
-        cfg.status.right.iter().any(|w| matches!(w, WidgetSpec::Cwd { .. })),
-        "right cluster must include Cwd"
+        cfg.status.right.iter().any(|w| matches!(w, WidgetSpec::Battery { .. })),
+        "right cluster must include Battery (charge)"
     );
     assert!(
-        cfg.status.right.iter().any(|w| matches!(w, WidgetSpec::Time { .. })),
-        "right cluster must include Time"
+        cfg.status.right.iter().any(|w| matches!(w, WidgetSpec::Hostname { .. })),
+        "right cluster must include Hostname"
+    );
+    assert!(
+        cfg.status.right.iter().any(|w| matches!(w, WidgetSpec::Shell { .. })),
+        "right cluster must include the Shell weather widget"
     );
 
-    // Dropped widgets must not appear in the default right cluster.
+    // git/cwd/time are no longer in the default right cluster.
     assert!(
-        cfg.status.right.iter().all(|w| !matches!(w, WidgetSpec::CpuLoad { .. })),
-        "CpuLoad removed from default right cluster"
-    );
-    assert!(
-        cfg.status.right.iter().all(|w| !matches!(w, WidgetSpec::Battery { .. })),
-        "Battery removed from default right cluster"
-    );
-    assert!(
-        cfg.status.right.iter().all(|w| !matches!(w, WidgetSpec::AttachedClients { .. })),
-        "AttachedClients removed from default right cluster"
+        cfg.status.right.iter().all(|w| !matches!(
+            w,
+            WidgetSpec::GitBranch { .. } | WidgetSpec::Cwd { .. } | WidgetSpec::Time { .. }
+        )),
+        "GitBranch/Cwd/Time removed from default right cluster"
     );
 
     // Left cluster must not contain blank `Text` spacers.
     assert!(
         cfg.status.left.iter().all(|w| !matches!(w, WidgetSpec::Text { value, .. } if value.trim().is_empty())),
         "left cluster must not contain blank Text spacers"
-    );
-
-    // The `Cwd` widget must use `max_components: Some(1)` so the display stays compact.
-    assert!(
-        cfg.status.right.iter().any(|w| matches!(w, WidgetSpec::Cwd { max_components: Some(1), .. })),
-        "Cwd must have max_components: Some(1)"
     );
 }

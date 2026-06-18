@@ -593,12 +593,24 @@ status {
         }
     }
     right {
-        git-branch interval="10s" { style fg="ok" bg="bg_bar" }
-        cwd max-components=3 { style fg="fg" bg="bg_bar" }
-        time format="%H:%M" { style fg="fg" bg="bg_bar" }
+        // This mirrors the built-in default right cluster.
+        cpu-load { style fg="fg" bg="selection" }
+        battery { style fg="fg" bg="bg_bar" }
+        hostname { style fg="fg" bg="selection" }
+        // Weather via a self-contained wttr.in curl — the condition icon + temperature,
+        // metric (append `&u` to the format for °F). No API key, no external script.
+        shell command="bash" interval="30m" timeout="5s" {
+            args "-c" "curl -sfL 'wttr.in/?format=%c+%t' | tr -d '+'"
+            style fg="bg" bg="accent"
+        }
     }
 }
 ```
+
+> Note that the built-in default right cluster is CPU · battery · hostname ·
+> weather, and the weather segment makes a periodic outbound network request
+> to `wttr.in`, which infers your location from your IP. Replace or remove
+> the `shell` widget if you'd rather not.
 
 See [`auto-rename`](#auto-rename) for the companion setting that controls
 whether unpinned windows derive their name from the active pane.

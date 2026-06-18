@@ -395,9 +395,10 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let mut cfg = built_in_default();
-        // Force a fast interval on the Time widget so the tick fires often.
+        // Force a fast interval on an interval-driven widget so the tick fires
+        // often (the default right cluster has CpuLoad, which carries one).
         for w in cfg.status.right.iter_mut() {
-            if let plexy_glass_config::WidgetSpec::Time { interval, .. } = w {
+            if let plexy_glass_config::WidgetSpec::CpuLoad { interval, .. } = w {
                 *interval = Some(std::time::Duration::from_millis(100));
             }
         }

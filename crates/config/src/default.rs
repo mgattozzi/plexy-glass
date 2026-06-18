@@ -82,7 +82,7 @@ pub fn built_in_default() -> Config {
                 },
             }],
             right: vec![
-                WidgetSpec::GitBranch {
+                WidgetSpec::CpuLoad {
                     style: StyleConfig {
                         fg: Some("fg".into()),
                         bg: Some("selection".into()),
@@ -90,22 +90,41 @@ pub fn built_in_default() -> Config {
                     },
                     interval: None,
                 },
-                WidgetSpec::Cwd {
+                WidgetSpec::Battery {
                     style: StyleConfig {
                         fg: Some("fg".into()),
                         bg: Some("bg_bar".into()),
                         ..Default::default()
                     },
-                    max_components: Some(1),
+                    interval: None,
                 },
-                WidgetSpec::Time {
+                WidgetSpec::Hostname {
+                    style: StyleConfig {
+                        fg: Some("fg".into()),
+                        bg: Some("selection".into()),
+                        ..Default::default()
+                    },
+                    interval: None,
+                },
+                // Weather: a self-contained wttr.in curl (no external script), the
+                // portable essence of the tmux-kanagawa weather.sh: condition icon
+                // + temperature, `+` stripped like the original. Metric, matching
+                // the kanagawa default (show-fahrenheit=false); append `&u` to the
+                // format for °F. Refreshed every 30m, 5s timeout so a slow network
+                // never stalls the bar.
+                WidgetSpec::Shell {
+                    command: "bash".into(),
+                    args: vec![
+                        "-c".into(),
+                        "curl -sfL 'wttr.in/?format=%c+%t' | tr -d '+'".into(),
+                    ],
+                    interval: Some(Duration::from_secs(1800)),
+                    timeout: Duration::from_secs(5),
                     style: StyleConfig {
                         fg: Some("bg".into()),
                         bg: Some("accent".into()),
                         ..Default::default()
                     },
-                    format: "%H:%M".into(),
-                    interval: None,
                 },
             ],
         },
@@ -188,11 +207,16 @@ mod tests {
     #[test]
     fn default_status_is_lean_and_divider_free() {
         let c = built_in_default();
-        // right cluster: GitBranch, Cwd, Time, no Text dividers
+        // right cluster: CpuLoad, Battery, Hostname, Shell(weather), no Text dividers
         assert!(c.status.right.iter().all(|w| !matches!(w, WidgetSpec::Text { .. })));
-        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::GitBranch { .. })));
-        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::Cwd { .. })));
-        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::Time { .. })));
+        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::CpuLoad { .. })));
+        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::Battery { .. })));
+        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::Hostname { .. })));
+        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::Shell { .. })));
+        // git/cwd/time are no longer in the default right cluster
+        assert!(c.status.right.iter().all(
+            |w| !matches!(w, WidgetSpec::GitBranch { .. } | WidgetSpec::Cwd { .. } | WidgetSpec::Time { .. })
+        ));
         assert!(c.status.left.iter().all(|w| !matches!(w, WidgetSpec::Text { value, .. } if value.trim().is_empty())));
     }
 }

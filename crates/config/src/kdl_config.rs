@@ -936,9 +936,10 @@ status {
         window-list { active-style fg="fg" bg="accent"; inactive-style fg="muted" bg="bg_bar" }
     }
     right {
-        git-branch { style fg="fg" bg="selection" }
-        cwd max-components=1 { style fg="fg" bg="bg_bar" }
-        time format="%H:%M" { style fg="bg" bg="accent" }
+        cpu-load { style fg="fg" bg="selection" }
+        battery { style fg="fg" bg="bg_bar" }
+        hostname { style fg="fg" bg="selection" }
+        shell command="bash" interval="30m" timeout="5s" { args "-c" "curl -sfL 'wttr.in/?format=%c+%t' | tr -d '+'"; style fg="bg" bg="accent" }
     }
 }
 
