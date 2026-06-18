@@ -43,6 +43,10 @@ is designed alongside Ghostty-style terminal integration.
   (running command → directory → shell) and updates live; an explicit or
   declared rename pins it. Toggle with `auto-rename #true|#false`
   ([reference](docs/configuration.md#auto-rename))
+- Configurable glyph tier: `glyphs "unicode"` (default, any font) /
+  `glyphs "nerd"` (Nerd Font icons + powerline separators) /
+  `glyphs "ascii"` (ASCII-only fallback)
+  ([reference](docs/configuration.md#glyphs))
 - KDL v2 configuration (`config.kdl`)
 - Declarative sessions: recursive `session → window → split/pane` layouts in
   the config, with per-pane commands and working directories, split ratios

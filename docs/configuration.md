@@ -516,6 +516,93 @@ The `blocks` node live-reloads with the config (`Ctrl+a R` /
 `plexy-glass reload`), same as `palette` and `status`. A reload that supplies
 new colors shows up on the next rendered frame.
 
+## `glyphs`
+
+```kdl
+glyphs "unicode"   // "unicode" (default) | "nerd" | "ascii"
+```
+
+Controls which glyph repertoire the status bar uses for icons and separators.
+Note that there is **no runtime font detection**, plexy-glass does not inspect
+which font your terminal is using, so you declare the tier that matches your
+setup.
+
+| Tier | What it means |
+|---|---|
+| `"unicode"` | Box-drawing characters and simple Unicode symbols. Renders on any font. **Default.** |
+| `"nerd"` | [Nerd Font](https://www.nerdfonts.com/) icons + powerline separators. Requires a Nerd Font patched font to be active in your terminal; unpatched fonts render these codepoints as tofu (☐). |
+| `"ascii"` | Lowest-common-denominator ASCII fallback. All icons are short text labels; no special characters. |
+
+### Icon table
+
+The icons each widget renders in each tier:
+
+| Role | `unicode` | `nerd` (codepoint) | `ascii` |
+|---|---|---|---|
+| Separator (left-cluster cap) | *(none)* | `` U+E0B0 | *(none)* |
+| Separator (right-cluster cap) | *(none)* | `` U+E0B2 | *(none)* |
+| `session` | `◆` U+25C6 | `` U+EBC8 | `*` |
+| `prefix-indicator` | `▲` U+25B2 | `` U+F4A1 | `^` |
+| `git-branch` | `⎇` U+2387 | `` U+E0A0 | `git:` |
+| `cwd` | `▸` U+25B8 | `` U+F07B | `>` |
+| `time` | `◷` U+25F7 | `` U+F017 | *(empty)* |
+| `cpu-load` | `λ` U+03BB | `` U+F2DB | `cpu:` |
+| `memory` | `≣` U+2263 | `` U+EFC5 | `mem:` |
+| `battery` | `▮` U+25AE | `` U+F240 | `bat:` |
+| `hostname` | `@` | `` U+F108 | `@` |
+| `attached-clients` | `^` | `` U+F0C0 | `cl:` |
+
+Icons lead each widget's content and are separated from it by a space in the
+rendered output. On the `ascii` tier, the `time` widget renders no prefix icon
+at all.
+
+### Powerline separators
+
+**Powerline separators are only inserted on the `nerd` tier.** On `unicode` and
+`ascii` tiers the left, middle, and right zones are plain flat segments with no
+arrows between widget groups.
+
+On the `nerd` tier, adjacent widget groups with different background colors get
+a powerline arrow between them, the filled-triangle chevron (`` / ``) that
+points in the direction of the cluster. A trailing cap is also added at the
+outer edge of the left cluster, and a leading cap at the outer edge of the
+right cluster.
+
+To use powerline separators, set `glyphs "nerd"` in your config and give your
+status-bar widget `style` nodes background colors. Widget groups that share a
+background color are joined directly, and the separator between them is
+omitted (it would be invisible anyway).
+
+### Worked example
+
+```kdl
+// ~/.config/plexy-glass/config.kdl  (Linux)
+// ~/Library/Application Support/plexy-glass/config.kdl  (macOS)
+
+glyphs "nerd"   // requires a Nerd Font in your terminal
+
+status {
+    left {
+        session { style fg="bg" bg="accent" bold=#true; padding 1 1 }
+        prefix-indicator content=" PFX " { style fg="bg" bg="highlight" bold=#true }
+    }
+    middle {
+        window-list {
+            active-style fg="fg" bg="accent" bold=#true
+            inactive-style fg="muted" bg="bg_bar"
+        }
+    }
+    right {
+        git-branch interval="10s" { style fg="ok" bg="bg_bar" }
+        cwd max-components=3 { style fg="fg" bg="bg_bar" }
+        time format="%H:%M" { style fg="fg" bg="bg_bar" }
+    }
+}
+```
+
+See [`auto-rename`](#auto-rename) for the companion setting that controls
+whether unpinned windows derive their name from the active pane.
+
 ## `auto-rename`
 
 ```kdl
