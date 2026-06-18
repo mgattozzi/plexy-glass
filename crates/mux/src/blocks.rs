@@ -401,6 +401,24 @@ pub fn pane_at_prompt(screen: &Screen) -> bool {
     !has_output_after
 }
 
+/// The command line of the block currently executing, or `None` when the pane
+/// is sitting at a prompt awaiting input (or has no integration at all).
+///
+/// "Running" means the newest `PROMPT_START` has output started after it
+/// (the inverse of [`pane_at_prompt`]); the running command is that newest
+/// prompt's command line ([`block_command_line`]). Note that this returns the
+/// FULL command line, and the caller takes the first token / basename for
+/// window naming.
+pub fn running_command(screen: &Screen) -> Option<String> {
+    if pane_at_prompt(screen) {
+        return None;
+    }
+    // The most recent prompt at/above the end of the line space owns the
+    // in-flight command. `prev_prompt_line` from beyond total scans everything.
+    let prompt = prev_prompt_line(screen, total_lines(screen))?;
+    block_command_line(screen, prompt)
+}
+
 /// Render the absolute-line range `(start, end)` (inclusive, scrollback rows
 /// included) as plain text: one line per row, trailing whitespace trimmed,
 /// trailing blank lines dropped (a block that ends at the bottom of the grid
@@ -1204,5 +1222,42 @@ mod tests {
     fn lcp_none_without_block_end() {
         let s = screen_from(4, 20, b"\x1b]133;A\x07$ running");
         assert_eq!(last_completed_prompt(&s), None);
+    }
+
+    // ── running_command tests ────────────────────────────────────────────────
+
+    /// A, B "cargo build", C (output started), no D → command is running.
+    #[test]
+    fn running_command_reports_in_flight_command() {
+        // Line 0: A, "$ " prompt, B (col 2), "cargo build"
+        // Line 1: C, output (command started, not yet finished)
+        let s = screen_from(
+            4,
+            20,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07cargo build\r\n\x1b]133;C\x07building",
+        );
+        assert_eq!(running_command(&s), Some("cargo build".to_string()));
+    }
+
+    /// Fresh prompt (A,C,D,A awaiting input) → None.
+    #[test]
+    fn running_command_none_when_at_prompt() {
+        // Full cycle then a fresh A: pane is at a prompt, nothing running.
+        let s = screen_from(
+            6,
+            20,
+            b"\x1b]133;A\x07$ first\r\n\
+              \x1b]133;C\x07output\r\n\
+              \x1b]133;D;0\x07\x1b]133;A\x07$ ",
+        );
+        assert_eq!(running_command(&s), None);
+    }
+
+    /// No OSC 133 integration at all → None (`pane_at_prompt` is false, but no
+    /// prompt exists to extract a command from).
+    #[test]
+    fn running_command_none_without_integration() {
+        let s = screen_from(4, 20, b"just plain output");
+        assert_eq!(running_command(&s), None);
     }
 }

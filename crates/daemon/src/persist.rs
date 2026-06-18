@@ -38,6 +38,12 @@ pub struct SessionStateV1 {
 pub struct WindowStateV1 {
     pub name: String,
     pub sync_input: bool,
+    /// Whether `name` is a derived placeholder (auto-rename). Absent in older
+    /// files, where `#[serde(default)]` fills it as `false`, i.e. pinned,
+    /// preserving today's behavior (every pre-feature window was effectively
+    /// pinned: declared/renamed names, or the foundational "shell" name).
+    #[serde(default)]
+    pub auto_named: bool,
     /// The window's home base (per-window cwd). Absent in older files, where
     /// `#[serde(default)]` fills it as `None`.
     #[serde(default)]
@@ -539,6 +545,7 @@ mod tests {
             active_window: 0,
             windows: vec![WindowStateV1 {
                 name: "shell".into(),
+                auto_named: false,
                 sync_input: false,
                 home_cwd: None,
                 active_pane: 0,
@@ -629,6 +636,31 @@ mod tests {
         assert_eq!(loaded.schema, SCHEMA_VERSION);
         assert_eq!(loaded.schema, 2, "saves write the current schema");
         assert_eq!(loaded.windows[0].panes[0].name.as_deref(), Some("logs"));
+    }
+
+    #[test]
+    fn auto_named_round_trips() {
+        let _g = isolate();
+        let mut s = sample_state("auto");
+        s.windows[0].auto_named = true;
+        save_session(&s).expect("save");
+        let loaded = load_session("auto").expect("load").expect("present");
+        assert!(loaded.windows[0].auto_named, "auto_named must survive save/load");
+    }
+
+    #[test]
+    fn missing_auto_named_defaults_to_pinned() {
+        let _g = isolate();
+        let dir = sessions_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file with no `auto_named` key on the window (older format).
+        std::fs::write(
+            dir.join("legacy.json"),
+            br#"{"schema":2,"name":"legacy","created":"2026-05-24T12:00:00Z","active_window":0,"windows":[{"name":"shell","sync_input":false,"active_pane":0,"panes":[{"cwd":"/tmp"}],"layout":{"Leaf":0}}]}"#,
+        )
+        .unwrap();
+        let loaded = load_session("legacy").expect("load").expect("present");
+        assert!(!loaded.windows[0].auto_named, "missing auto_named ⇒ false ⇒ pinned");
     }
 
     #[test]

@@ -57,10 +57,12 @@ impl WindowManager {
                 let mut spec = self.default_spec.clone();
                 let home = self.session_cwd.clone();
                 spec.cwd = home.clone();
-                let n = id.raw();
+                // Empty name → auto-named: the window derives its name from the
+                // active pane (running command → cwd → shell) until a manual
+                // rename pins it. See `Window::display_name`.
                 let mut window = Window::spawn_first(
                     id,
-                    format!("shell{n}"),
+                    String::new(),
                     first_pane,
                     spec,
                     viewport,

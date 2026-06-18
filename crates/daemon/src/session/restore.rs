@@ -76,6 +76,11 @@ impl Session {
                 if let Some(win) = wm.windows_mut().get_mut(i) {
                     win.sync_input = saved_w.sync_input;
                     win.home_cwd = saved_w.home_cwd.clone();
+                    // Authoritatively restore the persisted auto-named state.
+                    // The name was installed via set_window_name / new_window_
+                    // with_spec above (which pin); this re-enables auto for a
+                    // window whose persisted name is a derived placeholder.
+                    win.set_auto_named(saved_w.auto_named);
                     let leaves = win.layout().dfs_leaves();
                     // Restore user-assigned pane names by DFS index (the same
                     // order panes were serialized in).

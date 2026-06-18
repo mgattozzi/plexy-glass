@@ -948,30 +948,49 @@ fn custom_prefix_retargets_bindings() {
     let mut sess = TestSession::spawn(&env);
     assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
 
+    // Window count for a session from `list` output (the line's second
+    // whitespace-separated column). Interactively created windows are now
+    // auto-named from their pane (shell basename here, "sh"), so the old
+    // "shell1"/"shell2" name needles no longer apply. Assert on the window
+    // COUNT instead, which is unambiguous regardless of derived names.
+    let window_count = |name: &str| -> Option<usize> {
+        let (_, out, _) = run_cli(&env, &["list"]);
+        out.lines()
+            .find(|l| l.split_whitespace().next() == Some(name))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|c| c.parse().ok())
+    };
+    let poll_count = |name: &str, want: usize| -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if window_count(name) == Some(want) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+
     // Ctrl+b (0x02) then `c` → the inherited `prefix c` default fires
-    // new_window under the custom prefix. Observable: the status bar's
-    // window-list paints " {index} {name} " per window, and a window created
-    // interactively is named "shell{id}", so the second window is "shell1" (the
-    // first is "shell"). Match "shell1", not "2 shell1": the diff renderer can
-    // jump over unchanged blank cells, so the spaced form need not arrive as
-    // contiguous bytes, while a same-style word always does.
+    // new_window under the custom prefix. "main" grows from 1 to 2 windows.
     sess.send(&[0x02]);
     sess.send(b"c");
     assert!(
-        sess.wait_for(b"shell1", Duration::from_secs(10)),
+        poll_count("main", 2),
         "Ctrl+b c did not create a second window under prefix Ctrl+b. raw: {}",
         sess.snapshot_str()
     );
 
     // Negative: Ctrl+a (0x01) then `c`. With the prefix moved to Ctrl+b no
     // binding starts with Ctrl+a, so both keys pass through to the pane's
-    // shell and no third window ("shell2") may appear. Absence needs a
-    // liveness round-trip first, all through the SAME client writer so the
-    // bytes are strictly ordered after the chord: Ctrl+u (0x15) clears the
-    // literal "c" from the shell's line buffer, then a quote-concatenated
-    // marker proves the input path and renderer caught up. Had Ctrl+a c
-    // wrongly created a window, its status repaint would render before the
-    // marker's output does.
+    // shell and no third window may appear. Absence needs a liveness round-trip
+    // first, all through the SAME client writer so the bytes are strictly
+    // ordered after the chord: Ctrl+u (0x15) clears the literal "c" from the
+    // shell's line buffer, then a quote-concatenated marker proves the input
+    // path and renderer caught up. Had Ctrl+a c wrongly created a window, the
+    // window count would have grown before the marker's output appears.
     sess.send(&[0x01]);
     sess.send(b"c");
     sess.send(&[0x15]); // kill-line: discard the passed-through "c"
@@ -981,8 +1000,9 @@ fn custom_prefix_retargets_bindings() {
         "liveness marker never appeared after Ctrl+a c. raw: {}",
         sess.snapshot_str()
     );
-    assert!(
-        !sess.snapshot_str().contains("shell2"),
+    assert_eq!(
+        window_count("main"),
+        Some(2),
         "Ctrl+a c created a window despite prefix Ctrl+b. raw: {}",
         sess.snapshot_str()
     );
@@ -2110,11 +2130,31 @@ fn cross_window_swap_pane_exchanges_panes() {
         sess.snapshot_str()
     );
 
-    // Create window 2 (index 1, status bar shows "shell1").
+    // Create window 2 (index 1). Interactively created windows are now
+    // auto-named from their pane, so assert the window COUNT grew to 2 via
+    // `list` rather than matching a derived name.
     sess.send_prefix(b'c');
+    let two_windows = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (_, out, _) = run_cli(&env, &["list"]);
+            let count = out
+                .lines()
+                .find(|l| l.split_whitespace().next() == Some("main"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|c| c.parse::<usize>().ok());
+            if count == Some(2) {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
     assert!(
-        sess.wait_for(b"shell1", Duration::from_secs(10)),
-        "window 2 never appeared in status bar. raw: {}",
+        two_windows,
+        "window 2 never appeared. raw: {}",
         sess.snapshot_str()
     );
 

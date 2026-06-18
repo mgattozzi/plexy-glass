@@ -708,6 +708,7 @@ mod tests {
             active_window: 0,
             windows: vec![crate::persist::WindowStateV1 {
                 name: "w".into(),
+                auto_named: false,
                 sync_input: false,
                 home_cwd: None,
                 active_pane: 0,
@@ -779,6 +780,7 @@ mod tests {
             active_window: 0,
             windows: vec![crate::persist::WindowStateV1 {
                 name: "w".into(),
+                auto_named: false,
                 sync_input: false,
                 home_cwd: None,
                 active_pane: 0,
@@ -886,6 +888,7 @@ mod tests {
             active_window: 0,
             windows: vec![crate::persist::WindowStateV1 {
                 name: "stale".into(),
+                auto_named: false,
                 sync_input: false,
                 home_cwd: None,
                 active_pane: 0,

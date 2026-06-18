@@ -39,6 +39,10 @@ is designed alongside Ghostty-style terminal integration.
   `:monitor-command`), all surfaced as status-bar window-list flags and
   edge-triggered status-line alert messages
 - Configurable status bar with live config reload
+- Dynamic window names: an unnamed window derives its name from the active pane
+  (running command → directory → shell) and updates live; an explicit or
+  declared rename pins it. Toggle with `auto-rename #true|#false`
+  ([reference](docs/configuration.md#auto-rename))
 - KDL v2 configuration (`config.kdl`)
 - Declarative sessions: recursive `session → window → split/pane` layouts in
   the config, with per-pane commands and working directories, split ratios

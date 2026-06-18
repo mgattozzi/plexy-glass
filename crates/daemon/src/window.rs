@@ -21,6 +21,12 @@ const FOCUS_HISTORY_CAP: usize = 64;
 pub struct Window {
     pub id: WindowId,
     pub name: String,
+    /// When true, `name` is a derived placeholder and `display_name` recomputes
+    /// the live name from the active pane (running command → cwd → shell). Set
+    /// by `assemble` from an empty construction name (interactive windows pass
+    /// `String::new()`); cleared the moment the name is pinned by a manual
+    /// rename or a declared/restored real name. Persisted (`auto_named` DTO).
+    pub auto_named: bool,
     /// When true, input sent to the active pane is also broadcast to all other
     /// panes in this window (sync-panes mode). Defaults to false; toggled by
     /// `Command::ToggleSyncPanes`.
@@ -125,6 +131,7 @@ impl Window {
     ) -> Self {
         Self {
             id,
+            auto_named: name.is_empty(),
             name,
             sync_input: false,
             zoomed: None,
@@ -183,6 +190,62 @@ impl Window {
 
     pub fn active_pane(&self) -> Option<&Pane> {
         self.panes.get(&self.active)
+    }
+
+    /// Pin the window name: set it and disable auto-naming. The path for every
+    /// manual rename (overlay commit, command prompt, choose-tree rename).
+    pub fn set_manual_name(&mut self, name: String) {
+        self.name = name;
+        self.auto_named = false;
+    }
+
+    /// Restore the persisted auto-named state (session restore). Distinct from
+    /// `set_manual_name`: it does not touch `name` and may RE-enable auto for a
+    /// window whose persisted name is a placeholder.
+    pub fn set_auto_named(&mut self, auto: bool) {
+        self.auto_named = auto;
+    }
+
+    /// The name to display in the status bar / pickers. A pinned window
+    /// (manual rename or declared/restored real name) returns its `name`
+    /// verbatim. An auto-named window derives its name from the active pane:
+    /// when `auto_rename` is on, the layered chain (running command → cwd
+    /// basename → shell basename); when off, just the shell basename. Falls
+    /// back to the stored `name` if no pane is available.
+    pub fn display_name(&self, auto_rename: bool) -> String {
+        if !self.auto_named {
+            return self.name.clone();
+        }
+        if auto_rename
+            && let Some(n) = self.compute_auto_name()
+        {
+            return n;
+        }
+        self.shell_basename().unwrap_or_else(|| self.name.clone())
+    }
+
+    /// The derived name from the active pane: running command's first-token
+    /// basename → OSC-7 cwd basename → shell basename. `None` only when there
+    /// is no active pane.
+    fn compute_auto_name(&self) -> Option<String> {
+        let pane = self.active_pane()?;
+        if let Some(cmd) = pane.with_screen(plexy_glass_mux::blocks::running_command)
+            && let Some(tok) = cmd.split_whitespace().next()
+        {
+            return Some(basename(tok));
+        }
+        if let Some(cwd) = pane.with_screen(|s| s.cwd.clone()) {
+            return Some(basename(&cwd));
+        }
+        self.shell_basename()
+    }
+
+    /// Basename of the user's shell. There is no per-pane stored program name
+    /// (the `SpawnSpec` is consumed at spawn), so for the shell rung we read
+    /// `$SHELL` rather than add pane plumbing.
+    // ponytail: $SHELL basename, no new pane field for the rarely-hit shell rung.
+    fn shell_basename(&self) -> Option<String> {
+        std::env::var("SHELL").ok().map(|s| basename(&s))
     }
 
     pub fn pane(&self, id: PaneId) -> Option<&Pane> {
@@ -734,6 +797,17 @@ impl Window {
     }
 }
 
+/// The last path component of `path` (works for plain paths and `file://`
+/// OSC-7 URLs alike, since both end in the directory name we want). Trailing
+/// slashes are trimmed; a bare `/` (or empty) maps to `"/"`.
+fn basename(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rsplit('/').next() {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => "/".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,6 +827,69 @@ mod tests {
             env: vec![],
             cwd: None,
         }
+    }
+
+    /// An auto-named window (built with an empty name) derives a non-empty
+    /// name from its shell when nothing else is available; a manual rename
+    /// pins the name and makes it ignore the `auto_rename` toggle entirely.
+    #[tokio::test]
+    async fn display_name_prefers_manual_then_falls_back() {
+        // `isolate()` pins `SHELL=/bin/sh` so `shell_basename` is deterministic.
+        let _g = crate::test_env::isolate();
+        let viewport = Rect::new(0, 0, 24, 80);
+        let mut w = Window::spawn_first(
+            WindowId(0),
+            String::new(), // empty → auto-named
+            PaneId(0),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+            None,
+        )
+        .unwrap();
+        assert!(w.auto_named, "empty construction name → auto");
+        // No running command, no OSC-7 cwd on a /bin/cat pane → shell basename.
+        assert_eq!(w.display_name(true), "sh", "auto → shell basename");
+        assert_eq!(w.display_name(false), "sh", "auto_rename off → shell basename");
+        assert!(!w.display_name(true).is_empty());
+
+        w.set_manual_name("api".into());
+        assert!(!w.auto_named, "manual rename pins");
+        assert_eq!(w.display_name(true), "api");
+        assert_eq!(w.display_name(false), "api", "pinned ignores the toggle");
+    }
+
+    /// A window built with a real name is pinned from the start.
+    #[tokio::test]
+    async fn named_window_is_pinned() {
+        let viewport = Rect::new(0, 0, 24, 80);
+        let w = Window::spawn_first(
+            WindowId(0),
+            "logs".into(),
+            PaneId(0),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+            None,
+        )
+        .unwrap();
+        assert!(!w.auto_named, "non-empty construction name → pinned");
+        assert_eq!(w.display_name(true), "logs");
+    }
+
+    #[test]
+    fn basename_handles_paths_and_urls() {
+        assert_eq!(basename("/Users/michael/p/api"), "api");
+        assert_eq!(basename("file:///Users/michael/p/api"), "api");
+        assert_eq!(basename("/Users/michael/p/api/"), "api");
+        assert_eq!(basename("/usr/bin/zsh"), "zsh");
+        assert_eq!(basename("/"), "/");
+        assert_eq!(basename(""), "/");
+        assert_eq!(basename("plain"), "plain");
     }
 
     #[tokio::test]

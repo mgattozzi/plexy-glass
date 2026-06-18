@@ -516,6 +516,35 @@ The `blocks` node live-reloads with the config (`Ctrl+a R` /
 `plexy-glass reload`), same as `palette` and `status`. A reload that supplies
 new colors shows up on the next rendered frame.
 
+## `auto-rename`
+
+```kdl
+auto-rename #true   // default; #false pins names to their literal value
+```
+
+When `#true` (the default), a window whose name was *not* set explicitly is
+**derived** from its active pane and updates live. The name is the first of:
+
+1. the **running command**: the first word of the command currently executing
+   in the active pane (basename only, e.g. `/usr/bin/cargo build` → `cargo`),
+   detected via OSC 133 shell integration;
+2. the **current directory**: the basename of the active pane's working
+   directory (OSC 7), e.g. `~/projects/api` → `api`;
+3. the **shell**: the basename of `$SHELL` (e.g. `sh`, `zsh`), as a fallback.
+
+A window's name is **pinned** (and the toggle no longer affects it) the moment
+it is given a real name, either by an explicit `:rename-window` / `Ctrl+a ,`
+rename or by a declared `window "name" { … }` in a `session` node. Pinned
+names are shown verbatim regardless of `auto-rename`.
+
+With `auto-rename #false`, an unnamed window simply shows its shell basename and
+never tracks the running command or directory.
+
+The pinned/auto state is persisted with the session, so a derived-name window
+restored after a daemon restart keeps deriving its name (a renamed window stays
+pinned). `auto-rename` is read fresh on every status-bar render, so toggling it
+via reload (`Ctrl+a R` / `plexy-glass reload`) takes effect immediately.
+
 ## `session` — declarative sessions
 
 `session` nodes declare sessions that the daemon builds fresh at boot. For a

@@ -288,6 +288,10 @@ impl WindowManager {
         // after the loop. The status line is a single slot, so on simultaneous
         // edges the LAST message wins (accepted, same as any rapid succession).
         let mut message: Option<String> = None;
+        // Auto-named windows have an empty structural `name`; alert messages
+        // must show the DERIVED name, so read the toggle once before the loop
+        // (the loop borrows `self.windows` mutably).
+        let auto_rename = self.config.auto_rename;
         for (i, w) in self.windows.iter_mut().enumerate() {
             let (acted, belled) = w.drain_pane_alerts();
             // Silence-timing bookkeeping updates every drain for every window
@@ -303,15 +307,18 @@ impl WindowManager {
                 w.clear_alerts();
             } else {
                 if acted && w.monitor_activity() && w.set_activity() {
-                    message = Some(format!("activity in window {} ({})", i + 1, w.name));
+                    message =
+                        Some(format!("activity in window {} ({})", i + 1, w.display_name(auto_rename)));
                 }
                 if belled && w.monitor_bell() && w.set_bell() {
-                    message = Some(format!("bell in window {} ({})", i + 1, w.name));
+                    message =
+                        Some(format!("bell in window {} ({})", i + 1, w.display_name(auto_rename)));
                 }
                 if let Some(exit) = done_edge {
+                    let name = w.display_name(auto_rename);
                     message = Some(match exit {
-                        Some(code) => format!("done in window {} ({}): exit {code}", i + 1, w.name),
-                        None => format!("done in window {} ({})", i + 1, w.name),
+                        Some(code) => format!("done in window {} ({name}): exit {code}", i + 1),
+                        None => format!("done in window {} ({name})", i + 1),
                     });
                 }
             }
@@ -343,12 +350,14 @@ impl WindowManager {
         let active = self.active;
         let now = Instant::now();
         let mut message: Option<String> = None;
+        let auto_rename = self.config.auto_rename;
         for (i, w) in self.windows.iter_mut().enumerate() {
             if i == active {
                 continue;
             }
             if w.check_silence(now) {
-                message = Some(format!("silence in window {} ({})", i + 1, w.name));
+                message =
+                    Some(format!("silence in window {} ({})", i + 1, w.display_name(auto_rename)));
             }
         }
         if let Some(text) = message {
@@ -476,9 +485,12 @@ impl WindowManager {
         )
     }
 
+    /// Pin a window's name (manual rename). Restore also calls this to install
+    /// the persisted name, then re-applies the saved `auto_named` afterward, so
+    /// pinning here does not clobber a restored auto-named window.
     pub fn set_window_name(&mut self, window_idx: usize, name: String) {
         if let Some(w) = self.windows.get_mut(window_idx) {
-            w.name = name;
+            w.set_manual_name(name);
         }
     }
 
@@ -687,7 +699,7 @@ impl WindowManager {
         let Some(w) = self.windows.iter_mut().find(|w| w.id == id) else {
             return false;
         };
-        w.name = name;
+        w.set_manual_name(name);
         true
     }
 

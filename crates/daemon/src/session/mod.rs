@@ -176,7 +176,10 @@ impl Session {
                     .map(|i| i as u32)
                     .unwrap_or(0);
                 WindowStateV1 {
+                    // Persist the STRUCTURAL name (the placeholder for an
+                    // auto-named window), not the derived display name.
                     name: w.name.clone(),
+                    auto_named: w.auto_named,
                     sync_input: w.sync_input,
                     home_cwd: w.home_cwd.clone(),
                     active_pane,
@@ -469,7 +472,9 @@ impl Session {
                     .iter()
                     .map(|id| (*id, w.pane(*id).and_then(|p| p.name())))
                     .collect();
-                WindowTree { id: w.id, name: w.name.clone(), active_pane: w.active(), panes }
+                // The picker shows the live derived name (auto-rename on); a
+                // pinned window returns its name verbatim regardless.
+                WindowTree { id: w.id, name: w.display_name(true), active_pane: w.active(), panes }
             })
             .collect();
         SessionTree { name: self.name(), active_window, total_panes, windows }
@@ -1391,11 +1396,12 @@ async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::Snaps
     let session_name = session.name();
     let attached_clients = session.clients.lock().await.len() as u8;
     let active_idx = manager.active_idx();
+    let auto_rename = session.config_snapshot().auto_rename;
     let windows: Vec<plexy_glass_status::WindowSummary> = manager
         .windows()
         .iter()
         .map(|w| plexy_glass_status::WindowSummary {
-            name: w.name.clone(),
+            name: w.display_name(auto_rename),
             // Read the sticky flags maintained by the coordinator's
             // update_monitor_flags; the tick task is not the drainer.
             activity: w.activity_flag(),
@@ -2559,6 +2565,7 @@ mod tests {
             active_window: 0,
             windows: vec![WindowStateV1 {
                 name: "w".into(),
+                auto_named: false,
                 sync_input: false,
                 home_cwd: None,
                 active_pane: 0,
@@ -2658,6 +2665,7 @@ mod tests {
             active_window: 0,
             windows: vec![WindowStateV1 {
                 name: "w".into(),
+                auto_named: false,
                 sync_input: false,
                 home_cwd: Some("/tmp".into()),
                 active_pane: 0,
