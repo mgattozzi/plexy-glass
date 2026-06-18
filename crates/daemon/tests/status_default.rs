@@ -1,5 +1,7 @@
-//! The built-in default config renders a frame with the session name in the status row.
+//! The built-in default config renders a frame with the session name in the status row,
+//! and uses the lean divider-free segment set (`GitBranch` / `Cwd` / `Time` on the right).
 
+use plexy_glass_config::WidgetSpec;
 use plexy_glass_daemon::Session;
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
@@ -53,4 +55,53 @@ async fn default_status_includes_session_name() {
         return;
     }
     assert!(row_text.contains("demo"));
+}
+
+#[test]
+fn default_right_cluster_is_git_cwd_time_no_dividers() {
+    let cfg = plexy_glass_config::built_in_default();
+
+    // New lean right cluster: `GitBranch`, `Cwd`, `Time`, and no `Text` dividers.
+    assert!(
+        cfg.status.right.iter().all(|w| !matches!(w, WidgetSpec::Text { .. })),
+        "right cluster must not contain Text dividers"
+    );
+    assert!(
+        cfg.status.right.iter().any(|w| matches!(w, WidgetSpec::GitBranch { .. })),
+        "right cluster must include GitBranch"
+    );
+    assert!(
+        cfg.status.right.iter().any(|w| matches!(w, WidgetSpec::Cwd { .. })),
+        "right cluster must include Cwd"
+    );
+    assert!(
+        cfg.status.right.iter().any(|w| matches!(w, WidgetSpec::Time { .. })),
+        "right cluster must include Time"
+    );
+
+    // Dropped widgets must not appear in the default right cluster.
+    assert!(
+        cfg.status.right.iter().all(|w| !matches!(w, WidgetSpec::CpuLoad { .. })),
+        "CpuLoad removed from default right cluster"
+    );
+    assert!(
+        cfg.status.right.iter().all(|w| !matches!(w, WidgetSpec::Battery { .. })),
+        "Battery removed from default right cluster"
+    );
+    assert!(
+        cfg.status.right.iter().all(|w| !matches!(w, WidgetSpec::AttachedClients { .. })),
+        "AttachedClients removed from default right cluster"
+    );
+
+    // Left cluster must not contain blank `Text` spacers.
+    assert!(
+        cfg.status.left.iter().all(|w| !matches!(w, WidgetSpec::Text { value, .. } if value.trim().is_empty())),
+        "left cluster must not contain blank Text spacers"
+    );
+
+    // The `Cwd` widget must use `max_components: Some(1)` so the display stays compact.
+    assert!(
+        cfg.status.right.iter().any(|w| matches!(w, WidgetSpec::Cwd { max_components: Some(1), .. })),
+        "Cwd must have max_components: Some(1)"
+    );
 }

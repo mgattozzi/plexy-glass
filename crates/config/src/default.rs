@@ -68,10 +68,6 @@ pub fn built_in_default() -> Config {
                     },
                     content: " PFX ".into(),
                 },
-                WidgetSpec::Text {
-                    value: " ".into(),
-                    style: StyleConfig::default(),
-                },
             ],
             middle: vec![WidgetSpec::WindowList {
                 active_style: StyleConfig {
@@ -86,70 +82,30 @@ pub fn built_in_default() -> Config {
                 },
             }],
             right: vec![
-                WidgetSpec::AttachedClients {
+                WidgetSpec::GitBranch {
                     style: StyleConfig {
                         fg: Some("fg".into()),
-                        bg: Some("bg_bar".into()),
-                        ..Default::default()
-                    },
-                    min_count: 2,
-                },
-                WidgetSpec::Text {
-                    value: "  ".into(),
-                    style: StyleConfig {
-                        fg: Some("muted".into()),
-                        bg: Some("bg_bar".into()),
-                        ..Default::default()
-                    },
-                },
-                WidgetSpec::CpuLoad {
-                    style: StyleConfig {
-                        fg: Some("fg".into()),
-                        bg: Some("bg_bar".into()),
+                        bg: Some("selection".into()),
                         ..Default::default()
                     },
                     interval: None,
                 },
-                WidgetSpec::Text {
-                    value: " | ".into(),
-                    style: StyleConfig {
-                        fg: Some("muted".into()),
-                        bg: Some("bg_bar".into()),
-                        ..Default::default()
-                    },
-                },
-                WidgetSpec::Battery {
+                WidgetSpec::Cwd {
                     style: StyleConfig {
                         fg: Some("fg".into()),
                         bg: Some("bg_bar".into()),
                         ..Default::default()
                     },
-                    interval: None,
-                },
-                WidgetSpec::Text {
-                    value: " | ".into(),
-                    style: StyleConfig {
-                        fg: Some("muted".into()),
-                        bg: Some("bg_bar".into()),
-                        ..Default::default()
-                    },
+                    max_components: Some(1),
                 },
                 WidgetSpec::Time {
                     style: StyleConfig {
-                        fg: Some("fg".into()),
-                        bg: Some("bg_bar".into()),
+                        fg: Some("bg".into()),
+                        bg: Some("accent".into()),
                         ..Default::default()
                     },
                     format: "%H:%M".into(),
                     interval: None,
-                },
-                WidgetSpec::Text {
-                    value: " ".into(),
-                    style: StyleConfig {
-                        fg: Some("muted".into()),
-                        bg: Some("bg_bar".into()),
-                        ..Default::default()
-                    },
                 },
             ],
         },
@@ -222,5 +178,21 @@ fn binding(keys: &str, command: &str) -> KeymapBinding {
     KeymapBinding {
         keys: keys.into(),
         command: command.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_status_is_lean_and_divider_free() {
+        let c = built_in_default();
+        // right cluster: GitBranch, Cwd, Time, no Text dividers
+        assert!(c.status.right.iter().all(|w| !matches!(w, WidgetSpec::Text { .. })));
+        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::GitBranch { .. })));
+        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::Cwd { .. })));
+        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::Time { .. })));
+        assert!(c.status.left.iter().all(|w| !matches!(w, WidgetSpec::Text { value, .. } if value.trim().is_empty())));
     }
 }

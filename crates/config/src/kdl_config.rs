@@ -931,20 +931,14 @@ status {
     left {
         session { style fg="bg" bg="accent" bold=#true; padding 1 1 }
         prefix-indicator content=" PFX " { style fg="bg" bg="highlight" bold=#true }
-        text value=" "
     }
     middle {
         window-list { active-style fg="fg" bg="accent"; inactive-style fg="muted" bg="bg_bar" }
     }
     right {
-        attached-clients min-count=2 { style fg="fg" bg="bg_bar" }
-        text value="  " { style fg="muted" bg="bg_bar" }
-        cpu-load { style fg="fg" bg="bg_bar" }
-        text value=" | " { style fg="muted" bg="bg_bar" }
-        battery { style fg="fg" bg="bg_bar" }
-        text value=" | " { style fg="muted" bg="bg_bar" }
-        time format="%H:%M" { style fg="fg" bg="bg_bar" }
-        text value=" " { style fg="muted" bg="bg_bar" }
+        git-branch { style fg="fg" bg="selection" }
+        cwd max-components=1 { style fg="fg" bg="bg_bar" }
+        time format="%H:%M" { style fg="bg" bg="accent" }
     }
 }
 
@@ -1067,8 +1061,8 @@ keymap {
 
     #[test]
     fn separator_is_supported_but_not_in_default() {
-        // Separator decodes (default char '|'), even though built_in_default uses
-        // `text " | "` for the bars instead.
+        // Separator decodes (default char '|'); the built-in default uses no
+        // dividers at all (lean divider-free right cluster).
         let cfg = parse_config(r##"status { right { separator char="*" } }"##).unwrap();
         match &cfg.status.right[0] {
             WidgetSpec::Separator { char, .. } => assert_eq!(*char, '*'),
