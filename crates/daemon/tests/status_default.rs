@@ -1,6 +1,6 @@
 //! The built-in default config renders a frame with the session name in the status row,
-//! and uses the lean divider-free segment set (`CpuLoad` / `Battery` / `Hostname` / weather
-//! on the right).
+//! and uses the lean divider-free segment set (`CpuLoad` / `Battery` / `Hostname` / clock
+//! on the right; weather is opt-in, not shipped, because it makes a network call).
 
 use plexy_glass_config::WidgetSpec;
 use plexy_glass_daemon::Session;
@@ -59,7 +59,7 @@ async fn default_status_includes_session_name() {
 }
 
 #[test]
-fn default_right_cluster_is_cpu_battery_host_weather() {
+fn default_right_cluster_is_cpu_battery_host_clock() {
     let cfg = plexy_glass_config::built_in_default();
 
     // New lean right cluster: `CpuLoad`, `Battery`, `Hostname`, `Shell(weather)`, and no
@@ -81,17 +81,18 @@ fn default_right_cluster_is_cpu_battery_host_weather() {
         "right cluster must include Hostname"
     );
     assert!(
-        cfg.status.right.iter().any(|w| matches!(w, WidgetSpec::Shell { .. })),
-        "right cluster must include the Shell weather widget"
+        cfg.status.right.iter().any(|w| matches!(w, WidgetSpec::Time { .. })),
+        "right cluster must end with a clock"
     );
 
-    // git/cwd/time are no longer in the default right cluster.
+    // git/cwd/weather are not in the shipped default right cluster (weather is a
+    // network widget, so it's opt in via your own config).
     assert!(
         cfg.status.right.iter().all(|w| !matches!(
             w,
-            WidgetSpec::GitBranch { .. } | WidgetSpec::Cwd { .. } | WidgetSpec::Time { .. }
+            WidgetSpec::GitBranch { .. } | WidgetSpec::Cwd { .. } | WidgetSpec::Shell { .. }
         )),
-        "GitBranch/Cwd/Time removed from default right cluster"
+        "GitBranch/Cwd/Shell(weather) not in default right cluster"
     );
 
     // Left cluster must not contain blank `Text` spacers.

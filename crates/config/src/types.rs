@@ -149,6 +149,8 @@ pub enum WidgetSpec {
         format: String,
         interval: Option<Duration>,
         style: StyleConfig,
+        /// Format in UTC (so `%Z` renders `UTC`) instead of the local timezone.
+        utc: bool,
     },
     Hostname {
         style: StyleConfig,

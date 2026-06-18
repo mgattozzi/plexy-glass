@@ -8,6 +8,9 @@ pub struct TimeWidget {
     pub interval: Option<Duration>,
     pub style: ResolvedStyle,
     pub icon: SmolStr,
+    /// When true, format the time in UTC (so `%Z` renders `UTC`); otherwise
+    /// the local timezone.
+    pub utc: bool,
 }
 
 #[async_trait]
@@ -17,16 +20,24 @@ impl Widget for TimeWidget {
     }
     async fn evaluate(&mut self, _ctx: &EvalContext<'_>) -> StyledText {
         use std::fmt::Write as _;
-        let now = chrono::Local::now();
         // chrono's `Display` returns `Err` on a malformed format specifier;
         // `.to_string()` would then panic ("a Display implementation returned an
         // error unexpectedly") and kill the spawned status tick task, silently
         // freezing the bar. A user `time format="…"` is unvalidated config, so
-        // degrade to a safe default on error instead of panicking.
+        // degrade to a safe default on error instead of panicking. `format_now`
+        // closes over the chosen clock (UTC or local) so both the primary and
+        // fallback formats use the same one.
+        let format_now = |fmt: &str, out: &mut String| -> std::fmt::Result {
+            if self.utc {
+                write!(out, "{}", chrono::Utc::now().format(fmt))
+            } else {
+                write!(out, "{}", chrono::Local::now().format(fmt))
+            }
+        };
         let mut body = String::new();
-        if write!(body, "{}", now.format(&self.format)).is_err() {
+        if format_now(&self.format, &mut body).is_err() {
             body.clear();
-            let _ = write!(body, "{}", now.format("%H:%M"));
+            let _ = format_now("%H:%M", &mut body);
         }
         let text = if self.icon.is_empty() {
             body
@@ -62,6 +73,7 @@ mod tests {
             interval: None,
             style: ResolvedStyle::default(),
             icon: SmolStr::new("\u{25f7}"), // unicode clock
+            utc: false,
         };
         let out = w.evaluate(&ctx_empty()).await;
         let text: String = out.segments.iter().map(|s| s.text.as_str()).collect();
@@ -75,6 +87,7 @@ mod tests {
             interval: None,
             style: ResolvedStyle::default(),
             icon: SmolStr::new(""),
+            utc: false,
         };
         let out = w.evaluate(&ctx_empty()).await;
         assert!(!out.segments[0].text.is_empty());
@@ -91,10 +104,26 @@ mod tests {
             interval: None,
             style: ResolvedStyle::default(),
             icon: SmolStr::new(""),
+            utc: false,
         };
         let out = w.evaluate(&ctx_empty()).await;
         // Fallback "%H:%M" -> "12:34".
         assert_eq!(out.segments[0].text.len(), 5);
         assert!(out.segments[0].text.contains(':'));
+    }
+
+    #[tokio::test]
+    async fn time_utc_renders_utc_timezone() {
+        let mut w = TimeWidget {
+            format: "%H:%M %Z".to_string(),
+            interval: None,
+            style: ResolvedStyle::default(),
+            icon: SmolStr::new(""),
+            utc: true,
+        };
+        let out = w.evaluate(&ctx_empty()).await;
+        let text = out.segments[0].text.as_str();
+        assert!(text.contains("UTC"), "UTC clock %Z must render `UTC`: {text:?}");
+        assert!(text.contains(':'), "24h time present: {text:?}");
     }
 }

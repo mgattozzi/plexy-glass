@@ -708,12 +708,13 @@ fn decode_widget(node: &KdlNode, src: &str) -> Result<WidgetSpec, ConfigError> {
             }
         }
         "time" => {
-            ensure_only_props(node, &["format", "interval"], src)?;
+            ensure_only_props(node, &["format", "interval", "utc"], src)?;
             ensure_only_children(node, &["style"], src)?;
             WidgetSpec::Time {
                 format: prop_str(node, "format").unwrap_or("%H:%M").to_string(),
                 interval: prop_dur(node, "interval", src)?,
                 style: opt_style(node, "style", src)?,
+                utc: bool_prop(node, "utc", src)?.unwrap_or(false),
             }
         }
         "hostname" => {
@@ -939,7 +940,7 @@ status {
         cpu-load { style fg="fg" bg="selection" }
         battery { style fg="fg" bg="bg_bar" }
         hostname { style fg="fg" bg="selection" }
-        shell command="bash" interval="30m" timeout="5s" { args "-c" "curl -sfL 'wttr.in/?format=%c+%t' | tr -d '+'"; style fg="bg" bg="accent" }
+        time format="%H:%M UTC%:z" { style fg="fg" bg="bg_bar" }
     }
 }
 

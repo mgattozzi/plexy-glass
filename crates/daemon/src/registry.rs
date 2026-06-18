@@ -539,15 +539,16 @@ mod tests {
         let _g = crate::test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
         let s = r.create("test".into(), spec(), size(), cfg()).await.unwrap();
-        let cfg_before = s.config_snapshot();
-        // Reload (will re-read from real XDG path; in tests this just returns
-        // the built-in default).
+        // Reload re-reads from disk via `load_or_default()` (the platform config
+        // dir). `isolate()` only sandboxes the state dir, not the HOME-derived
+        // config path, so a developer with a real `config.kdl` (custom status
+        // bar) would otherwise fail here. Compare the swapped-in config to a
+        // fresh load of the same source, which is what reload actually installs.
         r.reload_config().await.unwrap();
         let cfg_after = s.config_snapshot();
-        // Both should be `Arc::clone`s of a default `Config`, so pointer
-        // equality won't hold but structural equality should.
-        assert_eq!(cfg_before.status.left.len(), cfg_after.status.left.len());
-        assert_eq!(cfg_before.status.right.len(), cfg_after.status.right.len());
+        let (expected, _) = plexy_glass_config::load_or_default();
+        assert_eq!(cfg_after.status.left.len(), expected.status.left.len());
+        assert_eq!(cfg_after.status.right.len(), expected.status.right.len());
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -100,11 +100,12 @@ fn build_slot(spec: &WidgetSpec, palette: &PaletteConfig, glyphs: &GlyphSet) -> 
             min_count: *min_count,
             icon: SmolStr::new(glyphs.clients),
         }),
-        WidgetSpec::Time { format, interval, style } => Box::new(TimeWidget {
+        WidgetSpec::Time { format, interval, style, utc } => Box::new(TimeWidget {
             format: format.clone(),
             interval: *interval,
             style: resolve_style(style, palette),
             icon: SmolStr::new(glyphs.clock),
+            utc: *utc,
         }),
         WidgetSpec::Hostname { style, interval } => {
             Box::new(HostnameWidget::new(

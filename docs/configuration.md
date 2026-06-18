@@ -222,11 +222,13 @@ attached-clients min-count=2 { style fg="fg" bg="bg_bar" }
 
 #### `time`
 
-The local time. `format` is a string in `strftime` syntax (default `"%H:%M"`);
-`interval` is an optional duration; `style` optional.
+The current time. `format` is a string in `strftime` syntax (default `"%H:%M"`);
+`interval` is an optional duration; `style` optional. `utc=#true` formats in UTC
+(so `%Z` renders `UTC`) instead of the local timezone.
 
 ```kdl
 time format="%a %H:%M" interval="30s" { style fg="fg" bg="bg_bar" }
+time format="%H:%M %Z" utc=#true { style fg="fg" bg="bg_bar" }   // 14:32 UTC
 ```
 
 #### `hostname`
@@ -593,24 +595,30 @@ status {
         }
     }
     right {
-        // This mirrors the built-in default right cluster.
+        // The shipped default right cluster (offline, stable width).
         cpu-load { style fg="fg" bg="selection" }
         battery { style fg="fg" bg="bg_bar" }
         hostname { style fg="fg" bg="selection" }
-        // Weather via a self-contained wttr.in curl — the condition icon + temperature,
-        // metric (append `&u` to the format for °F). No API key, no external script.
+        // Optional weather (NOT shipped by default — it makes a network call):
+        // self-contained wttr.in curl with condition icon, temperature, and the
+        // IP-resolved city. `&u` selects °F (drop it for °C); no API key.
         shell command="bash" interval="30m" timeout="5s" {
-            args "-c" "curl -sfL 'wttr.in/?format=%c+%t' | tr -d '+'"
+            args "-c" "curl -sfL 'wttr.in/?format=%c+%t+%l&u' | tr -d '+'"
             style fg="bg" bg="accent"
         }
+        // Far-right clock: 24-hour LOCAL time with the location's UTC offset
+        // (e.g. `14:42 UTC-04:00`). Use `utc=#true` for absolute UTC instead.
+        time format="%H:%M UTC%:z" { style fg="fg" bg="bg_bar" }
     }
 }
 ```
 
-> Note that the built-in default right cluster is CPU · battery · hostname ·
-> weather, and the weather segment makes a periodic outbound network request
-> to `wttr.in`, which infers your location from your IP. Replace or remove
-> the `shell` widget if you'd rather not.
+> The built-in default right cluster is **CPU · battery · hostname · clock** (the
+> clock shows local time plus the location's UTC offset). We deliberately don't
+> ship weather by default because the `shell` widget makes a periodic outbound
+> request to `wttr.in` (which infers your location from your IP), so add it
+> yourself as shown above. Widget groups get a space of internal padding on
+> each side so content doesn't crowd the powerline arrows.
 
 See [`auto-rename`](#auto-rename) for the companion setting that controls
 whether unpinned windows derive their name from the active pane.

@@ -106,25 +106,20 @@ pub fn built_in_default() -> Config {
                     },
                     interval: None,
                 },
-                // Weather: a self-contained wttr.in curl (no external script), the
-                // portable essence of the tmux-kanagawa weather.sh: condition icon
-                // + temperature, `+` stripped like the original. Metric, matching
-                // the kanagawa default (show-fahrenheit=false); append `&u` to the
-                // format for °F. Refreshed every 30m, 5s timeout so a slow network
-                // never stalls the bar.
-                WidgetSpec::Shell {
-                    command: "bash".into(),
-                    args: vec![
-                        "-c".into(),
-                        "curl -sfL 'wttr.in/?format=%c+%t' | tr -d '+'".into(),
-                    ],
-                    interval: Some(Duration::from_secs(1800)),
-                    timeout: Duration::from_secs(5),
+                // Far-right clock: 24-hour LOCAL time annotated with the location's
+                // UTC offset (e.g. `14:42 UTC-04:00`). `Local` uses the host TZ, no
+                // network. Weather is intentionally NOT a shipped default: it makes a
+                // network call (flaky/slow in tests) and varies in width; add a
+                // `shell` widget in your own config, see docs/configuration.md.
+                WidgetSpec::Time {
+                    format: "%H:%M UTC%:z".into(),
+                    interval: None,
                     style: StyleConfig {
-                        fg: Some("bg".into()),
-                        bg: Some("accent".into()),
+                        fg: Some("fg".into()),
+                        bg: Some("bg_bar".into()),
                         ..Default::default()
                     },
+                    utc: false,
                 },
             ],
         },
@@ -212,10 +207,12 @@ mod tests {
         assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::CpuLoad { .. })));
         assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::Battery { .. })));
         assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::Hostname { .. })));
-        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::Shell { .. })));
-        // git/cwd/time are no longer in the default right cluster
+        // far-right clock present
+        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::Time { .. })));
+        // git/cwd/weather are not in the shipped default right cluster
+        // (weather is a network widget, opt in via your own config)
         assert!(c.status.right.iter().all(
-            |w| !matches!(w, WidgetSpec::GitBranch { .. } | WidgetSpec::Cwd { .. } | WidgetSpec::Time { .. })
+            |w| !matches!(w, WidgetSpec::GitBranch { .. } | WidgetSpec::Cwd { .. } | WidgetSpec::Shell { .. })
         ));
         assert!(c.status.left.iter().all(|w| !matches!(w, WidgetSpec::Text { value, .. } if value.trim().is_empty())));
     }

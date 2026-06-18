@@ -19,9 +19,27 @@ pub fn powerline_zone(
     cluster: Cluster,
     glyphs: &GlyphSet,
 ) -> Vec<Segment> {
+    // One space of internal padding on each side of every widget group, carrying
+    // the group's edge background, so content doesn't crowd the powerline arrows
+    // (or abut its neighbours on the flat tiers).
+    fn pad_group(g: Vec<Segment>) -> Vec<Segment> {
+        let space = |bg| Segment {
+            text: " ".into(),
+            style: ResolvedStyle { bg, ..Default::default() },
+            click_action: None,
+        };
+        let lead = g.first().and_then(|s| s.style.bg);
+        let trail = g.last().and_then(|s| s.style.bg);
+        let mut out = Vec::with_capacity(g.len() + 2);
+        out.push(space(lead));
+        out.extend(g);
+        out.push(space(trail));
+        out
+    }
     let groups: Vec<Vec<Segment>> = widgets
         .into_iter()
         .filter(|g| g.iter().any(|s| !s.text.is_empty()))
+        .map(pad_group)
         .collect();
     if !glyphs.powerline {
         return groups.into_iter().flatten().collect();
@@ -191,7 +209,10 @@ mod tests {
         let zone = vec![vec![seg("a", None)], vec![seg("b", None)]];
         let out = powerline_zone(zone, Cluster::Left, &GlyphSet::UNICODE);
         let joined: String = out.iter().map(|s| s.text.as_str()).collect();
-        assert_eq!(joined, "ab"); // no separators
+        // No powerline arrows on a flat tier; each group keeps a space of
+        // padding on each side.
+        assert_eq!(joined, " a  b ");
+        assert!(!out.iter().any(|s| s.text == GlyphSet::NERD.sep_right));
     }
 
     #[test]
@@ -200,15 +221,16 @@ mod tests {
         let b = rgb(20, 20, 20);
         let zone = vec![vec![seg("a", Some(a))], vec![seg("b", Some(b))]];
         let out = powerline_zone(zone, Cluster::Left, &GlyphSet::NERD);
-        // a, (fg=a bg=b), b, then trailing cap (fg=b bg=None)
-        assert_eq!(out[0].text, "a");
-        assert_eq!(out[1].text, GlyphSet::NERD.sep_right);
-        assert_eq!(out[1].style.fg, Some(a));
-        assert_eq!(out[1].style.bg, Some(b));
-        assert_eq!(out[2].text, "b");
-        assert_eq!(out[3].text, GlyphSet::NERD.sep_right); // trailing cap
-        assert_eq!(out[3].style.fg, Some(b));
-        assert_eq!(out[3].style.bg, None);
+        assert!(out.iter().any(|s| s.text == "a"));
+        assert!(out.iter().any(|s| s.text == "b"));
+        // Two right-arrows in order: the inter-group transition (fg=a bg=b) and
+        // the trailing cap into the bar bg (fg=b bg=None).
+        let seps: Vec<_> = out.iter().filter(|s| s.text == GlyphSet::NERD.sep_right).collect();
+        assert_eq!(seps.len(), 2);
+        assert_eq!(seps[0].style.fg, Some(a));
+        assert_eq!(seps[0].style.bg, Some(b));
+        assert_eq!(seps[1].style.fg, Some(b));
+        assert_eq!(seps[1].style.bg, None);
     }
 
     #[test]
@@ -217,15 +239,28 @@ mod tests {
         let b = rgb(20, 20, 20);
         let zone = vec![vec![seg("a", Some(a))], vec![seg("b", Some(b))]];
         let out = powerline_zone(zone, Cluster::Right, &GlyphSet::NERD);
-        // leading cap (fg=A bg=None), "a", inter-group sep (fg=B bg=A), "b"
-        assert_eq!(out.len(), 4);
-        assert_eq!(out[0].text, GlyphSet::NERD.sep_left); // leading cap from bar bg
-        assert_eq!(out[0].style.fg, Some(a));
-        assert_eq!(out[0].style.bg, None);
-        assert_eq!(out[1].text, "a");
-        assert_eq!(out[2].text, GlyphSet::NERD.sep_left); // inter-group: fg=cur(B), bg=prev(A)
-        assert_eq!(out[2].style.fg, Some(b));
-        assert_eq!(out[2].style.bg, Some(a));
-        assert_eq!(out[3].text, "b");
+        assert!(out.iter().any(|s| s.text == "a"));
+        assert!(out.iter().any(|s| s.text == "b"));
+        // Two left-arrows in order: the leading cap from the bar bg (fg=a
+        // bg=None) and the inter-group transition (fg=cur b, bg=prev a).
+        let seps: Vec<_> = out.iter().filter(|s| s.text == GlyphSet::NERD.sep_left).collect();
+        assert_eq!(seps.len(), 2);
+        assert_eq!(seps[0].style.fg, Some(a));
+        assert_eq!(seps[0].style.bg, None);
+        assert_eq!(seps[1].style.fg, Some(b));
+        assert_eq!(seps[1].style.bg, Some(a));
+    }
+
+    #[test]
+    fn powerline_pads_each_group_with_edge_colored_spaces() {
+        let a = rgb(10, 10, 10);
+        let zone = vec![vec![seg("x", Some(a))]];
+        let out = powerline_zone(zone, Cluster::Left, &GlyphSet::NERD);
+        // Leading cell is a space carrying the group bg; "x" is flanked by spaces.
+        assert_eq!(out[0].text, " ");
+        assert_eq!(out[0].style.bg, Some(a));
+        let xi = out.iter().position(|s| s.text == "x").expect("content present");
+        assert_eq!(out[xi - 1].text, " ");
+        assert_eq!(out[xi + 1].text, " ");
     }
 }
