@@ -48,6 +48,7 @@ pub fn powerline_zone(
                     let prev = bg_of(&groups[i - 1], false);
                     let cur = bg_of(g, true);
                     if prev != cur {
+                        // same bg: the separator would be invisible, so skip it.
                         out.push(arrow(sep, prev, cur));
                     }
                 }
@@ -71,6 +72,7 @@ pub fn powerline_zone(
                     let prev = bg_of(&groups[i - 1], false);
                     let cur = bg_of(g, true);
                     if prev != cur {
+                        // same bg: the separator would be invisible, so skip it.
                         out.push(arrow(sep, cur, prev));
                     }
                 }
@@ -207,5 +209,23 @@ mod tests {
         assert_eq!(out[3].text, GlyphSet::NERD.sep_right); // trailing cap
         assert_eq!(out[3].style.fg, Some(b));
         assert_eq!(out[3].style.bg, None);
+    }
+
+    #[test]
+    fn powerline_right_inserts_arrow_between_differing_bgs() {
+        let a = rgb(10, 10, 10);
+        let b = rgb(20, 20, 20);
+        let zone = vec![vec![seg("a", Some(a))], vec![seg("b", Some(b))]];
+        let out = powerline_zone(zone, Cluster::Right, &GlyphSet::NERD);
+        // leading cap (fg=A bg=None), "a", inter-group sep (fg=B bg=A), "b"
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0].text, GlyphSet::NERD.sep_left); // leading cap from bar bg
+        assert_eq!(out[0].style.fg, Some(a));
+        assert_eq!(out[0].style.bg, None);
+        assert_eq!(out[1].text, "a");
+        assert_eq!(out[2].text, GlyphSet::NERD.sep_left); // inter-group: fg=cur(B), bg=prev(A)
+        assert_eq!(out[2].style.fg, Some(b));
+        assert_eq!(out[2].style.bg, Some(a));
+        assert_eq!(out[3].text, "b");
     }
 }
