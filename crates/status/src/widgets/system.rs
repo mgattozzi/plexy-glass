@@ -6,6 +6,7 @@ use std::time::Duration;
 pub struct CpuLoadWidget {
     pub style: ResolvedStyle,
     pub interval: Option<Duration>,
+    pub icon: SmolStr,
 }
 
 #[async_trait]
@@ -15,7 +16,12 @@ impl Widget for CpuLoadWidget {
     }
     async fn evaluate(&mut self, _ctx: &EvalContext<'_>) -> StyledText {
         let load = sysinfo::System::load_average();
-        let text = format!("{:.2}", load.one);
+        let body = format!("{:.2}%", load.one);
+        let text = if self.icon.is_empty() {
+            body
+        } else {
+            format!("{} {body}", self.icon)
+        };
         StyledText::single(SmolStr::new(text), self.style)
     }
 }
@@ -23,14 +29,16 @@ impl Widget for CpuLoadWidget {
 pub struct MemoryWidget {
     pub style: ResolvedStyle,
     pub interval: Option<Duration>,
+    pub icon: SmolStr,
     system: sysinfo::System,
 }
 
 impl MemoryWidget {
-    pub fn new(style: ResolvedStyle, interval: Option<Duration>) -> Self {
+    pub fn new(style: ResolvedStyle, interval: Option<Duration>, icon: SmolStr) -> Self {
         Self {
             style,
             interval,
+            icon,
             system: sysinfo::System::new(),
         }
     }
@@ -51,7 +59,12 @@ impl Widget for MemoryWidget {
         } else {
             0
         };
-        let text = format!("{pct}%");
+        let body = format!("{pct}%");
+        let text = if self.icon.is_empty() {
+            body
+        } else {
+            format!("{} {body}", self.icon)
+        };
         StyledText::single(SmolStr::new(text), self.style)
     }
 }
@@ -59,6 +72,7 @@ impl Widget for MemoryWidget {
 pub struct BatteryWidget {
     pub style: ResolvedStyle,
     pub interval: Option<Duration>,
+    pub icon: SmolStr,
 }
 
 #[async_trait]
@@ -83,11 +97,16 @@ impl Widget for BatteryWidget {
         // 1:1 against terminal cells and doesn't reserve a spacer for
         // wide characters, so a "🔋" or "⚡" here would garble subsequent
         // cells in the right zone.
-        let prefix = match b.state() {
+        let charge_prefix = match b.state() {
             battery::State::Charging => "+",
             _ => "",
         };
-        let text = format!("{prefix}BAT {pct:.0}%");
+        let body = format!("{charge_prefix}BAT {pct:.0}%");
+        let text = if self.icon.is_empty() {
+            body
+        } else {
+            format!("{} {body}", self.icon)
+        };
         StyledText::single(SmolStr::new(text), self.style)
     }
 }
@@ -111,21 +130,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cpu_load_emits_a_number() {
+    async fn cpu_load_emits_a_number_with_percent() {
         let mut w = CpuLoadWidget {
             style: ResolvedStyle::default(),
             interval: None,
+            icon: SmolStr::new(""),
         };
         let out = w.evaluate(&ctx_empty()).await;
         assert!(!out.segments.is_empty());
         let txt = out.segments[0].text.as_str();
-        // Should be a float like "1.23"
-        assert!(txt.parse::<f64>().is_ok(), "expected numeric load, got {txt}");
+        // Should be a float like "1.23%", so strip the trailing '%' and parse.
+        let numeric = txt.strip_suffix('%').unwrap_or(txt);
+        assert!(
+            numeric.parse::<f64>().is_ok(),
+            "expected numeric load with % suffix, got {txt}"
+        );
+        assert!(txt.ends_with('%'), "expected % suffix, got {txt}");
     }
 
     #[tokio::test]
     async fn memory_widget_emits_percentage() {
-        let mut w = MemoryWidget::new(ResolvedStyle::default(), None);
+        let mut w = MemoryWidget::new(ResolvedStyle::default(), None, SmolStr::new(""));
         let out = w.evaluate(&ctx_empty()).await;
         assert!(out.segments[0].text.ends_with('%'));
     }
@@ -136,6 +161,7 @@ mod tests {
         let mut w = BatteryWidget {
             style: ResolvedStyle::default(),
             interval: None,
+            icon: SmolStr::new(""),
         };
         let _ = w.evaluate(&ctx_empty()).await;
     }

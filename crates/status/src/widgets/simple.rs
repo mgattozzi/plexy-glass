@@ -38,6 +38,7 @@ pub struct SessionWidget {
     pub style: ResolvedStyle,
     pub pad_left: u8,
     pub pad_right: u8,
+    pub icon: SmolStr,
 }
 
 #[async_trait]
@@ -48,6 +49,10 @@ impl Widget for SessionWidget {
     async fn evaluate(&mut self, ctx: &EvalContext<'_>) -> StyledText {
         let mut buf = String::new();
         for _ in 0..self.pad_left {
+            buf.push(' ');
+        }
+        if !self.icon.is_empty() {
+            buf.push_str(&self.icon);
             buf.push(' ');
         }
         buf.push_str(ctx.session_name);
@@ -65,14 +70,16 @@ impl Widget for SessionWidget {
 pub struct HostnameWidget {
     pub style: ResolvedStyle,
     pub interval: Option<Duration>,
+    pub icon: SmolStr,
     cached: Option<SmolStr>,
 }
 
 impl HostnameWidget {
-    pub fn new(style: ResolvedStyle, interval: Option<Duration>) -> Self {
+    pub fn new(style: ResolvedStyle, interval: Option<Duration>, icon: SmolStr) -> Self {
         Self {
             style,
             interval,
+            icon,
             cached: None,
         }
     }
@@ -89,7 +96,12 @@ impl Widget for HostnameWidget {
                 .ok()
                 .and_then(|s| s.into_string().ok())
                 .unwrap_or_default();
-            self.cached = Some(SmolStr::new(name));
+            let body = if self.icon.is_empty() {
+                name
+            } else {
+                format!("{} {name}", self.icon)
+            };
+            self.cached = Some(SmolStr::new(body));
         }
         // invariant: we just populated self.cached above if it was None
         let text = self.cached.clone().unwrap_or_default();
@@ -100,6 +112,7 @@ impl Widget for HostnameWidget {
 pub struct AttachedClientsWidget {
     pub style: ResolvedStyle,
     pub min_count: u8,
+    pub icon: SmolStr,
 }
 
 #[async_trait]
@@ -111,14 +124,20 @@ impl Widget for AttachedClientsWidget {
         if ctx.attached_clients < self.min_count {
             return StyledText::empty();
         }
-        let text = SmolStr::new(format!("*{}", ctx.attached_clients));
-        StyledText::single(text, self.style)
+        let body = format!("*{}", ctx.attached_clients);
+        let text = if self.icon.is_empty() {
+            body
+        } else {
+            format!("{} {body}", self.icon)
+        };
+        StyledText::single(SmolStr::new(text), self.style)
     }
 }
 
 pub struct PrefixIndicatorWidget {
     pub style: ResolvedStyle,
     pub content: SmolStr,
+    pub icon: SmolStr,
 }
 
 #[async_trait]
@@ -147,13 +166,19 @@ impl Widget for PrefixIndicatorWidget {
         if !ctx.prefix_active {
             return StyledText::empty();
         }
-        StyledText::single(self.content.clone(), self.style)
+        let text = if self.icon.is_empty() {
+            self.content.clone()
+        } else {
+            SmolStr::new(format!("{} {}", self.icon, self.content))
+        };
+        StyledText::single(text, self.style)
     }
 }
 
 pub struct CwdWidget {
     pub style: ResolvedStyle,
     pub max_components: Option<u8>,
+    pub icon: SmolStr,
 }
 
 #[async_trait]
@@ -173,7 +198,7 @@ impl Widget for CwdWidget {
             },
             None => url,
         };
-        let display = if let Some(max) = self.max_components {
+        let body = if let Some(max) = self.max_components {
             let parts: Vec<&str> = path
                 .trim_matches('/')
                 .split('/')
@@ -189,7 +214,12 @@ impl Widget for CwdWidget {
         } else {
             path.to_string()
         };
-        StyledText::single(SmolStr::new(display), self.style)
+        let text = if self.icon.is_empty() {
+            body
+        } else {
+            format!("{} {body}", self.icon)
+        };
+        StyledText::single(SmolStr::new(text), self.style)
     }
 }
 
@@ -228,9 +258,26 @@ mod tests {
             style: ResolvedStyle::default(),
             pad_left: 1,
             pad_right: 2,
+            icon: SmolStr::new(""),
         };
         let out = w.evaluate(&ctx_empty()).await;
         assert_eq!(out.segments[0].text.as_str(), " main  ");
+    }
+
+    #[tokio::test]
+    async fn session_widget_prefixes_icon() {
+        let mut w = SessionWidget {
+            style: ResolvedStyle::default(),
+            pad_left: 0,
+            pad_right: 0,
+            icon: SmolStr::new("\u{25c6}"),
+        };
+        let out = w.evaluate(&ctx_empty()).await;
+        assert!(
+            out.segments[0].text.as_str().starts_with("\u{25c6} "),
+            "expected icon prefix: {:?}",
+            out.segments[0].text.as_str()
+        );
     }
 
     #[tokio::test]
@@ -238,6 +285,7 @@ mod tests {
         let mut w = AttachedClientsWidget {
             style: ResolvedStyle::default(),
             min_count: 2,
+            icon: SmolStr::new(""),
         };
         let out = w.evaluate(&ctx_empty()).await;
         assert!(out.segments.is_empty());
@@ -248,6 +296,7 @@ mod tests {
         let mut w = AttachedClientsWidget {
             style: ResolvedStyle::default(),
             min_count: 2,
+            icon: SmolStr::new(""),
         };
         let ctx = EvalContext {
             attached_clients: 3,
@@ -262,6 +311,7 @@ mod tests {
         let mut w = CwdWidget {
             style: ResolvedStyle::default(),
             max_components: None,
+            icon: SmolStr::new(""),
         };
         let ctx = EvalContext {
             active_pane_cwd: Some("file://localhost/tmp/work"),
@@ -276,6 +326,7 @@ mod tests {
         let mut w = CwdWidget {
             style: ResolvedStyle::default(),
             max_components: Some(2),
+            icon: SmolStr::new(""),
         };
         let ctx = EvalContext {
             active_pane_cwd: Some("file:///a/b/c/d/e"),
@@ -290,6 +341,7 @@ mod tests {
         let mut w = PrefixIndicatorWidget {
             style: ResolvedStyle::default(),
             content: "PFX".into(),
+            icon: SmolStr::new(""),
         };
         let out = w.evaluate(&ctx_empty()).await;
         assert!(out.segments.is_empty());
@@ -300,6 +352,7 @@ mod tests {
         let mut w = PrefixIndicatorWidget {
             style: ResolvedStyle::default(),
             content: "PFX".into(),
+            icon: SmolStr::new(""),
         };
         let ctx = EvalContext {
             prefix_active: true,
@@ -314,6 +367,7 @@ mod tests {
         let mut w = PrefixIndicatorWidget {
             style: ResolvedStyle::default(),
             content: "PFX".into(),
+            icon: SmolStr::new(""),
         };
         let ctx = EvalContext {
             copy_mode_active: true,
@@ -328,6 +382,7 @@ mod tests {
         let mut w = PrefixIndicatorWidget {
             style: ResolvedStyle::default(),
             content: "PFX".into(),
+            icon: SmolStr::new(""),
         };
         let ctx = EvalContext {
             sync_active: true,
@@ -342,6 +397,7 @@ mod tests {
         let mut w = PrefixIndicatorWidget {
             style: ResolvedStyle::default(),
             content: "PFX".into(),
+            icon: SmolStr::new(""),
         };
         let ctx = EvalContext {
             copy_mode_active: true,
@@ -357,6 +413,7 @@ mod tests {
         let mut w = PrefixIndicatorWidget {
             style: ResolvedStyle::default(),
             content: "PFX".into(),
+            icon: SmolStr::new(""),
         };
         let ctx = EvalContext { zoom_active: true, ..ctx_empty() };
         let out = w.evaluate(&ctx).await;
@@ -368,6 +425,7 @@ mod tests {
         let mut w = PrefixIndicatorWidget {
             style: ResolvedStyle::default(),
             content: "PFX".into(),
+            icon: SmolStr::new(""),
         };
         let ctx = EvalContext { sync_active: true, zoom_active: true, ..ctx_empty() };
         let out = w.evaluate(&ctx).await;

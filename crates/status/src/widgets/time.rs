@@ -7,6 +7,7 @@ pub struct TimeWidget {
     pub format: String,
     pub interval: Option<Duration>,
     pub style: ResolvedStyle,
+    pub icon: SmolStr,
 }
 
 #[async_trait]
@@ -22,11 +23,16 @@ impl Widget for TimeWidget {
         // error unexpectedly") and kill the spawned status tick task, silently
         // freezing the bar. A user `time format="…"` is unvalidated config, so
         // degrade to a safe default on error instead of panicking.
-        let mut text = String::new();
-        if write!(text, "{}", now.format(&self.format)).is_err() {
-            text.clear();
-            let _ = write!(text, "{}", now.format("%H:%M"));
+        let mut body = String::new();
+        if write!(body, "{}", now.format(&self.format)).is_err() {
+            body.clear();
+            let _ = write!(body, "{}", now.format("%H:%M"));
         }
+        let text = if self.icon.is_empty() {
+            body
+        } else {
+            format!("{} {body}", self.icon)
+        };
         StyledText::single(SmolStr::new(text), self.style)
     }
 }
@@ -50,15 +56,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn time_widget_prefixes_clock_icon() {
+        let mut w = TimeWidget {
+            format: "%H:%M".into(),
+            interval: None,
+            style: ResolvedStyle::default(),
+            icon: SmolStr::new("\u{25f7}"), // unicode clock
+        };
+        let out = w.evaluate(&ctx_empty()).await;
+        let text: String = out.segments.iter().map(|s| s.text.as_str()).collect();
+        assert!(text.starts_with("\u{25f7} "), "leads with clock + space: {text:?}");
+    }
+
+    #[tokio::test]
     async fn time_emits_non_empty() {
         let mut w = TimeWidget {
             format: "%H:%M".to_string(),
             interval: None,
             style: ResolvedStyle::default(),
+            icon: SmolStr::new(""),
         };
         let out = w.evaluate(&ctx_empty()).await;
         assert!(!out.segments[0].text.is_empty());
-        // %H:%M -> "12:34" 5 chars.
+        // %H:%M -> "12:34" 5 chars when icon is empty.
         assert_eq!(out.segments[0].text.len(), 5);
     }
 
@@ -70,6 +90,7 @@ mod tests {
             format: "%Q".to_string(),
             interval: None,
             style: ResolvedStyle::default(),
+            icon: SmolStr::new(""),
         };
         let out = w.evaluate(&ctx_empty()).await;
         // Fallback "%H:%M" -> "12:34".

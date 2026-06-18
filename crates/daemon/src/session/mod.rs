@@ -224,7 +224,11 @@ impl Session {
         )?;
         let initial_frame = Arc::new(VirtualScreen::blank(first_size.rows, first_size.cols));
         let (frame_tx, frame_rx_template) = watch::channel(initial_frame);
-        let engine = plexy_glass_status::StatusEngine::new(&config.status, &config.palette);
+        let engine = plexy_glass_status::StatusEngine::new(
+            &config.status,
+            &config.palette,
+            plexy_glass_status::GlyphSet::for_tier(config.glyph_tier),
+        );
         let status_engine = engine.inner();
         let session = Arc::new(Self {
             name: StdMutex::new(name),
@@ -1057,8 +1061,11 @@ impl Session {
         }
 
         // Build a fresh `StatusEngine` + tick task.
-        let new_engine =
-            plexy_glass_status::StatusEngine::new(&new_config.status, &new_config.palette);
+        let new_engine = plexy_glass_status::StatusEngine::new(
+            &new_config.status,
+            &new_config.palette,
+            plexy_glass_status::GlyphSet::for_tier(new_config.glyph_tier),
+        );
         let new_inner = new_engine.inner();
 
         // (2) Abort the old tick before spawning a new one.

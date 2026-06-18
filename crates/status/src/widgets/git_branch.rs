@@ -6,11 +6,12 @@ use std::time::Duration;
 pub struct GitBranchWidget {
     pub style: ResolvedStyle,
     pub interval: Option<Duration>,
+    pub icon: SmolStr,
 }
 
 impl GitBranchWidget {
-    pub fn new(style: ResolvedStyle, interval: Option<Duration>) -> Self {
-        Self { style, interval }
+    pub fn new(style: ResolvedStyle, interval: Option<Duration>, icon: SmolStr) -> Self {
+        Self { style, interval, icon }
     }
 }
 
@@ -54,8 +55,12 @@ impl Widget for GitBranchWidget {
         match output {
             Ok(Ok(o)) if o.status.success() => {
                 let branch_raw = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                let branch = SmolStr::new(format!(" {branch_raw}"));
-                StyledText::single(branch, self.style)
+                let text = if self.icon.is_empty() {
+                    SmolStr::new(format!(" {branch_raw}"))
+                } else {
+                    SmolStr::new(format!("{} {branch_raw}", self.icon))
+                };
+                StyledText::single(text, self.style)
             }
             _ => StyledText::empty(),
         }
@@ -84,7 +89,7 @@ mod tests {
     async fn non_repo_dir_renders_empty() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().to_str().unwrap().to_string();
-        let mut w = GitBranchWidget::new(ResolvedStyle::default(), None);
+        let mut w = GitBranchWidget::new(ResolvedStyle::default(), None, SmolStr::new(""));
         let out = w.evaluate(&ctx_with_cwd(&cwd)).await;
         assert!(out.segments.is_empty());
     }
@@ -116,7 +121,7 @@ mod tests {
                 .success()
         );
 
-        let mut w = GitBranchWidget::new(ResolvedStyle::default(), None);
+        let mut w = GitBranchWidget::new(ResolvedStyle::default(), None, SmolStr::new(""));
         let first = w.evaluate(&ctx_with_cwd(&cwd)).await;
         let first_branch = first.segments[0].text.as_str().trim().to_string();
         assert!(!first_branch.is_empty(), "expected a branch on the fresh repo");
@@ -147,7 +152,7 @@ mod tests {
         unsafe { std::env::set_var("PATH", &new_path) };
 
         let cwd = dir.path().to_str().unwrap().to_string();
-        let mut w = GitBranchWidget::new(ResolvedStyle::default(), None);
+        let mut w = GitBranchWidget::new(ResolvedStyle::default(), None, SmolStr::new(""));
         let start = std::time::Instant::now();
         let out = w.evaluate(&ctx_with_cwd(&cwd)).await;
         let elapsed = start.elapsed();
