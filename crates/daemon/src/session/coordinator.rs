@@ -174,9 +174,6 @@ pub(super) async fn render_coordinator(
             // cheap no-op when the tick task is keeping up.
             let _ = engine.refresh_due_intervals(&ctx).await;
             let snap = engine.snapshot().await;
-            // Push clickable regions to the window manager so the next
-            // status-bar click can dispatch the matching command.
-            let hits = snap.click_hits();
             let host_size = m.host_size();
             // Honor the configured status-bar position for both the click row
             // and the compositor placement.
@@ -191,22 +188,59 @@ pub(super) async fn render_coordinator(
                 }
             };
             m.set_status_layout(Some(status_row), pane_row_offset);
-            m.set_status_hits(hits);
+
             let glyphs =
                 plexy_glass_status::GlyphSet::for_tier(session.config_snapshot().glyph_tier);
-            let status = StatusLine {
-                left: plexy_glass_status::powerline_zone(
-                    snap.left,
-                    plexy_glass_status::Cluster::Left,
-                    glyphs,
-                ),
-                middle: snap.middle.into_iter().flatten().collect(),
-                right: plexy_glass_status::powerline_zone(
-                    snap.right,
-                    plexy_glass_status::Cluster::Right,
-                    glyphs,
-                ),
-            };
+            // Flow the window list (middle zone) into the left powerline run so
+            // the window names get the same arrows/caps as session/prefix instead
+            // of rendering as flat blocks. Each window becomes its own group (the
+            // window-list widget emits them together) so arrows appear BETWEEN
+            // windows. The right cluster stays edge-anchored; middle is now empty.
+            let mut left_groups = snap.left;
+            left_groups.extend(snap.middle.into_iter().flatten().map(|seg| vec![seg]));
+            let left = plexy_glass_status::powerline_zone(
+                left_groups,
+                plexy_glass_status::Cluster::Left,
+                glyphs,
+            );
+            let right = plexy_glass_status::powerline_zone(
+                snap.right,
+                plexy_glass_status::Cluster::Right,
+                glyphs,
+            );
+
+            // Clickable regions, computed from the FINAL painted segments
+            // (powerline arrows/padding included) so window-name clicks land on
+            // the right window: the left run paints at col 0 and the right cluster
+            // is edge-anchored at `cols - right_w`. Arrow/padding cells carry no
+            // `click_action`, so they're skipped.
+            fn zone_hits(
+                segments: &[plexy_glass_status::Segment],
+                start: u16,
+            ) -> Vec<plexy_glass_status::StatusHit> {
+                let mut out = Vec::new();
+                let mut col = start;
+                for seg in segments {
+                    let w = plexy_glass_emulator::display_width(&seg.text);
+                    if let Some(action) = seg.click_action {
+                        out.push(plexy_glass_status::StatusHit {
+                            col_range: col..col.saturating_add(w),
+                            action,
+                        });
+                    }
+                    col = col.saturating_add(w);
+                }
+                out
+            }
+            let right_w = right
+                .iter()
+                .map(|s| plexy_glass_emulator::display_width(&s.text))
+                .fold(0u16, |a, w| a.saturating_add(w));
+            let mut hits = zone_hits(&left, 0);
+            hits.extend(zone_hits(&right, host_size.cols.saturating_sub(right_w)));
+            m.set_status_hits(hits);
+
+            let status = StatusLine { left, middle: Vec::new(), right };
             let selection = m.selection().cloned();
             // Transient status-line message (cleared lazily here when expired).
             let message: Option<String> = m.take_active_message().map(str::to_string);
