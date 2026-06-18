@@ -2641,13 +2641,13 @@ fn block_border_ok_block_paints_pipe_with_ok_color_no_half_block() {
         sess.snapshot_str()
     );
 
-    // Snapshot the bytes from mark_before and assert `▌` is NOT there.
-    // The ok case must never paint ▌ (only the fail case does).
+    // Snapshot the bytes from mark_before and assert `▌` IS there.
+    // The ok case now paints ▌ (parity with fail); color carries pass/fail.
     let raw = sess.snapshot();
     let post_mark = &raw[mark_before.min(raw.len())..];
     assert!(
-        !post_mark.windows(3).any(|w| w == b"\xe2\x96\x8c"),
-        "\u{258c} (half-block) must NOT appear after an ok block (D;0). \
+        post_mark.windows(3).any(|w| w == b"\xe2\x96\x8c"),
+        "\u{258c} (half-block) must appear after an ok block (D;0). \
          post-mark raw bytes (lossy): {}",
         String::from_utf8_lossy(post_mark)
     );

@@ -87,6 +87,13 @@ pub fn draw(
                 match status {
                     BlockLineStatus::Ok => {
                         cell.fg = colors.ok;
+                        // Parity with Failed: a plain vertical `│` becomes the
+                        // half-block `▌` so a passing block reads as a solid
+                        // bar, not a faint line. Color carries pass/fail.
+                        if glyph == "\u{2502}" {
+                            // │ → ▌
+                            cell.grapheme = SmolStr::new_static("\u{258c}");
+                        }
                     }
                     BlockLineStatus::Failed => {
                         cell.fg = colors.fail;
@@ -369,7 +376,7 @@ mod tests {
 
     // ── Block exit-status border segment tests ────────────────────────────────────
 
-    /// Ok status row: left-segment cell gets ok fg, glyph is `│`.
+    /// Ok status row: left-segment cell gets ok fg AND the heavy `▌` (parity with fail).
     #[test]
     fn block_ok_segment_fg_and_glyph() {
         // Band 5x7; pane inset at (1,1) sized 3x5.
@@ -381,10 +388,10 @@ mod tests {
         let mut screen = VirtualScreen::blank(5, 7);
         let f = frame_with_blocks(pane, false, false, block_rows);
         draw(&[f], band, &mut screen, Some(&colors));
-        // Row 2 (mid-pane), col 0 is the plain left-segment `│`.
+        // Row 2 (mid-pane), col 0: ok color + heavy bar ▌.
         let cell = screen.cell(2, 0).unwrap();
         assert_eq!(cell.fg, colors.ok, "ok segment: fg = ok color");
-        assert_eq!(cell.grapheme.as_str(), "\u{2502}", "ok segment: glyph unchanged (│)");
+        assert_eq!(cell.grapheme.as_str(), "\u{258c}", "ok segment: heavy bar (▌)");
     }
 
     /// Failed status row: left-segment `│` becomes `▌` with fail fg.
