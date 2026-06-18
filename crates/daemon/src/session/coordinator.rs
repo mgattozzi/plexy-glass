@@ -191,10 +191,20 @@ pub(super) async fn render_coordinator(
             };
             m.set_status_layout(Some(status_row), pane_row_offset);
             m.set_status_hits(hits);
+            let glyphs =
+                plexy_glass_status::GlyphSet::for_tier(session.config_snapshot().glyph_tier);
             let status = StatusLine {
-                left: snap.left.into_iter().flatten().collect(),
+                left: plexy_glass_status::powerline_zone(
+                    snap.left,
+                    plexy_glass_status::Cluster::Left,
+                    glyphs,
+                ),
                 middle: snap.middle.into_iter().flatten().collect(),
-                right: snap.right.into_iter().flatten().collect(),
+                right: plexy_glass_status::powerline_zone(
+                    snap.right,
+                    plexy_glass_status::Cluster::Right,
+                    glyphs,
+                ),
             };
             let selection = m.selection().cloned();
             // Transient status-line message (cleared lazily here when expired).

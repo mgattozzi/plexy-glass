@@ -10,7 +10,7 @@ pub use engine::{
     ClickAction, EngineInner, EvalContext, SegmentSnapshot, SnapshotCtx, StatusEngine, StatusHit,
     WindowSummary,
 };
-pub use glyphs::GlyphSet;
+pub use glyphs::{Cluster, GlyphSet, powerline_zone};
 pub use style::{resolve_color, resolve_style, ResolvedStyle, Rgb};
 pub use widget::{Segment, StyledText, Widget};
 pub use widgets::{
