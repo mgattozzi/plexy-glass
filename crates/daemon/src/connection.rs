@@ -629,6 +629,13 @@ async fn dispatch_input_event(
                             .map(|p| p.is_in_copy_mode())
                             .unwrap_or(false)
                     };
+                    let active_in_block_mode = {
+                        let m = ctx.session.window_manager.lock().await;
+                        m.active_window()
+                            .active_pane()
+                            .map(|p| p.is_in_block_mode())
+                            .unwrap_or(false)
+                    };
                     if active_in_copy_mode {
                         let action = {
                             let m = ctx.session.window_manager.lock().await;
@@ -666,6 +673,56 @@ async fn dispatch_input_event(
                                 ctx.session.notify.notify_one();
                             }
                             None => {}
+                        }
+                    } else if active_in_block_mode {
+                        let action = {
+                            let m = ctx.session.window_manager.lock().await;
+                            let pane_opt = m.active_window().active_pane();
+                            pane_opt.and_then(|p| {
+                                let screen = p.with_screen(|s| s.clone());
+                                p.with_block_mode_mut(|state| {
+                                    plexy_glass_mux::block_mode::handle(
+                                        &event_ke, state, &screen,
+                                    )
+                                })
+                            })
+                        };
+                        match action {
+                            Some(plexy_glass_mux::BlockModeAction::Render) => {
+                                ctx.session.notify.notify_one();
+                            }
+                            Some(plexy_glass_mux::BlockModeAction::Exit) => {
+                                let m = ctx.session.window_manager.lock().await;
+                                if let Some(p) = m.active_window().active_pane() {
+                                    p.exit_block_mode();
+                                }
+                                ctx.session.notify.notify_one();
+                            }
+                            Some(plexy_glass_mux::BlockModeAction::Yank(text)) => {
+                                let _ =
+                                    crate::osc_actions::write_clipboard(text.as_bytes()).await;
+                                // STAY in block mode (unlike copy mode's yank).
+                                ctx.registry.push_paste_buffer(text.into_bytes()).await;
+                                ctx.session.notify.notify_one();
+                            }
+                            Some(plexy_glass_mux::BlockModeAction::ReRun(cmd)) => {
+                                // Inject command + Enter directly into the pane
+                                // (bypassing sync-panes, like serve_exec), then
+                                // exit and snap to live to watch it run.
+                                let pane = {
+                                    let m = ctx.session.window_manager.lock().await;
+                                    m.active_window().active_pane().cloned()
+                                };
+                                if let Some(p) = pane {
+                                    let mut bytes = cmd.into_bytes();
+                                    bytes.push(b'\r');
+                                    let _ = p.send_input(bytes::Bytes::from(bytes)).await;
+                                    p.exit_block_mode();
+                                    p.reset_scroll();
+                                }
+                                ctx.session.notify.notify_one();
+                            }
+                            Some(plexy_glass_mux::BlockModeAction::Ignore) | None => {}
                         }
                     } else {
                         let _ = ctx

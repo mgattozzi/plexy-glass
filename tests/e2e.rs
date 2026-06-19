@@ -2339,6 +2339,44 @@ fn capture_last_command_returns_block_output() {
     );
 }
 
+/// Block mode `r` re-runs the selected block's command. We plant a single
+/// OSC 133 block whose command line (between 133;B and 133;C) is `expr 40 + 2`,
+/// and its *output* (42) never appears in the planted command text, so seeing
+/// "42" after `r` proves the command was extracted and injected into the
+/// /bin/sh child. (`+` is not a shell glob, unlike `*`.)
+#[test]
+fn block_mode_rerun_injects_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Plant: A, prompt "$ ", B, command "expr 40 + 2", C, output "PLANTED", D;0.
+    let (send_status, _, send_err) = run_cli(
+        &env,
+        &[
+            "send",
+            "--enter",
+            "printf '\\033]133;A\\007$ \\033]133;B\\007expr 40 + 2\\r\\n\\033]133;C\\007PLANTED\\n\\033]133;D;0\\007'",
+        ],
+    );
+    assert!(send_status.success(), "send failed: {send_err}");
+    assert!(
+        sess.wait_for(b"PLANTED", Duration::from_secs(15)),
+        "planted block never rendered. pane: {}",
+        sess.snapshot_str()
+    );
+
+    let mark = sess.buffer_len();
+    sess.send_prefix(b'b'); // enter block mode (newest block = the planted one)
+    sess.send(b"r"); // re-run
+    assert!(
+        sess.wait_for_from(mark, b"42", Duration::from_secs(10)),
+        "re-run output (42) never appeared. pane: {}",
+        sess.snapshot_str()
+    );
+}
+
 /// `prefix b` on a pane with no OSC 133 blocks (plain /bin/sh, no shell
 /// integration) refuses to open block mode and shows the no-blocks status hint.
 #[test]
