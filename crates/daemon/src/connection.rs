@@ -1086,6 +1086,7 @@ enum ConnVerb {
     PasteBuffer(Option<String>),
     ChooseBuffer,
     CopyOutput,
+    EnterBlockMode,
     SetBuffer(String),
     SaveBuffer { name: Option<String>, path: String },
     LoadBuffer(String),
@@ -1106,6 +1107,7 @@ impl ConnVerb {
             Command::PasteBuffer => Ok(Self::PasteBuffer(None)),
             Command::ChooseBuffer => Ok(Self::ChooseBuffer),
             Command::CopyOutput => Ok(Self::CopyOutput),
+            Command::EnterBlockMode => Ok(Self::EnterBlockMode),
             other => Err(other),
         }
     }
@@ -1124,6 +1126,7 @@ impl ConnVerb {
             PromptCommand::PasteBuffer(name) => Ok(Self::PasteBuffer(name)),
             PromptCommand::ChooseBuffer => Ok(Self::ChooseBuffer),
             PromptCommand::CopyOutput => Ok(Self::CopyOutput),
+            PromptCommand::BlockMode => Ok(Self::EnterBlockMode),
             PromptCommand::SetBuffer { text } => Ok(Self::SetBuffer(text)),
             PromptCommand::SaveBuffer { name, path } => Ok(Self::SaveBuffer { name, path }),
             PromptCommand::LoadBuffer { path } => Ok(Self::LoadBuffer(path)),
@@ -1178,6 +1181,9 @@ async fn run_connection_verb(
         ConnVerb::CopyOutput => {
             // Status messages (success and no-blocks) are set inside.
             let _ = copy_last_output(ctx.session, ctx.registry).await;
+        }
+        ConnVerb::EnterBlockMode => {
+            enter_block_mode(ctx.session).await;
         }
         ConnVerb::SetBuffer(text) => {
             let msg = set_buffer(ctx.registry, text).await;
@@ -1537,6 +1543,9 @@ async fn run_prompt_line(
                 (false, Some(NO_BLOCKS_MSG.to_string()))
             }
         }
+        // Block mode is interactive, per-pane modal navigation, so refuse
+        // headlessly like the other attached-only verbs.
+        PromptCommand::BlockMode => refuse("block-mode"),
         PromptCommand::Detach => refuse("detach"),
         PromptCommand::Switch(_) => refuse("switch"),
         PromptCommand::Help => refuse("help"),
@@ -1584,6 +1593,36 @@ async fn copy_last_output(session: &Arc<Session>, registry: &Arc<SessionRegistry
             session.set_status_message(NO_BLOCKS_MSG.into()).await;
             false
         }
+    }
+}
+
+/// Open block mode on the active pane, or set the no-blocks status hint and
+/// refuse. The newest block is selected. Reads the ACTIVE pane (block mode is
+/// a focus-pane modal navigation; a popup swallows the entry chord upstream).
+async fn enter_block_mode(session: &Arc<Session>) {
+    let opened = {
+        let manager = session.window_manager.lock().await;
+        match manager.active_window().active_pane() {
+            Some(pane) => {
+                let state = pane
+                    .with_screen(|s| plexy_glass_mux::BlockMode::new_for(s, s.active.num_rows()));
+                match state {
+                    Some(state) => {
+                        pane.enter_block_mode(state);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            None => false,
+        }
+    };
+    if opened {
+        session.notify.notify_one();
+    } else {
+        session
+            .set_status_message("no command blocks in this pane".into())
+            .await;
     }
 }
 

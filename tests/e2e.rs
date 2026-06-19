@@ -2339,6 +2339,22 @@ fn capture_last_command_returns_block_output() {
     );
 }
 
+/// `prefix b` on a pane with no OSC 133 blocks (plain /bin/sh, no shell
+/// integration) refuses to open block mode and shows the no-blocks status hint.
+#[test]
+fn block_mode_refuses_without_blocks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    sess.send_prefix(b'b');
+    assert!(
+        sess.wait_for(b"no command blocks in this pane", Duration::from_secs(10)),
+        "expected the no-blocks hint. pane: {}",
+        sess.snapshot_str()
+    );
+}
+
 /// `prev-prompt` scrolls the viewport so the previous prompt is visible;
 /// `next-prompt` scrolls back toward the live content.
 ///
