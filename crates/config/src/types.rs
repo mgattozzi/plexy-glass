@@ -35,6 +35,8 @@ pub struct BlocksConfig {
     pub ok_color: String,
     /// Palette name or `#rrggbb` hex color for failed-command border segments.
     pub fail_color: String,
+    /// Palette name or `#rrggbb` hex for the block-mode selection bracket.
+    pub select_color: String,
 }
 
 impl Default for BlocksConfig {
@@ -43,6 +45,7 @@ impl Default for BlocksConfig {
             enabled: true,
             ok_color: "ok".to_string(),
             fail_color: "alert".to_string(),
+            select_color: "#dca561".to_string(),
         }
     }
 }

@@ -199,6 +199,9 @@ fn decode_blocks(node: &KdlNode, src: &str) -> Result<BlocksConfig, ConfigError>
                 "enabled" => blocks.enabled = bool_arg(child, 0, src, "enabled")?,
                 "ok-color" => blocks.ok_color = string_arg(child, 0, src, "ok-color")?.to_string(),
                 "fail-color" => blocks.fail_color = string_arg(child, 0, src, "fail-color")?.to_string(),
+                "select-color" => {
+                    blocks.select_color = string_arg(child, 0, src, "select-color")?.to_string()
+                }
                 other => return Err(decode_err(src, child, &format!("unknown blocks node `{other}`"))),
             }
         }
@@ -1683,6 +1686,15 @@ session "dev" cwd="~/projects/app" {
     fn blocks_enabled_false_decodes() {
         let cfg = parse_config(r##"blocks { enabled #false }"##).unwrap();
         assert!(!cfg.blocks.enabled);
+    }
+
+    #[test]
+    fn blocks_select_color_decodes() {
+        let cfg = parse_config(r##"blocks { select-color "#112233" }"##).unwrap();
+        assert_eq!(cfg.blocks.select_color, "#112233");
+        // Unspecified means the default.
+        let d = parse_config(r##"blocks { ok-color "#ff0000" }"##).unwrap();
+        assert_eq!(d.blocks.select_color, "#dca561");
     }
 
     #[test]
