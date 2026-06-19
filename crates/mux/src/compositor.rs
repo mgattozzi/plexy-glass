@@ -22,6 +22,9 @@ pub struct PaneView<'a> {
     /// When Some, the pane is in copy-mode; the compositor uses the copy-mode
     /// viewport instead of `scroll_offset` and renders overlays.
     pub copy_mode: Option<&'a crate::CopyMode>,
+    /// When Some, the pane is in block-mode; the compositor uses the block-mode
+    /// viewport and paints the selected-block bracket.
+    pub block_mode: Option<&'a crate::BlockMode>,
     /// User-assigned pane name, painted on the pane's top border. `None` hides
     /// the title (plain border).
     pub title: Option<&'a str>,
@@ -110,6 +113,9 @@ pub fn compose(
     popup: Option<&PopupView<'_>>,
     // blocks: None = feature disabled (no block work per frame).
     blocks: Option<&BlockBorderColors>,
+    // Color of the block-mode selection bracket (always available, the
+    // bracket works even when `blocks` coloring is disabled).
+    block_select_color: plexy_glass_emulator::Color,
 ) -> VirtualScreen {
     let (host_rows, host_cols) = host_size;
     let host_rows = host_rows.max(1);
@@ -285,23 +291,39 @@ pub fn compose(
         .map(|v| {
             let mut r = v.rect;
             r.row = r.row.saturating_add(pane_row_offset);
-            // Per-viewport block status, computed from the same
-            // `effective_scroll` as the content copy so they always agree.
+            // Effective viewport top comes from the same source as the content copy,
+            // so block status and the selection bracket agree with the content.
+            let es = effective_scroll_for(v);
+            let sb_len = v.screen.scrollback.len() as u32;
+            let top = sb_len.saturating_sub(es);
             let block_rows = if blocks.is_some() {
-                let es = effective_scroll_for(v);
-                let sb_len = v.screen.scrollback.len() as u32;
-                let top = sb_len.saturating_sub(es);
                 viewport_block_status(v.screen, top, v.rect.rows)
             } else {
                 vec![]
             };
+            // Selected-block bracket (independent of the blocks toggle).
+            let selected_block = v.block_mode.and_then(|bm| {
+                let (a_start, a_end) = crate::blocks::block_extent(v.screen, bm.selected);
+                let vp_end = top + u32::from(v.rect.rows); // exclusive
+                if a_end < top || a_start >= vp_end {
+                    return None; // block entirely off-screen
+                }
+                let vis_start = a_start.max(top);
+                let vis_end = a_end.min(vp_end - 1);
+                Some(borders::SelectedBlock {
+                    rows: ((vis_start - top) as u16, (vis_end - top) as u16),
+                    cap_top: a_start >= top,
+                    cap_bottom: a_end < vp_end,
+                    color: block_select_color,
+                })
+            });
             borders::PaneFrame {
                 rect: r,
                 active: v.is_active,
                 marked: v.marked,
                 title: v.title,
                 block_rows,
-                selected_block: None,
+                selected_block,
             }
         })
         .collect();
@@ -397,12 +419,19 @@ pub fn compose(
 /// source of truth used by both the content copy and the block-status scan so
 /// both always show the same viewport.
 fn effective_scroll_for(view: &PaneView<'_>) -> u32 {
-    match view.copy_mode {
-        Some(cm) => {
+    // copy and block mode are mutually exclusive; both pin the viewport via an
+    // absolute viewport_top, so derive the scroll offset the same way.
+    let viewport_top = match (view.copy_mode, view.block_mode) {
+        (Some(cm), _) => Some(cm.viewport_top),
+        (None, Some(bm)) => Some(bm.viewport_top),
+        (None, None) => None,
+    };
+    match viewport_top {
+        Some(vt) => {
             let total_lines = view.screen.scrollback.len() as u32
                 + view.screen.active.num_rows() as u32;
             total_lines
-                .saturating_sub(cm.viewport_top)
+                .saturating_sub(vt)
                 .saturating_sub(u32::from(view.rect.rows))
         }
         None => view.scroll_offset,
@@ -1146,10 +1175,11 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
-        let vs = compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
         assert_eq!(vs.cursor, Some((0, 2)));
     }
@@ -1190,6 +1220,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -1208,7 +1239,7 @@ mod tests {
             None,
             Some(&pv),
             None,
-        );
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         // Corners of the border frame.
         assert_eq!(vs.cell(2, 10).unwrap().grapheme.as_str(), "┌");
         assert_eq!(vs.cell(9, 31).unwrap().grapheme.as_str(), "┘");
@@ -1239,6 +1270,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -1257,7 +1289,7 @@ mod tests {
             None,
             Some(&pv),
             None,
-        );
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         // Top status row occupies physical row 0; the popup's logical row 2
         // paints at physical row 3 (pane_row_offset = 1).
         assert_eq!(vs.cell(3, 10).unwrap().grapheme.as_str(), "┌");
@@ -1282,12 +1314,13 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
         let mut sel = Selection::start(PaneId(0), 0, 0);
         sel.extend(0, 4, Rect::new(0, 0, 4, 6));
-        let vs = compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel), None, None, None, None);
+        let vs = compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel), None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -1314,6 +1347,7 @@ mod tests {
             is_active: false,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -1324,10 +1358,11 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
-        let vs = compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "L");
         assert_eq!(vs.cell(0, 4).unwrap().grapheme.as_str(), "R");
         // Border column.
@@ -1354,10 +1389,11 @@ mod tests {
             is_active: true,
             scroll_offset: 1,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
-        let vs = compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         // Row 0 should be the last scrollback row (BBBB), not CCCC.
         let r0: String = (0..4)
             .map(|c| vs.cell(0, c).unwrap().grapheme.as_str().to_string())
@@ -1387,10 +1423,11 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: Some(&cm),
+            block_mode: None,
             title: None,
             marked: false,
         };
-        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         assert_eq!(vs.cursor, Some((3, 7)));
     }
 
@@ -1415,10 +1452,11 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: Some(&cm),
+            block_mode: None,
             title: None,
             marked: false,
         };
-        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -1455,10 +1493,11 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: Some(&cm),
+            block_mode: None,
             title: None,
             marked: false,
         };
-        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         for c in 1..=3 {
             assert!(vs.cell(0, c).unwrap().attrs.contains(Attrs::HIGHLIGHT), "col {c} highlighted");
         }
@@ -1494,10 +1533,11 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: Some(&cm),
+            block_mode: None,
             title: None,
             marked: false,
         };
-        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         // The out-of-viewport match must not paint any HIGHLIGHT in the band.
         for r in 0..4 {
             for c in 0..20 {
@@ -1536,10 +1576,11 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: Some(&cm),
+            block_mode: None,
             title: None,
             marked: false,
         };
-        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         // Prompt bar on the pane's bottom row (rect.row + rect.rows - 1 = 3).
         let row: Vec<String> = (0..4)
             .map(|c| vs.cell(3, c).unwrap().grapheme.to_string())
@@ -1593,11 +1634,12 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
         let status = status_with_left("中B");
-        let vs = compose(&[view], (3, 8), Some(&status), StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (3, 8), Some(&status), StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "中");
         assert!(vs.cell(2, 1).unwrap().grapheme.is_empty(), "wide spacer after 中");
         assert_eq!(vs.cell(2, 2).unwrap().grapheme.as_str(), "B");
@@ -1616,11 +1658,12 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
         let status = status_with_left("AB");
-        let vs = compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None, None, None, None);
+        let vs = compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "A", "status at row 0");
         assert_eq!(vs.cell(0, 1).unwrap().grapheme.as_str(), "B");
         assert_eq!(vs.cell(1, 0).unwrap().grapheme.as_str(), "X", "pane shifted to row 1");
@@ -1638,11 +1681,12 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
         let status = status_with_left("AB");
-        let vs = compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "X", "pane stays at row 0");
         assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "A", "status at last row");
     }
@@ -1659,11 +1703,12 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
         let ov = OverlayView::RenamePrompt { label: "rename window", buf: "hi" };
-        let vs = compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         // Bottom row (3) is a REVERSE prompt bar.
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "prompt bar is REVERSE");
         // Text " rename window \u{25b8} hi", with 'r' at col 1.
@@ -1682,11 +1727,12 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
         let ov = OverlayView::Command { buf: "spl" };
-        let vs = compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "command bar is REVERSE");
         // Text " :spl": ':' at col 1, 's' at col 2.
         assert_eq!(vs.cell(3, 1).unwrap().grapheme.as_str(), ":");
@@ -1705,6 +1751,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -1718,7 +1765,7 @@ mod tests {
             Some("no session: foo"),
             None,
             None,
-        );
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         // Bottom row (3) is a REVERSE message bar; text rendered after a space.
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "message bar is REVERSE");
         assert_eq!(vs.cell(3, 1).unwrap().grapheme.as_str(), "n");
@@ -1737,6 +1784,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -1751,7 +1799,7 @@ mod tests {
             Some("this message must not show"),
             None,
             None,
-        );
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         // The overlay owns the bottom row: 'r' of "rename window" is at col 1,
         // proving the message did not overwrite it.
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE));
@@ -1769,12 +1817,13 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
         let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
-        let vs = compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         let mut found_corner = false;
         let mut found_text = false;
         for r in 0..10 {
@@ -1812,6 +1861,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -1820,7 +1870,7 @@ mod tests {
             picker_view("work", "work - 2 win", false),
         ];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "", selected: 1 };
-        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
 
         let mut found_corner = false;
         let mut found_marker = false;
@@ -1853,13 +1903,14 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
         // A CJK session name must be sized and placed as one cell + a spacer.
         let entries = vec![picker_view("中文", "中文", false)];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "", selected: 0 };
-        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         let mut found = false;
         for r in 0..10 {
             for c in 0..49 {
@@ -1887,12 +1938,13 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
         let entries = vec![picker_view("main", "main", true)];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "zzz", selected: 0 };
-        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         let mut text = String::new();
         for r in 0..10 {
             for c in 0..50 {
@@ -1916,6 +1968,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -1923,7 +1976,7 @@ mod tests {
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
         let status = status_with_left("S");
         let vs =
-            compose(&[view], (4, 40), Some(&status), StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+            compose(&[view], (4, 40), Some(&status), StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         let mut found_corner = false;
         for r in 0..4 {
             for c in 0..40 {
@@ -1967,6 +2020,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -1981,7 +2035,7 @@ mod tests {
             ..Default::default()
         };
         let ov = OverlayView::Tree { state: &state };
-        let vs = compose(&[view], (12, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (12, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
 
         let mut found_corner = false;
         let mut found_marker = false;
@@ -2036,6 +2090,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -2047,7 +2102,7 @@ mod tests {
             selected: 1,
         };
         let ov = OverlayView::Buffer { state: &state };
-        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         let mut text = String::new();
         let mut selected_reverse = false;
         for r in 0..10 {
@@ -2076,12 +2131,13 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
         let state = crate::buffer::BufferPickerState { entries: vec![], selected: 0 };
         let ov = OverlayView::Buffer { state: &state };
-        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         let mut text = String::new();
         for r in 0..10 {
             for c in 0..50 {
@@ -2104,10 +2160,11 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: true,
         };
-        let vs = compose(&[view], (3, 8), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs = compose(&[view], (3, 8), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         let mut magenta = false;
         for r in 0..3 {
             for c in 0..8 {
@@ -2130,6 +2187,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -2140,7 +2198,7 @@ mod tests {
             ..Default::default()
         };
         let ov = OverlayView::Tree { state: &state };
-        let vs = compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         let mut text = String::new();
         for r in 0..12 {
             for c in 0..60 {
@@ -2161,11 +2219,12 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
         let ov = OverlayView::Tree { state };
-        let vs = compose(&[view], (rows, cols), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None);
+        let vs = compose(&[view], (rows, cols), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         let mut text = String::new();
         for r in 0..rows {
             for c in 0..cols {
@@ -2256,6 +2315,7 @@ mod tests {
             is_active: false,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -2266,6 +2326,7 @@ mod tests {
             StatusPlacement::Bottom,
             None, None, None, None,
             None, // blocks disabled
+            plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61),
         );
         // No ▌ anywhere and no fail-color cell.
         for r in 0..3u16 {
@@ -2297,12 +2358,13 @@ mod tests {
             is_active: false,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
         let colors = block_colors();
-        let vs_some = compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors));
-        let vs_none = compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None);
+        let vs_some = compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs_none = compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         for r in 0..4u16 {
             for c in 0..6u16 {
                 let c1 = vs_some.cell(r, c).unwrap().clone();
@@ -2346,6 +2408,7 @@ mod tests {
             is_active: false,
             scroll_offset: 3,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -2359,7 +2422,7 @@ mod tests {
             None,
             None,
             Some(&colors),
-        );
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         // Left-segment column = pane.rect.col - 1 = 0. Pane rows 1..=3 map to
         // block rows 0..2. All should be Failed (fail color / ▌).
         for r in 1..=3u16 {
@@ -2379,6 +2442,7 @@ mod tests {
             is_active: false,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -2392,7 +2456,7 @@ mod tests {
             None,
             None,
             Some(&colors),
-        );
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         for r in 1..=3u16 {
             let cell = vs_live.cell(r, 0).unwrap();
             assert_ne!(
@@ -2429,6 +2493,7 @@ mod tests {
             is_active: false,
             scroll_offset: 3, // viewport = lines 0..2, all Failed
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -2443,7 +2508,7 @@ mod tests {
             None,
             None,
             Some(&colors),
-        );
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         // Logical pane rows 1..=3 paint physically at rows 2..=4 (offset 1).
         for r in 2..=4u16 {
             let cell = vs.cell(r, 0).unwrap();
@@ -2498,6 +2563,7 @@ mod tests {
             is_active: false,
             scroll_offset: 0, // copy-mode overrides this
             copy_mode: Some(&cm),
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -2511,7 +2577,7 @@ mod tests {
             None,
             None,
             Some(&colors),
-        );
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         // Lines 0..2 visible → block 1 (Failed) → left-segment cells colored.
         for r in 1..=3u16 {
             let cell = vs.cell(r, 0).unwrap();
@@ -2550,6 +2616,7 @@ mod tests {
             is_active: true,
             scroll_offset: 0,
             copy_mode: None,
+            block_mode: None,
             title: None,
             marked: false,
         };
@@ -2566,7 +2633,7 @@ mod tests {
             None,
             Some(&pv),
             blocks,
-        )
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61))
     }
 
     /// Popup with a failed block → left border rows colored fail + ▌ glyph.

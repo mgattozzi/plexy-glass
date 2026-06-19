@@ -15,6 +15,7 @@ struct OwnedPane {
     is_active: bool,
     scroll: u32,
     copy_mode: Option<plexy_glass_mux::CopyMode>,
+    block_mode: Option<plexy_glass_mux::BlockMode>,
     name: Option<String>,
 }
 
@@ -97,6 +98,7 @@ pub(super) async fn render_coordinator(
                         is_active: id == active_id,
                         scroll: pane.scroll_offset(),
                         copy_mode: pane.with_copy_mode(|cm| cm.clone()),
+                        block_mode: pane.with_block_mode(|bm| bm.clone()),
                         name: pane.name(),
                     });
                 }
@@ -110,6 +112,7 @@ pub(super) async fn render_coordinator(
                     is_active: p.is_active,
                     scroll_offset: p.scroll,
                     copy_mode: p.copy_mode.as_ref(),
+                    block_mode: p.block_mode.as_ref(),
                     title: p.name.as_deref(),
                     marked: marked_pane == Some(p.id),
                 })
@@ -287,6 +290,7 @@ pub(super) async fn render_coordinator(
             // Build the block-border color pair from the session's current config
             // so that live-reload updates apply for free on the next compose call.
             let block_colors = block_border_colors(&session.config_snapshot());
+            let block_select = block_select_color(&session.config_snapshot());
 
             plexy_glass_mux::compositor::compose(
                 &views,
@@ -298,6 +302,7 @@ pub(super) async fn render_coordinator(
                 message.as_deref(),
                 popup_view.as_ref(),
                 block_colors.as_ref(),
+                block_select,
             )
         };
         // The WM lock is released; if the drain set an alert message, schedule
@@ -439,6 +444,22 @@ fn command_label(command: &str) -> String {
 /// Used when `resolve_color` fails to resolve a user-supplied name/hex.
 const DEFAULT_OK_RGB: (u8, u8, u8) = (0x87, 0xa9, 0x87); // #87a987
 const DEFAULT_ALERT_RGB: (u8, u8, u8) = (0xc4, 0x74, 0x6e); // #c4746e
+const DEFAULT_SELECT_RGB: (u8, u8, u8) = (0xdc, 0xa5, 0x61); // #dca561
+
+/// Resolve the block-mode selection-bracket color from config. Always returns a
+/// color (unlike [`block_border_colors`], which is `None` when blocks are
+/// disabled), since the bracket is independent of the block-status feature.
+pub(super) fn block_select_color(
+    cfg: &plexy_glass_config::Config,
+) -> plexy_glass_emulator::Color {
+    let rgb = plexy_glass_status::resolve_color(&cfg.blocks.select_color, &cfg.palette)
+        .unwrap_or(plexy_glass_status::Rgb {
+            r: DEFAULT_SELECT_RGB.0,
+            g: DEFAULT_SELECT_RGB.1,
+            b: DEFAULT_SELECT_RGB.2,
+        });
+    plexy_glass_emulator::Color::Rgb(rgb.r, rgb.g, rgb.b)
+}
 
 /// Build an `Option<BlockBorderColors>` from the session's current config.
 ///

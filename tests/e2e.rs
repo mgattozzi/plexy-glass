@@ -2377,6 +2377,39 @@ fn block_mode_rerun_injects_command() {
     );
 }
 
+/// With blocks present, `prefix b` paints the capped selection bracket on the
+/// pane's left border (┏ at the selected block's top row).
+#[test]
+fn block_mode_paints_selection_bracket() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    let (send_status, _, send_err) = run_cli(
+        &env,
+        &[
+            "send",
+            "--enter",
+            "printf '\\033]133;A\\007PONE\\r\\n\\033]133;C\\007BRK_OUT\\n\\033]133;D;0\\007'",
+        ],
+    );
+    assert!(send_status.success(), "send failed: {send_err}");
+    assert!(
+        sess.wait_for(b"BRK_OUT", Duration::from_secs(15)),
+        "planted block never rendered. pane: {}",
+        sess.snapshot_str()
+    );
+
+    sess.send_prefix(b'b');
+    // ┏ = U+250F = e2 94 8f
+    assert!(
+        sess.wait_for(b"\xe2\x94\x8f", Duration::from_secs(10)),
+        "selection bracket ┏ never appeared. pane: {}",
+        sess.snapshot_str()
+    );
+}
+
 /// `prefix b` on a pane with no OSC 133 blocks (plain /bin/sh, no shell
 /// integration) refuses to open block mode and shows the no-blocks status hint.
 #[test]
