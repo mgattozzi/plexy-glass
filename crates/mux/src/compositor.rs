@@ -301,6 +301,7 @@ pub fn compose(
                 marked: v.marked,
                 title: v.title,
                 block_rows,
+                selected_block: None,
             }
         })
         .collect();

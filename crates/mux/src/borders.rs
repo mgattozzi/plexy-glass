@@ -21,6 +21,18 @@ pub struct BlockBorderColors {
     pub fail: Color,
 }
 
+/// A selected command block to outline with a capped bracket on the pane's
+/// left border column (block mode). `rows` are viewport-relative row indices
+/// (inclusive), same basis as [`PaneFrame::block_rows`]. Caps are drawn only
+/// when the real block boundary is in view, so a scrolled block reads as
+/// continuing past the edge.
+pub struct SelectedBlock {
+    pub rows: (u16, u16),
+    pub cap_top: bool,
+    pub cap_bottom: bool,
+    pub color: Color,
+}
+
 /// One pane to frame: its content `rect` (in the same physical coordinate
 /// space as `band`), whether it is the active pane, and an optional title to
 /// paint on its top edge.
@@ -36,6 +48,10 @@ pub struct PaneFrame<'a> {
     /// An empty vec means no block painting for this pane (feature disabled or
     /// not yet computed). Length must equal `rect.rows` when non-empty.
     pub block_rows: Vec<Option<BlockLineStatus>>,
+    /// When `Some`, paint a capped selection bracket on this pane's left
+    /// border for the given viewport rows (block mode). Highest precedence on
+    /// those cells.
+    pub selected_block: Option<SelectedBlock>,
 }
 
 /// Paint the frame, separators, and titles for `frames` within `band` (the
@@ -48,6 +64,7 @@ pub struct PaneFrame<'a> {
 /// disabled or `enabled #false`).
 ///
 /// Precedence per cell (highest wins):
+///   0. Selected-block bracket (block mode: color + `┏`/`┃`/`┗` glyph)
 ///   1. Marked ring (color + glyph; no `▌` ever on a marked ring)
 ///   2. Block status (ok/fail fg; fail replaces `│` → `▌` when plain vertical)
 ///   3. Active ring (bright blue)
@@ -73,9 +90,13 @@ pub fn draw(
             let glyph = box_glyph(n, s, e, w);
             let mut cell = Cell { grapheme: SmolStr::new(glyph), ..Cell::default() };
 
-            // Precedence: marked > block status > active.
-            // Marked ring: color + glyph unchanged (no ▌ ever).
-            if let Some(mr) = marked_rect
+            // Precedence: selected bracket > marked > block status > active.
+            // Selected-block bracket (block mode): color + ┏/┃/┗ glyph.
+            if let Some((color, glyph)) = selected_bracket(r, c, frames) {
+                cell.attrs = Attrs::BOLD;
+                cell.fg = color;
+                cell.grapheme = SmolStr::new_static(glyph);
+            } else if let Some(mr) = marked_rect
                 && touches(r, c, mr)
             {
                 cell.attrs = Attrs::BOLD;
@@ -166,6 +187,34 @@ fn left_segment_status(
     None
 }
 
+/// The selection-bracket color + glyph for cell `(r, c)` if it lies on the
+/// left border column of a pane whose `selected_block` covers row `r`. Glyphs:
+/// `┏` at the top row (when `cap_top`), `┗` at the bottom (when `cap_bottom`),
+/// `┃` elsewhere.
+fn selected_bracket(r: u16, c: u16, frames: &[PaneFrame<'_>]) -> Option<(Color, &'static str)> {
+    for f in frames {
+        let Some(sel) = &f.selected_block else { continue };
+        let Some(left_col) = f.rect.col.checked_sub(1) else { continue };
+        if c != left_col {
+            continue;
+        }
+        let top_abs = f.rect.row.saturating_add(sel.rows.0);
+        let bot_abs = f.rect.row.saturating_add(sel.rows.1);
+        if r < top_abs || r > bot_abs {
+            continue;
+        }
+        let glyph = if r == top_abs && sel.cap_top {
+            "\u{250f}" // ┏
+        } else if r == bot_abs && sel.cap_bottom {
+            "\u{2517}" // ┗
+        } else {
+            "\u{2503}" // ┃
+        };
+        return Some((sel.color, glyph));
+    }
+    None
+}
+
 /// A cell is a border cell when it is inside the band but not inside any pane.
 fn is_border(r: u16, c: u16, band: Rect, rects: &[Rect]) -> bool {
     if !band.contains(r, c) {
@@ -244,11 +293,11 @@ mod tests {
     use crate::blocks::BlockLineStatus;
 
     fn frame(rect: Rect, active: bool, title: Option<&str>) -> PaneFrame<'_> {
-        PaneFrame { rect, active, marked: false, title, block_rows: vec![] }
+        PaneFrame { rect, active, marked: false, title, block_rows: vec![], selected_block: None }
     }
 
     fn marked_frame(rect: Rect, active: bool, title: Option<&str>) -> PaneFrame<'_> {
-        PaneFrame { rect, active, marked: true, title, block_rows: vec![] }
+        PaneFrame { rect, active, marked: true, title, block_rows: vec![], selected_block: None }
     }
 
     fn frame_with_blocks(
@@ -257,7 +306,72 @@ mod tests {
         marked: bool,
         block_rows: Vec<Option<BlockLineStatus>>,
     ) -> PaneFrame<'static> {
-        PaneFrame { rect, active, marked, title: None, block_rows }
+        PaneFrame { rect, active, marked, title: None, block_rows, selected_block: None }
+    }
+
+    fn frame_with_selected(rect: Rect, sel: Option<SelectedBlock>) -> PaneFrame<'static> {
+        PaneFrame {
+            rect,
+            active: false,
+            marked: false,
+            title: None,
+            block_rows: vec![],
+            selected_block: sel,
+        }
+    }
+
+    fn sel_color() -> Color {
+        Color::Rgb(0xdc, 0xa5, 0x61)
+    }
+
+    /// A fully-visible block: ┏ cap at top row, ┃ middle, ┗ cap at bottom.
+    #[test]
+    fn selected_block_draws_capped_bracket() {
+        // Band 6x7; pane inset at (1,1) sized 4x5. Left segment = col 0, rows 1..=4.
+        let band = Rect::new(0, 0, 6, 7);
+        let pane = Rect::new(1, 1, 4, 5);
+        let sel = SelectedBlock { rows: (0, 3), cap_top: true, cap_bottom: true, color: sel_color() };
+        let mut screen = VirtualScreen::blank(6, 7);
+        draw(&[frame_with_selected(pane, Some(sel))], band, &mut screen, None);
+        assert_eq!(screen.cell(1, 0).unwrap().grapheme.as_str(), "\u{250f}", "top cap ┏");
+        assert_eq!(screen.cell(2, 0).unwrap().grapheme.as_str(), "\u{2503}", "middle ┃");
+        assert_eq!(screen.cell(4, 0).unwrap().grapheme.as_str(), "\u{2517}", "bottom cap ┗");
+        assert_eq!(screen.cell(2, 0).unwrap().fg, sel_color(), "bracket fg = selection color");
+    }
+
+    /// Off-screen top: no ┏ cap, ┃ continues to the visible top row.
+    #[test]
+    fn selected_block_no_top_cap_when_scrolled() {
+        let band = Rect::new(0, 0, 6, 7);
+        let pane = Rect::new(1, 1, 4, 5);
+        let sel = SelectedBlock { rows: (0, 3), cap_top: false, cap_bottom: true, color: sel_color() };
+        let mut screen = VirtualScreen::blank(6, 7);
+        draw(&[frame_with_selected(pane, Some(sel))], band, &mut screen, None);
+        assert_eq!(screen.cell(1, 0).unwrap().grapheme.as_str(), "\u{2503}", "no cap → ┃");
+        assert_eq!(screen.cell(4, 0).unwrap().grapheme.as_str(), "\u{2517}", "bottom cap ┗");
+    }
+
+    /// The bracket beats block-status coloring on its rows.
+    #[test]
+    fn selected_block_beats_block_status() {
+        let band = Rect::new(0, 0, 5, 7);
+        let pane = Rect::new(1, 1, 3, 5);
+        let colors = test_colors();
+        let sel = SelectedBlock { rows: (0, 2), cap_top: true, cap_bottom: true, color: sel_color() };
+        let f = PaneFrame {
+            rect: pane,
+            active: false,
+            marked: false,
+            title: None,
+            block_rows: vec![Some(BlockLineStatus::Failed); 3],
+            selected_block: Some(sel),
+        };
+        let mut screen = VirtualScreen::blank(5, 7);
+        draw(&[f], band, &mut screen, Some(&colors));
+        // Mid row: selection color + ┃, NOT the fail color / ▌.
+        let cell = screen.cell(2, 0).unwrap();
+        assert_eq!(cell.fg, sel_color(), "selection beats fail color");
+        assert_eq!(cell.grapheme.as_str(), "\u{2503}", "selection glyph, not ▌");
     }
 
     fn test_colors() -> BlockBorderColors {
