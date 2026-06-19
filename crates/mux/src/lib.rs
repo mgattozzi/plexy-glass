@@ -5,6 +5,7 @@
 //! that emits minimal ANSI to keep a host TTY in sync, and the prefix-key
 //! keymap state machine. The daemon owns the thin wiring on top.
 
+pub mod block_mode;
 pub mod blocks;
 pub mod borders;
 pub mod buffer;
@@ -26,9 +27,11 @@ pub mod status;
 pub mod tree;
 pub mod virtual_screen;
 
+pub use block_mode::{BlockMode, BlockModeAction};
 pub use blocks::{
-    BlockLineStatus, block_output_range, block_text, last_completed_block, next_prompt_line,
-    prev_prompt_line, viewport_block_status,
+    BlockLineStatus, block_command_line, block_extent, block_output_range, block_text,
+    first_prompt_line, last_completed_block, last_prompt_line, next_prompt_line, prev_prompt_line,
+    prompt_at_or_above, viewport_block_status,
 };
 pub use borders::BlockBorderColors;
 pub use buffer::{BufferAction, BufferEntry, BufferOutcome, BufferPickerState, handle_buffers};

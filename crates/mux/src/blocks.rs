@@ -24,7 +24,7 @@ fn row_at(screen: &Screen, line: u32) -> Option<&Row> {
 }
 
 /// Total lines in the unified space (scrollback + active grid).
-fn total_lines(screen: &Screen) -> u32 {
+pub(crate) fn total_lines(screen: &Screen) -> u32 {
     screen.scrollback.rows().len() as u32 + screen.active.rows.len() as u32
 }
 
@@ -68,6 +68,43 @@ pub fn block_output_range(screen: &Screen, line: u32) -> Option<(u32, u32)> {
         .find(|&l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::OUTPUT_START)))
         .unwrap_or(prompt);
     Some((start, end))
+}
+
+/// First `PROMPT_START` line at or after line 0, the oldest block's prompt.
+/// `None` when no prompt exists anywhere.
+pub fn first_prompt_line(screen: &Screen) -> Option<u32> {
+    (0..total_lines(screen)).find(|&l| is_prompt(screen, l))
+}
+
+/// Newest `PROMPT_START` line, the last block's prompt. `None` when no prompt
+/// exists anywhere.
+pub fn last_prompt_line(screen: &Screen) -> Option<u32> {
+    prev_prompt_line(screen, total_lines(screen))
+}
+
+/// The governing `PROMPT_START` at or above `line` (the block that contains
+/// `line`). `None` when no prompt exists at or above `line`.
+pub fn prompt_at_or_above(screen: &Screen, line: u32) -> Option<u32> {
+    let total = total_lines(screen);
+    if total == 0 {
+        return None;
+    }
+    let line = line.min(total - 1);
+    if is_prompt(screen, line) {
+        Some(line)
+    } else {
+        prev_prompt_line(screen, line)
+    }
+}
+
+/// Whole-block line range `(prompt_line, end)` (inclusive): the prompt row
+/// through the row before the next prompt (or the last line). Unlike
+/// [`block_output_range`], `start` is always the prompt row, so this is the
+/// extent the block-mode bracket spans and the "whole block" yank renders.
+pub fn block_extent(screen: &Screen, prompt_line: u32) -> (u32, u32) {
+    let total = total_lines(screen);
+    let end = next_prompt_line(screen, prompt_line).map_or(total.saturating_sub(1), |n| n - 1);
+    (prompt_line, end)
 }
 
 /// First `BLOCK_END` strictly after `prompt_line`, up to and including the
