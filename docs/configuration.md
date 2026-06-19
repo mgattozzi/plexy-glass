@@ -490,9 +490,10 @@ for the user-facing description of what it does).
 
 ```kdl
 blocks {
-    enabled #true         // #false disables all block border painting
-    ok-color "ok"         // palette name or #rrggbb; default: palette `ok`
-    fail-color "alert"    // palette name or #rrggbb; default: palette `alert`
+    enabled #true            // #false disables all block border painting
+    ok-color "ok"            // palette name or #rrggbb; default: palette `ok`
+    fail-color "alert"       // palette name or #rrggbb; default: palette `alert`
+    select-color "#dca561"   // palette name or #rrggbb; the block-mode bracket
 }
 ```
 
@@ -508,6 +509,12 @@ blocks {
   exited with a nonzero code, and it also triggers the `│` → `▌` glyph on
   plain vertical segments. Same value forms as `ok-color`. Default: `"alert"`
   (the built-in palette entry `#c4746e`).
+- `select-color` is the color of the block-mode selection bracket (`┏┃┗`)
+  drawn around the selected command block (see
+  [docs/command-blocks.md, Block mode](command-blocks.md#block-mode)). Same
+  value forms as `ok-color`. Default: `"#dca561"`. Note that this one is
+  independent of `enabled`: the bracket is part of block-mode navigation, so
+  it is drawn even when block-status border coloring is turned off.
 
 A bad color value (unknown palette name or malformed hex) falls back to the
 built-in default for that field, so it never disables the feature and is not

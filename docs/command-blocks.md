@@ -297,6 +297,43 @@ The `blocks` node in `config.kdl` controls this feature. See the
 [`blocks` section of docs/configuration.md](configuration.md#blocks) for the
 full reference (colors, `enabled` flag, defaults, and live-reload behavior).
 
+## Block mode
+
+Press `Ctrl+a b` to enter **block mode**, a dedicated view for navigating the
+command blocks in the focused pane. The selected block gets a bright capped
+bracket (`┏ ┃ ┗`) on the pane's left border, and the viewport scrolls to keep
+it visible as you move.
+
+Block mode refuses to open when the pane has no command blocks, which happens
+when a full-screen application is running (the alternate screen) or the shell
+has no OSC 133 integration. You stay in normal mode and
+`no command blocks in this pane` flashes on the status line.
+
+| Key | Action |
+|-----|--------|
+| `j` / `↓` | select the next (newer) block |
+| `k` / `↑` | select the previous (older) block |
+| `g` / `G` | select the oldest / newest block |
+| `y` | yank the whole block (prompt + command + output) |
+| `o` | yank the block's output only |
+| `c` | yank the block's command line only |
+| `r` | re-run the block's command (injects it + Enter, then exits) |
+| `Esc` / `q` | leave block mode |
+
+Yanks go to the paste-buffer stack (paste with `Ctrl+a ]`) **and** the system
+clipboard, the same destinations as `copy-output`. The three yanks stay in
+block mode so you can copy several blocks in a row, while `r` and `Esc`/`q`
+leave it. Any other key is swallowed (block mode is modal, nothing leaks to
+the pane's shell), but `Ctrl+a` prefix chords still work, so you can switch
+panes or detach without leaving block mode first.
+
+`:block-mode` opens block mode from the command prompt. The bracket color is
+the `blocks` node's `select-color` (see
+[the `blocks` node in docs/configuration.md](configuration.md#blocks)), and
+the entry chord is configurable like any other binding (`enter_block_mode`).
+
+**Requires OSC 133 shell integration**, same as all the other block features.
+
 ## Limitations
 
 - **Scrollback cap on restore**: only the most recent 1000 rows per pane are
