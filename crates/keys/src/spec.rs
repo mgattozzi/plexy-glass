@@ -148,6 +148,7 @@ pub fn parse_command(s: &str) -> Result<Command, KeyParseError> {
         "detach" => Command::Detach,
         "cancel" => Command::Cancel,
         "enter_copy_mode" => Command::EnterCopyMode,
+        "enter_block_mode" => Command::EnterBlockMode,
         "toggle_sync_panes" => Command::ToggleSyncPanes,
         "reload_config" => Command::ReloadConfig,
         "select_next_pane" => Command::SelectNextPane,
@@ -313,6 +314,11 @@ mod tests {
     fn command_with_arg() {
         let c = parse_command("select_window:0").unwrap();
         assert_eq!(c, Command::SelectWindow(0));
+    }
+
+    #[test]
+    fn parses_enter_block_mode() {
+        assert_eq!(parse_command("enter_block_mode").unwrap(), Command::EnterBlockMode);
     }
 
     #[test]

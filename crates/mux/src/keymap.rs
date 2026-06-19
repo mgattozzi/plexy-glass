@@ -58,6 +58,9 @@ pub enum Command {
     Detach,
     Cancel,
     EnterCopyMode,
+    /// Enter block mode on the active pane (handled at the connection layer so
+    /// the no-blocks refusal can set a status message).
+    EnterBlockMode,
     ToggleSyncPanes,
     ReloadConfig,
     /// Open a floating popup pane running `command` via `$SHELL -c` (`None` =

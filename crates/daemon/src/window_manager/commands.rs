@@ -368,10 +368,10 @@ impl WindowManager {
                     pane.set_scroll_offset(off, max);
                 }
             }
-            Command::CopyOutput => {
+            Command::EnterBlockMode | Command::CopyOutput => {
                 // Handled at the connection layer (needs the registry's paste
-                // buffers and the async clipboard write); see
-                // serve_attach / run_connection_verb.
+                // buffers / clipboard, or the session for the no-blocks status
+                // message); see `serve_attach` / `run_connection_verb`.
             }
         }
         self.notify.notify_one();

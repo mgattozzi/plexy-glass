@@ -870,6 +870,7 @@ impl Session {
             | PromptCommand::PasteBuffer(_)
             | PromptCommand::ChooseBuffer
             | PromptCommand::CopyOutput
+            | PromptCommand::BlockMode
             | PromptCommand::SetBuffer { .. }
             | PromptCommand::SaveBuffer { .. }
             | PromptCommand::LoadBuffer { .. } => {

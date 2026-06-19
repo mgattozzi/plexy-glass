@@ -83,6 +83,8 @@ pub enum PromptCommand {
     NextPrompt,
     /// Copy the last completed command block's output.
     CopyOutput,
+    /// Enter block mode on the active pane.
+    BlockMode,
 }
 
 /// A human-readable parse failure.
@@ -101,7 +103,7 @@ impl std::error::Error for ParseError {}
 
 /// Static verb names, sorted, for Tab-completion of the first token.
 pub const VERBS: &[&str] = &[
-    "break", "buffers", "close-popup", "copy", "copy-output", "detach", "focus",
+    "block-mode", "break", "buffers", "close-popup", "copy", "copy-output", "detach", "focus",
     "help", "join", "kill", "last", "layout", "load-buffer", "mark",
     "monitor-activity", "monitor-bell", "monitor-command", "monitor-silence", "new", "next",
     "next-prompt", "paste",
@@ -230,6 +232,7 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
         "prev-prompt" => no_args(PromptCommand::PrevPrompt),
         "next-prompt" => no_args(PromptCommand::NextPrompt),
         "copy-output" => no_args(PromptCommand::CopyOutput),
+        "block-mode" => no_args(PromptCommand::BlockMode),
         "join" | "join-pane" => match args.as_slice() {
             [] | ["v"] => Ok(PromptCommand::JoinPane(SplitDir::Vertical)),
             ["h"] => Ok(PromptCommand::JoinPane(SplitDir::Horizontal)),
@@ -646,6 +649,11 @@ mod tests {
         assert_eq!(p("prev-prompt").unwrap(), PromptCommand::PrevPrompt);
         assert_eq!(p("next-prompt").unwrap(), PromptCommand::NextPrompt);
         assert_eq!(p("copy-output").unwrap(), PromptCommand::CopyOutput);
+        assert_eq!(p("block-mode").unwrap(), PromptCommand::BlockMode);
+        assert_eq!(
+            p("block-mode x").unwrap_err().to_string(),
+            "block-mode: takes no arguments"
+        );
         assert_eq!(
             p("prev-prompt x").unwrap_err().to_string(),
             "prev-prompt: takes no arguments"
