@@ -37,6 +37,7 @@ struct Inner {
     emulator: Arc<Mutex<Emulator>>,
     scroll_offset: AtomicU32,
     copy_mode: Mutex<Option<plexy_glass_mux::CopyMode>>,
+    block_mode: Mutex<Option<plexy_glass_mux::BlockMode>>,
     /// User-assigned pane name (distinct from the shell-set terminal title on
     /// the emulator screen). `None` until the user renames the pane; shown on
     /// the pane's top border and persisted in the saved-session file.
@@ -330,6 +331,7 @@ impl Pane {
                 emulator,
                 scroll_offset: AtomicU32::new(0),
                 copy_mode: Mutex::new(None),
+                block_mode: Mutex::new(None),
                 name: Mutex::new(None),
                 config: config_slot,
                 activity,
@@ -543,6 +545,12 @@ impl Pane {
     ) {
         // invariant: copy_mode mutex is only contended with the Connection's
         // brief checks; no async holding.
+        // Block mode and copy mode are mutually exclusive on a pane.
+        *self
+            .inner
+            .block_mode
+            .lock()
+            .expect("pane block_mode mutex poisoned") = None;
         let mut guard = self
             .inner
             .copy_mode
@@ -597,6 +605,63 @@ impl Pane {
         guard.as_ref().map(f)
     }
 
+    /// Enter block mode with the given state. Clears copy mode, since the
+    /// two per-pane modes are mutually exclusive.
+    pub fn enter_block_mode(&self, state: plexy_glass_mux::BlockMode) {
+        // invariant: both mode mutexes are only contended by the Connection's
+        // brief checks; no async holding.
+        *self
+            .inner
+            .copy_mode
+            .lock()
+            .expect("pane copy_mode mutex poisoned") = None;
+        *self
+            .inner
+            .block_mode
+            .lock()
+            .expect("pane block_mode mutex poisoned") = Some(state);
+    }
+
+    pub fn exit_block_mode(&self) {
+        *self
+            .inner
+            .block_mode
+            .lock()
+            .expect("pane block_mode mutex poisoned") = None;
+    }
+
+    pub fn is_in_block_mode(&self) -> bool {
+        self.inner
+            .block_mode
+            .lock()
+            .expect("pane block_mode mutex poisoned")
+            .is_some()
+    }
+
+    pub fn with_block_mode_mut<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut plexy_glass_mux::BlockMode) -> R,
+    {
+        self.inner
+            .block_mode
+            .lock()
+            .expect("pane block_mode mutex poisoned")
+            .as_mut()
+            .map(f)
+    }
+
+    pub fn with_block_mode<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&plexy_glass_mux::BlockMode) -> R,
+    {
+        self.inner
+            .block_mode
+            .lock()
+            .expect("pane block_mode mutex poisoned")
+            .as_ref()
+            .map(f)
+    }
+
     /// Notify the pane that its cell size has changed (called from
     /// `Window::resize` after the layout recomputes pane rects). Keeps
     /// `CopyMode` state consistent across host resizes.
@@ -606,6 +671,9 @@ impl Pane {
         });
         let _ = self.with_copy_mode_mut(|cm| {
             cm.set_pane_rows(new_rows, total_lines);
+        });
+        let _ = self.with_block_mode_mut(|bm| {
+            bm.set_pane_rows(new_rows, total_lines);
         });
     }
 }
@@ -718,6 +786,36 @@ mod tests {
         let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None)
             .expect("spawn");
         assert_eq!(p.with_screen(|s| s.term.clone()), "xterm-ghostty");
+        p.kill_child();
+    }
+
+    #[tokio::test]
+    async fn block_mode_is_mutually_exclusive_with_copy_mode() {
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None)
+            .expect("spawn");
+
+        p.enter_copy_mode(10, 24, 0, 0);
+        assert!(p.is_in_copy_mode());
+        assert!(!p.is_in_block_mode());
+
+        let bm = plexy_glass_mux::BlockMode {
+            selected: 0,
+            viewport_top: 0,
+            pane_rows: 24,
+            total_lines: 10,
+        };
+        p.enter_block_mode(bm);
+        assert!(p.is_in_block_mode(), "block mode on");
+        assert!(!p.is_in_copy_mode(), "entering block mode cleared copy mode");
+
+        p.exit_block_mode();
+        assert!(!p.is_in_block_mode());
         p.kill_child();
     }
 
