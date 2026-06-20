@@ -281,6 +281,58 @@ pub fn compose(
         }
     }
 
+    // Block-mode filter: dim non-matching blocks, highlight the query in matches.
+    // Mirrors the copy-mode selection/search passes; gated on an active filter
+    // with a non-empty query, and suppressed on the alt screen (the block marks
+    // live on the main grid, like every other block-mode render path).
+    for view in panes {
+        let Some(bm) = view.block_mode else { continue };
+        let Some(filter) = &bm.filter else { continue };
+        if filter.query.is_empty() || view.screen.alt.is_some() {
+            continue;
+        }
+        let viewport_lo = bm.viewport_top;
+
+        // Dim: any viewport row whose governing block is not a match (including
+        // rows with no governing prompt) gets DIM on its content cells.
+        for r in 0..view.rect.rows {
+            let line = viewport_lo + u32::from(r);
+            let is_match = crate::blocks::prompt_at_or_above(view.screen, line)
+                .is_some_and(|p| filter.matches.contains(&p));
+            if is_match {
+                continue;
+            }
+            let host_r = pane_row_offset + view.rect.row + r;
+            for c in 0..view.rect.cols {
+                let host_c = view.rect.col + c;
+                if let Some(cell) = screen.cell_mut(host_r, host_c) {
+                    cell.attrs |= plexy_glass_emulator::Attrs::DIM;
+                }
+            }
+        }
+
+        // Highlight: every occurrence of the query within visible rows. Any row
+        // containing the query belongs to a matching (bright) block by
+        // definition, so no membership check is needed here.
+        let viewport_hi = viewport_lo + u32::from(view.rect.rows);
+        for (line, col_start, col_end) in
+            filter_match_spans(view.screen, &filter.query, viewport_lo, viewport_hi)
+        {
+            let local_row = (line - viewport_lo) as u16;
+            let host_r = pane_row_offset + view.rect.row + local_row;
+            let last_col = col_end.min(view.rect.cols.saturating_sub(1));
+            for c in col_start..=last_col {
+                let host_c = view.rect.col + c;
+                if host_c >= host_cols {
+                    break;
+                }
+                if let Some(cell) = screen.cell_mut(host_r, host_c) {
+                    cell.attrs |= plexy_glass_emulator::Attrs::HIGHLIGHT;
+                }
+            }
+        }
+    }
+
     // Full pane frames. Offset each pane rect by `pane_row_offset` so the
     // frame lands on the physical pane band (matters for top status). The
     // band is the whole physical pane area; the layout already inset pane
@@ -393,6 +445,25 @@ pub fn compose(
         put_str(&mut screen, prompt_row, active.rect.col, &text, prompt_attrs, host_cols);
     }
 
+    // Block-mode filter prompt overlay on the active pane.
+    if let Some(active) = panes.iter().find(|v| v.is_active)
+        && let Some(bm) = active.block_mode
+        && let Some(filter) = &bm.filter
+        && filter.prompt_active
+    {
+        let total = crate::blocks::all_prompt_lines(active.screen).len();
+        let prompt_row = pane_row_offset + active.rect.row + active.rect.rows.saturating_sub(1);
+        let text = format!("filter: {} ({}/{})", filter.query, filter.matches.len(), total);
+        put_str(
+            &mut screen,
+            prompt_row,
+            active.rect.col,
+            &text,
+            plexy_glass_emulator::Attrs::REVERSE,
+            host_cols,
+        );
+    }
+
     // Transient status-line message: a full-width REVERSE bar on the bottom
     // content row, shown only when no interactive overlay is open (the
     // overlay owns that row when present).
@@ -443,6 +514,58 @@ fn effective_scroll_for(view: &PaneView<'_>) -> u32 {
         }
         None => view.scroll_offset,
     }
+}
+
+/// Case-insensitive query occurrences within unified lines `[lo, hi)`, returned
+/// as `(line, col_start, col_end)` grid spans. Mirrors `copy_mode::find_matches`:
+/// a cell's grid column is its index (wide graphemes occupy a cell + a spacer).
+fn filter_match_spans(
+    screen: &Screen,
+    query: &str,
+    lo: u32,
+    hi: u32,
+) -> Vec<(u32, u16, u16)> {
+    let mut out = Vec::new();
+    if query.is_empty() {
+        return out;
+    }
+    let q = query.to_lowercase();
+    let cols = screen.active.num_cols();
+    let total = screen.scrollback.rows().len() as u32 + screen.active.num_rows() as u32;
+    let span = display_width(&q).max(1);
+    for line in lo..hi.min(total) {
+        let Some(row) = crate::blocks::row_at(screen, line) else { continue };
+        // Build the line's lowercased text + a column map (byte offset → grid
+        // column), keyed on the SAME lowercased text the byte offsets index into.
+        let mut line_text = String::new();
+        let mut starts: Vec<(usize, u16)> = Vec::new();
+        let mut grid_col = 0u16;
+        for cell in &row.cells {
+            if cell.is_wide_spacer() {
+                grid_col += 1;
+                continue;
+            }
+            starts.push((line_text.len(), grid_col));
+            line_text.push_str(&cell.grapheme.as_str().to_lowercase());
+            grid_col += 1;
+        }
+        let mut start = 0usize;
+        while let Some(idx) = line_text[start..].find(&q) {
+            let byte_off = start + idx;
+            let col_start = starts
+                .iter()
+                .rev()
+                .find(|(b, _)| *b <= byte_off)
+                .map(|(_, gc)| *gc)
+                .unwrap_or(0);
+            let col_end = col_start
+                .saturating_add(span.saturating_sub(1))
+                .min(cols.saturating_sub(1));
+            out.push((line, col_start, col_end));
+            start = byte_off + q.len();
+        }
+    }
+    out
 }
 
 /// Paint the active overlay over the pane band.
@@ -2590,6 +2713,144 @@ mod tests {
                 "bracket glyph {g:?} leaked onto the alt screen at row {r}"
             );
         }
+    }
+
+    // ── block-mode filter (dim / highlight / prompt bar) ──────────────────────
+
+    /// A two-block screen filtered to block 1 ("alpha"): block 2's content is
+    /// dimmed; block 1's matched text is highlighted.
+    #[test]
+    fn filter_dims_non_matches_and_highlights_matches() {
+        use plexy_glass_emulator::{Attrs, Emulator};
+        let mut e = Emulator::new(8, 20);
+        e.advance(
+            b"\x1b]133;A\x07$ \x1b]133;B\x07alpha\r\n\
+              \x1b]133;C\x07out\r\n\
+              \x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07beta\r\n\
+              \x1b]133;C\x07out",
+        );
+        e.advance(b"\x1b[m");
+        let screen = e.screen().clone();
+        // Block 1 prompt at line 0, block 2 prompt at line 2 (D+A share a row).
+        let bm = crate::BlockMode {
+            selected: 0,
+            viewport_top: 0,
+            pane_rows: 8,
+            total_lines: 8,
+            filter: Some(crate::Filter {
+                query: "alpha".into(),
+                prompt_active: false,
+                matches: vec![0],
+            }),
+        };
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(1, 1, 8, 18),
+            screen: &screen,
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: Some(&bm),
+            title: None,
+            marked: false,
+        };
+        let vs = compose(&[view], (10, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
+        // Block 1 command row = host row 1; "alpha" begins after "$ " at content
+        // col 2 → host col 1 + 2 = 3. It must be HIGHLIGHT, not DIM.
+        assert!(vs.cell(1, 3).unwrap().attrs.contains(Attrs::HIGHLIGHT), "match highlighted");
+        assert!(!vs.cell(1, 3).unwrap().attrs.contains(Attrs::DIM), "match row not dimmed");
+        // Block 2 command row = line 2 → host row 3 → dimmed.
+        assert!(vs.cell(3, 2).unwrap().attrs.contains(Attrs::DIM), "non-match dimmed");
+    }
+
+    /// No dim/highlight on the alt screen even with a filter present.
+    #[test]
+    fn filter_suppressed_on_alt_screen() {
+        use plexy_glass_emulator::{Attrs, Emulator};
+        let mut e = Emulator::new(6, 20);
+        e.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07alpha\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07");
+        e.advance(b"\x1b[?1049h$ alt");
+        e.advance(b"\x1b[m");
+        let screen = e.screen().clone();
+        assert!(screen.alt.is_some());
+        let bm = crate::BlockMode {
+            selected: 0,
+            viewport_top: 0,
+            pane_rows: 6,
+            total_lines: 6,
+            filter: Some(crate::Filter {
+                query: "alpha".into(),
+                prompt_active: false,
+                matches: vec![0],
+            }),
+        };
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(1, 1, 6, 18),
+            screen: &screen,
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: Some(&bm),
+            title: None,
+            marked: false,
+        };
+        let vs = compose(&[view], (8, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
+        for r in 0..8u16 {
+            for c in 0..20u16 {
+                let a = vs.cell(r, c).unwrap().attrs;
+                assert!(
+                    !a.contains(Attrs::DIM) && !a.contains(Attrs::HIGHLIGHT),
+                    "no filter paint on alt at ({r},{c})"
+                );
+            }
+        }
+    }
+
+    /// The filter prompt bar renders `filter: <query> (<n>/<total>)` on the
+    /// pane's bottom row while typing.
+    #[test]
+    fn filter_prompt_bar_renders_query_and_count() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(8, 20);
+        e.advance(
+            b"\x1b]133;A\x07$ \x1b]133;B\x07alpha\r\n\
+              \x1b]133;C\x07out\r\n\
+              \x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07beta\r\n\
+              \x1b]133;C\x07out",
+        );
+        e.advance(b"\x1b[m");
+        let screen = e.screen().clone();
+        let bm = crate::BlockMode {
+            selected: 0,
+            viewport_top: 0,
+            pane_rows: 8,
+            total_lines: 8,
+            filter: Some(crate::Filter {
+                query: "alpha".into(),
+                prompt_active: true,
+                matches: vec![0],
+            }),
+        };
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(1, 1, 8, 18),
+            screen: &screen,
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: Some(&bm),
+            title: None,
+            marked: false,
+        };
+        let vs = compose(&[view], (10, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
+        // Bottom content row of the pane = rect.row + rect.rows - 1 = 8. Read the
+        // full host width, since the bar ("filter: alpha (1/2)", 19 cols) starts
+        // at col 1 and runs past the pane's content columns.
+        let row: String = (1..20)
+            .filter_map(|c| vs.cell(8, c).map(|cell| cell.grapheme.as_str().to_string()))
+            .collect();
+        assert!(row.contains("filter: alpha (1/2)"), "prompt bar text: {row:?}");
     }
 
     /// Status bar on TOP shifts every pane down by one physical row
