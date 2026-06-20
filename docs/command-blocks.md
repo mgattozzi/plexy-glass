@@ -314,6 +314,8 @@ has no OSC 133 integration. You stay in normal mode and
 | `j` / `↓` | select the next (newer) block |
 | `k` / `↑` | select the previous (older) block |
 | `g` / `G` | select the oldest / newest block |
+| `/` | filter blocks by command + output (incremental; dims non-matches, highlights the match) |
+| `J` / `K` | jump to the next / previous **failed** block (within the filter) |
 | `y` | yank the whole block (prompt + command + output) |
 | `o` | yank the block's output only |
 | `c` | yank the block's command line only |
@@ -326,6 +328,20 @@ block mode so you can copy several blocks in a row, while `r` and `Esc`/`q`
 leave it. Any other key is swallowed (block mode is modal, nothing leaks to
 the pane's shell), but `Ctrl+a` prefix chords still work, so you can switch
 panes or detach without leaving block mode first.
+
+### Filter and failed-jump
+
+`/` makes the filter the **lens**: type a query and the navigable set narrows to
+blocks whose **command + output** contains it (case-insensitive, incremental).
+While a filter is active, `j`/`k`/`g`/`G` only visit matching blocks,
+non-matching blocks are **dimmed**, and the query is **highlighted** inside each
+match; the prompt shows a live count (`filter: cargo (3/7)`). `Enter` commits
+the filter; `Esc` while typing clears it; with a committed filter, `Esc` clears
+it and `Esc` again (no filter) leaves block mode.
+
+`J` / `K` jump to the next / previous **failed** block (nonzero exit), within
+the current filter if one is active, for a fast "take me to what broke" loop.
+All relative motions (`j`/`k`, `J`/`K`) **wrap** around the ends of the set.
 
 `:block-mode` opens block mode from the command prompt. The bracket color is
 the `blocks` node's `select-color` (see

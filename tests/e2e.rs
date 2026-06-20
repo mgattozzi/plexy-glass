@@ -2410,6 +2410,80 @@ fn block_mode_paints_selection_bracket() {
     );
 }
 
+/// Plant three OSC-133 blocks for the filter/failed-jump e2e tests: ok
+/// (`echo aaa`) / FAIL (`expr 40 + 2`, D;1) / ok (`echo ccc`). The failed
+/// block's command, when re-run, prints `42`, a marker that appears nowhere
+/// in the planted text. Returns once the last block has rendered.
+fn plant_three_blocks(env: &TestEnv, sess: &TestSession) {
+    let (st, _, err) = run_cli(
+        env,
+        &[
+            "send",
+            "--enter",
+            "printf '\\033]133;A\\007$ \\033]133;B\\007echo aaa\\r\\n\\033]133;C\\007o-aaa\\n\\033]133;D;0\\007\\033]133;A\\007$ \\033]133;B\\007expr 40 + 2\\r\\n\\033]133;C\\007o-bbb\\n\\033]133;D;1\\007\\033]133;A\\007$ \\033]133;B\\007echo ccc\\r\\n\\033]133;C\\007o-ccc\\n\\033]133;D;0\\007'",
+        ],
+    );
+    assert!(st.success(), "send failed: {err}");
+    assert!(
+        sess.wait_for(b"o-ccc", Duration::from_secs(15)),
+        "planted blocks never rendered. pane: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// `/` filters by command+output and the prompt bar shows the live match count.
+/// Only the middle block's command contains "expr" → 1 of 3.
+#[test]
+fn block_mode_filter_shows_match_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    plant_three_blocks(&env, &sess);
+
+    sess.send_prefix(b'b');
+    assert!(
+        sess.wait_for(b"\xe2\x94\x8f", Duration::from_secs(10)),
+        "block mode never opened. pane: {}",
+        sess.snapshot_str()
+    );
+    sess.send(b"/");
+    sess.send(b"expr");
+    assert!(
+        sess.wait_for(b"filter: expr (1/3)", Duration::from_secs(10)),
+        "filter prompt bar never showed 1/3. pane: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// `J` (failed-jump) lands on the failed block, and `r` re-runs ITS command.
+/// The failed block's command is `expr 40 + 2` → re-running prints `42`. The
+/// newest block (selected on entry) is `echo ccc`, so seeing `42` proves the
+/// jump moved the selection to the failed block before the re-run.
+#[test]
+fn block_mode_failed_jump_then_rerun() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    plant_three_blocks(&env, &sess);
+
+    sess.send_prefix(b'b');
+    assert!(
+        sess.wait_for(b"\xe2\x94\x8f", Duration::from_secs(10)),
+        "block mode never opened. pane: {}",
+        sess.snapshot_str()
+    );
+    let mark = sess.buffer_len();
+    sess.send(b"J"); // jump to the failed block (expr 40 + 2)
+    sess.send(b"r"); // re-run it → prints 42
+    assert!(
+        sess.wait_for_from(mark, b"42", Duration::from_secs(10)),
+        "failed-jump + re-run never produced 42. pane: {}",
+        sess.snapshot_str()
+    );
+}
+
 /// `prefix b` on a pane with no OSC 133 blocks (plain /bin/sh, no shell
 /// integration) refuses to open block mode and shows the no-blocks status hint.
 #[test]

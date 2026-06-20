@@ -200,11 +200,13 @@ rebindable via the `keymap` block in `config.kdl` (see the
 |---|---|
 | `Ctrl+a <` | Previous prompt (scroll back one command) |
 | `Ctrl+a >` | Next prompt (scroll forward one command) |
-| `Ctrl+a b` | Block mode (navigate / yank / re-run command blocks) |
+| `Ctrl+a b` | Block mode (navigate / yank / re-run; `/` filter, `J`/`K` jump to failures) |
 
 These work outside copy mode. **Block mode** (`Ctrl+a b`) outlines the selected
-block and adds `j`/`k`/`g`/`G` navigation, `y`/`o`/`c` yanks (whole / output /
-command), and `r` to re-run. Inside copy mode: `[` / `]` jump to the
+block and adds `j`/`k`/`g`/`G` navigation (wrapping), `y`/`o`/`c` yanks (whole /
+output / command), `r` to re-run, `/` to filter by command + output (dims
+non-matches, highlights the match), and `J`/`K` to jump to failed blocks within
+the filter. Inside copy mode: `[` / `]` jump to the
 previous / next prompt; `o` selects the current block's output region (then
 `y` to yank). See [docs/command-blocks.md](docs/command-blocks.md).
 
