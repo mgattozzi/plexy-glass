@@ -3818,9 +3818,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Refused: these act on the calling client (detach/switch) or open
-        // modal overlays (help/sessions/tree/buffers).
-        for line in ["detach", "switch x", "sessions", "tree", "buffers", "help"] {
+        // Refused: these act on the calling client (detach/switch), open modal
+        // overlays (help/sessions/tree/buffers), or are interactive per-pane
+        // modal navigation (block-mode).
+        for line in ["detach", "switch x", "sessions", "tree", "buffers", "help", "block-mode"] {
             let (ok, message) = run_prompt_line(&session, &registry, line).await;
             assert!(!ok, "`{line}` must be refused headless, not silently succeed");
             let msg = message.unwrap_or_default();

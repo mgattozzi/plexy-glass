@@ -76,6 +76,15 @@ impl BlockMode {
 pub fn handle(event: &KeyEvent, state: &mut BlockMode, screen: &Screen) -> BlockModeAction {
     use BlockModeAction::*;
 
+    // A full-screen app took over the pane (alt screen) while block mode was
+    // open. The OSC 133 marks live on the MAIN grid's scrollback, not on what
+    // is now displayed, so navigating/yanking would act on stale content. Leave
+    // block mode (the caller's Exit arm clears the per-pane state), the same
+    // alt policy as the entry guard in `new_for`.
+    if screen.alt.is_some() {
+        return Exit;
+    }
+
     // Keep total_lines fresh (background output may have grown the screen) and
     // re-anchor the selection onto a surviving prompt (eviction / drift safety).
     state.total_lines = crate::blocks::total_lines(screen);
@@ -134,6 +143,9 @@ pub fn handle(event: &KeyEvent, state: &mut BlockMode, screen: &Screen) -> Block
             Yank(crate::blocks::block_text(screen, range))
         }
         (m, Key::Char('o')) if m.is_empty() => {
+            // `selected` is always re-anchored to a real prompt above, so
+            // block_output_range returns Some (it falls back to the prompt row
+            // when the block has no OUTPUT_START). The None arm is defensive.
             match crate::blocks::block_output_range(screen, state.selected) {
                 Some(range) => Yank(crate::blocks::block_text(screen, range)),
                 None => Ignore,
@@ -299,5 +311,67 @@ mod tests {
         let bm = BlockMode::new_for(&s, 8).unwrap(); // selected = 3, pane_rows = 8
         // max_top = 8 - 8 = 0, so newest selection clamps viewport_top to 0.
         assert_eq!(bm.viewport_top, 0);
+    }
+
+    #[test]
+    fn handle_exits_on_alt_screen() {
+        // Block mode was open on the main screen; the child then enters the alt
+        // screen. `handle` must Exit (marks live on the main grid, not on screen).
+        let main = two_blocks();
+        let mut bm = BlockMode::new_for(&main, 8).unwrap();
+        let alt = screen_from(4, 20, b"\x1b]133;A\x07$ x\r\n\x1b[?1049h\x1b]133;A\x07$ alt");
+        assert_eq!(handle(&key('j'), &mut bm, &alt), BlockModeAction::Exit);
+        assert_eq!(handle(&key('y'), &mut bm, &alt), BlockModeAction::Exit);
+    }
+
+    #[test]
+    fn handle_exits_when_no_prompts_remain() {
+        // The selected prompt was evicted and no prompt survives anywhere.
+        let s = screen_from(4, 20, b"plain text");
+        let mut bm = BlockMode { selected: 0, viewport_top: 0, pane_rows: 4, total_lines: 1 };
+        assert_eq!(handle(&key('j'), &mut bm, &s), BlockModeAction::Exit);
+    }
+
+    #[test]
+    fn handle_reanchors_when_selected_is_non_prompt() {
+        // `selected` drifted onto a non-prompt output row (e.g. eviction shifted
+        // indices). handle re-anchors to the governing prompt before acting.
+        let s = two_blocks(); // prompts at lines 0 and 3
+        let mut bm = BlockMode::new_for(&s, 8).unwrap();
+        bm.selected = 5; // an output row inside block 2 (lines 3..=7)
+        match handle(&key('y'), &mut bm, &s) {
+            BlockModeAction::Yank(t) => {
+                assert_eq!(bm.selected, 3, "re-anchored to governing prompt");
+                assert!(t.contains("two"), "yanked block 2: {t:?}");
+            }
+            other => panic!("expected Yank, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_pane_rows_clamps_selection_and_recenters() {
+        let s = two_blocks(); // total = 8
+        let mut bm = BlockMode::new_for(&s, 8).unwrap(); // selected = 3
+        bm.set_pane_rows(4, 6);
+        assert_eq!(bm.pane_rows, 4);
+        assert_eq!(bm.total_lines, 6);
+        assert_eq!(bm.selected, 3, "still valid, not clamped");
+        // recenter: viewport_top = selected.min(total - pane_rows) = 3.min(2) = 2
+        assert_eq!(bm.viewport_top, 2);
+        // Shrink total below the selection → clamp to total-1.
+        bm.set_pane_rows(4, 2);
+        assert_eq!(bm.selected, 1, "selection clamped to total-1");
+    }
+
+    #[test]
+    fn g_g_return_render_even_at_edge() {
+        // Distinct from j/k, which Ignore at the edge: g/G always Render.
+        let s = two_blocks();
+        let mut bm = BlockMode::new_for(&s, 8).unwrap(); // selected = 3 (newest)
+        assert_eq!(handle(&key('G'), &mut bm, &s), BlockModeAction::Render);
+        assert_eq!(bm.selected, 3, "G at newest is a no-op move but still Render");
+        handle(&key('g'), &mut bm, &s); // → 0
+        assert_eq!(handle(&key('g'), &mut bm, &s), BlockModeAction::Render);
+        assert_eq!(bm.selected, 0, "g at oldest is a no-op move but still Render");
     }
 }

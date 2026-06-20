@@ -301,8 +301,15 @@ pub fn compose(
             } else {
                 vec![]
             };
-            // Selected-block bracket (independent of the blocks toggle).
+            // Selected-block bracket (independent of the blocks toggle, but
+            // suppressed on the alt screen: a full-screen app entered while
+            // block mode was open must not get a bracket painted over it; the
+            // marks belong to the main grid. Mirrors `viewport_block_status`'s
+            // alt guard. The 0-row guard keeps the `vp_end - 1` math total.)
             let selected_block = v.block_mode.and_then(|bm| {
+                if v.rect.rows == 0 || v.screen.alt.is_some() {
+                    return None;
+                }
                 let (a_start, a_end) = crate::blocks::block_extent(v.screen, bm.selected);
                 let vp_end = top + u32::from(v.rect.rows); // exclusive
                 if a_end < top || a_start >= vp_end {
@@ -2462,6 +2469,125 @@ mod tests {
             assert_ne!(
                 cell.fg, colors.fail,
                 "live viewport row {r}: should not have fail color (block 2 running)"
+            );
+        }
+    }
+
+    // ── block-mode selection bracket (render path) ───────────────────────────
+
+    /// 8-row screen, two OSC-133 blocks; same bytes as `block_mode::tests`.
+    fn two_block_screen() -> plexy_glass_emulator::Screen {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(8, 20);
+        e.advance(
+            b"\x1b]133;A\x07$ \x1b]133;B\x07one\r\n\
+              \x1b]133;C\x07out1\r\n\
+              out2\r\n\
+              \x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07two\r\n\
+              \x1b]133;C\x07out3",
+        );
+        e.advance(b"\x1b[m");
+        e.screen().clone()
+    }
+
+    const SEL: plexy_glass_emulator::Color = plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61);
+
+    /// A fully-visible selected block gets ┏ at its top content row, ┃ between,
+    /// and ┗ at its bottom, all on the pane's left border column.
+    #[test]
+    fn selected_block_maps_fully_visible_block_with_both_caps() {
+        let screen = two_block_screen();
+        // Select block 1 (prompt line 0, extent lines 0..=2), viewport at top.
+        let bm = crate::BlockMode { selected: 0, viewport_top: 0, pane_rows: 8, total_lines: 8 };
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(1, 1, 8, 18),
+            screen: &screen,
+            is_active: false,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: Some(&bm),
+            title: None,
+            marked: false,
+        };
+        let vs = compose(&[view], (10, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
+        // Left segment col = rect.col - 1 = 0. Block rows 0..=2 → host rows 1..=3.
+        assert_eq!(vs.cell(1, 0).unwrap().grapheme.as_str(), "\u{250f}", "top cap ┏");
+        assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "\u{2503}", "middle ┃");
+        assert_eq!(vs.cell(3, 0).unwrap().grapheme.as_str(), "\u{2517}", "bottom cap ┗");
+        assert_eq!(vs.cell(2, 0).unwrap().fg, SEL, "bracket uses the select color");
+    }
+
+    /// When the selected block's top is scrolled above the viewport, the
+    /// topmost visible bracket cell is ┃ (no ┏ cap).
+    #[test]
+    fn selected_block_omits_top_cap_when_scrolled_above_viewport() {
+        use plexy_glass_emulator::Emulator;
+        // 3-row pane fed 6 lines → 3 scrollback rows; block 1 = lines 0..=2.
+        let mut e = Emulator::new(3, 20);
+        e.advance(
+            b"\x1b]133;A\x07$ one\r\n\
+              \x1b]133;C\x07out1\r\n\
+              out2\r\n\
+              \x1b]133;D;0\x07\x1b]133;A\x07$ two\r\n\
+              \x1b]133;C\x07out3\r\n\
+              y",
+        );
+        e.advance(b"\x1b[m");
+        let screen = e.screen().clone();
+        assert_eq!(screen.scrollback.rows().len(), 3, "setup: 3 scrollback rows");
+        // Select block 1 (line 0); viewport_top = 1 so its top (line 0) is above
+        // the viewport. effective_scroll = 6 - 1 - 3 = 2 → top = 3 - 2 = 1.
+        let bm = crate::BlockMode { selected: 0, viewport_top: 1, pane_rows: 3, total_lines: 6 };
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(1, 1, 3, 18),
+            screen: &screen,
+            is_active: false,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: Some(&bm),
+            title: None,
+            marked: false,
+        };
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
+        // Topmost visible bracket cell (host row 1) is ┃, not ┏.
+        assert_eq!(vs.cell(1, 0).unwrap().grapheme.as_str(), "\u{2503}", "no top cap → ┃");
+        assert_ne!(vs.cell(1, 0).unwrap().grapheme.as_str(), "\u{250f}");
+    }
+
+    /// A pane in block mode whose child entered the alt screen must NOT get a
+    /// bracket painted over the full-screen app. (Regression: the bracket
+    /// closure now short-circuits on `screen.alt.is_some()`.)
+    #[test]
+    fn selected_block_suppressed_on_alt_screen() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(6, 20);
+        // A completed block on the main screen, then enter the alt screen.
+        e.advance(b"\x1b]133;A\x07$ one\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07");
+        e.advance(b"\x1b[?1049h\x1b]133;A\x07$ alt");
+        e.advance(b"\x1b[m");
+        let screen = e.screen().clone();
+        assert!(screen.alt.is_some(), "setup: alt screen active");
+        let bm = crate::BlockMode { selected: 0, viewport_top: 0, pane_rows: 6, total_lines: 6 };
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(1, 1, 6, 18),
+            screen: &screen,
+            is_active: false,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: Some(&bm),
+            title: None,
+            marked: false,
+        };
+        let vs = compose(&[view], (8, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
+        // No bracket glyph anywhere on the pane's left border column.
+        for r in 0..8u16 {
+            let g = vs.cell(r, 0).unwrap().grapheme.as_str().to_string();
+            assert!(
+                g != "\u{250f}" && g != "\u{2503}" && g != "\u{2517}",
+                "bracket glyph {g:?} leaked onto the alt screen at row {r}"
             );
         }
     }
