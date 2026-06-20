@@ -13,7 +13,7 @@
 use plexy_glass_emulator::{Row, RowMark, Screen, WrapOrigin};
 
 /// Row at absolute `line` (scrollback rows first, then the active grid).
-fn row_at(screen: &Screen, line: u32) -> Option<&Row> {
+pub(crate) fn row_at(screen: &Screen, line: u32) -> Option<&Row> {
     let scrollback = screen.scrollback.rows();
     let scrollback_len = scrollback.len() as u32;
     if line < scrollback_len {
@@ -80,6 +80,11 @@ pub fn first_prompt_line(screen: &Screen) -> Option<u32> {
 /// exists anywhere.
 pub fn last_prompt_line(screen: &Screen) -> Option<u32> {
     prev_prompt_line(screen, total_lines(screen))
+}
+
+/// Every `PROMPT_START` line, ascending: the full block set in display order.
+pub fn all_prompt_lines(screen: &Screen) -> Vec<u32> {
+    (0..total_lines(screen)).filter(|&l| is_prompt(screen, l)).collect()
 }
 
 /// The governing `PROMPT_START` at or above `line` (the block that contains

@@ -27,11 +27,11 @@ pub mod status;
 pub mod tree;
 pub mod virtual_screen;
 
-pub use block_mode::{BlockMode, BlockModeAction};
+pub use block_mode::{BlockMode, BlockModeAction, Filter};
 pub use blocks::{
-    BlockLineStatus, block_command_line, block_extent, block_output_range, block_text,
-    first_prompt_line, last_completed_block, last_prompt_line, next_prompt_line, prev_prompt_line,
-    prompt_at_or_above, viewport_block_status,
+    BlockLineStatus, all_prompt_lines, block_command_line, block_extent, block_output_range,
+    block_text, first_prompt_line, last_completed_block, last_prompt_line, next_prompt_line,
+    prev_prompt_line, prompt_at_or_above, viewport_block_status,
 };
 pub use borders::BlockBorderColors;
 pub use buffer::{BufferAction, BufferEntry, BufferOutcome, BufferPickerState, handle_buffers};

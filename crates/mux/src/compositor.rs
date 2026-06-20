@@ -2498,7 +2498,7 @@ mod tests {
     fn selected_block_maps_fully_visible_block_with_both_caps() {
         let screen = two_block_screen();
         // Select block 1 (prompt line 0, extent lines 0..=2), viewport at top.
-        let bm = crate::BlockMode { selected: 0, viewport_top: 0, pane_rows: 8, total_lines: 8 };
+        let bm = crate::BlockMode { selected: 0, viewport_top: 0, pane_rows: 8, total_lines: 8, filter: None };
         let view = PaneView {
             id: PaneId(0),
             rect: Rect::new(1, 1, 8, 18),
@@ -2538,7 +2538,7 @@ mod tests {
         assert_eq!(screen.scrollback.rows().len(), 3, "setup: 3 scrollback rows");
         // Select block 1 (line 0); viewport_top = 1 so its top (line 0) is above
         // the viewport. effective_scroll = 6 - 1 - 3 = 2 → top = 3 - 2 = 1.
-        let bm = crate::BlockMode { selected: 0, viewport_top: 1, pane_rows: 3, total_lines: 6 };
+        let bm = crate::BlockMode { selected: 0, viewport_top: 1, pane_rows: 3, total_lines: 6, filter: None };
         let view = PaneView {
             id: PaneId(0),
             rect: Rect::new(1, 1, 3, 18),
@@ -2569,7 +2569,7 @@ mod tests {
         e.advance(b"\x1b[m");
         let screen = e.screen().clone();
         assert!(screen.alt.is_some(), "setup: alt screen active");
-        let bm = crate::BlockMode { selected: 0, viewport_top: 0, pane_rows: 6, total_lines: 6 };
+        let bm = crate::BlockMode { selected: 0, viewport_top: 0, pane_rows: 6, total_lines: 6, filter: None };
         let view = PaneView {
             id: PaneId(0),
             rect: Rect::new(1, 1, 6, 18),

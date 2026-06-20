@@ -809,6 +809,7 @@ mod tests {
             viewport_top: 0,
             pane_rows: 24,
             total_lines: 10,
+            filter: None,
         };
         p.enter_block_mode(bm);
         assert!(p.is_in_block_mode(), "block mode on");
