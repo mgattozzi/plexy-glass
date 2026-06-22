@@ -2517,13 +2517,15 @@ fn kitty_image_renders_transmit_and_place() {
         sess.snapshot_str()
     );
     // The renderer transmits the image once (a=t) and places it by id (a=p).
+    // The wire image id is namespaced per pane (host_image_id), so match the
+    // protocol shape rather than the raw id 5.
     assert!(
-        sess.wait_for(b"\x1b_Gi=5,a=t", Duration::from_secs(10)),
+        sess.wait_for(b",a=t,f=24", Duration::from_secs(10)),
         "no transmit emitted. raw: {:?}",
         sess.snapshot_str()
     );
     assert!(
-        sess.wait_for(b"a=p,i=5", Duration::from_secs(10)),
+        sess.wait_for(b"\x1b_Ga=p,i=", Duration::from_secs(10)),
         "no place-by-id emitted. raw: {:?}",
         sess.snapshot_str()
     );

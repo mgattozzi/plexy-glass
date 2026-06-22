@@ -15,8 +15,13 @@ pub struct VisiblePlacement {
     /// Stable per-frame key (pane id folded with the placement seq) for the
     /// renderer's cross-frame placement diff.
     pub key: u64,
+    /// Host-global image id (raw per-pane id folded with the pane id) so two
+    /// panes that both use, say, Kitty image id 5 don't collide on the wire.
     pub image_id: u32,
     pub placement_id: u32,
+    /// Content version of the source image; the renderer re-transmits when this
+    /// changes for an already-transmitted id.
+    pub generation: u64,
     pub format: ImageFormat,
     pub pixel_w: u32,
     pub pixel_h: u32,

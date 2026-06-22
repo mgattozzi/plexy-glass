@@ -49,6 +49,10 @@ pub struct Image {
     pub pixel_w: u32,
     pub pixel_h: u32,
     pub data_b64: Arc<[u8]>,
+    /// Bumped each time an id's content is (re)transmitted, so a per-client
+    /// renderer keyed on `(id, generation)` re-transmits when the pixels change
+    /// instead of showing the stale first image.
+    pub generation: u64,
 }
 
 /// An on-screen placement of an image, anchored to an absolute unified line.
@@ -241,6 +245,7 @@ mod tests {
             pixel_w: 1,
             pixel_h: 1,
             data_b64: big.clone().into(),
+            generation: 1,
         });
         assert!(ev1.is_empty());
         let ev2 = store.insert(Image {
@@ -249,6 +254,7 @@ mod tests {
             pixel_w: 1,
             pixel_h: 1,
             data_b64: big.into(),
+            generation: 2,
         });
         assert_eq!(ev2, vec![1], "oldest image evicted over budget");
         assert!(!store.contains(1));

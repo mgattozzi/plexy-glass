@@ -25,11 +25,17 @@ impl Scrollback {
         }
     }
 
-    pub fn push(&mut self, row: Row) {
+    /// Push a row, evicting from the front while over the cap. Returns the
+    /// number of front rows evicted (0 or 1 in steady state), so the caller can
+    /// shift anything anchored to an absolute scrollback index.
+    pub fn push(&mut self, row: Row) -> usize {
         self.rows.push_back(row);
+        let mut evicted = 0;
         while self.rows.len() > self.cap {
             self.rows.pop_front();
+            evicted += 1;
         }
+        evicted
     }
 
     pub fn len(&self) -> usize {

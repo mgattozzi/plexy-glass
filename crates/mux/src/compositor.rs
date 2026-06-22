@@ -414,8 +414,9 @@ pub fn compose(
                 let key = (u64::from(v.id.0) << 40) | (p.seq & ((1u64 << 40) - 1));
                 placements.push(crate::virtual_screen::VisiblePlacement {
                     key,
-                    image_id: p.image_id,
+                    image_id: host_image_id(v.id.0, p.image_id),
                     placement_id: p.placement_id,
+                    generation: img.generation,
                     format: img.format,
                     pixel_w: img.pixel_w,
                     pixel_h: img.pixel_h,
@@ -538,6 +539,18 @@ pub fn compose(
 /// Compute the effective scroll offset for a pane view. This is the single
 /// source of truth used by both the content copy and the block-status scan so
 /// both always show the same viewport.
+/// Fold a pane id and a per-pane (raw) image id into a host-global wire id, so
+/// two panes that each use the same raw Kitty image id don't collide in the
+/// client's single terminal. Multiplicative hash 64→32; non-zero (Kitty treats
+/// i=0 as "no id").
+/// ponytail: collision ~ N²/2³³ over distinct (pane,image) pairs, negligible at
+/// real pane/image counts; swap for a per-client id map if it ever bites.
+fn host_image_id(pane_id: u32, raw_image_id: u32) -> u32 {
+    let mixed = ((u64::from(pane_id) << 32) | u64::from(raw_image_id))
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    ((mixed >> 32) as u32).max(1)
+}
+
 fn effective_scroll_for(view: &PaneView<'_>) -> u32 {
     // copy and block mode are mutually exclusive; both pin the viewport via an
     // absolute viewport_top, so derive the scroll offset the same way.
@@ -3239,12 +3252,24 @@ mod tests {
         let vs = compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         assert_eq!(vs.placements.len(), 1, "compose resolved one visible placement");
         let p = &vs.placements[0];
-        assert_eq!(p.image_id, 5);
+        assert_eq!(p.image_id, host_image_id(3, 5), "raw id 5 folded with pane 3");
         // anchor_line 2, top 0 → host row = pane_row_offset(0) + rect.row(1) + 2 = 3.
         assert_eq!(p.host_row, 3);
         assert_eq!(p.host_col, 1, "rect.col + 0");
         assert_eq!(p.data_b64.as_ref(), b"QUJD", "carries the image data");
         // key folds the pane id (3) into the high bits.
         assert_eq!(p.key, (3u64 << 40), "pane-3, seq 0");
+    }
+
+    #[test]
+    fn same_raw_image_id_in_two_panes_gets_distinct_host_ids() {
+        // Two panes both using Kitty image id 5 must not collide on the wire.
+        let a = host_image_id(1, 5);
+        let b = host_image_id(2, 5);
+        assert_ne!(a, b, "pane id namespaces the host image id");
+        assert_ne!(a, 0, "host id is non-zero (Kitty i=0 means no id)");
+        assert_ne!(b, 0);
+        // Deterministic across frames so transmit-once stays stable.
+        assert_eq!(a, host_image_id(1, 5));
     }
 }

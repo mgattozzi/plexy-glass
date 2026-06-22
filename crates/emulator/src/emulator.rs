@@ -65,6 +65,11 @@ impl Emulator {
         }
         // Row-resident marks (including `PROMPT_END`) travel with their rows
         // through reflow automatically, so no housekeeping is needed here.
+        // Image placements anchor to ABSOLUTE unified line indices, which reflow
+        // rewrites (soft-wrapped lines join/split), so a surviving anchor would
+        // paint at the wrong row. Drop them on resize; the child re-emits. A
+        // row-resident remap (like marks) is P3 lifecycle work.
+        self.screen.placements.clear();
         // Also resize tab stops.
         self.screen.tabs.resize(cols);
         // Reset scroll region to full screen.

@@ -10,19 +10,15 @@ use std::fmt::Write as _;
 /// supports. Negotiated per client (Phase 2 Task 4). The renderer emits a
 /// protocol's bytes only when its flag is set; clients without a flag get blank
 /// cells where the image would be (a richer placeholder is later-phase work).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `Default` is all-off (conservative): no graphics until the daemon proves them
+/// from the negotiated `ClientHello` (it always sets caps per client). Matches
+/// the protocol type's default, so a renderer can never implicitly turn images
+/// on for a terminal that didn't advertise them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GraphicsCaps {
     pub kitty: bool,
     pub sixel: bool,
     pub iterm2: bool,
-}
-
-impl Default for GraphicsCaps {
-    fn default() -> Self {
-        // Default to Kitty-capable; the daemon overrides per client from the
-        // negotiated `ClientHello` caps once Task 4 wires it.
-        Self { kitty: true, sixel: false, iterm2: false }
-    }
 }
 
 /// What the renderer last emitted for a placement key (to diff across frames).
@@ -37,8 +33,11 @@ struct PlacedRect {
 pub struct DiffRenderer {
     previous: Option<VirtualScreen>,
     graphics: GraphicsCaps,
-    /// Image ids already transmitted to this client's terminal.
-    transmitted: HashSet<u32>,
+    /// Host image id → the content generation last transmitted to this client's
+    /// terminal. A changed generation means the id's pixels changed, so we
+    /// re-transmit (Kitty `a=t` with the same `i=` replaces) instead of showing
+    /// stale data.
+    transmitted: HashMap<u32, u64>,
     /// Placement key → what we last emitted, for the per-frame placement diff.
     placed: HashMap<u64, PlacedRect>,
     /// Set by `invalidate`: the next render first deletes ALL terminal images
@@ -51,7 +50,7 @@ impl DiffRenderer {
         Self {
             previous: None,
             graphics: GraphicsCaps::default(),
-            transmitted: HashSet::new(),
+            transmitted: HashMap::new(),
             placed: HashMap::new(),
             reset_images: false,
         }
@@ -76,7 +75,7 @@ impl DiffRenderer {
         // re-transmitting (the new content's placements transmit fresh).
         if self.reset_images {
             if self.graphics.kitty && (!self.transmitted.is_empty() || !self.placed.is_empty()) {
-                out.push_str("\x1b_Ga=d,d=A\x1b\\");
+                out.push_str("\x1b_Ga=d,d=A,q=2\x1b\\");
             }
             self.transmitted.clear();
             self.placed.clear();
@@ -89,6 +88,16 @@ impl DiffRenderer {
         };
 
         if full_repaint {
+            // A full repaint (first frame or resize) re-walks the whole grid; the
+            // graphics layer must be re-established too. Drop any terminal images
+            // first so a stale placement can't ghost at a wrong cell after a 2J,
+            // then re-transmit/re-place from the current frame below. (No-op when
+            // reset_images already cleared the state just above.)
+            if self.graphics.kitty && (!self.transmitted.is_empty() || !self.placed.is_empty()) {
+                out.push_str("\x1b_Ga=d,d=A,q=2\x1b\\");
+            }
+            self.transmitted.clear();
+            self.placed.clear();
             // Clear + home, then walk every row, every cell.
             out.push_str("\x1b[2J\x1b[H");
             let mut current_attrs = CellAttrs::default();
@@ -177,8 +186,15 @@ impl DiffRenderer {
         let mut seen: HashSet<u64> = HashSet::with_capacity(current.placements.len());
         for p in &current.placements {
             seen.insert(p.key);
-            if self.transmitted.insert(p.image_id) {
+            // Transmit once per (id, content generation). An image with no data can't be
+            // transmitted or placed, so skip it without poisoning the transmitted map
+            // (poisoning it would block a later real transmit of the id).
+            if p.data_b64.is_empty() {
+                continue;
+            }
+            if self.transmitted.get(&p.image_id) != Some(&p.generation) {
                 emit_transmit(out, p);
+                self.transmitted.insert(p.image_id, p.generation);
             }
             let rect = PlacedRect {
                 host_row: p.host_row,
@@ -205,6 +221,14 @@ impl DiffRenderer {
             if let Some(rect) = self.placed.remove(&k) {
                 emit_delete(out, rect.image_id, rect.placement_id);
             }
+        }
+        // Bound the transmitted set: transmit-once keeps scrolled-off ids cached,
+        // so over a long session with many distinct images it would grow without
+        // limit. Past the cap, schedule a full graphics reset next frame (delete
+        // all + re-transmit the visible set), which is rare and self-healing.
+        const TRANSMIT_CAP: usize = 256;
+        if self.transmitted.len() > TRANSMIT_CAP {
+            self.reset_images = true;
         }
     }
 }
@@ -251,7 +275,7 @@ fn emit_place(out: &mut String, p: &VisiblePlacement) {
 
 /// Delete a single placement (lowercase `d=i` keeps the image data for re-place).
 fn emit_delete(out: &mut String, image_id: u32, placement_id: u32) {
-    let _ = write!(out, "\x1b_Ga=d,d=i,i={image_id},p={placement_id}\x1b\\");
+    let _ = write!(out, "\x1b_Ga=d,d=i,i={image_id},p={placement_id},q=2\x1b\\");
 }
 
 impl Default for DiffRenderer {
@@ -586,6 +610,7 @@ mod tests {
             key,
             image_id,
             placement_id,
+            generation: 1,
             format: plexy_glass_emulator::ImageFormat::Png,
             pixel_w: 30,
             pixel_h: 40,
@@ -595,6 +620,13 @@ mod tests {
             rows: 2,
             cols: 3,
         }
+    }
+
+    /// A renderer with Kitty graphics enabled (the default is now all-off).
+    fn kitty_renderer() -> DiffRenderer {
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(GraphicsCaps { kitty: true, sixel: false, iterm2: false });
+        d
     }
 
     fn frame_with(placements: Vec<VisiblePlacement>) -> VirtualScreen {
@@ -609,7 +641,7 @@ mod tests {
 
     #[test]
     fn first_frame_transmits_then_places() {
-        let mut d = DiffRenderer::new();
+        let mut d = kitty_renderer();
         let s = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
         assert!(s.contains("\x1b_Gi=7,a=t,f=100,s=30,v=40"), "transmit once: {s:?}");
         // Place at host (row 3, col 4) 1-based, by id, forcing r/c.
@@ -618,7 +650,7 @@ mod tests {
 
     #[test]
     fn unchanged_frame_re_emits_nothing() {
-        let mut d = DiffRenderer::new();
+        let mut d = kitty_renderer();
         let f = frame_with(vec![vp(1, 7, 1, 2, 3)]);
         render_str(&mut d, &f);
         let s = render_str(&mut d, &f);
@@ -627,20 +659,20 @@ mod tests {
 
     #[test]
     fn moved_placement_deletes_old_and_places_new_without_retransmit() {
-        let mut d = DiffRenderer::new();
+        let mut d = kitty_renderer();
         render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
         let s = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 4, 3)])); // moved down 2 rows
         assert!(!s.contains("a=t"), "image already transmitted: {s:?}");
-        assert!(s.contains("\x1b_Ga=d,d=i,i=7,p=1\x1b\\"), "delete old placement: {s:?}");
+        assert!(s.contains("\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\"), "delete old placement: {s:?}");
         assert!(s.contains("\x1b[5;4H\x1b_Ga=p,i=7,p=1"), "re-place at new row: {s:?}");
     }
 
     #[test]
     fn vanished_placement_is_deleted() {
-        let mut d = DiffRenderer::new();
+        let mut d = kitty_renderer();
         render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
         let s = render_str(&mut d, &frame_with(vec![]));
-        assert!(s.contains("\x1b_Ga=d,d=i,i=7,p=1\x1b\\"), "delete vanished placement: {s:?}");
+        assert!(s.contains("\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\"), "delete vanished placement: {s:?}");
     }
 
     #[test]
@@ -653,11 +685,52 @@ mod tests {
 
     #[test]
     fn invalidate_resets_images_then_retransmits() {
-        let mut d = DiffRenderer::new();
+        let mut d = kitty_renderer();
         render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
         d.invalidate(); // session switch / re-point
         let s = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
-        assert!(s.contains("\x1b_Ga=d,d=A\x1b\\"), "reset deletes all images: {s:?}");
+        assert!(s.contains("\x1b_Ga=d,d=A,q=2\x1b\\"), "reset deletes all images: {s:?}");
         assert!(s.contains("a=t"), "re-transmits after reset: {s:?}");
+    }
+
+    #[test]
+    fn retransmit_on_generation_change() {
+        // Same id + key, but the image content changed (new generation), so the
+        // renderer must re-transmit, not show the stale first image.
+        let mut d = kitty_renderer();
+        render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
+        let mut p = vp(1, 7, 1, 2, 3);
+        p.generation = 2;
+        p.data_b64 = std::sync::Arc::from(&b"WFla"[..]);
+        let s = render_str(&mut d, &frame_with(vec![p]));
+        assert!(s.contains("a=t"), "changed content re-transmits id 7: {s:?}");
+    }
+
+    #[test]
+    fn empty_data_placement_neither_transmits_nor_poisons() {
+        // A placement whose image has no data can't be transmitted/placed, and
+        // must not mark the id transmitted, so a later real-data frame still
+        // sends it.
+        let mut d = kitty_renderer();
+        let mut empty = vp(1, 7, 1, 2, 3);
+        empty.data_b64 = std::sync::Arc::from(&b""[..]);
+        let s = render_str(&mut d, &frame_with(vec![empty]));
+        assert!(!s.contains("\x1b_G"), "no graphics for an empty-data image: {s:?}");
+        let s2 = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
+        assert!(s2.contains("a=t"), "real data still transmits id 7 later: {s2:?}");
+    }
+
+    #[test]
+    fn resize_full_repaint_reestablishes_image() {
+        // A size change forces a full repaint; the image must be re-placed (and
+        // the old terminal state dropped) rather than silently vanishing.
+        let mut d = kitty_renderer();
+        render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
+        let mut bigger = VirtualScreen::blank(10, 24); // different size → full repaint
+        bigger.placements = vec![vp(1, 7, 1, 2, 3)];
+        let s = render_str(&mut d, &bigger);
+        assert!(s.contains("\x1b_Ga=d,d=A,q=2\x1b\\"), "full repaint drops old images: {s:?}");
+        assert!(s.contains("a=t"), "re-transmits after the repaint: {s:?}");
+        assert!(s.contains("a=p,i=7"), "re-places the image: {s:?}");
     }
 }

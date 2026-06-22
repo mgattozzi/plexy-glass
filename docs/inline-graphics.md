@@ -49,4 +49,6 @@ off-screen removes it.
   (cross-mode visibility is Phase 3).
 - Occlusion under popups/overlays and `z`-ordering are Phase 3.
 - Animation and Unicode-placeholder (virtual) placements are Phase 4.
+- A pane resize drops its images (the program re-emits on redraw); a
+  reflow-aware anchor remap is Phase 3 lifecycle work.
 - Transmitted image *pixel data* is not persisted across a daemon restart.

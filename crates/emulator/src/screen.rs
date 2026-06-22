@@ -110,6 +110,10 @@ pub struct Screen {
     graphics_seq: u64,
     placement_id_seq: u32,
     image_id_seq: u32,
+    /// Monotonic content version, bumped on every finalized transmission, so a
+    /// re-transmit of an existing id carries a fresh `Image::generation` and the
+    /// per-client renderer re-sends the new pixels instead of the stale ones.
+    image_gen: u64,
 }
 
 impl Screen {
@@ -144,6 +148,7 @@ impl Screen {
             graphics_seq: 0,
             placement_id_seq: 0,
             image_id_seq: 0x8000_0000, // synthesized ids; high to avoid child collisions
+            image_gen: 0,
         }
     }
 
@@ -229,12 +234,14 @@ impl Screen {
             w = pw;
             h = ph;
         }
+        self.image_gen = self.image_gen.wrapping_add(1);
         let image = Image {
             id: tx.id,
             format: tx.format,
             pixel_w: w,
             pixel_h: h,
             data_b64: Arc::from(tx.data_b64.as_slice()),
+            generation: self.image_gen,
         };
         let evicted = self.images.insert(image);
         if !evicted.is_empty() {
@@ -279,6 +286,23 @@ impl Screen {
         self.cursor.col = 0;
     }
 
+    /// Push a row into scrollback, keeping placement anchors valid: each evicted
+    /// front row shifts every absolute `anchor_line` down by one, and placements
+    /// whose anchor falls off the front (their rows left history) are dropped.
+    fn push_scrollback(&mut self, row: crate::grid::Row) {
+        let evicted = self.scrollback.push(row) as u32;
+        if evicted == 0 || self.placements.is_empty() {
+            return;
+        }
+        self.placements.retain_mut(|p| match p.anchor_line.checked_sub(evicted) {
+            Some(a) => {
+                p.anchor_line = a;
+                true
+            }
+            None => false,
+        });
+    }
+
     /// Set the text-area pixel size relayed from the client's terminal.
     pub fn set_pixel_area(&mut self, w: u16, h: u16) {
         self.area_px_w = w;
@@ -296,7 +320,9 @@ impl Screen {
         if self.area_px_w == 0 || self.area_px_h == 0 {
             (DEFAULT_CELL_W, DEFAULT_CELL_H)
         } else {
-            (self.area_px_w / cols, self.area_px_h / rows)
+            // max(1): a degenerate area smaller than the grid would otherwise
+            // floor to 0 px/cell and blow the footprint up to the 1000-row clamp.
+            ((self.area_px_w / cols).max(1), (self.area_px_h / rows).max(1))
         }
     }
 
@@ -325,7 +351,7 @@ impl Screen {
     /// emulator ahead of the seed.
     pub fn preseed_scrollback(&mut self, rows: Vec<crate::grid::Row>) {
         for row in rows {
-            self.scrollback.push(row);
+            self.push_scrollback(row);
         }
     }
 
@@ -471,7 +497,7 @@ impl Screen {
             };
             self.active.scroll_up(top, bottom, 1, target);
             for r in popped {
-                self.scrollback.push(r);
+                self.push_scrollback(r);
             }
             // Stay at the bottom; new content goes there.
             self.cursor.row = bottom;
@@ -641,7 +667,7 @@ impl Screen {
                 };
                 self.active.scroll_up(top, bottom, n, target);
                 for r in popped {
-                    self.scrollback.push(r);
+                    self.push_scrollback(r);
                 }
             }
             'T' => {
@@ -1432,6 +1458,69 @@ mod tests {
         e.advance(b"\x1b[?1049h"); // enter alt
         e.advance(b"\x1b_Ga=T,i=1,f=24,s=10,v=10;QQ\x1b\\");
         assert!(e.screen().placements.is_empty() && e.screen().images.is_empty());
+    }
+
+    #[test]
+    fn placement_dropped_when_its_scrollback_row_evicts() {
+        // Regression: anchor_line must follow scrollback eviction, not freeze.
+        let mut e = crate::Emulator::new(3, 80);
+        e.screen_mut().scrollback = crate::scrollback::Scrollback::with_cap(2);
+        e.advance(b"\x1b_Ga=T,i=1,f=24,s=10,v=20;QQ\x1b\\"); // 1×1-cell image, anchor 0
+        assert_eq!(e.screen().placements.len(), 1);
+        // Scroll well past cap+grid so the anchored row leaves history entirely.
+        for _ in 0..20 {
+            e.advance(b"\r\n");
+        }
+        assert!(
+            e.screen().placements.is_empty(),
+            "placement dropped once its row evicts — no frozen ghost"
+        );
+    }
+
+    #[test]
+    fn abandoned_chunked_transmission_stores_nothing() {
+        let mut e = crate::Emulator::new(24, 80);
+        // m=1 with no following m=0 chunk: never finalized.
+        e.advance(b"\x1b_Ga=T,i=3,f=24,s=2,v=2,m=1;QQ\x1b\\");
+        assert!(e.screen().images.is_empty(), "no image stored without finalize");
+        assert!(e.screen().placements.is_empty(), "no placement without finalize");
+    }
+
+    #[test]
+    fn ris_clears_images_and_placements() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,i=5,f=24,s=10,v=20;QQ\x1b\\");
+        assert_eq!(e.screen().images.len(), 1);
+        assert_eq!(e.screen().placements.len(), 1);
+        e.advance(b"\x1bc"); // RIS
+        assert!(e.screen().images.is_empty() && e.screen().placements.is_empty());
+    }
+
+    #[test]
+    fn place_of_unknown_image_is_noop() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=p,i=999\x1b\\"); // place an id never transmitted
+        assert!(e.screen().placements.is_empty(), "no placement for unknown id");
+        assert_eq!(e.screen().cursor.row, 0, "cursor untouched");
+    }
+
+    #[test]
+    fn resize_drops_placements() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,i=5,f=24,s=10,v=20;QQ\x1b\\");
+        assert_eq!(e.screen().placements.len(), 1);
+        e.resize(24, 100); // width change reflows; absolute anchors no longer valid
+        assert!(e.screen().placements.is_empty(), "placements dropped on resize");
+    }
+
+    #[test]
+    fn retransmit_same_id_bumps_generation() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=t,i=5,f=24,s=10,v=20;QQ\x1b\\"); // transmit only
+        let g1 = e.screen().images.get(5).expect("stored").generation;
+        e.advance(b"\x1b_Ga=t,i=5,f=24,s=10,v=20;Qg\x1b\\"); // re-transmit same id, new data
+        let g2 = e.screen().images.get(5).expect("stored").generation;
+        assert!(g2 > g1, "re-transmit of an existing id bumps the content generation");
     }
 
     #[test]
