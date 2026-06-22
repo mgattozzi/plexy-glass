@@ -492,7 +492,7 @@ docs/command-blocks.md), the
 
 ```kdl
 blocks {
-    enabled #true               // #false disables all block border painting
+    enabled #true               // master switch: #false disables ALL block annotations
     ok-color "ok"               // palette name or #rrggbb; default: palette `ok`
     fail-color "alert"          // palette name or #rrggbb; default: palette `alert`
     select-color "#dca561"      // palette name or #rrggbb; the block-mode bracket
@@ -502,10 +502,12 @@ blocks {
 }
 ```
 
-- `enabled` is `#true` (default) or `#false`. When `#false`, no block-status
-  coloring is performed and the left border is always plain. All other
-  `blocks` properties are still decoded normally, so `enabled #false` is the
-  way to opt out of the feature without deleting the rest of the node.
+- `enabled` is `#true` (default) or `#false`, and it is the master switch for
+  every block annotation: when `#false`, no block-status border coloring is
+  performed (the left border is always plain), and the command duration and
+  sticky command header are off too. All other `blocks` properties are still
+  decoded normally, so `enabled #false` is the way to opt out of the whole
+  feature without deleting the rest of the node.
 - `ok-color` is the foreground color for border rows belonging to a block
   that exited with code 0. It takes a palette name (e.g. `"ok"`, `"accent"`)
   or a `#rrggbb` hex literal (e.g. `"#87a987"`). Default: `"ok"` (the

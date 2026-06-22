@@ -585,7 +585,12 @@ pub fn compose(
                 let dw = display_width(&d);
                 if pane_right > v.rect.col + dw {
                     let start_col = pane_right - dw;
-                    put_str(&mut screen, host_row, start_col, &d, Attrs::REVERSE, pane_right);
+                    // Same overlap guard as the inline annotation: don't clobber the
+                    // command's tail, so omit the duration when the command reaches it
+                    // (`cmd_end` is the column just past the command, keeping a 1-col gap).
+                    if cmd_end < start_col {
+                        put_str(&mut screen, host_row, start_col, &d, Attrs::REVERSE, pane_right);
+                    }
                 }
             }
         }
@@ -3950,6 +3955,30 @@ mod tests {
         let row0 = composed_row(&vs, 0);
         assert!(row0.contains("cargo build"), "header command: {row0:?}");
         assert!(row0.contains("4.0s"), "header carries duration: {row0:?}");
+    }
+
+    #[test]
+    fn sticky_header_omits_duration_when_command_is_long() {
+        use plexy_glass_emulator::Emulator;
+        // Wide emulator (command doesn't wrap) rendered in a narrow pane, so the
+        // pinned command reaches the duration columns → the duration is omitted
+        // rather than clobbering the command's tail (the inline overlap guard).
+        let mut e = Emulator::new(3, 60);
+        e.advance(
+            b"\x1b]133;A\x07$ \x1b]133;B\x07cargo build --workspace\r\n\
+              \x1b]133;C\x07l1\r\nl2\r\nl3\r\nl4\r\nl5",
+        );
+        e.advance(b"\x1b[m");
+        let mut screen = e.screen().clone();
+        let last = screen.active.rows.len() - 1;
+        screen.active.rows[last].mark.set(RowMark::BLOCK_END);
+        screen.active.rows[last].mark.set_duration(Some(3000));
+        let colors = block_colors_with(Some(2000), true);
+        let view = plain_view(&screen, Rect::new(0, 0, 3, 24));
+        let vs = compose(&[view], (3, 60), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let row0 = composed_row(&vs, 0);
+        assert!(row0.contains("workspace"), "command tail preserved (not clobbered): {row0:?}");
+        assert!(!row0.contains("3.0s"), "duration omitted when it would overlap: {row0:?}");
     }
 
     #[test]

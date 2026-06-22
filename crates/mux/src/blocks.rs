@@ -202,12 +202,18 @@ pub fn closing_duration(screen: &Screen, prompt_line: u32) -> Option<u32> {
 pub fn format_duration(ms: u32) -> String {
     if ms < 1_000 {
         format!("{ms}ms")
-    } else if ms < 10_000 {
+    } else if ms < 9_950 {
+        // Tenths, e.g. `2.3s`. Capped below 9.95s so `{:.1}` rounding can never
+        // produce `10.0s` (the whole-seconds branch renders that as `10s`).
         format!("{:.1}s", ms as f64 / 1_000.0)
-    } else if ms < 60_000 {
-        format!("{}s", ms / 1_000)
     } else {
-        format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1_000)
+        // Whole seconds, rounded (saturating_add avoids debug overflow at u32::MAX).
+        let secs = ms.saturating_add(500) / 1_000;
+        if secs < 60 {
+            format!("{secs}s")
+        } else {
+            format!("{}m{:02}s", secs / 60, secs % 60)
+        }
     }
 }
 
@@ -778,6 +784,12 @@ mod tests {
         assert_eq!(format_duration(2300), "2.3s");
         assert_eq!(format_duration(45_000), "45s");
         assert_eq!(format_duration(125_000), "2m05s");
+        // Boundary: 9.95s..9.999s reads "10s", never "10.0s".
+        assert_eq!(format_duration(9_949), "9.9s");
+        assert_eq!(format_duration(9_999), "10s");
+        assert_eq!(format_duration(10_000), "10s");
+        // u32::MAX must not panic (saturating round).
+        let _ = format_duration(u32::MAX);
     }
 
     #[test]
