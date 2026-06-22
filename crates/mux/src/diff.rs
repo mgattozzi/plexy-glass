@@ -49,6 +49,11 @@ pub struct DiffRenderer {
     transmitted: HashMap<u32, u64>,
     /// Placement key → what we last emitted, for the per-frame placement diff.
     placed: HashMap<u64, PlacedRect>,
+    /// Placement key → the placeholder box last drawn (non-graphics clients).
+    /// Mirrors `placed`: drawn on new/moved, cleared (repaint underlying cells)
+    /// on vanish, so a client whose terminal can't render the image still keeps a
+    /// consistent labelled-box layout.
+    boxed: HashMap<u64, PlacedRect>,
     /// Set by `invalidate`: the next render first deletes ALL terminal images
     /// (session switch / re-point) before re-transmitting + re-placing.
     reset_images: bool,
@@ -61,6 +66,7 @@ impl DiffRenderer {
             graphics: GraphicsCaps::default(),
             transmitted: HashMap::new(),
             placed: HashMap::new(),
+            boxed: HashMap::new(),
             reset_images: false,
         }
     }
@@ -88,6 +94,7 @@ impl DiffRenderer {
             }
             self.transmitted.clear();
             self.placed.clear();
+            self.boxed.clear();
             self.reset_images = false;
         }
 
@@ -107,6 +114,7 @@ impl DiffRenderer {
             }
             self.transmitted.clear();
             self.placed.clear();
+            self.boxed.clear();
             // Clear + home, then walk every row, every cell.
             out.push_str("\x1b[2J\x1b[H");
             let mut current_attrs = CellAttrs::default();
@@ -164,11 +172,15 @@ impl DiffRenderer {
             }
         }
 
-        // Inline-image placements (Kitty-capable clients only): transmit each
-        // image once, place by id, and diff placements across frames so they
-        // follow scrolling and are deleted when they leave the viewport.
+        // Inline-image placements. A Kitty-capable client gets the real image
+        // (transmit-once, place-by-id, scroll-follow). A client whose terminal
+        // can't render the placement's protocol gets a labelled placeholder box
+        // of the same footprint, so heterogeneous clients keep a consistent
+        // layout instead of blank cells.
         if self.graphics.kitty {
             self.render_kitty_placements(&mut out, current);
+        } else {
+            self.render_placeholder_boxes(&mut out, current);
         }
 
         // Cursor.
@@ -244,6 +256,137 @@ impl DiffRenderer {
         const TRANSMIT_CAP: usize = 256;
         if self.transmitted.len() > TRANSMIT_CAP {
             self.reset_images = true;
+        }
+    }
+
+    /// Placeholder fallback for a client whose terminal can't render the
+    /// placement's protocol: draw a labelled box of the image's footprint,
+    /// diffed across frames (drawn on new/moved, the old cells repainted on
+    /// vanish) so the layout matches a graphics-capable client's.
+    fn render_placeholder_boxes(&mut self, out: &mut String, current: &VirtualScreen) {
+        let mut seen: HashSet<u64> = HashSet::with_capacity(current.placements.len());
+        for p in &current.placements {
+            seen.insert(p.key);
+            let rect = PlacedRect {
+                host_row: p.host_row,
+                host_col: p.host_col,
+                image_id: p.image_id,
+                placement_id: p.placement_id,
+                src_x: p.src_x,
+                src_y: p.src_y,
+                src_w: p.src_w,
+                src_h: p.src_h,
+                rows: p.rows,
+                cols: p.cols,
+            };
+            match self.boxed.get(&p.key) {
+                Some(prev) if *prev == rect => {} // unchanged, box already drawn
+                Some(prev) => {
+                    paint_cells_rect(out, current, prev.host_row, prev.host_col, prev.rows, prev.cols);
+                    emit_placeholder_box(out, p);
+                    self.boxed.insert(p.key, rect);
+                }
+                None => {
+                    emit_placeholder_box(out, p);
+                    self.boxed.insert(p.key, rect);
+                }
+            }
+        }
+        // Repaint the cells under boxes that vanished this frame.
+        let gone: Vec<u64> = self.boxed.keys().copied().filter(|k| !seen.contains(k)).collect();
+        for k in gone {
+            if let Some(rect) = self.boxed.remove(&k) {
+                paint_cells_rect(out, current, rect.host_row, rect.host_col, rect.rows, rect.cols);
+            }
+        }
+    }
+}
+
+/// Repaint a rectangle of cells from `screen` (used to clear a placeholder box
+/// when its placement vanishes or moves).
+fn paint_cells_rect(out: &mut String, screen: &VirtualScreen, r0: u16, c0: u16, rows: u16, cols: u16) {
+    let mut attrs = CellAttrs::default();
+    out.push_str("\x1b[0m");
+    for r in r0..r0.saturating_add(rows).min(screen.rows) {
+        let _ = write!(out, "\x1b[{};{}H", r + 1, c0 + 1);
+        let mut c = c0;
+        while c < c0.saturating_add(cols).min(screen.cols) {
+            let Some(cell) = screen.cell(r, c) else { break };
+            if cell.is_wide_spacer() {
+                c += 1;
+                continue;
+            }
+            apply_sgr_delta(out, &attrs, cell);
+            attrs = CellAttrs::from_cell(cell);
+            out.push_str(cell.grapheme.as_str());
+            c += plexy_glass_emulator::grapheme_advance(cell.grapheme.as_str());
+        }
+        out.push_str("\x1b[0m");
+        attrs = CellAttrs::default();
+    }
+}
+
+/// Draw a labelled placeholder box over a placement's host footprint. A box big
+/// enough gets a unicode border + a centred `WxH` label; a tiny footprint is
+/// filled with a hatch so it's still visibly an image stand-in.
+fn emit_placeholder_box(out: &mut String, p: &VisiblePlacement) {
+    out.push_str("\x1b[0m");
+    let rows = p.rows;
+    let cols = p.cols;
+    if rows == 0 || cols == 0 {
+        return;
+    }
+    // Too small for a border: fill with a light hatch.
+    if rows < 2 || cols < 2 {
+        for r in 0..rows {
+            let _ = write!(out, "\x1b[{};{}H", p.host_row + r + 1, p.host_col + 1);
+            for _ in 0..cols {
+                out.push('▒');
+            }
+        }
+        return;
+    }
+    let w = cols as usize;
+    let inner = w - 2;
+    let label = format!("{}x{}", p.pixel_w, p.pixel_h);
+    let label: String = if label.chars().count() > inner {
+        label.chars().take(inner).collect()
+    } else {
+        label
+    };
+    let mid = rows / 2;
+    for r in 0..rows {
+        let _ = write!(out, "\x1b[{};{}H", p.host_row + r + 1, p.host_col + 1);
+        if r == 0 {
+            out.push('┌');
+            for _ in 0..inner {
+                out.push('─');
+            }
+            out.push('┐');
+        } else if r == rows - 1 {
+            out.push('└');
+            for _ in 0..inner {
+                out.push('─');
+            }
+            out.push('┘');
+        } else if r == mid {
+            out.push('│');
+            let pad = inner.saturating_sub(label.chars().count());
+            let left = pad / 2;
+            for _ in 0..left {
+                out.push(' ');
+            }
+            out.push_str(&label);
+            for _ in 0..(pad - left) {
+                out.push(' ');
+            }
+            out.push('│');
+        } else {
+            out.push('│');
+            for _ in 0..inner {
+                out.push(' ');
+            }
+            out.push('│');
         }
     }
 }
@@ -794,5 +937,50 @@ mod tests {
             s.contains("a=p,i=7,p=1") && s.contains(",y=20,"),
             "crop-only change re-places with the new source rect: {s:?}"
         );
+    }
+
+    // ── placeholder box (non-graphics clients) ─────────────────────────────────
+
+    fn boxed_vp(rows: u16, cols: u16) -> VisiblePlacement {
+        let mut p = vp(1, 7, 1, 2, 3);
+        p.rows = rows;
+        p.cols = cols;
+        p.pixel_w = 30;
+        p.pixel_h = 40;
+        p
+    }
+
+    #[test]
+    fn non_kitty_client_draws_placeholder_box() {
+        let mut d = DiffRenderer::new(); // default caps: no graphics
+        let s = render_str(&mut d, &frame_with(vec![boxed_vp(3, 10)]));
+        assert!(s.contains('┌') && s.contains('┐') && s.contains('└') && s.contains('┘'), "box border: {s:?}");
+        assert!(s.contains("30x40"), "centred WxH label: {s:?}");
+        assert!(!s.contains("\x1b_G"), "no Kitty bytes for a non-graphics client: {s:?}");
+    }
+
+    #[test]
+    fn kitty_client_draws_no_placeholder_box() {
+        let mut d = kitty_renderer();
+        let s = render_str(&mut d, &frame_with(vec![boxed_vp(3, 10)]));
+        assert!(s.contains("a=t"), "Kitty client transmits the real image: {s:?}");
+        assert!(!s.contains('┌'), "no placeholder box for a Kitty client: {s:?}");
+    }
+
+    #[test]
+    fn placeholder_box_cleared_when_placement_vanishes() {
+        let mut d = DiffRenderer::new();
+        render_str(&mut d, &frame_with(vec![boxed_vp(3, 10)]));
+        let s = render_str(&mut d, &frame_with(vec![]));
+        assert!(s.contains("\x1b[3;4H"), "repaints the vacated box region: {s:?}");
+        assert!(!s.contains('┌'), "box not redrawn after vanish: {s:?}");
+    }
+
+    #[test]
+    fn tiny_placeholder_footprint_hatches_without_panic() {
+        let mut d = DiffRenderer::new();
+        let s = render_str(&mut d, &frame_with(vec![boxed_vp(1, 1)]));
+        assert!(s.contains('▒'), "tiny footprint hatched: {s:?}");
+        assert!(!s.contains('┌'), "no border when too small: {s:?}");
     }
 }
