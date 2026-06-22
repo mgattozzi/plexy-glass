@@ -13,6 +13,26 @@ pub trait ScreenOps {
     /// A complete DCS string (intermediates/action/params + payload), delivered
     /// at `unhook`. Used for XTGETTCAP (`DCS +q …`).
     fn handle_dcs(&mut self, intermediates: &[u8], action: u8, params: &[Vec<u16>], payload: &[u8]);
+    /// A complete Kitty-graphics APC sequence (`ESC _ G … ST`), re-framed with
+    /// its `ESC _` prefix and `ESC \` terminator. Captured ahead of `vte`
+    /// (which discards APC). One call per chunk (no merging).
+    fn handle_graphics(&mut self, framed: &[u8]);
+}
+
+/// APC pre-scan state. `vte` 0.15 drops APC, so we intercept `ESC _ … ST` ahead
+/// of it; graphics APCs (`G…`) are diverted, everything else is forwarded.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApcState {
+    Ground,
+    Esc,
+    Apc,
+    ApcEsc,
+}
+
+/// One ordered pre-scan segment: bytes for `vte`, or a re-framed graphics APC.
+enum Seg {
+    Run(Vec<u8>),
+    Graphics(Vec<u8>),
 }
 
 pub struct Parser {
@@ -23,6 +43,8 @@ pub struct Parser {
     dcs_params: Vec<Vec<u16>>,
     dcs_payload: Vec<u8>,
     in_dcs: bool,
+    apc_state: ApcState,
+    apc_buf: Vec<u8>,
 }
 
 impl Parser {
@@ -35,10 +57,15 @@ impl Parser {
             dcs_params: Vec::new(),
             dcs_payload: Vec::new(),
             in_dcs: false,
+            apc_state: ApcState::Ground,
+            apc_buf: Vec::new(),
         }
     }
 
     pub fn advance<S: ScreenOps>(&mut self, screen: &mut S, bytes: &[u8]) {
+        // Split into vte-bound runs and diverted graphics APCs, in order, so the
+        // cursor is current when a placement is recorded.
+        let segs = self.prescan(bytes);
         let mut perf = Performer {
             screen,
             pending: &mut self.pending,
@@ -48,11 +75,83 @@ impl Parser {
             dcs_payload: &mut self.dcs_payload,
             in_dcs: &mut self.in_dcs,
         };
-        self.vte.advance(&mut perf, bytes);
+        for seg in &segs {
+            match seg {
+                Seg::Run(run) => self.vte.advance(&mut perf, run),
+                Seg::Graphics(framed) => perf.screen.handle_graphics(framed),
+            }
+        }
         // Flush any trailing complete grapheme. The final byte may have left a
         // partial cluster (say, a base char still waiting on combining marks), so
         // partials stay in the buffer until the next call.
         perf.flush_complete_clusters();
+    }
+
+    /// Pull `ESC _ … ST` graphics APCs out of `bytes`, returning ordered runs to
+    /// feed `vte` interleaved with re-framed graphics blobs (one per chunk). The
+    /// state persists across calls so a sequence split across reads is captured.
+    fn prescan(&mut self, bytes: &[u8]) -> Vec<Seg> {
+        const APC_CAP: usize = 16 * 1024 * 1024;
+        let mut segs: Vec<Seg> = Vec::new();
+        let mut run: Vec<u8> = Vec::new();
+        let push = |buf: &mut Vec<u8>, b: u8| {
+            if buf.len() < APC_CAP {
+                buf.push(b);
+            }
+        };
+        for &b in bytes {
+            match self.apc_state {
+                ApcState::Ground => {
+                    if b == 0x1b {
+                        self.apc_state = ApcState::Esc;
+                    } else {
+                        run.push(b);
+                    }
+                }
+                ApcState::Esc => {
+                    if b == 0x5f {
+                        self.apc_state = ApcState::Apc;
+                        self.apc_buf.clear();
+                    } else {
+                        run.push(0x1b);
+                        if b == 0x1b {
+                            self.apc_state = ApcState::Esc;
+                        } else {
+                            run.push(b);
+                            self.apc_state = ApcState::Ground;
+                        }
+                    }
+                }
+                ApcState::Apc => {
+                    if b == 0x9c {
+                        flush_run(&mut segs, &mut run);
+                        push_graphics(&mut segs, &mut self.apc_buf);
+                        self.apc_state = ApcState::Ground;
+                    } else if b == 0x1b {
+                        self.apc_state = ApcState::ApcEsc;
+                    } else {
+                        push(&mut self.apc_buf, b);
+                    }
+                }
+                ApcState::ApcEsc => {
+                    if b == 0x5c {
+                        flush_run(&mut segs, &mut run);
+                        push_graphics(&mut segs, &mut self.apc_buf);
+                        self.apc_state = ApcState::Ground;
+                    } else {
+                        push(&mut self.apc_buf, 0x1b);
+                        if b == 0x1b {
+                            self.apc_state = ApcState::ApcEsc;
+                        } else {
+                            push(&mut self.apc_buf, b);
+                            self.apc_state = ApcState::Apc;
+                        }
+                    }
+                }
+            }
+        }
+        flush_run(&mut segs, &mut run);
+        segs
     }
 
     /// Force-flush any pending grapheme cluster to the screen. Use this at
@@ -73,6 +172,26 @@ impl Default for Parser {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Move accumulated vte-bound bytes into a `Run` segment.
+fn flush_run(segs: &mut Vec<Seg>, run: &mut Vec<u8>) {
+    if !run.is_empty() {
+        segs.push(Seg::Run(std::mem::take(run)));
+    }
+}
+
+/// Finalize a completed APC: graphics APCs (`G…`) are re-framed and diverted as
+/// one segment per chunk; other APCs are dropped.
+fn push_graphics(segs: &mut Vec<Seg>, buf: &mut Vec<u8>) {
+    if buf.first() == Some(&b'G') {
+        let mut framed = Vec::with_capacity(buf.len() + 3);
+        framed.extend_from_slice(b"\x1b_");
+        framed.extend_from_slice(buf);
+        framed.extend_from_slice(b"\x1b\\");
+        segs.push(Seg::Graphics(framed));
+    }
+    buf.clear();
 }
 
 struct Performer<'a, S: ScreenOps> {
@@ -217,6 +336,7 @@ mod tests {
         osc: Vec<Vec<Vec<u8>>>,
         esc: Vec<(Vec<u8>, u8)>,
         dcs: Vec<DcsRecord>,
+        graphics: Vec<Vec<u8>>,
     }
 
     impl ScreenOps for MockScreen {
@@ -249,6 +369,9 @@ mod tests {
                 params.to_vec(),
                 payload.to_vec(),
             ));
+        }
+        fn handle_graphics(&mut self, framed: &[u8]) {
+            self.graphics.push(framed.to_vec());
         }
     }
 
@@ -324,6 +447,34 @@ mod tests {
         assert_eq!(s.dcs.len(), 1, "one DCS dispatched");
         let (_ints, _action, _params, payload) = &s.dcs[0];
         assert_eq!(payload.len(), DCS_CAP, "payload truncated to the cap");
+    }
+
+    #[test]
+    fn graphics_apc_diverted_per_chunk_text_passes_through() {
+        // Two back-to-back graphics chunks are captured as TWO segments (no
+        // merge), and surrounding text still reaches vte.
+        let s = drive(b"hi\x1b_Ga=T,m=1;AA\x1b\\\x1b_Gm=0;BB\x1b\\");
+        assert_eq!(s.graphics.len(), 2, "one capture per chunk");
+        assert_eq!(s.graphics[0], b"\x1b_Ga=T,m=1;AA\x1b\\");
+        assert_eq!(s.graphics[1], b"\x1b_Gm=0;BB\x1b\\");
+        assert!(s.graphemes.contains(&"h".to_string()));
+    }
+
+    #[test]
+    fn graphics_apc_split_across_reads_is_captured_whole() {
+        let mut p = Parser::new();
+        let mut s = MockScreen::default();
+        p.advance(&mut s, b"\x1b_Ga=T,f=100;AA");
+        p.advance(&mut s, b"BB\x1b\\");
+        assert_eq!(s.graphics, vec![b"\x1b_Ga=T,f=100;AABB\x1b\\".to_vec()]);
+    }
+
+    #[test]
+    fn csi_after_graphics_still_dispatches() {
+        let s = drive(b"\x1b_Ga=T;AA\x1b\\\x1b[31m");
+        assert_eq!(s.graphics.len(), 1);
+        assert_eq!(s.csi.len(), 1);
+        assert_eq!(s.csi[0].2, 'm');
     }
 
     #[test]

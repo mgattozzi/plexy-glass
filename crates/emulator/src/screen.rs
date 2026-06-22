@@ -4,6 +4,7 @@
 use crate::{
     cell::Cell,
     cursor::Cursor,
+    graphics::{Image, ImageFormat, ImageStore, Placement},
     grid::{Grid, RowMark, WrapOrigin},
     hyperlinks::HyperlinkTable,
     keyboard::KeyboardState,
@@ -12,7 +13,23 @@ use crate::{
     scrollback::Scrollback,
     tabs::TabStops,
 };
+use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
+
+/// In-progress chunked image transmission (`m=1 … m=0`). Accumulated across
+/// `handle_graphics` calls until the final chunk, then finalized into an
+/// `Image` (+ a `Placement` when the action is display).
+#[derive(Clone, Debug)]
+struct PendingTx {
+    id: u32,
+    format: ImageFormat,
+    width: Option<u32>,
+    height: Option<u32>,
+    data_b64: Vec<u8>,
+    display: bool,
+    place_rows: Option<u16>,
+    place_cols: Option<u16>,
+}
 
 /// Terminal color queries from inner apps (OSC 10/11/12 with `?` parameter).
 /// Daemon drains and replies with the configured palette colors.
@@ -84,6 +101,15 @@ pub struct Screen {
     /// and to answer `CSI 14/16/18t` size reports.
     pub area_px_w: u16,
     pub area_px_h: u16,
+    /// Transmitted images (id → data), with an LRU byte budget.
+    pub images: ImageStore,
+    /// On-screen image placements, anchored to absolute unified lines.
+    pub placements: Vec<Placement>,
+    /// In-progress chunked transmission (`None` between images).
+    pending_tx: Option<PendingTx>,
+    graphics_seq: u64,
+    placement_id_seq: u32,
+    image_id_seq: u32,
 }
 
 impl Screen {
@@ -112,7 +138,145 @@ impl Screen {
             last_block_exit: None,
             area_px_w: 0,
             area_px_h: 0,
+            images: ImageStore::default(),
+            placements: Vec::new(),
+            pending_tx: None,
+            graphics_seq: 0,
+            placement_id_seq: 0,
+            image_id_seq: 0x8000_0000, // synthesized ids; high to avoid child collisions
         }
+    }
+
+    /// Handle a captured Kitty-graphics APC (`framed` = `ESC _ G … ESC \`).
+    /// Transmissions accumulate into `images`; display actions add a `Placement`
+    /// at the cursor and advance the cursor by the image's cell footprint.
+    /// Not captured on the alt screen (a full-screen app owns the pane).
+    pub(crate) fn handle_graphics(&mut self, framed: &[u8]) {
+        if self.alt.is_some() {
+            return;
+        }
+        let Some(cmd) = crate::graphics::parse_command(framed) else {
+            return;
+        };
+        match cmd.action {
+            b'd' => {
+                // Delete: by image id when given, else all placements.
+                match cmd.id {
+                    Some(id) => self.placements.retain(|p| p.image_id != id),
+                    None => self.placements.clear(),
+                }
+            }
+            b'p' => {
+                // Place an already-transmitted image at the cursor.
+                if let Some(id) = cmd.id
+                    && let Some(img) = self.images.get(id)
+                {
+                    let (w, h) = (img.pixel_w, img.pixel_h);
+                    self.add_placement(id, w, h, cmd.rows, cmd.cols);
+                }
+            }
+            b't' | b'T' => self.accumulate_transmission(cmd),
+            _ => {} // query (q) and unknown: ignored in Phase 2
+        }
+    }
+
+    fn accumulate_transmission(&mut self, cmd: crate::graphics::GraphicsCommand) {
+        let is_continuation = self.pending_tx.is_some()
+            && cmd.format.is_none()
+            && cmd.id.is_none()
+            && cmd.width.is_none()
+            && cmd.height.is_none()
+            && cmd.rows.is_none()
+            && cmd.cols.is_none();
+        if is_continuation {
+            if let Some(tx) = self.pending_tx.as_mut() {
+                tx.data_b64.extend_from_slice(&cmd.payload);
+            }
+        } else {
+            // Start a new transmission (drop any abandoned one).
+            let id = cmd.id.unwrap_or_else(|| {
+                self.image_id_seq = self.image_id_seq.wrapping_add(1);
+                self.image_id_seq
+            });
+            let format = cmd
+                .format
+                .and_then(ImageFormat::from_kitty_f)
+                .unwrap_or(ImageFormat::Png);
+            self.pending_tx = Some(PendingTx {
+                id,
+                format,
+                width: cmd.width,
+                height: cmd.height,
+                data_b64: cmd.payload,
+                display: cmd.action == b'T',
+                place_rows: cmd.rows,
+                place_cols: cmd.cols,
+            });
+        }
+        if !cmd.more {
+            self.finalize_transmission();
+        }
+    }
+
+    fn finalize_transmission(&mut self) {
+        let Some(tx) = self.pending_tx.take() else {
+            return;
+        };
+        let (mut w, mut h) = (tx.width.unwrap_or(0), tx.height.unwrap_or(0));
+        if (w == 0 || h == 0) && tx.format == ImageFormat::Png
+            && let Some((pw, ph)) = decode_png_dims(&tx.data_b64)
+        {
+            w = pw;
+            h = ph;
+        }
+        let image = Image {
+            id: tx.id,
+            format: tx.format,
+            pixel_w: w,
+            pixel_h: h,
+            data_b64: Arc::from(tx.data_b64.as_slice()),
+        };
+        let evicted = self.images.insert(image);
+        if !evicted.is_empty() {
+            self.placements.retain(|p| !evicted.contains(&p.image_id));
+        }
+        if tx.display {
+            self.add_placement(tx.id, w, h, tx.place_rows, tx.place_cols);
+        }
+    }
+
+    /// Add a placement at the cursor and advance the cursor by its row footprint
+    /// (so subsequent output lands below the image, the spike's overlap fix).
+    fn add_placement(&mut self, image_id: u32, pixel_w: u32, pixel_h: u32, r: Option<u16>, c: Option<u16>) {
+        let (cell_w, cell_h) = self.cell_pixels();
+        let rows = r.unwrap_or_else(|| {
+            pixel_h.div_ceil(u32::from(cell_h).max(1)).clamp(1, 1000) as u16
+        });
+        let cols = c.unwrap_or_else(|| {
+            pixel_w.div_ceil(u32::from(cell_w).max(1)).clamp(1, 1000) as u16
+        });
+        let anchor_line = self.scrollback.len() as u32 + u32::from(self.cursor.row);
+        self.placement_id_seq = self.placement_id_seq.wrapping_add(1);
+        let placement_id = self.placement_id_seq;
+        let seq = self.graphics_seq;
+        self.graphics_seq = self.graphics_seq.wrapping_add(1);
+        const MAX_PLACEMENTS: usize = 1024;
+        if self.placements.len() >= MAX_PLACEMENTS {
+            self.placements.remove(0);
+        }
+        self.placements.push(Placement {
+            image_id,
+            placement_id,
+            anchor_line,
+            col: self.cursor.col,
+            rows,
+            cols,
+            seq,
+        });
+        for _ in 0..rows {
+            self.advance_to_next_row(false);
+        }
+        self.cursor.col = 0;
     }
 
     /// Set the text-area pixel size relayed from the client's terminal.
@@ -1182,6 +1346,20 @@ impl ScreenOps for Screen {
             tracing::trace!(?intermediates, action = %(action as char), "unhandled DCS");
         }
     }
+    fn handle_graphics(&mut self, framed: &[u8]) {
+        Screen::handle_graphics(self, framed);
+    }
+}
+
+/// Decode the PNG width/height from the base64 transmission prefix (first chunk
+/// contains the PNG signature + IHDR). `None` if the prefix isn't a PNG header.
+fn decode_png_dims(b64: &[u8]) -> Option<(u32, u32)> {
+    use base64::Engine as _;
+    let take = (b64.len() / 4 * 4).min(64);
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&b64[..take])
+        .ok()?;
+    crate::graphics::png_dimensions(&decoded)
 }
 
 #[cfg(test)]
@@ -1204,6 +1382,56 @@ mod tests {
             .filter(|c| !c.is_wide_spacer())
             .map(|c| c.grapheme.as_str())
             .collect::<String>()
+    }
+
+    /// A 30×40px PNG as `a=T` chunked transmission: stored as an image, placed
+    /// at the cursor (footprint ceil(30/10)=3 cols × ceil(40/20)=2 rows with the
+    /// default 10×20 cell), and the cursor advances by 2 rows ONLY after the
+    /// final (`m=0`) chunk.
+    #[test]
+    fn graphics_chunked_transmit_and_display_models_image_and_placement() {
+        let mut png = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&30u32.to_be_bytes());
+        png.extend_from_slice(&40u32.to_be_bytes());
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let (a, b) = b64.split_at(28);
+        let chunk1 = format!("\x1b_Ga=T,i=7,f=100,m=1;{a}\x1b\\");
+        let chunk2 = format!("\x1b_Gm=0;{b}\x1b\\");
+
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(chunk1.as_bytes());
+        assert_eq!(e.screen().cursor.row, 0, "no cursor move before the final chunk");
+        assert!(e.screen().images.is_empty(), "not finalized yet");
+
+        e.advance(chunk2.as_bytes());
+        let s = e.screen();
+        assert!(s.images.contains(7), "image stored on finalize");
+        assert_eq!(s.placements.len(), 1);
+        let p = &s.placements[0];
+        assert_eq!(p.image_id, 7);
+        assert_eq!(p.anchor_line, 0, "anchored at the image start");
+        assert_eq!((p.cols, p.rows), (3, 2), "footprint from dims ÷ default cell");
+        assert_eq!(s.cursor.row, 2, "cursor advanced by the footprint after m=0");
+    }
+
+    #[test]
+    fn graphics_delete_by_id_removes_placements() {
+        // Inline single-chunk image (s=/v= dims given), then delete it.
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,i=9,f=24,s=20,v=20;QUJD\x1b\\");
+        assert_eq!(e.screen().placements.len(), 1);
+        e.advance(b"\x1b_Ga=d,i=9\x1b\\");
+        assert!(e.screen().placements.is_empty(), "a=d,i=9 removed the placement");
+    }
+
+    #[test]
+    fn graphics_not_captured_on_alt_screen() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b[?1049h"); // enter alt
+        e.advance(b"\x1b_Ga=T,i=1,f=24,s=10,v=10;QQ\x1b\\");
+        assert!(e.screen().placements.is_empty() && e.screen().images.is_empty());
     }
 
     #[test]
