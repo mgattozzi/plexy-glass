@@ -41,6 +41,26 @@ pub struct VisiblePlacement {
     pub cols: u16,
 }
 
+/// A Unicode-placeholder (virtual) placement resolved for the per-client
+/// renderer. The terminal composites the image onto the app's `U+10EEEE`
+/// placeholder cells (which flow through the ordinary cell diff), so this
+/// carries no host position, only the data to transmit once and the box to
+/// emit via `a=p,U=1`. The raw image id is kept (the placeholder cells
+/// reference it), so no per-pane id fold.
+#[derive(Debug, Clone)]
+pub struct VisibleVirtualPlacement {
+    pub key: u64,
+    pub image_id: u32,
+    pub placement_id: u32,
+    pub generation: u64,
+    pub format: ImageFormat,
+    pub pixel_w: u32,
+    pub pixel_h: u32,
+    pub data_b64: Arc<[u8]>,
+    pub rows: u16,
+    pub cols: u16,
+}
+
 #[derive(Debug, Clone)]
 pub struct VirtualScreen {
     pub cells: Vec<Cell>,
@@ -50,6 +70,8 @@ pub struct VirtualScreen {
     pub cols: u16,
     /// Inline-image placements to transmit/place after the cell diff.
     pub placements: Vec<VisiblePlacement>,
+    /// Unicode-placeholder (virtual) placements to transmit + `a=p,U=1`.
+    pub virtual_placements: Vec<VisibleVirtualPlacement>,
 }
 
 impl VirtualScreen {
@@ -63,6 +85,7 @@ impl VirtualScreen {
             rows,
             cols,
             placements: Vec::new(),
+            virtual_placements: Vec::new(),
         }
     }
 

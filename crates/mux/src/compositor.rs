@@ -456,6 +456,37 @@ pub fn compose(
             }
         }
         screen.placements = placements;
+
+        // Unicode-placeholder (virtual) placements: the terminal composites the
+        // image onto the app's placeholder cells (which flow through the cell
+        // diff), so we only surface the image data to transmit once + the box to
+        // emit. Raw id is kept (the placeholder cells reference it). No viewport
+        // clipping; the placeholder cells are clipped by the cell copy.
+        let mut virtual_placements: Vec<crate::virtual_screen::VisibleVirtualPlacement> = Vec::new();
+        for v in panes {
+            if v.screen.alt.is_some() || v.screen.virtual_placements.is_empty() {
+                continue;
+            }
+            for vp in &v.screen.virtual_placements {
+                let Some(img) = v.screen.images.get(vp.image_id) else {
+                    continue;
+                };
+                let key = (u64::from(v.id.0) << 40) | (vp.seq & ((1u64 << 40) - 1));
+                virtual_placements.push(crate::virtual_screen::VisibleVirtualPlacement {
+                    key,
+                    image_id: vp.image_id,
+                    placement_id: vp.placement_id,
+                    generation: img.generation,
+                    format: img.format,
+                    pixel_w: img.pixel_w,
+                    pixel_h: img.pixel_h,
+                    data_b64: img.data_b64.clone(),
+                    rows: vp.rows,
+                    cols: vp.cols,
+                });
+            }
+        }
+        screen.virtual_placements = virtual_placements;
     }
 
     // Status bar.
@@ -3522,6 +3553,27 @@ mod tests {
         let p = &vs.placements[0];
         assert_eq!(p.host_row, 1, "shifted down by the top status row");
         assert_eq!(p.rows, 2, "clipped to the 2-row pane band");
+    }
+
+    #[test]
+    fn virtual_placement_surfaces_and_is_suppressed_under_overlay() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(8, 40);
+        e.advance(b"\x1b_Ga=T,U=1,i=9,f=24,s=10,v=20,c=2,r=1;QUJD\x1b\\");
+        let screen = e.screen().clone();
+        assert_eq!(screen.virtual_placements.len(), 1, "emulator captured virtual placement");
+
+        // Surfaces with no overlay.
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs = compose(&[view], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert_eq!(vs.virtual_placements.len(), 1);
+        assert_eq!(vs.virtual_placements[0].image_id, 9, "raw id kept (no host fold)");
+
+        // Suppressed under a modal overlay.
+        let view2 = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let ov = OverlayView::RenamePrompt { label: "r", buf: "x" };
+        let vs2 = compose(&[view2], (9, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, TEST_COLOR);
+        assert!(vs2.virtual_placements.is_empty(), "overlay suppresses virtual placements");
     }
 
     #[test]

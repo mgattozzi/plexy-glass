@@ -54,6 +54,9 @@ pub struct DiffRenderer {
     /// on vanish, so a client whose terminal can't render the image still keeps a
     /// consistent labelled-box layout.
     boxed: HashMap<u64, PlacedRect>,
+    /// Virtual-placement key → (image_id, placement_id) of the `a=p,U=1` emitted,
+    /// so it's sent once and deleted when the placement goes away.
+    virtual_placed: HashMap<u64, (u32, u32)>,
     /// Set by `invalidate`: the next render first deletes ALL terminal images
     /// (session switch / re-point) before re-transmitting + re-placing.
     reset_images: bool,
@@ -67,6 +70,7 @@ impl DiffRenderer {
             transmitted: HashMap::new(),
             placed: HashMap::new(),
             boxed: HashMap::new(),
+            virtual_placed: HashMap::new(),
             reset_images: false,
         }
     }
@@ -95,6 +99,7 @@ impl DiffRenderer {
             self.transmitted.clear();
             self.placed.clear();
             self.boxed.clear();
+            self.virtual_placed.clear();
             self.reset_images = false;
         }
 
@@ -115,6 +120,7 @@ impl DiffRenderer {
             self.transmitted.clear();
             self.placed.clear();
             self.boxed.clear();
+            self.virtual_placed.clear();
             // Clear + home, then walk every row, every cell.
             out.push_str("\x1b[2J\x1b[H");
             let mut current_attrs = CellAttrs::default();
@@ -179,6 +185,7 @@ impl DiffRenderer {
         // layout instead of blank cells.
         if self.graphics.kitty {
             self.render_kitty_placements(&mut out, current);
+            self.render_virtual_placements(&mut out, current);
         } else {
             self.render_placeholder_boxes(&mut out, current);
         }
@@ -300,6 +307,39 @@ impl DiffRenderer {
             }
         }
     }
+
+    /// Unicode-placeholder (virtual) placements for a Kitty client: transmit the
+    /// image once (keyed by raw id + generation, shared with `transmitted`) and
+    /// emit `a=p,U=1` once. The placeholder cells render via the ordinary cell
+    /// diff; deleting the virtual placement removes it from the terminal.
+    fn render_virtual_placements(&mut self, out: &mut String, current: &VirtualScreen) {
+        let mut seen: HashSet<u64> = HashSet::with_capacity(current.virtual_placements.len());
+        for vp in &current.virtual_placements {
+            if vp.data_b64.is_empty() {
+                continue; // nothing to transmit/place
+            }
+            seen.insert(vp.key);
+            if self.transmitted.get(&vp.image_id) != Some(&vp.generation) {
+                emit_transmit_bytes(out, vp.image_id, vp.format.kitty_f(), vp.pixel_w, vp.pixel_h, &vp.data_b64);
+                self.transmitted.insert(vp.image_id, vp.generation);
+            }
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.virtual_placed.entry(vp.key) {
+                let _ = write!(
+                    out,
+                    "\x1b_Ga=p,U=1,i={},p={},c={},r={},q=2\x1b\\",
+                    vp.image_id, vp.placement_id, vp.cols, vp.rows
+                );
+                slot.insert((vp.image_id, vp.placement_id));
+            }
+        }
+        // Delete virtual placements that vanished this frame.
+        let gone: Vec<u64> = self.virtual_placed.keys().copied().filter(|k| !seen.contains(k)).collect();
+        for k in gone {
+            if let Some((img, pid)) = self.virtual_placed.remove(&k) {
+                emit_delete(out, img, pid);
+            }
+        }
+    }
 }
 
 /// Repaint a rectangle of cells from `screen` (used to clear a placeholder box
@@ -393,12 +433,16 @@ fn emit_placeholder_box(out: &mut String, p: &VisiblePlacement) {
 
 /// Transmit an image's data once (`a=t`), re-chunked to ≤4096 base64 bytes.
 fn emit_transmit(out: &mut String, p: &VisiblePlacement) {
-    if p.data_b64.is_empty() {
+    emit_transmit_bytes(out, p.image_id, p.format.kitty_f(), p.pixel_w, p.pixel_h, &p.data_b64);
+}
+
+/// Shared transmit emitter (classic + virtual placements).
+fn emit_transmit_bytes(out: &mut String, image_id: u32, f: u32, pixel_w: u32, pixel_h: u32, data: &[u8]) {
+    if data.is_empty() {
         return;
     }
     const CHUNK: usize = 4096;
-    let f = p.format.kitty_f();
-    let n = p.data_b64.len();
+    let n = data.len();
     let mut i = 0;
     let mut first = true;
     while i < n {
@@ -407,14 +451,13 @@ fn emit_transmit(out: &mut String, p: &VisiblePlacement) {
         if first {
             let _ = write!(
                 out,
-                "\x1b_Gi={},a=t,f={},s={},v={},q=2,m={};",
-                p.image_id, f, p.pixel_w, p.pixel_h, more
+                "\x1b_Gi={image_id},a=t,f={f},s={pixel_w},v={pixel_h},q=2,m={more};"
             );
             first = false;
         } else {
-            let _ = write!(out, "\x1b_Gm={};", more);
+            let _ = write!(out, "\x1b_Gm={more};");
         }
-        out.push_str(&String::from_utf8_lossy(&p.data_b64[i..end]));
+        out.push_str(&String::from_utf8_lossy(&data[i..end]));
         out.push_str("\x1b\\");
         i = end;
     }
@@ -559,6 +602,7 @@ fn apply_sgr_delta(out: &mut String, prev: &CellAttrs, cell: &Cell) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::virtual_screen::VisibleVirtualPlacement;
     use smol_str::SmolStr;
 
     fn lettered(cells: &[(u16, u16, &str)], rows: u16, cols: u16) -> VirtualScreen {
@@ -982,5 +1026,55 @@ mod tests {
         let s = render_str(&mut d, &frame_with(vec![boxed_vp(1, 1)]));
         assert!(s.contains('▒'), "tiny footprint hatched: {s:?}");
         assert!(!s.contains('┌'), "no border when too small: {s:?}");
+    }
+
+    // ── virtual (Unicode-placeholder) placements ───────────────────────────────
+
+    fn vvp(key: u64, image_id: u32) -> VisibleVirtualPlacement {
+        VisibleVirtualPlacement {
+            key,
+            image_id,
+            placement_id: 1,
+            generation: 1,
+            format: plexy_glass_emulator::ImageFormat::Png,
+            pixel_w: 30,
+            pixel_h: 40,
+            data_b64: std::sync::Arc::from(&b"QUJD"[..]),
+            rows: 2,
+            cols: 3,
+        }
+    }
+
+    fn frame_with_virtual(vps: Vec<VisibleVirtualPlacement>) -> VirtualScreen {
+        let mut v = VirtualScreen::blank(8, 20);
+        v.virtual_placements = vps;
+        v
+    }
+
+    #[test]
+    fn virtual_placement_transmits_once_and_emits_unicode_place() {
+        let mut d = kitty_renderer();
+        let s = render_str(&mut d, &frame_with_virtual(vec![vvp(1, 7)]));
+        // Transmitted under the RAW id (placeholder cells reference it), no fold.
+        assert!(s.contains("\x1b_Gi=7,a=t,f=100"), "transmit raw id: {s:?}");
+        assert!(s.contains("\x1b_Ga=p,U=1,i=7,p=1,c=3,r=2,q=2\x1b\\"), "virtual place: {s:?}");
+        // Second identical frame re-emits nothing.
+        let s2 = render_str(&mut d, &frame_with_virtual(vec![vvp(1, 7)]));
+        assert!(!s2.contains("\x1b_G"), "unchanged virtual frame is silent: {s2:?}");
+    }
+
+    #[test]
+    fn vanished_virtual_placement_is_deleted() {
+        let mut d = kitty_renderer();
+        render_str(&mut d, &frame_with_virtual(vec![vvp(1, 7)]));
+        let s = render_str(&mut d, &frame_with_virtual(vec![]));
+        assert!(s.contains("\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\"), "delete vanished virtual placement: {s:?}");
+    }
+
+    #[test]
+    fn non_kitty_client_emits_no_virtual_graphics() {
+        let mut d = DiffRenderer::new(); // no graphics caps
+        let s = render_str(&mut d, &frame_with_virtual(vec![vvp(1, 7)]));
+        assert!(!s.contains("\x1b_G"), "no graphics for a non-kitty client: {s:?}");
     }
 }

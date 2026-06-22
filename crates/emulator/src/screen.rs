@@ -4,7 +4,7 @@
 use crate::{
     cell::Cell,
     cursor::Cursor,
-    graphics::{Image, ImageFormat, ImageStore, Placement},
+    graphics::{Image, ImageFormat, ImageStore, Placement, VirtualPlacement},
     grid::{Grid, RowMark, WrapOrigin},
     hyperlinks::HyperlinkTable,
     keyboard::KeyboardState,
@@ -29,6 +29,9 @@ struct PendingTx {
     display: bool,
     place_rows: Option<u16>,
     place_cols: Option<u16>,
+    /// `U=1`: on finalize, record a virtual placement instead of an anchored one.
+    unicode: bool,
+    placement_id: Option<u32>,
 }
 
 /// Terminal color queries from inner apps (OSC 10/11/12 with `?` parameter).
@@ -105,6 +108,9 @@ pub struct Screen {
     pub images: ImageStore,
     /// On-screen image placements, anchored to absolute unified lines.
     pub placements: Vec<Placement>,
+    /// Unicode-placeholder (virtual) placements, positioned by the app's
+    /// `U+10EEEE` cells, not anchored to a line.
+    pub virtual_placements: Vec<VirtualPlacement>,
     /// In-progress chunked transmission (`None` between images).
     pending_tx: Option<PendingTx>,
     graphics_seq: u64,
@@ -144,6 +150,7 @@ impl Screen {
             area_px_h: 0,
             images: ImageStore::default(),
             placements: Vec::new(),
+            virtual_placements: Vec::new(),
             pending_tx: None,
             graphics_seq: 0,
             placement_id_seq: 0,
@@ -167,17 +174,29 @@ impl Screen {
             b'd' => {
                 // Delete: by image id when given, else all placements.
                 match cmd.id {
-                    Some(id) => self.placements.retain(|p| p.image_id != id),
-                    None => self.placements.clear(),
+                    Some(id) => {
+                        self.placements.retain(|p| p.image_id != id);
+                        self.virtual_placements.retain(|p| p.image_id != id);
+                    }
+                    None => {
+                        self.placements.clear();
+                        self.virtual_placements.clear();
+                    }
                 }
             }
             b'p' => {
-                // Place an already-transmitted image at the cursor.
+                // Place an already-transmitted image. `U=1` is a virtual
+                // (Unicode-placeholder) placement positioned by the app's cells;
+                // otherwise it's a classic placement anchored at the cursor.
                 if let Some(id) = cmd.id
                     && let Some(img) = self.images.get(id)
                 {
-                    let (w, h) = (img.pixel_w, img.pixel_h);
-                    self.add_placement(id, w, h, cmd.rows, cmd.cols);
+                    if cmd.unicode {
+                        self.add_virtual_placement(id, cmd.placement_id, cmd.rows, cmd.cols);
+                    } else {
+                        let (w, h) = (img.pixel_w, img.pixel_h);
+                        self.add_placement(id, w, h, cmd.rows, cmd.cols);
+                    }
                 }
             }
             b't' | b'T' => self.accumulate_transmission(cmd),
@@ -216,6 +235,8 @@ impl Screen {
                 display: cmd.action == b'T',
                 place_rows: cmd.rows,
                 place_cols: cmd.cols,
+                unicode: cmd.unicode,
+                placement_id: cmd.placement_id,
             });
         }
         if !cmd.more {
@@ -246,10 +267,38 @@ impl Screen {
         let evicted = self.images.insert(image);
         if !evicted.is_empty() {
             self.placements.retain(|p| !evicted.contains(&p.image_id));
+            self.virtual_placements.retain(|p| !evicted.contains(&p.image_id));
         }
-        if tx.display {
+        if tx.unicode {
+            // Transmit-and-virtual-place (a=T,U=1): no anchor, no cursor advance.
+            self.add_virtual_placement(tx.id, tx.placement_id, tx.place_rows, tx.place_cols);
+        } else if tx.display {
             self.add_placement(tx.id, w, h, tx.place_rows, tx.place_cols);
         }
+    }
+
+    /// Record a Unicode-placeholder (virtual) placement. The app positions the
+    /// image via its `U+10EEEE` cells, so this neither anchors to a line nor
+    /// advances the cursor; it just notes that the image has a virtual placement
+    /// for the per-client renderer to transmit + emit `a=p,U=1` once.
+    fn add_virtual_placement(&mut self, image_id: u32, placement_id: Option<u32>, r: Option<u16>, c: Option<u16>) {
+        let placement_id = placement_id.unwrap_or(0);
+        let seq = self.graphics_seq;
+        self.graphics_seq = self.graphics_seq.wrapping_add(1);
+        // Replace an existing virtual placement for the same (image, placement).
+        self.virtual_placements
+            .retain(|p| !(p.image_id == image_id && p.placement_id == placement_id));
+        const MAX_VIRTUAL: usize = 1024;
+        if self.virtual_placements.len() >= MAX_VIRTUAL {
+            self.virtual_placements.remove(0);
+        }
+        self.virtual_placements.push(VirtualPlacement {
+            image_id,
+            placement_id,
+            rows: r.unwrap_or(0),
+            cols: c.unwrap_or(0),
+            seq,
+        });
     }
 
     /// Add a placement at the cursor and advance the cursor by its row footprint
@@ -1511,6 +1560,50 @@ mod tests {
         assert_eq!(e.screen().placements.len(), 1);
         e.resize(24, 100); // width change reflows; absolute anchors no longer valid
         assert!(e.screen().placements.is_empty(), "placements dropped on resize");
+    }
+
+    #[test]
+    fn unicode_placement_records_virtual_not_anchored() {
+        let mut e = crate::Emulator::new(24, 80);
+        // Transmit, then a virtual placement (U=1), positioned by the app's cells.
+        e.advance(b"\x1b_Ga=t,i=7,f=24,s=10,v=20;QUJD\x1b\\");
+        let row_before = e.screen().cursor.row;
+        e.advance(b"\x1b_Ga=p,U=1,i=7,p=1,c=3,r=2\x1b\\");
+        let s = e.screen();
+        assert!(s.placements.is_empty(), "no anchored placement for U=1");
+        assert_eq!(s.virtual_placements.len(), 1);
+        let vp = &s.virtual_placements[0];
+        assert_eq!((vp.image_id, vp.placement_id, vp.cols, vp.rows), (7, 1, 3, 2));
+        assert_eq!(s.cursor.row, row_before, "virtual placement does not move the cursor");
+    }
+
+    #[test]
+    fn transmit_and_virtual_place_in_one_command() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,U=1,i=9,f=24,s=10,v=20,c=2,r=1;QUJD\x1b\\");
+        let s = e.screen();
+        assert!(s.images.contains(9), "image stored");
+        assert!(s.placements.is_empty(), "no anchored placement");
+        assert_eq!(s.virtual_placements.len(), 1);
+        assert_eq!(s.cursor.row, 0, "no cursor advance for a virtual placement");
+    }
+
+    #[test]
+    fn delete_clears_virtual_placements() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,U=1,i=9,f=24,s=10,v=20,c=2,r=1;QUJD\x1b\\");
+        assert_eq!(e.screen().virtual_placements.len(), 1);
+        e.advance(b"\x1b_Ga=d,i=9\x1b\\");
+        assert!(e.screen().virtual_placements.is_empty(), "a=d,i=9 cleared the virtual placement");
+    }
+
+    #[test]
+    fn ris_clears_virtual_placements() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,U=1,i=9,f=24,s=10,v=20,c=2,r=1;QUJD\x1b\\");
+        assert_eq!(e.screen().virtual_placements.len(), 1);
+        e.advance(b"\x1bc");
+        assert!(e.screen().virtual_placements.is_empty());
     }
 
     #[test]

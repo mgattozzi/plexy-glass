@@ -70,6 +70,23 @@ pub struct Placement {
     pub seq: u64,
 }
 
+/// A Unicode-placeholder (virtual) placement: the image is composited by the
+/// terminal onto `U+10EEEE` placeholder cells the app wrote into the grid (those
+/// cells carry the image id in their fg color and the row/col in diacritics, and
+/// ride scroll/reflow like text). The emulator does not anchor it to a line or
+/// advance the cursor; it only records that image id `image_id` has a virtual
+/// placement so the per-client renderer transmits the image once and emits the
+/// `a=p,U=1` once. `rows`/`cols` are the placement's declared cell box.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VirtualPlacement {
+    pub image_id: u32,
+    pub placement_id: u32,
+    pub rows: u16,
+    pub cols: u16,
+    /// Monotonic id (per Screen), stable across clones, for renderer dedupe.
+    pub seq: u64,
+}
+
 /// `id → Image` with a byte-budget, insertion-order LRU. A pathological child
 /// can't grow this without bound; placements that reference an evicted image are
 /// skipped at render time (the compositor/renderer tolerate a missing image).
@@ -143,6 +160,7 @@ pub struct GraphicsCommand {
     pub cols: Option<u16>,       // c=
     pub more: bool,              // m=1 (more chunks coming)
     pub delete_target: Option<u8>, // d= (for a=d)
+    pub unicode: bool,           // U=1 (Unicode-placeholder / virtual placement)
     pub payload: Vec<u8>,        // base64 chunk
 }
 
@@ -177,6 +195,7 @@ pub fn parse_command(framed: &[u8]) -> Option<GraphicsCommand> {
             b"c" => cmd.cols = val.parse().ok(),
             b"m" => cmd.more = val == "1",
             b"d" => cmd.delete_target = v.first().copied(),
+            b"U" => cmd.unicode = val == "1",
             _ => {}
         }
     }
