@@ -30,11 +30,18 @@ impl FoldCtx {
         } else {
             FoldProjection::identity(blocks::total_lines(view.screen))
         };
+        // `scroll_offset` (and copy/block `viewport_top`-derived `es`) is in
+        // UNIFIED-line space: `es` lines up from the bottom of the unified space.
+        // Translate that anchor into visible space so a folded view scrolls by the
+        // right amount and keyboard prompt-jumps land on the target. At es=0 this
+        // bottom-anchors (prompt at the bottom); identity panes reduce to the
+        // plain `visible_total - rows - es`.
         let es = effective_scroll_for(view);
+        let rows = u32::from(view.rect.rows);
+        let bottom_unified = proj.total().saturating_sub(1).saturating_sub(es);
         let top_visible = proj
-            .visible_total()
-            .saturating_sub(u32::from(view.rect.rows))
-            .saturating_sub(es);
+            .visible_at_or_below(bottom_unified)
+            .saturating_sub(rows.saturating_sub(1));
         Self { proj, top_visible }
     }
 
@@ -367,12 +374,16 @@ pub fn compose(
             // the bracket is used).
             let ctx = &fold_ctx[&v.id];
             let top = ctx.top_visible;
-            let block_rows: Vec<Option<crate::blocks::BlockLineStatus>> = if blocks.is_some() {
+            let block_rows: Vec<Option<crate::blocks::BlockLineStatus>> = if blocks.is_none() {
+                vec![]
+            } else if ctx.proj.is_identity() {
+                // No folds: the single-pass scan (display row r == unified top+r).
+                viewport_block_status(v.screen, top, v.rect.rows)
+            } else {
+                // Folded: status per display row through the projection.
                 (0..v.rect.rows)
                     .map(|r| ctx.line_at(r).and_then(|line| block_status_at(v.screen, line)))
                     .collect()
-            } else {
-                vec![]
             };
             // Selected-block bracket (independent of the blocks toggle, but
             // suppressed on the alt screen: a full-screen app entered while
@@ -448,15 +459,16 @@ pub fn compose(
                 continue; // pane too narrow for the summary
             }
             let start_col = pane_right - sw;
-            // Don't overwrite the command text: find its right edge and skip if
-            // the summary would collide.
-            let cmd_end = (v.rect.col..start_col)
+            // Don't overwrite the command text: scan the WHOLE pane row (including
+            // the summary columns) for the command's right edge; omit the summary
+            // when the command reaches into (or within one cell of) it.
+            let cmd_end = (v.rect.col..pane_right)
                 .rev()
                 .find(|&c| screen.cell(host_row, c).is_some_and(|cell| !cell.is_blank()))
                 .map(|c| c + 1)
                 .unwrap_or(v.rect.col);
-            if cmd_end > start_col {
-                continue;
+            if cmd_end >= start_col {
+                continue; // command fills the row up to the summary, omit (1-col gap kept)
             }
             put_str(&mut screen, host_row, start_col, &summary, Attrs::DIM, pane_right);
             // Color the summary with the block's ok/fail color when known.
@@ -3721,6 +3733,46 @@ mod tests {
         assert!(row0.contains('▸'), "fold marker present: {row0:?}");
         assert!(row0.contains("2 lines"), "hidden line count: {row0:?}");
         assert!(row0.contains('✓'), "ok status glyph: {row0:?}");
+    }
+
+    #[test]
+    fn fold_summary_omitted_when_command_fills_the_row() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(8, 40);
+        let long = "x".repeat(36); // command nearly fills the 40-col row
+        let bytes = format!(
+            "\x1b]133;A\x07$ {long}\r\n\x1b]133;C\x07out\r\n\x1b]133;A\x07$ next\r\ny"
+        );
+        e.advance(bytes.as_bytes());
+        e.advance(b"\x1b[m");
+        let mut screen = e.screen().clone();
+        crate::blocks::set_block_folded(&mut screen, 0, true);
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let row0 = composed_row(&vs, 0);
+        assert!(!row0.contains('▸'), "summary omitted when the command fills the row: {row0:?}");
+        assert!(row0.contains(&long), "command text not overwritten: {row0:?}");
+    }
+
+    #[test]
+    fn live_cursor_shifts_up_under_a_fold() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(8, 40);
+        // Block 0 with 2 output rows, then the active prompt (cursor on it).
+        e.advance(b"\x1b]133;A\x07$ one\r\n\x1b]133;C\x07o1\r\no2\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ two ");
+        let screen = e.screen().clone();
+        let vs0 = compose(
+            &[plain_view(&screen, Rect::new(0, 0, 8, 40))],
+            (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR,
+        );
+        let mut folded = screen.clone();
+        crate::blocks::set_block_folded(&mut folded, 0, true);
+        let vs1 = compose(
+            &[plain_view(&folded, Rect::new(0, 0, 8, 40))],
+            (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR,
+        );
+        let (r0, r1) = (vs0.cursor.unwrap().0, vs1.cursor.unwrap().0);
+        assert_eq!(r1, r0 - 2, "folding 2 output rows above the cursor shifts it up by 2");
     }
 
     #[test]

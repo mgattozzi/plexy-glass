@@ -1663,6 +1663,41 @@ mod tests {
     }
 
     #[test]
+    fn folded_mark_rides_reflow_and_drops_on_eviction() {
+        // The fold flag lives on the prompt row's `RowMark`, so it rides reflow and
+        // drops when the row evicts (spec D1). We set the bit directly here, not
+        // through the mux fold policy.
+        let mut e = crate::Emulator::new(4, 20);
+        e.advance(b"\x1b]133;A\x07$ cmd\r\nout1\r\nout2\r\n");
+        e.screen_mut().active.rows[0].mark.set_folded(true);
+        assert!(e.screen().active.rows[0].mark.contains(RowMark::PROMPT_START));
+
+        e.resize(4, 12); // reflow at a new width
+        let folded_after_reflow = e
+            .screen()
+            .active
+            .rows
+            .iter()
+            .chain(e.screen().scrollback.rows().iter())
+            .any(|r| r.mark.contains(RowMark::PROMPT_START) && r.mark.is_folded());
+        assert!(folded_after_reflow, "FOLDED rides reflow on the prompt row");
+
+        // Tiny scrollback cap + scroll past → the folded prompt row evicts.
+        e.screen_mut().scrollback = crate::scrollback::Scrollback::with_cap(1);
+        for _ in 0..20 {
+            e.advance(b"\r\n");
+        }
+        let still_folded = e
+            .screen()
+            .active
+            .rows
+            .iter()
+            .chain(e.screen().scrollback.rows().iter())
+            .any(|r| r.mark.is_folded());
+        assert!(!still_folded, "fold drops when its prompt row is evicted");
+    }
+
+    #[test]
     fn unicode_placement_records_virtual_not_anchored() {
         let mut e = crate::Emulator::new(24, 80);
         // Transmit, then a virtual placement (U=1), positioned by the app's cells.

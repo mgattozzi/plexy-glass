@@ -619,6 +619,35 @@ async fn next_prompt_snaps_to_live_when_the_prompt_is_in_the_grid() {
 }
 
 #[tokio::test]
+async fn fold_via_block_mode_dispatch_persists_after_exit() {
+    let notify = Arc::new(Notify::new());
+    let m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    let pane = m.active_window().active_pane().unwrap();
+    // Two blocks so block 0 (prompt 0 + output 1) is completed/foldable.
+    pane.with_screen_mut(|s| {
+        use plexy_glass_emulator::RowMark;
+        s.active.rows[0].mark.set(RowMark::PROMPT_START);
+        s.active.rows[1].mark.set(RowMark::OUTPUT_START);
+        s.active.rows[3].mark.set(RowMark::PROMPT_START);
+    });
+    let screen = pane.with_screen(|s| s.clone());
+    pane.enter_block_mode(plexy_glass_mux::BlockMode::new_for(&screen, 24).unwrap());
+    // Apply the fold exactly as the connection dispatch does.
+    pane.with_screen_mut(|s| plexy_glass_mux::blocks::toggle_block_fold(s, 0));
+    assert!(pane.with_screen(|s| s.active.rows[0].mark.is_folded()), "block folded");
+    // Leaving block mode must NOT clear the fold, that's the whole point.
+    pane.exit_block_mode();
+    assert!(pane.with_screen(|s| s.active.rows[0].mark.is_folded()), "fold persists after exit");
+}
+
+#[tokio::test]
 async fn block_scroll_without_marks_prev_noops_and_next_goes_live() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(

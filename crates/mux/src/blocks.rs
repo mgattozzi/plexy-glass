@@ -646,6 +646,28 @@ impl FoldProjection {
         }
         Some(vis)
     }
+
+    /// Total unified line count this projection was built over.
+    pub fn total(&self) -> u32 {
+        self.total
+    }
+
+    /// Visible index of the **last visible line at or below** `unified`,
+    /// snapping past a fold if `unified` lands inside one. Used to translate a
+    /// unified scroll/bottom anchor into visible space (the daemon keeps
+    /// `scroll_offset` in unified lines). `0` when nothing precedes it.
+    pub fn visible_at_or_below(&self, unified: u32) -> u32 {
+        let u = unified.min(self.total.saturating_sub(1));
+        let mut hidden_le = 0u32;
+        for &(s, e) in &self.hidden {
+            if s > u {
+                break;
+            }
+            hidden_le += e.min(u) - s + 1;
+        }
+        // Count of visible lines in [0, u]; the last one's index is count - 1.
+        (u + 1).saturating_sub(hidden_le).saturating_sub(1)
+    }
 }
 
 #[cfg(test)]
@@ -1546,6 +1568,27 @@ mod tests {
         assert_eq!(p.from_unified(2), None);
         assert_eq!(p.from_unified(3), Some(1));
         assert_eq!(p.from_unified(4), Some(2));
+    }
+
+    #[test]
+    fn visible_at_or_below_translates_unified_anchor() {
+        // Fold block 0 of two_blocks (hides unified 1,2) → visible: 0,3,4,5,6,7.
+        let mut s = two_blocks();
+        set_block_folded(&mut s, 0, true);
+        let p = FoldProjection::build(&s);
+        // Below the fold: identity.
+        assert_eq!(p.visible_at_or_below(0), 0);
+        // Inside the fold (1,2) snaps to the last visible at/below → line 0 (index 0).
+        assert_eq!(p.visible_at_or_below(1), 0);
+        assert_eq!(p.visible_at_or_below(2), 0);
+        // After the fold, indices shift down by the 2 hidden rows.
+        assert_eq!(p.visible_at_or_below(3), 1);
+        assert_eq!(p.visible_at_or_below(7), 5);
+        // Past the end clamps to the last visible index.
+        assert_eq!(p.visible_at_or_below(99), p.visible_total() - 1);
+        // No folds → identity.
+        let id = FoldProjection::identity(5);
+        assert_eq!(id.visible_at_or_below(3), 3);
     }
 
     #[test]
