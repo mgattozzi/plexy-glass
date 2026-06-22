@@ -297,6 +297,52 @@ The `blocks` node in `config.kdl` controls this feature. See the
 [`blocks` section of docs/configuration.md](configuration.md#blocks) for the
 full reference (colors, `enabled` flag, defaults, and live-reload behavior).
 
+## Command duration
+
+Each block is timed from when its command starts running (`133;C`) to when it
+finishes (`133;D`), and the elapsed time shows up as a dim, right-aligned note
+on the command row, right where the fold summary sits:
+
+```
+$ cargo build --release                                      2.3s
+```
+
+Timing every `ls` and `cd` would just be noise, so only commands at or above a
+threshold get a note (default **2s**). Set `duration-threshold "0"` to time
+everything. When a block is also folded, the duration appends to the fold
+summary: `▸ 412 lines ✓ · 2.3s`.
+
+The duration shows in the live/scrollback view and in block mode, and it is
+suppressed in copy mode (which renders raw text for selection). Durations are
+**runtime-only**, so a block restored from disk after a daemon restart shows no
+duration. Turn the feature off with `duration #false` in the `blocks` node.
+
+**Requires OSC 133 shell integration**, same as all the other block features.
+
+## Sticky command header
+
+When a single command's output is taller than the pane (a long `cargo build`,
+a big `git log`), its command line scrolls off the top and you lose track of
+what produced the wall of text you're looking at. The **sticky header** pins
+it: the command line stays on the pane's top row (a reverse-video bar) for as
+long as that block's output fills the top of the viewport, whether you got
+there by scrolling back with the wheel or just by the output overflowing the
+screen.
+
+```
+┌ cargo build --release                                       2.3s ┐   ← pinned header
+│   Compiling plexy-glass-emulator v0.1.0                          │
+│   Compiling plexy-glass-mux v0.1.0                               │
+```
+
+The header carries the block's exit-status duration too (same threshold). It
+appears in the **live view only**, since block mode already lists every command
+line and copy mode owns the selection cursor. A folded block never triggers it
+(its output is collapsed, so nothing of it is on screen to scroll into). Turn
+it off with `sticky-header #false` in the `blocks` node.
+
+**Requires OSC 133 shell integration**, same as all the other block features.
+
 ## Block mode
 
 Press `Ctrl+a b` to enter **block mode**, a dedicated view for navigating the

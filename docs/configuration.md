@@ -484,16 +484,21 @@ nothing reaches the pane's shell behind it.
 
 ## `blocks`
 
-Controls the block exit-status border feature (see
-[docs/command-blocks.md, Exit status on the border](command-blocks.md#exit-status-on-the-border)
-for the user-facing description of what it does).
+Controls the command-block annotations: the exit-status border (see
+[Exit status on the border](command-blocks.md#exit-status-on-the-border) in
+docs/command-blocks.md), the
+[command duration](command-blocks.md#command-duration), and the
+[sticky command header](command-blocks.md#sticky-command-header).
 
 ```kdl
 blocks {
-    enabled #true            // #false disables all block border painting
-    ok-color "ok"            // palette name or #rrggbb; default: palette `ok`
-    fail-color "alert"       // palette name or #rrggbb; default: palette `alert`
-    select-color "#dca561"   // palette name or #rrggbb; the block-mode bracket
+    enabled #true               // #false disables all block border painting
+    ok-color "ok"               // palette name or #rrggbb; default: palette `ok`
+    fail-color "alert"          // palette name or #rrggbb; default: palette `alert`
+    select-color "#dca561"      // palette name or #rrggbb; the block-mode bracket
+    sticky-header #true         // pin the command line when its output scrolls off-top
+    duration #true              // show each block's wall-clock duration inline
+    duration-threshold "2s"     // minimum duration to show; "0" times everything
 }
 ```
 
@@ -515,6 +520,17 @@ blocks {
   value forms as `ok-color`. Default: `"#dca561"`. Note that this one is
   independent of `enabled`: the bracket is part of block-mode navigation, so
   it is drawn even when block-status border coloring is turned off.
+- `sticky-header` is `#true` (default) or `#false`. It pins a block's command
+  line as a reverse-video bar on the pane's top row while that block's output
+  fills the top of the viewport (live view only). Gated by `enabled`.
+- `duration` is `#true` (default) or `#false`. It shows each completed
+  block's wall-clock duration (`C`→`D`) as a dim, right-aligned note on the
+  command row (and on the sticky header). Runtime-only, not persisted across
+  restart. Gated by `enabled`.
+- `duration-threshold` is the minimum duration to display, as `"<int>ms"`,
+  `"<float>s"`, or `"0"` (e.g. `"500ms"`, `"1.5s"`, `"2s"`). Default `"2s"`.
+  `"0"` shows every completed block, faster commands are hidden otherwise.
+  Note that an unparseable value is a hard config error.
 
 A bad color value (unknown palette name or malformed hex) falls back to the
 built-in default for that field, so it never disables the feature and is not

@@ -376,6 +376,32 @@ and click-to-jump compute fold-exact offsets via
 compositor consumes `top_visible = visible_total − rows − offset` directly), so
 scrolled navigation over folds lands the target at the top with no dead zone.
 
+Command-block **annotations** (shipped — `docs/command-blocks.md`, spec/plan
+`docs/superpowers/{specs,plans}/2026-06-22-block-annotations*`): two
+viewport-painted block annotations. **Command duration** — the emulator times
+each block by stashing `Instant::now()` at `OSC 133;C` (the one deliberate clock
+read in the otherwise-pure emulator, cleared at `;A` so a `C` with no `;D` can't
+mis-attribute to the next block) and writing the elapsed millis onto the `;D`
+row's `RowMark` next to the exit code (`HAS_DURATION` bit 5 / `set_duration` /
+`duration_ms()`; size assertion bumped 8→12; rides reflow via `merge`; excluded
+from persistence for free since `mark_to_dto` copies only the four OSC-133 bits
+— runtime-only like `FOLDED`). Read via `blocks::closing_duration` (mirrors
+`closing_exit`) and rendered by `blocks::format_duration` (`340ms`/`2.3s`/`45s`/
+`2m05s`) as a dim, right-aligned note on the command row — the fold-summary pass
+became a **command-row annotation** pass that composes summary + duration
+(`▸ N lines ✓ · 2.3s`), gated by a config threshold (default 2s, `0` = all),
+suppressed in copy mode. **Sticky command header** — a new live-only compositor
+pass pins the command line as a reverse-video bar on the pane's top row when its
+block's output has scrolled above the viewport top (`prompt_at_or_above(line_at(0))
+< top_line` + `block_command_line`), carrying the duration too; folds compose for
+free (a folded block has no visible output rows, so the top line never lands
+inside one). Both flags ride `BlockBorderColors`
+(`duration_threshold_ms: Option<u32>`, `sticky_header: bool`) — gated by
+`blocks.enabled`, filled from `config_snapshot()` so live-reload is free, and no
+`compose()` signature churn. Config: `blocks { sticky-header / duration /
+duration-threshold "2s" }` (`parse_duration_threshold`: `<int>ms` | `<float>s` |
+`0`).
+
 Not yet built (future work): native Kitty animation protocol + `z`-ordering
 (deferred from the inline-graphics P4 spec, with rationale).
 (Silence monitoring + bell/activity alert messages shipped with the 2026-06-12
