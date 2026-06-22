@@ -374,12 +374,9 @@ Notes / current limits:
   from). The marker/summary show which are folded, and the collapse takes
   visible effect when you return to the normal view.
 - Folds are **runtime-only**, so they don't survive a daemon restart.
-- Scrolled-back navigation over a folded view is **best-effort**: wheel scroll
-  and the `Ctrl+a <`/`>` prompt jumps bring the target into view (no dead
-  zone), but when other blocks between the target and the bottom are folded the
-  target may land a row or two below the top rather than exactly at it, and a
-  mouse click there maps by the unfolded row layout. The unscrolled live view
-  (the common case: declutter and keep typing) is exact.
+- Scrolled navigation is fold-exact: wheel scroll moves by visible lines (folds
+  skipped, no dead zone), and `Ctrl+a <`/`>` and click-a-prompt-to-jump land the
+  target at the viewport top through the visible-line projection.
 
 ## Limitations
 

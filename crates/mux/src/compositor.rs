@@ -30,18 +30,17 @@ impl FoldCtx {
         } else {
             FoldProjection::identity(blocks::total_lines(view.screen))
         };
-        // `scroll_offset` (and copy/block `viewport_top`-derived `es`) is in
-        // UNIFIED-line space: `es` lines up from the bottom of the unified space.
-        // Translate that anchor into visible space so a folded view scrolls by the
-        // right amount and keyboard prompt-jumps land on the target. At es=0 this
-        // bottom-anchors (prompt at the bottom); identity panes reduce to the
-        // plain `visible_total - rows - es`.
+        // `scroll_offset` is VISIBLE-line space (the daemon's wheel / prompt-jump
+        // produce visible offsets via blocks::{max_scroll_offset,
+        // scroll_offset_for_top}). So the top is a plain bottom-anchor in visible
+        // space: at es=0 the prompt sits at the bottom; scrolling moves by visible
+        // lines (folds skipped). For copy/block panes (identity projection) this
+        // reduces to the prior `viewport_top` behavior.
         let es = effective_scroll_for(view);
-        let rows = u32::from(view.rect.rows);
-        let bottom_unified = proj.total().saturating_sub(1).saturating_sub(es);
         let top_visible = proj
-            .visible_at_or_below(bottom_unified)
-            .saturating_sub(rows.saturating_sub(1));
+            .visible_total()
+            .saturating_sub(u32::from(view.rect.rows))
+            .saturating_sub(es);
         Self { proj, top_visible }
     }
 

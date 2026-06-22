@@ -619,6 +619,62 @@ async fn next_prompt_snaps_to_live_when_the_prompt_is_in_the_grid() {
 }
 
 #[tokio::test]
+async fn prev_prompt_lands_target_at_top_under_a_fold() {
+    use plexy_glass_emulator::{Row, RowMark};
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 6, cols: 20, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    // Scrollback: block0 (p@0, out@1,2), block1 (p@3, out@4), block2 (p@5).
+    {
+        let pane = m.active_window().active_pane().unwrap();
+        pane.with_screen_mut(|s| {
+            let cols = s.active.num_cols();
+            let mut push = |flag: Option<u8>| {
+                let mut r = Row::blank(cols);
+                if let Some(f) = flag {
+                    r.mark.set(f);
+                }
+                s.scrollback.push(r);
+            };
+            push(Some(RowMark::PROMPT_START)); // 0
+            push(Some(RowMark::OUTPUT_START)); // 1
+            push(None); // 2
+            push(Some(RowMark::PROMPT_START)); // 3
+            push(Some(RowMark::OUTPUT_START)); // 4
+            push(Some(RowMark::PROMPT_START)); // 5
+            plexy_glass_mux::blocks::set_block_folded(s, 0, true); // hide unified 1,2
+        });
+        // Scroll so block1's prompt (unified 3) is at the top.
+        let (off, max) = pane.with_screen(|s| {
+            let r = s.active.num_rows();
+            (
+                plexy_glass_mux::blocks::scroll_offset_for_top(s, r, 3),
+                plexy_glass_mux::blocks::max_scroll_offset(s, r),
+            )
+        });
+        pane.set_scroll_offset(off, max);
+    }
+    let top_line = |m: &WindowManager| {
+        let p = m.active_window().active_pane().unwrap();
+        let off = p.scroll_offset();
+        p.with_screen(|s| {
+            plexy_glass_mux::blocks::scroll_line_at(s, s.active.num_rows(), off, 0)
+        })
+    };
+    assert_eq!(top_line(&m), 3, "setup: block1 prompt at the top");
+    // Prev-prompt jumps to block0's prompt (unified 0), which must land at the
+    // top exactly despite the fold (unified 1,2) below it.
+    m.handle_command(Command::PrevPrompt).unwrap();
+    assert_eq!(top_line(&m), 0, "prev-prompt lands the target at the top under a fold");
+}
+
+#[tokio::test]
 async fn fold_via_block_mode_dispatch_persists_after_exit() {
     let notify = Arc::new(Notify::new());
     let m = WindowManager::new(

@@ -366,14 +366,17 @@ runtime-only). A `blocks::FoldProjection` maps unified↔visible line space
 (`block_status_at`), inline-image hiding, and the live cursor through it,
 **bottom-anchored** (prompt stays at the bottom, history fills in at the top) and
 translating the daemon's unified `scroll_offset` via `visible_at_or_below`. Copy
-mode and block mode render **expanded** (folds apply on return to the live view);
-scrolled-back nav over folds is best-effort (documented). Block-mode keys →
-`BlockModeAction::{ToggleFold,FoldAll,UnfoldAll}` → daemon `with_screen_mut` +
-`blocks::{toggle_block_fold,fold_all_completed,unfold_all}`.
+mode and block mode render **expanded** (folds apply on return to the live view).
+Block-mode keys → `BlockModeAction::{ToggleFold,FoldAll,UnfoldAll}` → daemon
+`with_screen_mut` + `blocks::{toggle_block_fold,fold_all_completed,unfold_all}`.
+`scroll_offset` is **visible-line space**: the daemon's wheel, `Ctrl+a <`/`>`,
+and click-to-jump compute fold-exact offsets via
+`blocks::{max_scroll_offset,scroll_line_at,scroll_offset_for_top}` (the
+compositor consumes `top_visible = visible_total − rows − offset` directly), so
+scrolled navigation over folds lands the target at the top with no dead zone.
 
 Not yet built (future work): native Kitty animation protocol + `z`-ordering
-(deferred from the inline-graphics P4 spec, with rationale); fold-aware daemon
-prev/next-prompt + wheel for exact prompt-jump-to-top under folds.
+(deferred from the inline-graphics P4 spec, with rationale).
 (Silence monitoring + bell/activity alert messages shipped with the 2026-06-12
 alerts feature; "push notifications on run completion" is cleared by
 monitor-command + the `run` CLI's synchronous exit code — a detached `run`

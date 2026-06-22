@@ -647,27 +647,42 @@ impl FoldProjection {
         Some(vis)
     }
 
-    /// Total unified line count this projection was built over.
-    pub fn total(&self) -> u32 {
-        self.total
-    }
+}
 
-    /// Visible index of the **last visible line at or below** `unified`,
-    /// snapping past a fold if `unified` lands inside one. Used to translate a
-    /// unified scroll/bottom anchor into visible space (the daemon keeps
-    /// `scroll_offset` in unified lines). `0` when nothing precedes it.
-    pub fn visible_at_or_below(&self, unified: u32) -> u32 {
-        let u = unified.min(self.total.saturating_sub(1));
-        let mut hidden_le = 0u32;
-        for &(s, e) in &self.hidden {
-            if s > u {
-                break;
-            }
-            hidden_le += e.min(u) - s + 1;
-        }
-        // Count of visible lines in [0, u]; the last one's index is count - 1.
-        (u + 1).saturating_sub(hidden_le).saturating_sub(1)
-    }
+// ── Visible-space scroll geometry ────────────────────────────────────────────
+//
+// `scroll_offset` is kept (by the daemon) in VISIBLE-line space: lines scrolled
+// up from the live bottom, with folded output skipped. These helpers let the
+// daemon's wheel / prompt-jump / click-to-jump produce fold-exact offsets that
+// the compositor consumes directly (`top_visible = visible_total - rows - off`).
+
+/// Max scroll offset for a pane of `rows` rows: scrolled all the way up, the
+/// oldest visible line sits at the top.
+pub fn max_scroll_offset(screen: &Screen, rows: u16) -> u32 {
+    FoldProjection::build(screen)
+        .visible_total()
+        .saturating_sub(u32::from(rows))
+}
+
+/// The unified line shown at display `row` for a pane of `rows` rows scrolled
+/// `offset` visible lines up. (`row` 0 = the top visible line.)
+pub fn scroll_line_at(screen: &Screen, rows: u16, offset: u32, row: u16) -> u32 {
+    let p = FoldProjection::build(screen);
+    let top = p
+        .visible_total()
+        .saturating_sub(u32::from(rows))
+        .saturating_sub(offset);
+    p.to_unified(top + u32::from(row))
+}
+
+/// The visible scroll offset that puts `target_unified` at the viewport top of a
+/// pane of `rows` rows. Saturates to 0 (live) when the target sits within the
+/// bottom `rows` visible lines.
+pub fn scroll_offset_for_top(screen: &Screen, rows: u16, target_unified: u32) -> u32 {
+    let p = FoldProjection::build(screen);
+    let max = p.visible_total().saturating_sub(u32::from(rows));
+    let target_visible = p.from_unified(target_unified).unwrap_or(0);
+    max.saturating_sub(target_visible)
 }
 
 #[cfg(test)]
@@ -1571,24 +1586,26 @@ mod tests {
     }
 
     #[test]
-    fn visible_at_or_below_translates_unified_anchor() {
-        // Fold block 0 of two_blocks (hides unified 1,2) → visible: 0,3,4,5,6,7.
+    fn visible_space_scroll_helpers_are_fold_exact() {
+        // two_blocks: 8 unified lines, fold block 0 (hides output 1,2) → visible 6.
         let mut s = two_blocks();
         set_block_folded(&mut s, 0, true);
-        let p = FoldProjection::build(&s);
-        // Below the fold: identity.
-        assert_eq!(p.visible_at_or_below(0), 0);
-        // Inside the fold (1,2) snaps to the last visible at/below → line 0 (index 0).
-        assert_eq!(p.visible_at_or_below(1), 0);
-        assert_eq!(p.visible_at_or_below(2), 0);
-        // After the fold, indices shift down by the 2 hidden rows.
-        assert_eq!(p.visible_at_or_below(3), 1);
-        assert_eq!(p.visible_at_or_below(7), 5);
-        // Past the end clamps to the last visible index.
-        assert_eq!(p.visible_at_or_below(99), p.visible_total() - 1);
-        // No folds → identity.
-        let id = FoldProjection::identity(5);
-        assert_eq!(id.visible_at_or_below(3), 3);
+        let rows = 4u16;
+        // Max scroll = visible_total(6) - rows(4) = 2.
+        assert_eq!(max_scroll_offset(&s, rows), 2);
+        // At offset 0 the top display row is visible_total-rows = 2 → unified 4
+        // (visible seq 0,3,4,5,6,7 → index 2 is unified 4).
+        assert_eq!(scroll_line_at(&s, rows, 0, 0), 4);
+        // Scrolled to the top (offset 2): top display row is unified 0 (the $a
+        // prompt), display row 1 skips the fold → unified 3 ($two prompt).
+        assert_eq!(scroll_line_at(&s, rows, 2, 0), 0);
+        assert_eq!(scroll_line_at(&s, rows, 2, 1), 3);
+        // Offset that lands the $two prompt (unified 3) at the top: from_unified(3)
+        // = 1, max(2) - 1 = 1.
+        assert_eq!(scroll_offset_for_top(&s, rows, 3), 1);
+        assert_eq!(scroll_line_at(&s, rows, 1, 0), 3, "the prompt is at the top");
+        // A target within the bottom `rows` visible lines snaps to live (0).
+        assert_eq!(scroll_offset_for_top(&s, rows, 7), 0);
     }
 
     #[test]

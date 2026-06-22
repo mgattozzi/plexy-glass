@@ -340,12 +340,17 @@ impl WindowManager {
             Command::PrevPrompt => {
                 if let Some(pane) = self.active_window().active_pane() {
                     let offset = pane.scroll_offset();
+                    // Fold-aware, visible-space: find the prompt above the current
+                    // top line and the offset that lands it exactly at the top.
                     let target = pane.with_screen(|s| {
-                        let sb = s.scrollback.len() as u32;
-                        let top = sb.saturating_sub(offset);
-                        // prev_prompt_line is strictly above `top`, so the
-                        // target is always < sb and the offset >= 1.
-                        plexy_glass_mux::prev_prompt_line(s, top).map(|t| (sb - t, sb))
+                        let rows = s.active.num_rows();
+                        let top = plexy_glass_mux::blocks::scroll_line_at(s, rows, offset, 0);
+                        plexy_glass_mux::prev_prompt_line(s, top).map(|t| {
+                            (
+                                plexy_glass_mux::blocks::scroll_offset_for_top(s, rows, t),
+                                plexy_glass_mux::blocks::max_scroll_offset(s, rows),
+                            )
+                        })
                     });
                     // No prompt above → no-op (no wraparound).
                     if let Some((off, max)) = target {
@@ -357,13 +362,13 @@ impl WindowManager {
                 if let Some(pane) = self.active_window().active_pane() {
                     let offset = pane.scroll_offset();
                     let (off, max) = pane.with_screen(|s| {
-                        let sb = s.scrollback.len() as u32;
-                        let top = sb.saturating_sub(offset);
-                        // Past the newest prompt, or a prompt already in the live grid
-                        // (t >= sb, saturating to 0), snaps to live.
+                        let rows = s.active.num_rows();
+                        let top = plexy_glass_mux::blocks::scroll_line_at(s, rows, offset, 0);
+                        // Past the newest prompt, or one already in the live view
+                        // (offset_for_top saturates to 0), snaps to live.
                         let off = plexy_glass_mux::next_prompt_line(s, top)
-                            .map_or(0, |t| sb.saturating_sub(t));
-                        (off, sb)
+                            .map_or(0, |t| plexy_glass_mux::blocks::scroll_offset_for_top(s, rows, t));
+                        (off, plexy_glass_mux::blocks::max_scroll_offset(s, rows))
                     });
                     pane.set_scroll_offset(off, max);
                 }

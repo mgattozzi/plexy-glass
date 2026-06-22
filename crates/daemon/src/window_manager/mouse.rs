@@ -439,20 +439,23 @@ impl WindowManager {
             let scroll_offset = pane.scroll_offset();
             if scroll_offset > 0 {
                 let jumped = pane.with_screen(|s| {
-                    let sb = s.scrollback.len() as u32;
-                    let top = sb.saturating_sub(scroll_offset);
-                    let abs_line = top + u32::from(local_row);
+                    // Fold-aware: map the clicked display row to its unified line
+                    // through the visible-space projection.
+                    let rows = s.active.num_rows();
+                    let abs_line =
+                        plexy_glass_mux::blocks::scroll_line_at(s, rows, scroll_offset, local_row);
                     // is_prompt is private; use the public prev_prompt_line:
                     // prev_prompt_line(s, abs_line + 1) == Some(abs_line) iff
                     // abs_line itself carries PROMPT_START.
                     let is_prompt =
                         prev_prompt_line(s, abs_line.saturating_add(1)) == Some(abs_line);
                     if is_prompt {
-                        // Put the prompt at the viewport top.
-                        // For a grid-portion line (abs_line >= sb) the math
-                        // saturates to 0 (snaps to live, and that's accepted).
-                        let new_offset = sb.saturating_sub(abs_line);
-                        Some((new_offset, sb))
+                        // Put the prompt at the viewport top (visible-space offset;
+                        // a line already in the live view saturates to 0).
+                        let new_offset =
+                            plexy_glass_mux::blocks::scroll_offset_for_top(s, rows, abs_line);
+                        let max = plexy_glass_mux::blocks::max_scroll_offset(s, rows);
+                        Some((new_offset, max))
                     } else {
                         None
                     }
@@ -543,7 +546,10 @@ impl WindowManager {
         let Some(pane) = self.active_window().pane(pane_id) else {
             return;
         };
-        let max_offset = pane.scrollback_len();
+        // Visible-space max so each notch moves one visible line (folds skipped),
+        // with no over-scroll dead zone.
+        let max_offset =
+            pane.with_screen(|s| plexy_glass_mux::blocks::max_scroll_offset(s, s.active.num_rows()));
         // Wheel-up = positive delta = scroll INTO older history.
         pane.scroll_by(delta.into(), max_offset);
     }
