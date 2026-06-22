@@ -1262,6 +1262,57 @@ mod tests {
         assert!(s.contains("\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\"), "delete vanished virtual placement: {s:?}");
     }
 
+    // ── Sixel data placements ──────────────────────────────────────────────────
+
+    fn sixel_vp(key: u64, host_row: u16, host_col: u16) -> VisiblePlacement {
+        let mut p = vp(key, 7, 1, host_row, host_col);
+        p.protocol = plexy_glass_emulator::ImageProtocol::Sixel;
+        p.data_b64 = std::sync::Arc::from(&b"0q\"1;1;10;20~~~"[..]);
+        p
+    }
+
+    fn sixel_caps() -> GraphicsCaps {
+        GraphicsCaps { kitty: false, sixel: true, iterm2: false }
+    }
+
+    #[test]
+    fn sixel_placement_emitted_at_position_for_sixel_client() {
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(sixel_caps());
+        let s = render_str(&mut d, &frame_with(vec![sixel_vp(1, 2, 3)]));
+        assert!(s.contains("\x1bP0q"), "sixel data emitted: {s:?}");
+        assert!(s.contains("\x1b[3;4H"), "positioned at the host cell: {s:?}");
+        assert!(!s.contains('┌'), "no box for a sixel-capable client: {s:?}");
+    }
+
+    #[test]
+    fn sixel_placement_boxed_for_kitty_only_client() {
+        let mut d = kitty_renderer(); // kitty only
+        let s = render_str(&mut d, &frame_with(vec![sixel_vp(1, 2, 3)]));
+        assert!(s.contains('┌'), "sixel boxed on a kitty-only client: {s:?}");
+        assert!(!s.contains("\x1bP0q"), "no sixel bytes: {s:?}");
+    }
+
+    #[test]
+    fn sixel_unchanged_frame_not_re_emitted() {
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(sixel_caps());
+        let f = frame_with(vec![sixel_vp(1, 2, 3)]);
+        render_str(&mut d, &f);
+        let s = render_str(&mut d, &f);
+        assert!(!s.contains("\x1bP0q"), "unchanged sixel not re-sent: {s:?}");
+    }
+
+    #[test]
+    fn moved_sixel_repaints_old_and_re_emits() {
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(sixel_caps());
+        render_str(&mut d, &frame_with(vec![sixel_vp(1, 2, 3)]));
+        let s = render_str(&mut d, &frame_with(vec![sixel_vp(1, 5, 3)])); // moved down
+        assert!(s.contains("\x1b[3;4H"), "repaints old rect (row 3): {s:?}");
+        assert!(s.contains("\x1bP0q"), "re-emits sixel at the new position: {s:?}");
+    }
+
     #[test]
     fn non_kitty_client_emits_no_virtual_graphics() {
         let mut d = DiffRenderer::new(); // no graphics caps

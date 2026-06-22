@@ -299,8 +299,9 @@ impl<S: ScreenOps> vte::Perform for Performer<'_, S> {
 
     fn put(&mut self, byte: u8) {
         if *self.in_dcs {
-            // Bound the payload so a child can't OOM us via a giant DCS.
-            const DCS_CAP: usize = 64 * 1024;
+            // Bound the payload so a child can't OOM us via a giant DCS. Raised
+            // from 64 KiB for Sixel, since sixel images routinely exceed that.
+            const DCS_CAP: usize = 4 * 1024 * 1024;
             if self.dcs_payload.len() < DCS_CAP {
                 self.dcs_payload.push(byte);
             }
@@ -437,9 +438,9 @@ mod tests {
 
     #[test]
     fn dcs_payload_is_capped_at_dcs_cap() {
-        // A DCS payload larger than DCS_CAP (64 KiB) must be truncated, not
-        // grown unbounded, and still dispatch exactly once without panic.
-        const DCS_CAP: usize = 64 * 1024;
+        // A DCS payload larger than DCS_CAP (4 MiB; raised for Sixel) must be
+        // truncated, not grown unbounded, and still dispatch exactly once.
+        const DCS_CAP: usize = 4 * 1024 * 1024;
         let mut input = Vec::from(&b"\x1bP+q"[..]);
         input.extend(std::iter::repeat_n(b'a', DCS_CAP + 100));
         input.extend_from_slice(b"\x1b\\");

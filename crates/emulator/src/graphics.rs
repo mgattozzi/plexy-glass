@@ -222,6 +222,92 @@ pub fn parse_command(framed: &[u8]) -> Option<GraphicsCommand> {
     Some(cmd)
 }
 
+/// Read `(width, height)` in pixels from Sixel data. Prefers the raster-attributes
+/// command (`"Pan;Pad;Ph;Pv` → `Ph`×`Pv`); falls back to scanning the sixel
+/// stream for its extent (max column run × band count). `None` if it can't tell.
+pub fn sixel_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
+    // Raster attributes: a `"` followed by Pan;Pad;Ph;Pv.
+    if let Some(pos) = payload.iter().position(|&b| b == b'"') {
+        let mut nums = [0u32; 4];
+        let mut idx = 0;
+        let mut cur: Option<u32> = None;
+        for &b in &payload[pos + 1..] {
+            match b {
+                b'0'..=b'9' => cur = Some(cur.unwrap_or(0) * 10 + u32::from(b - b'0')),
+                b';' => {
+                    if idx < 4 {
+                        nums[idx] = cur.take().unwrap_or(0);
+                        idx += 1;
+                    }
+                }
+                _ => {
+                    if idx < 4 {
+                        nums[idx] = cur.take().unwrap_or(0);
+                        idx += 1;
+                    }
+                    break;
+                }
+            }
+        }
+        if idx >= 4 && nums[2] > 0 && nums[3] > 0 {
+            return Some((nums[2], nums[3]));
+        }
+    }
+    // Fallback: scan for the extent. Data bytes `?`..`~` advance x by 1; `!N`
+    // repeats the next data byte N times; `$` carriage-returns; `-` starts a new
+    // 6px band; `#`/`"` introduce color/raster (digits skipped, no x advance).
+    let mut x: u32 = 0;
+    let mut max_x: u32 = 0;
+    let mut bands: u32 = 1;
+    let mut saw_data = false;
+    let mut i = 0;
+    while i < payload.len() {
+        match payload[i] {
+            b'!' => {
+                // Repeat count, then one data byte.
+                let mut n: u32 = 0;
+                i += 1;
+                while i < payload.len() && payload[i].is_ascii_digit() {
+                    n = n * 10 + u32::from(payload[i] - b'0');
+                    i += 1;
+                }
+                if i < payload.len() && (0x3f..=0x7e).contains(&payload[i]) {
+                    x += n.max(1);
+                    saw_data = true;
+                    i += 1;
+                }
+                max_x = max_x.max(x);
+                continue;
+            }
+            b'$' => x = 0,
+            b'-' => {
+                bands += 1;
+                x = 0;
+            }
+            b'#' | b'"' => {
+                // Skip the parameter run (digits + `;`).
+                i += 1;
+                while i < payload.len() && (payload[i].is_ascii_digit() || payload[i] == b';') {
+                    i += 1;
+                }
+                continue;
+            }
+            0x3f..=0x7e => {
+                x += 1;
+                saw_data = true;
+                max_x = max_x.max(x);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if saw_data && max_x > 0 {
+        Some((max_x, bands * 6))
+    } else {
+        None
+    }
+}
+
 /// Read `(width, height)` in pixels from a PNG header (8-byte signature + IHDR).
 /// `bytes` is the decoded PNG prefix (≥ 24 bytes). `None` if not a PNG.
 pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
@@ -271,6 +357,23 @@ mod tests {
         png.extend_from_slice(&480u32.to_be_bytes());
         assert_eq!(png_dimensions(&png), Some((640, 480)));
         assert_eq!(png_dimensions(b"not a png header...."), None);
+    }
+
+    #[test]
+    fn sixel_dims_from_raster_attributes() {
+        assert_eq!(sixel_dimensions(b"\"1;1;640;480#0;2;0;0;0~~~"), Some((640, 480)));
+    }
+
+    #[test]
+    fn sixel_dims_fallback_scan_when_no_raster() {
+        // 3 data columns, one band → 3×6.
+        assert_eq!(sixel_dimensions(b"~~~"), Some((3, 6)));
+        // Two bands (one `-`), max 2 wide → 2×12.
+        assert_eq!(sixel_dimensions(b"~~-~"), Some((2, 12)));
+        // RLE `!5~` → 5 columns wide.
+        assert_eq!(sixel_dimensions(b"!5~"), Some((5, 6)));
+        // No data at all.
+        assert_eq!(sixel_dimensions(b"#0;2;0;0;0"), None);
     }
 
     #[test]

@@ -163,6 +163,49 @@ impl Screen {
     /// Transmissions accumulate into `images`; display actions add a `Placement`
     /// at the cursor and advance the cursor by the image's cell footprint.
     /// Not captured on the alt screen (a full-screen app owns the pane).
+    /// Capture a Sixel image (DCS `<params> q <data> ST`): store it under the
+    /// unified model and add an anchored placement at the cursor (cursor advances
+    /// by the footprint, like a Kitty `a=T`). `params` are the pre-`q` DCS params,
+    /// `payload` is the sixel data; both are kept (reconstructed) for re-emit.
+    pub(crate) fn handle_sixel(&mut self, params: &[Vec<u16>], payload: &[u8]) {
+        if self.alt.is_some() || payload.is_empty() {
+            return;
+        }
+        let (w, h) = crate::graphics::sixel_dimensions(payload).unwrap_or((0, 0));
+        // Reconstruct the inner DCS payload for re-emit: <params>q<data>.
+        let mut inner = Vec::with_capacity(payload.len() + 8);
+        for (i, g) in params.iter().enumerate() {
+            if i > 0 {
+                inner.push(b';');
+            }
+            if let Some(&v) = g.first() {
+                inner.extend_from_slice(v.to_string().as_bytes());
+            }
+        }
+        inner.push(b'q');
+        inner.extend_from_slice(payload);
+
+        self.image_id_seq = self.image_id_seq.wrapping_add(1);
+        let id = self.image_id_seq;
+        self.image_gen = self.image_gen.wrapping_add(1);
+        let image = Image {
+            id,
+            protocol: ImageProtocol::Sixel,
+            format: ImageFormat::Rgba, // unused for sixel re-emit
+            pixel_w: w,
+            pixel_h: h,
+            data_b64: Arc::from(inner.as_slice()),
+            iterm_args: None,
+            generation: self.image_gen,
+        };
+        let evicted = self.images.insert(image);
+        if !evicted.is_empty() {
+            self.placements.retain(|p| !evicted.contains(&p.image_id));
+            self.virtual_placements.retain(|p| !evicted.contains(&p.image_id));
+        }
+        self.add_placement(id, ImageProtocol::Sixel, w, h, None, None);
+    }
+
     pub(crate) fn handle_graphics(&mut self, framed: &[u8]) {
         if self.alt.is_some() {
             return;
@@ -1420,10 +1463,13 @@ impl ScreenOps for Screen {
     fn handle_esc(&mut self, intermediates: &[u8], byte: u8) {
         Screen::handle_esc(self, intermediates, byte);
     }
-    fn handle_dcs(&mut self, intermediates: &[u8], action: u8, _params: &[Vec<u16>], payload: &[u8]) {
+    fn handle_dcs(&mut self, intermediates: &[u8], action: u8, params: &[Vec<u16>], payload: &[u8]) {
         // XTGETTCAP: DCS + q <hexnames> ST.
         if intermediates.first() == Some(&b'+') && action == b'q' {
             Screen::xtgettcap(self, payload);
+        } else if action == b'q' && intermediates.is_empty() {
+            // Sixel: DCS <params> q <data> ST (no `+`/`$` intermediate).
+            Screen::handle_sixel(self, params, payload);
         } else {
             tracing::trace!(?intermediates, action = %(action as char), "unhandled DCS");
         }
@@ -1623,6 +1669,39 @@ mod tests {
         assert!(s.images.contains(9), "image stored");
         assert!(s.virtual_placements.is_empty(), "a=t,U=1 does not place");
         assert!(s.placements.is_empty());
+    }
+
+    #[test]
+    fn sixel_dcs_captured_as_image_and_placement() {
+        let mut e = crate::Emulator::new(24, 80);
+        // Raster 10×20px → 1×1 cell footprint at the default 10×20 cell.
+        e.advance(b"\x1bPq\"1;1;10;20#0;2;0;0;0~~~\x1b\\");
+        let s = e.screen();
+        assert_eq!(s.images.len(), 1, "sixel stored as an image");
+        assert_eq!(s.placements.len(), 1);
+        assert_eq!(s.placements[0].protocol, ImageProtocol::Sixel);
+        assert_eq!(s.cursor.row, 1, "cursor advanced by the 1-row footprint");
+        // The stored payload is re-emittable: <params>q<data>, ending in the
+        // sixel data, with the raster attrs intact right after `q`.
+        let img = s.images.get(s.placements[0].image_id).unwrap();
+        assert!(img.data_b64.windows(2).any(|w| w == b"q\""), "q + raster preserved");
+        assert!(img.data_b64.ends_with(b"~~~"), "sixel data preserved");
+    }
+
+    #[test]
+    fn sixel_not_captured_on_alt_screen() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b[?1049h");
+        e.advance(b"\x1bPq\"1;1;10;20#0;2;0;0;0~~~\x1b\\");
+        assert!(e.screen().images.is_empty() && e.screen().placements.is_empty());
+    }
+
+    #[test]
+    fn dcs_queries_are_not_captured_as_sixel() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1bP$qm\x1b\\"); // DECRQSS
+        e.advance(b"\x1bP+q544e\x1b\\"); // XTGETTCAP
+        assert!(e.screen().images.is_empty(), "DCS queries ($q / +q) are not sixel");
     }
 
     #[test]
