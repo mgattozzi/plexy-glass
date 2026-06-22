@@ -924,6 +924,23 @@ mod tests {
         assert_eq!(live.exit(), None, "live mark must have exit None");
     }
 
+    #[test]
+    fn duration_is_not_persisted() {
+        // Durations are runtime-only (like `FOLDED`): a `BLOCK_END` row with a
+        // duration round-trips to a DTO that drops it, while exit survives.
+        let mut mark = RowMark::default();
+        mark.set(RowMark::BLOCK_END);
+        mark.set_exit(Some(0));
+        mark.set_duration(Some(4200));
+
+        let dto = mark_to_dto(mark).expect("BLOCK_END mark must produce a DTO");
+        let json = serde_json::to_string(&dto).expect("serialize");
+        assert!(!json.contains("4200"), "duration must not be serialized, got: {json}");
+        let back = mark_from_dto(&dto);
+        assert_eq!(back.duration_ms(), None, "duration must not persist");
+        assert_eq!(back.exit(), Some(0), "exit still persists");
+    }
+
     // ── capture_scrollback direct tests ───────────────────────────────────
     // Tests for the N-cap, blank-row drop, and None (empty/blank pane) branches.
 
