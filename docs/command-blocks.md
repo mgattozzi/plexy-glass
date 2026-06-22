@@ -320,6 +320,9 @@ has no OSC 133 integration. You stay in normal mode and
 | `o` | yank the block's output only |
 | `c` | yank the block's command line only |
 | `r` | re-run the block's command (injects it + Enter, then exits) |
+| `Tab` | fold / unfold the selected block's output |
+| `Z` | fold all completed blocks |
+| `O` | unfold all blocks |
 | `Esc` / `q` | leave block mode |
 
 Yanks go to the paste-buffer stack (paste with `Ctrl+a ]`) **and** the system
@@ -349,6 +352,31 @@ the `blocks` node's `select-color` (see
 the entry chord is configurable like any other binding (`enter_block_mode`).
 
 **Requires OSC 133 shell integration**, same as all the other block features.
+
+### Folding
+
+`Tab` collapses the selected block's **output**, keeping the command line
+visible; `Tab` again expands it. `Z` folds every completed block at once, `O`
+unfolds them all. A folded block keeps a dim, right-aligned `▸ N lines ✓`/`✗`
+summary on its command row (the hidden line count and the command's exit
+status), so you can see at a glance what's tucked away and whether it passed.
+
+Folds **persist after you leave block mode**: the whole point is to declutter
+your working view and then keep typing in it. In the live view the output rows
+vanish and the rows below shift up (the prompt stays at the bottom and older
+history fills in at the top). Only **completed** blocks fold, the running
+command and the prompt you're typing at never collapse, and a command with no
+output isn't foldable.
+
+Notes / current limits:
+
+- Block mode itself renders blocks **expanded** (you see everything to choose
+  from). The marker/summary show which are folded, and the collapse takes
+  visible effect when you return to the normal view.
+- Folds are **runtime-only**, so they don't survive a daemon restart.
+- A mouse click in a folded, scrolled-back view maps by the unfolded row
+  layout, so click-to-jump can be off by the folded-row count there (the
+  keyboard navigation above is exact).
 
 ## Limitations
 
