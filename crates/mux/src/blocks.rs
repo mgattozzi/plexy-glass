@@ -484,6 +484,73 @@ pub fn block_text(screen: &Screen, (start, end): (u32, u32)) -> String {
     lines.join("\n")
 }
 
+// ── Folding ────────────────────────────────────────────────────────────────
+//
+// A fold is a runtime `RowMark::FOLDED` bit on a block's prompt row (set here,
+// rendered by the compositor via the fold projection below). Only *completed*
+// blocks with a real output region fold; the command line stays visible.
+
+/// Row at absolute `line`, mutable (scrollback first, then the active grid).
+pub(crate) fn row_at_mut(screen: &mut Screen, line: u32) -> Option<&mut Row> {
+    let sb_len = screen.scrollback.rows().len() as u32;
+    if line < sb_len {
+        screen.scrollback.rows_mut().get_mut(line as usize)
+    } else {
+        screen.active.rows.get_mut((line - sb_len) as usize)
+    }
+}
+
+/// The hidden output range `(start, end)` (inclusive) of a *foldable* block at
+/// `prompt_line`, or `None`. Foldable means: it's a prompt row, the block is
+/// completed (a later prompt exists, so never the active/running block), and it
+/// has a real output region below the command (`OUTPUT_START` strictly below the
+/// prompt). The command line itself is never hidden.
+pub fn foldable_output(screen: &Screen, prompt_line: u32) -> Option<(u32, u32)> {
+    if !is_prompt(screen, prompt_line) {
+        return None;
+    }
+    next_prompt_line(screen, prompt_line)?; // completed only
+    let (start, end) = block_output_range(screen, prompt_line)?;
+    (start > prompt_line).then_some((start, end))
+}
+
+/// Set or clear the fold on the block at `prompt_line`. Folding is a no-op
+/// unless [`foldable_output`] allows it; unfolding always clears the bit on a
+/// prompt row.
+pub fn set_block_folded(screen: &mut Screen, prompt_line: u32, folded: bool) {
+    if folded && foldable_output(screen, prompt_line).is_none() {
+        return;
+    }
+    if let Some(row) = row_at_mut(screen, prompt_line)
+        && row.mark.contains(RowMark::PROMPT_START)
+    {
+        row.mark.set_folded(folded);
+    }
+}
+
+/// Toggle the fold on the block at `prompt_line`.
+pub fn toggle_block_fold(screen: &mut Screen, prompt_line: u32) {
+    let folded = row_at(screen, prompt_line).is_some_and(|r| r.mark.is_folded());
+    set_block_folded(screen, prompt_line, !folded);
+}
+
+/// Fold every completed block (all but the active/last, where you're typing).
+pub fn fold_all_completed(screen: &mut Screen) {
+    let last = last_prompt_line(screen);
+    for line in all_prompt_lines(screen) {
+        if Some(line) != last {
+            set_block_folded(screen, line, true);
+        }
+    }
+}
+
+/// Clear all folds.
+pub fn unfold_all(screen: &mut Screen) {
+    for line in all_prompt_lines(screen) {
+        set_block_folded(screen, line, false);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1301,5 +1368,54 @@ mod tests {
     fn running_command_none_without_integration() {
         let s = screen_from(4, 20, b"just plain output");
         assert_eq!(running_command(&s), None);
+    }
+
+    #[test]
+    fn foldable_only_for_completed_blocks_with_output() {
+        let s = two_blocks();
+        // block 0: completed (next prompt at 3), output rows (1,2) → foldable.
+        assert_eq!(foldable_output(&s, 0), Some((1, 2)));
+        // block 3: active/running (no next prompt) → not foldable.
+        assert_eq!(foldable_output(&s, 3), None);
+        // a non-prompt line → not foldable.
+        assert_eq!(foldable_output(&s, 1), None);
+    }
+
+    #[test]
+    fn set_block_folded_respects_foldability() {
+        let mut s = two_blocks();
+        set_block_folded(&mut s, 0, true);
+        assert!(row_at(&s, 0).unwrap().mark.is_folded());
+        // Active block can't be folded.
+        set_block_folded(&mut s, 3, true);
+        assert!(!row_at(&s, 3).unwrap().mark.is_folded());
+        // Unfold clears it.
+        set_block_folded(&mut s, 0, false);
+        assert!(!row_at(&s, 0).unwrap().mark.is_folded());
+    }
+
+    #[test]
+    fn toggle_fold_all_and_unfold_all() {
+        let mut s = two_blocks();
+        toggle_block_fold(&mut s, 0);
+        assert!(row_at(&s, 0).unwrap().mark.is_folded());
+        toggle_block_fold(&mut s, 0);
+        assert!(!row_at(&s, 0).unwrap().mark.is_folded());
+
+        fold_all_completed(&mut s);
+        assert!(row_at(&s, 0).unwrap().mark.is_folded(), "completed block folded");
+        assert!(!row_at(&s, 3).unwrap().mark.is_folded(), "active block left open");
+
+        unfold_all(&mut s);
+        assert!(!row_at(&s, 0).unwrap().mark.is_folded());
+    }
+
+    #[test]
+    fn zero_output_block_is_not_foldable() {
+        // Two prompts back-to-back, no output between → nothing to fold.
+        let mut s = screen_from(6, 20, b"\x1b]133;A\x07$ x\r\n\x1b]133;A\x07$ y\r\nz");
+        assert_eq!(foldable_output(&s, 0), None);
+        set_block_folded(&mut s, 0, true);
+        assert!(!row_at(&s, 0).unwrap().mark.is_folded(), "nothing to fold");
     }
 }

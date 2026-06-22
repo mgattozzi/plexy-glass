@@ -795,6 +795,19 @@ mod tests {
     }
 
     #[test]
+    fn fold_flag_is_not_persisted() {
+        // The runtime `FOLDED` bit must not survive a persist round-trip: restored
+        // scrollback comes back unfolded (other marks preserved).
+        let mut folded = Row::blank(4);
+        folded.cells[0].grapheme = "$".into();
+        folded.mark.set(RowMark::PROMPT_START);
+        folded.mark.set_folded(true);
+        let back = row_from_dto(&row_to_dto(&folded), 4);
+        assert!(back.mark.contains(RowMark::PROMPT_START), "133 mark preserved");
+        assert!(!back.mark.is_folded(), "FOLDED dropped on persist");
+    }
+
+    #[test]
     fn plain_cell_serializes_to_just_its_grapheme() {
         // A plain text cell elides every styled field, so only `grapheme` remains.
         let dto = cell_to_dto(&Cell {
