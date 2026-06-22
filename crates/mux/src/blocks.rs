@@ -190,6 +190,27 @@ pub fn closing_exit(screen: &Screen, prompt_line: u32) -> Option<i32> {
         .and_then(|d| row_at(screen, d)?.mark.exit())
 }
 
+/// Wall-clock duration (millis) of the block anchored at `prompt_line`, if its
+/// closing `OSC 133;D` recorded one. `None` when the block is unclosed, the row
+/// was evicted, or `C` never preceded `D`. Mirrors [`closing_exit`].
+pub fn closing_duration(screen: &Screen, prompt_line: u32) -> Option<u32> {
+    closing_block_end_line(screen, prompt_line)
+        .and_then(|d| row_at(screen, d)?.mark.duration_ms())
+}
+
+/// Human-compact duration: `340ms` / `2.3s` / `45s` / `2m05s`.
+pub fn format_duration(ms: u32) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 10_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else if ms < 60_000 {
+        format!("{}s", ms / 1_000)
+    } else {
+        format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1_000)
+    }
+}
+
 /// Text of the command line typed at `prompt_line`.
 ///
 /// The command line is the text between the prompt-end mark (`OSC 133;B`) and
@@ -734,6 +755,29 @@ mod tests {
         );
         assert_eq!(s.scrollback.rows().len(), 3, "setup: 3 rows scrolled");
         s
+    }
+
+    #[test]
+    fn closing_duration_reads_end_row() {
+        let mut s = two_blocks();
+        // Block 1's closing D is on line 3; stamp a known duration there.
+        s.active.rows[3].mark.set_duration(Some(2300));
+        assert_eq!(closing_duration(&s, 0), Some(2300));
+    }
+
+    #[test]
+    fn closing_duration_none_when_unclosed() {
+        let s = two_blocks();
+        // Block 2 (prompt at line 3) has no closing D in the grid.
+        assert_eq!(closing_duration(&s, 3), None);
+    }
+
+    #[test]
+    fn format_duration_units() {
+        assert_eq!(format_duration(340), "340ms");
+        assert_eq!(format_duration(2300), "2.3s");
+        assert_eq!(format_duration(45_000), "45s");
+        assert_eq!(format_duration(125_000), "2m05s");
     }
 
     #[test]
