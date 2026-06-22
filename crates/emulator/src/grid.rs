@@ -24,8 +24,8 @@ pub enum WrapOrigin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RowMark {
     /// Bitwise OR of [`RowMark::PROMPT_START`], [`RowMark::OUTPUT_START`],
-    /// [`RowMark::BLOCK_END`], [`RowMark::PROMPT_END`] (plus the private
-    /// exit-presence bit). 0 = unmarked.
+    /// [`RowMark::BLOCK_END`], [`RowMark::PROMPT_END`], the runtime
+    /// [`RowMark::FOLDED`] bit, and the private exit-presence bit. 0 = unmarked.
     flags: u8,
     /// Column at which `OSC 133;B` (prompt end) landed. Valid only when
     /// [`RowMark::PROMPT_END`] is set; kept `0` otherwise so the derived
@@ -48,6 +48,11 @@ impl RowMark {
     /// An `OSC 133;B` landed on this row: prompt end / command input begins.
     /// `prompt_end_col` holds the cursor column at the time of the event.
     pub const PROMPT_END: u8 = 8;
+    /// **Runtime** fold flag (not from OSC 133): set on a block's prompt row to
+    /// mean "this block's output is collapsed in the viewport." Lives here so it
+    /// rides reflow (merge ORs flags) and eviction (the row drops) like the 133
+    /// marks; masked off when persisted (folds are runtime-only).
+    pub const FOLDED: u8 = 16;
     /// Private presence bit for `exit_code`.
     const HAS_EXIT: u8 = 1 << 7;
 
@@ -108,6 +113,21 @@ impl RowMark {
     /// True when the row carries no block annotation at all.
     pub fn is_empty(self) -> bool {
         self.flags == 0
+    }
+
+    /// Set or clear the runtime [`RowMark::FOLDED`] flag. Unlike [`RowMark::set`]
+    /// (which only ORs), this can clear, so a block can be unfolded.
+    pub fn set_folded(&mut self, folded: bool) {
+        if folded {
+            self.flags |= Self::FOLDED;
+        } else {
+            self.flags &= !Self::FOLDED;
+        }
+    }
+
+    /// True when this row's block is folded (output collapsed).
+    pub fn is_folded(self) -> bool {
+        self.flags & Self::FOLDED != 0
     }
 
     /// Fold another row's mark into this one: flags are OR-ed; an exit code on
@@ -286,6 +306,52 @@ mod tests {
         assert_eq!(m.exit(), None);
         // Col is None when PROMPT_END is not set.
         assert_eq!(m.prompt_end_col(), None);
+    }
+
+    #[test]
+    fn folded_flag_set_clear_and_compare() {
+        let mut m = RowMark::default();
+        assert!(!m.is_folded());
+        m.set_folded(true);
+        assert!(m.is_folded());
+        // A folded mark differs from an unfolded one (drives the render diff).
+        assert_ne!(m, RowMark::default());
+        m.set_folded(false);
+        assert!(!m.is_folded());
+        assert_eq!(m, RowMark::default());
+    }
+
+    #[test]
+    fn merge_ors_the_folded_flag() {
+        // reflow merges first→last; a folded row keeps its fold through a merge.
+        let mut base = RowMark::default();
+        base.set(RowMark::PROMPT_START);
+        base.set_folded(true);
+        let mut other = RowMark::default();
+        other.set(RowMark::OUTPUT_START);
+        base.merge(other);
+        assert!(base.is_folded(), "merge ORs FOLDED");
+        assert!(base.contains(RowMark::OUTPUT_START));
+        // And a fold on `other` propagates too.
+        let mut a = RowMark::default();
+        a.set(RowMark::PROMPT_START);
+        let mut b = RowMark::default();
+        b.set_folded(true);
+        a.merge(b);
+        assert!(a.is_folded());
+    }
+
+    #[test]
+    fn folded_flag_does_not_collide_with_133_bits() {
+        let mut m = RowMark::default();
+        m.set(RowMark::PROMPT_START);
+        m.set_folded(true);
+        // Folding leaves the OSC 133 bits and exit untouched.
+        assert!(m.contains(RowMark::PROMPT_START));
+        assert!(!m.contains(RowMark::OUTPUT_START));
+        assert_eq!(m.exit(), None);
+        m.set_folded(false);
+        assert!(m.contains(RowMark::PROMPT_START), "unfold leaves 133 marks");
     }
 
     #[test]
