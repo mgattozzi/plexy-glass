@@ -99,6 +99,13 @@ pub struct Screen {
     /// `None` when no `D` has been received, or when the last `D` carried no
     /// parseable exit payload. Survives eviction and clears; reset by RIS.
     pub last_block_exit: Option<i32>,
+    /// Wall-clock instant of the most recent `OSC 133;C` (command start),
+    /// consumed at `;D` to record the block duration. Cleared at `;A` so a
+    /// command that emits `C` but never `D` can't mis-attribute its time to the
+    /// next block. Transient (never persisted/serialized).
+    // invariant: the one deliberate clock read in the otherwise-pure emulator,
+    // scoped to C->D timing; tests assert presence/ordering, never exact millis.
+    pub pending_command_start: Option<std::time::Instant>,
     /// Text-area size in pixels, relayed from the attached client's terminal
     /// (`0` = unknown). Used to derive the cell pixel size for graphics scaling
     /// and to answer `CSI 14/16/18t` size reports.
@@ -146,6 +153,7 @@ impl Screen {
             color_scheme_dark: true,
             blocks_completed: 0,
             last_block_exit: None,
+            pending_command_start: None,
             area_px_w: 0,
             area_px_h: 0,
             images: ImageStore::default(),
@@ -1403,18 +1411,31 @@ impl Screen {
             return;
         };
         match subcmd {
-            b'A' => self.mark_cursor_row(|m| m.set(RowMark::PROMPT_START)),
-            b'C' => self.mark_cursor_row(|m| m.set(RowMark::OUTPUT_START)),
+            b'A' => {
+                // A new prompt abandons any in-flight command start (a `C` with
+                // no matching `D`), so it can't mis-attribute to the next block.
+                self.pending_command_start = None;
+                self.mark_cursor_row(|m| m.set(RowMark::PROMPT_START));
+            }
+            b'C' => {
+                self.pending_command_start = Some(std::time::Instant::now());
+                self.mark_cursor_row(|m| m.set(RowMark::OUTPUT_START));
+            }
             b'D' => {
                 let exit_code = params
                     .get(2)
                     .and_then(|p| std::str::from_utf8(p).ok())
                     .and_then(|s| s.parse::<i32>().ok());
+                let duration_ms = self
+                    .pending_command_start
+                    .take()
+                    .map(|start| start.elapsed().as_millis().min(u32::MAX as u128) as u32);
                 // BLOCK_END is set even when the code is missing/malformed:
                 // "last completed block" must not depend on a parseable code.
                 self.mark_cursor_row(|m| {
                     m.set(RowMark::BLOCK_END);
                     m.set_exit(exit_code);
+                    m.set_duration(duration_ms);
                 });
                 self.blocks_completed += 1;
                 self.last_block_exit = exit_code;
@@ -2512,6 +2533,44 @@ mod tests {
         let mark = s.active.rows[0].mark;
         assert!(mark.contains(RowMark::BLOCK_END));
         assert_eq!(mark.exit(), Some(42));
+    }
+
+    #[test]
+    fn duration_recorded_from_c_then_d() {
+        // C ... D on its own row; the D row carries a duration (value unasserted).
+        let s = parse(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07x");
+        let d_row = s
+            .active
+            .rows
+            .iter()
+            .find(|r| r.mark.contains(RowMark::BLOCK_END))
+            .expect("a BLOCK_END row");
+        assert!(d_row.mark.duration_ms().is_some(), "C->D must record a duration");
+    }
+
+    #[test]
+    fn duration_none_without_c() {
+        let s = parse(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;D;0\x07x");
+        let d_row = s
+            .active
+            .rows
+            .iter()
+            .find(|r| r.mark.contains(RowMark::BLOCK_END))
+            .expect("a BLOCK_END row");
+        assert_eq!(d_row.mark.duration_ms(), None, "D without C has no duration");
+    }
+
+    #[test]
+    fn prompt_start_clears_dangling_command_start() {
+        // C with no D, then a new prompt A, then a D with no fresh C: no duration.
+        let s = parse(b"\x1b]133;C\x07out\r\n\x1b]133;A\x07$ cmd\r\n\x1b]133;D;0\x07x");
+        let d_row = s
+            .active
+            .rows
+            .iter()
+            .find(|r| r.mark.contains(RowMark::BLOCK_END))
+            .expect("a BLOCK_END row");
+        assert_eq!(d_row.mark.duration_ms(), None, "A must clear a dangling start");
     }
 
     #[test]
