@@ -4,7 +4,7 @@
 use crate::{
     cell::Cell,
     cursor::Cursor,
-    graphics::{Image, ImageFormat, ImageStore, Placement, VirtualPlacement},
+    graphics::{Image, ImageFormat, ImageProtocol, ImageStore, Placement, VirtualPlacement},
     grid::{Grid, RowMark, WrapOrigin},
     hyperlinks::HyperlinkTable,
     keyboard::KeyboardState,
@@ -194,8 +194,8 @@ impl Screen {
                     if cmd.unicode {
                         self.add_virtual_placement(id, cmd.placement_id, cmd.rows, cmd.cols);
                     } else {
-                        let (w, h) = (img.pixel_w, img.pixel_h);
-                        self.add_placement(id, w, h, cmd.rows, cmd.cols);
+                        let (w, h, proto) = (img.pixel_w, img.pixel_h, img.protocol);
+                        self.add_placement(id, proto, w, h, cmd.rows, cmd.cols);
                     }
                 }
             }
@@ -258,10 +258,12 @@ impl Screen {
         self.image_gen = self.image_gen.wrapping_add(1);
         let image = Image {
             id: tx.id,
+            protocol: ImageProtocol::Kitty,
             format: tx.format,
             pixel_w: w,
             pixel_h: h,
             data_b64: Arc::from(tx.data_b64.as_slice()),
+            iterm_args: None,
             generation: self.image_gen,
         };
         let evicted = self.images.insert(image);
@@ -276,7 +278,7 @@ impl Screen {
                 // a=T,U=1: virtual placement, so no anchor and no cursor advance.
                 self.add_virtual_placement(tx.id, tx.placement_id, tx.place_rows, tx.place_cols);
             } else {
-                self.add_placement(tx.id, w, h, tx.place_rows, tx.place_cols);
+                self.add_placement(tx.id, ImageProtocol::Kitty, w, h, tx.place_rows, tx.place_cols);
             }
         }
     }
@@ -307,7 +309,7 @@ impl Screen {
 
     /// Add a placement at the cursor and advance the cursor by its row footprint
     /// (so subsequent output lands below the image, the spike's overlap fix).
-    fn add_placement(&mut self, image_id: u32, pixel_w: u32, pixel_h: u32, r: Option<u16>, c: Option<u16>) {
+    fn add_placement(&mut self, image_id: u32, protocol: ImageProtocol, pixel_w: u32, pixel_h: u32, r: Option<u16>, c: Option<u16>) {
         let (cell_w, cell_h) = self.cell_pixels();
         let rows = r.unwrap_or_else(|| {
             pixel_h.div_ceil(u32::from(cell_h).max(1)).clamp(1, 1000) as u16
@@ -327,6 +329,7 @@ impl Screen {
         self.placements.push(Placement {
             image_id,
             placement_id,
+            protocol,
             anchor_line,
             col: self.cursor.col,
             rows,

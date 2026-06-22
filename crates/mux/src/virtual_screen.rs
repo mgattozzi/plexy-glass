@@ -1,8 +1,7 @@
 //! In-memory composite output grid. The compositor builds one; the
 //! diff-renderer compares two to produce ANSI bytes.
 
-use plexy_glass_emulator::ImageFormat;
-use plexy_glass_emulator::Cell;
+use plexy_glass_emulator::{Cell, ImageFormat, ImageProtocol};
 use std::sync::Arc;
 
 /// An image placement resolved to host (terminal) coordinates, ready for the
@@ -19,6 +18,11 @@ pub struct VisiblePlacement {
     /// panes that both use, say, Kitty image id 5 don't collide on the wire.
     pub image_id: u32,
     pub placement_id: u32,
+    /// Source protocol, which selects the renderer's emit path (and the
+    /// per-client capability gate).
+    pub protocol: ImageProtocol,
+    /// iTerm2 `File=` args (only set for `protocol == Iterm2`).
+    pub iterm_args: Option<Arc<str>>,
     /// Content version of the source image; the renderer re-transmits when this
     /// changes for an already-transmitted id.
     pub generation: u64,

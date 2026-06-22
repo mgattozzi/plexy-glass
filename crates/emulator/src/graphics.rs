@@ -20,6 +20,17 @@ pub enum ImageFormat {
     Rgba,
 }
 
+/// Which terminal graphics protocol an image was captured from. A client
+/// re-emits an image only if its terminal supports this protocol (we don't
+/// transcode, unsupported clients get a placeholder box).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ImageProtocol {
+    #[default]
+    Kitty,
+    Sixel,
+    Iterm2,
+}
+
 impl ImageFormat {
     pub fn from_kitty_f(f: u32) -> Option<Self> {
         match f {
@@ -45,10 +56,16 @@ impl ImageFormat {
 #[derive(Clone, Debug)]
 pub struct Image {
     pub id: u32,
+    /// Source protocol, which decides how the renderer re-emits this image.
+    pub protocol: ImageProtocol,
     pub format: ImageFormat,
     pub pixel_w: u32,
     pub pixel_h: u32,
+    /// The protocol-specific re-emit payload: Kitty = base64 PNG/RGB(A); Sixel =
+    /// the inner DCS payload (`<params>q<data>`); iTerm2 = base64 file data.
     pub data_b64: Arc<[u8]>,
+    /// iTerm2 `File=` argument string (e.g. `inline=1;width=20`), for re-emit.
+    pub iterm_args: Option<Arc<str>>,
     /// Bumped each time an id's content is (re)transmitted, so a per-client
     /// renderer keyed on `(id, generation)` re-transmits when the pixels change
     /// instead of showing the stale first image.
@@ -60,6 +77,9 @@ pub struct Image {
 pub struct Placement {
     pub image_id: u32,
     pub placement_id: u32,
+    /// Source protocol of the referenced image (mirrors `Image::protocol`), so
+    /// the renderer can dispatch without a store lookup.
+    pub protocol: ImageProtocol,
     /// Absolute unified line (scrollback rows first, then active grid).
     pub anchor_line: u32,
     pub col: u16,
@@ -264,6 +284,8 @@ mod tests {
             pixel_w: 1,
             pixel_h: 1,
             data_b64: big.clone().into(),
+            iterm_args: None,
+            protocol: ImageProtocol::Kitty,
             generation: 1,
         });
         assert!(ev1.is_empty());
@@ -273,6 +295,8 @@ mod tests {
             pixel_w: 1,
             pixel_h: 1,
             data_b64: big.into(),
+            iterm_args: None,
+            protocol: ImageProtocol::Kitty,
             generation: 2,
         });
         assert_eq!(ev2, vec![1], "oldest image evicted over budget");

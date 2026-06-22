@@ -439,6 +439,8 @@ pub fn compose(
                     key,
                     image_id: host_image_id(v.id.0, p.image_id),
                     placement_id: p.placement_id,
+                    protocol: img.protocol,
+                    iterm_args: img.iterm_args.clone(),
                     generation: img.generation,
                     format: img.format,
                     pixel_w: img.pixel_w,

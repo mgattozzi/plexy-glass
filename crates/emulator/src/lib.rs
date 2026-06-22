@@ -33,7 +33,7 @@ pub use cell::Cell;
 pub use color::Color;
 pub use cursor::{Cursor, CursorShape};
 pub use emulator::Emulator;
-pub use graphics::{Image, ImageFormat, ImageStore, Placement};
+pub use graphics::{Image, ImageFormat, ImageProtocol, ImageStore, Placement};
 pub use grid::{Grid, Row, RowMark, WrapOrigin};
 pub use hyperlinks::HyperlinkTable;
 pub use keyboard::KeyboardState;

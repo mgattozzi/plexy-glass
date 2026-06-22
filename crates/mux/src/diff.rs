@@ -61,6 +61,10 @@ pub struct DiffRenderer {
     /// Virtual-placement key → (image_id, placement_id) of the `a=p,U=1` emitted,
     /// so it's sent once and deleted when the placement goes away.
     virtual_placed: HashMap<u64, (u32, u32)>,
+    /// Placement key → rect for Sixel/iTerm2 placements (no by-id model: the
+    /// data is re-emitted at the host cell, and the old rect repainted on
+    /// move/vanish, like the placeholder box).
+    placed_data: HashMap<u64, PlacedRect>,
     /// Set by `invalidate`: the next render first deletes ALL terminal images
     /// (session switch / re-point) before re-transmitting + re-placing.
     reset_images: bool,
@@ -76,6 +80,7 @@ impl DiffRenderer {
             placed: HashMap::new(),
             boxed: HashMap::new(),
             virtual_placed: HashMap::new(),
+            placed_data: HashMap::new(),
             reset_images: false,
         }
     }
@@ -83,6 +88,16 @@ impl DiffRenderer {
     /// Set this client's negotiated graphics capabilities.
     pub fn set_graphics_caps(&mut self, caps: GraphicsCaps) {
         self.graphics = caps;
+    }
+
+    /// Whether this client's terminal can render an image of the given protocol.
+    fn can_emit(&self, protocol: plexy_glass_emulator::ImageProtocol) -> bool {
+        use plexy_glass_emulator::ImageProtocol::*;
+        match protocol {
+            Kitty => self.graphics.kitty,
+            Sixel => self.graphics.sixel,
+            Iterm2 => self.graphics.iterm2,
+        }
     }
 
     /// Forcibly invalidate the cached frame so the next render is a full repaint,
@@ -106,6 +121,7 @@ impl DiffRenderer {
             self.placed.clear();
             self.boxed.clear();
             self.virtual_placed.clear();
+            self.placed_data.clear();
             self.reset_images = false;
         }
 
@@ -128,6 +144,7 @@ impl DiffRenderer {
             self.placed.clear();
             self.boxed.clear();
             self.virtual_placed.clear();
+            self.placed_data.clear();
             // Clear + home, then walk every row, every cell.
             out.push_str("\x1b[2J\x1b[H");
             let mut current_attrs = CellAttrs::default();
@@ -185,17 +202,16 @@ impl DiffRenderer {
             }
         }
 
-        // Inline-image placements. A Kitty-capable client gets the real image
-        // (transmit-once, place-by-id, scroll-follow). A client whose terminal
-        // can't render the placement's protocol gets a labelled placeholder box
-        // of the same footprint, so heterogeneous clients keep a consistent
-        // layout instead of blank cells.
-        if self.graphics.kitty {
-            self.render_kitty_placements(&mut out, current);
-            self.render_virtual_placements(&mut out, current);
-        } else {
-            self.render_placeholder_boxes(&mut out, current);
-        }
+        // Inline-image placements, dispatched per placement by (source protocol,
+        // this client's caps): Kitty gets transmit-once/place-by-id, Sixel/iTerm2
+        // re-emit data at the host cell, and a placement whose protocol the
+        // client can't render becomes a labelled placeholder box of the same
+        // footprint, so heterogeneous clients keep a consistent layout. Each pass
+        // owns a disjoint set of placement keys, so their diff maps never overlap.
+        self.render_kitty_placements(&mut out, current);
+        self.render_virtual_placements(&mut out, current);
+        self.render_data_placements(&mut out, current);
+        self.render_placeholder_boxes(&mut out, current);
 
         // Cursor.
         if current.cursor_visible {
@@ -216,10 +232,18 @@ impl DiffRenderer {
     }
 
     /// Per-frame Kitty placement diff: transmit-once, place-by-id for new/moved,
-    /// delete (placement only, data retained) for gone/moved.
+    /// delete (placement only, data retained) for gone/moved. Only Kitty-protocol
+    /// placements on a Kitty-capable client.
     fn render_kitty_placements(&mut self, out: &mut String, current: &VirtualScreen) {
+        use plexy_glass_emulator::ImageProtocol;
+        if !self.graphics.kitty {
+            return;
+        }
         let mut seen: HashSet<u64> = HashSet::with_capacity(current.placements.len());
         for p in &current.placements {
+            if p.protocol != ImageProtocol::Kitty {
+                continue;
+            }
             seen.insert(p.key);
             // Transmit once per (id, content generation). An image with no data can't be
             // transmitted or placed, so skip it without poisoning the transmitted map
@@ -286,15 +310,18 @@ impl DiffRenderer {
     /// each frame, which is cheap (non-graphics clients with images are rare and
     /// boxes are small); a grid-backed box would avoid it but isn't worth the cost.
     fn render_placeholder_boxes(&mut self, out: &mut String, current: &VirtualScreen) {
-        let mut seen: HashSet<u64> = HashSet::with_capacity(current.placements.len());
+        // Boxes are for placements this client CAN'T render in their protocol.
+        let mut seen: HashSet<u64> = HashSet::new();
         for p in &current.placements {
-            seen.insert(p.key);
+            if !self.can_emit(p.protocol) {
+                seen.insert(p.key);
+            }
         }
         // 1. Repaint stale regions: vanished boxes, and the OLD rect of any box
         //    whose footprint moved/changed this frame.
         let mut stale: Vec<PlacedRect> = Vec::new();
         for (k, prev) in &self.boxed {
-            let still = current.placements.iter().find(|p| p.key == *k);
+            let still = current.placements.iter().find(|p| p.key == *k && !self.can_emit(p.protocol));
             match still {
                 None => stale.push(*prev),
                 Some(p) if (prev.host_row, prev.host_col, prev.rows, prev.cols)
@@ -308,6 +335,9 @@ impl DiffRenderer {
         self.boxed.retain(|k, _| seen.contains(k));
         // 2. Draw every current box last (over any just-repainted region).
         for p in &current.placements {
+            if self.can_emit(p.protocol) {
+                continue;
+            }
             emit_placeholder_box(out, p);
             self.boxed.insert(p.key, PlacedRect {
                 host_row: p.host_row,
@@ -329,6 +359,9 @@ impl DiffRenderer {
     /// cache) and emit `a=p,U=1` once. The placeholder cells render via the
     /// ordinary cell diff; deleting the virtual placement removes it.
     fn render_virtual_placements(&mut self, out: &mut String, current: &VirtualScreen) {
+        if !self.graphics.kitty {
+            return; // virtual placements are Kitty-only
+        }
         let mut seen: HashSet<u64> = HashSet::with_capacity(current.virtual_placements.len());
         for vp in &current.virtual_placements {
             if vp.data_b64.is_empty() {
@@ -364,6 +397,94 @@ impl DiffRenderer {
         if self.transmitted_virtual.len() > TRANSMIT_CAP {
             self.reset_images = true;
         }
+    }
+
+    /// Sixel / iTerm2 placements for a client that supports the protocol. These
+    /// have no place-by-reference model, so the whole image data is re-emitted at
+    /// the host cell; on move/vanish the old rect is repainted from the grid (the
+    /// same diff shape as the placeholder box). The cursor is saved/restored
+    /// around each emit so the image draw can't drift our cursor. ponytail: these
+    /// protocols can't crop, so a clipped image is emitted at its visible
+    /// top-left and the terminal clips at the screen edge, best-effort, as the
+    /// design intends; Kitty is the precise path.
+    fn render_data_placements(&mut self, out: &mut String, current: &VirtualScreen) {
+        use plexy_glass_emulator::ImageProtocol;
+        let caps = self.graphics; // Copy, so the closure doesn't borrow self
+        let emittable = move |p: &VisiblePlacement| match p.protocol {
+            ImageProtocol::Sixel => caps.sixel,
+            ImageProtocol::Iterm2 => caps.iterm2,
+            ImageProtocol::Kitty => false,
+        };
+        let mut seen: HashSet<u64> = HashSet::new();
+        for p in &current.placements {
+            if emittable(p) {
+                seen.insert(p.key);
+            }
+        }
+        // Repaint stale regions (vanished or moved/changed) before drawing.
+        let mut stale: Vec<PlacedRect> = Vec::new();
+        for (k, prev) in &self.placed_data {
+            let still = current.placements.iter().find(|p| p.key == *k && emittable(p));
+            match still {
+                None => stale.push(*prev),
+                Some(p) if (prev.host_row, prev.host_col, prev.rows, prev.cols)
+                    != (p.host_row, p.host_col, p.rows, p.cols) => stale.push(*prev),
+                Some(_) => {}
+            }
+        }
+        for rect in stale {
+            paint_cells_rect(out, current, rect.host_row, rect.host_col, rect.rows, rect.cols);
+        }
+        self.placed_data.retain(|k, _| seen.contains(k));
+        // (Re)emit only when new or the rect changed (a changed rect was already
+        // repainted above). An unchanged data image stays on screen, so we don't
+        // re-send the (large) payload every frame.
+        for p in &current.placements {
+            if !emittable(p) || p.data_b64.is_empty() {
+                continue;
+            }
+            let rect = PlacedRect {
+                host_row: p.host_row,
+                host_col: p.host_col,
+                image_id: p.image_id,
+                placement_id: p.placement_id,
+                src_x: p.src_x,
+                src_y: p.src_y,
+                src_w: p.src_w,
+                src_h: p.src_h,
+                rows: p.rows,
+                cols: p.cols,
+            };
+            if self.placed_data.get(&p.key) != Some(&rect) {
+                let _ = write!(out, "\x1b7\x1b[{};{}H", p.host_row + 1, p.host_col + 1);
+                emit_data_image(out, p);
+                out.push_str("\x1b8");
+                self.placed_data.insert(p.key, rect);
+            }
+        }
+    }
+}
+
+/// Emit a Sixel or iTerm2 image's wire bytes (the cursor is already positioned
+/// and saved by the caller).
+fn emit_data_image(out: &mut String, p: &VisiblePlacement) {
+    use plexy_glass_emulator::ImageProtocol;
+    match p.protocol {
+        ImageProtocol::Sixel => {
+            out.push_str("\x1bP");
+            out.push_str(&String::from_utf8_lossy(&p.data_b64));
+            out.push_str("\x1b\\");
+        }
+        ImageProtocol::Iterm2 => {
+            out.push_str("\x1b]1337;File=");
+            if let Some(args) = &p.iterm_args {
+                out.push_str(args);
+            }
+            out.push(':');
+            out.push_str(&String::from_utf8_lossy(&p.data_b64));
+            out.push('\x07');
+        }
+        ImageProtocol::Kitty => {} // not a data-emit protocol
     }
 }
 
@@ -839,6 +960,8 @@ mod tests {
             key,
             image_id,
             placement_id,
+            protocol: plexy_glass_emulator::ImageProtocol::Kitty,
+            iterm_args: None,
             generation: 1,
             format: plexy_glass_emulator::ImageFormat::Png,
             pixel_w: 30,
@@ -1072,6 +1195,17 @@ mod tests {
         render_str(&mut d, &frame_with(vec![a, b.clone()]));
         let s = render_str(&mut d, &frame_with(vec![b])); // A vanishes
         assert!(s.contains('┌'), "surviving overlapping box B redrawn after A vanished: {s:?}");
+    }
+
+    #[test]
+    fn kitty_placement_on_sixel_only_client_gets_a_box() {
+        // Per-protocol gating: a Kitty image on a client that only speaks Sixel
+        // can't be rendered, so it gets a placeholder box and no Kitty bytes.
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(GraphicsCaps { kitty: false, sixel: true, iterm2: false });
+        let s = render_str(&mut d, &frame_with(vec![boxed_vp(3, 10)]));
+        assert!(s.contains('┌'), "kitty image boxed on a sixel-only client: {s:?}");
+        assert!(!s.contains("\x1b_G"), "no kitty bytes: {s:?}");
     }
 
     #[test]
