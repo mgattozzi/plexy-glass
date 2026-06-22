@@ -730,6 +730,29 @@ async fn dispatch_input_event(
                                 }
                                 ctx.session.notify.notify_one();
                             }
+                            Some(plexy_glass_mux::BlockModeAction::ToggleFold(line)) => {
+                                let m = ctx.session.window_manager.lock().await;
+                                if let Some(p) = m.active_window().active_pane() {
+                                    p.with_screen_mut(|s| {
+                                        plexy_glass_mux::blocks::toggle_block_fold(s, line);
+                                    });
+                                }
+                                ctx.session.notify.notify_one();
+                            }
+                            Some(plexy_glass_mux::BlockModeAction::FoldAll) => {
+                                let m = ctx.session.window_manager.lock().await;
+                                if let Some(p) = m.active_window().active_pane() {
+                                    p.with_screen_mut(plexy_glass_mux::blocks::fold_all_completed);
+                                }
+                                ctx.session.notify.notify_one();
+                            }
+                            Some(plexy_glass_mux::BlockModeAction::UnfoldAll) => {
+                                let m = ctx.session.window_manager.lock().await;
+                                if let Some(p) = m.active_window().active_pane() {
+                                    p.with_screen_mut(plexy_glass_mux::blocks::unfold_all);
+                                }
+                                ctx.session.notify.notify_one();
+                            }
                             Some(plexy_glass_mux::BlockModeAction::Ignore) | None => {}
                         }
                     } else {

@@ -43,6 +43,13 @@ pub enum BlockModeAction {
     Yank(String),
     /// Inject `command + Enter` into the pane, then exit + snap to live.
     ReRun(String),
+    /// Toggle the fold on the block at this prompt line (daemon mutates the
+    /// screen's `RowMark::FOLDED`); STAY in mode.
+    ToggleFold(u32),
+    /// Fold every completed block; STAY in mode.
+    FoldAll,
+    /// Unfold every block and STAY in mode.
+    UnfoldAll,
     /// Key not handled: swallow it (modal isolation), no repaint.
     Ignore,
 }
@@ -184,6 +191,11 @@ pub fn handle(event: &KeyEvent, state: &mut BlockMode, screen: &Screen) -> Block
                 None => Ignore,
             }
         }
+        // Folding: Tab toggles the selected block, Z folds all completed, O
+        // unfolds all. The daemon applies the fold to the screen.
+        (m, Key::Tab) if m.is_empty() => ToggleFold(state.selected),
+        (m, Key::Char('Z')) if m.is_empty() || m == Modifiers::SHIFT => FoldAll,
+        (m, Key::Char('O')) if m.is_empty() || m == Modifiers::SHIFT => UnfoldAll,
         _ => Ignore,
     }
 }
@@ -430,6 +442,21 @@ mod tests {
         assert_eq!(bm.selected, 0);
         handle(&key('G'), &mut bm, &s);
         assert_eq!(bm.selected, 3);
+    }
+
+    #[test]
+    fn fold_keys_emit_fold_actions() {
+        let s = two_blocks();
+        let mut bm = BlockMode::new_for(&s, 8).unwrap();
+        handle(&key('k'), &mut bm, &s); // select the older block (line 0)
+        assert_eq!(bm.selected, 0);
+        assert_eq!(
+            handle(&KeyEvent::plain(Key::Tab), &mut bm, &s),
+            BlockModeAction::ToggleFold(0),
+            "Tab toggles the selected block"
+        );
+        assert_eq!(handle(&key('Z'), &mut bm, &s), BlockModeAction::FoldAll, "Z folds all");
+        assert_eq!(handle(&key('O'), &mut bm, &s), BlockModeAction::UnfoldAll, "O unfolds all");
     }
 
     #[test]
