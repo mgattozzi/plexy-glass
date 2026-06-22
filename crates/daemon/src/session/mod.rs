@@ -541,8 +541,22 @@ impl Session {
                 Some(PtySize {
                     rows: clients.iter().map(|c| c.size.rows).min().unwrap_or(1),
                     cols: clients.iter().map(|c| c.size.cols).min().unwrap_or(1),
-                    pixel_width: clients.iter().map(|c| c.size.pixel_width).min().unwrap_or(0),
-                    pixel_height: clients.iter().map(|c| c.size.pixel_height).min().unwrap_or(0),
+                    // Pixels: ignore clients reporting 0 (terminals without pixel
+                    // reporting); take the min of the real reporters so a mixed
+                    // client set still yields a usable cell size. 0 only when NO
+                    // client reports pixels.
+                    pixel_width: clients
+                        .iter()
+                        .map(|c| c.size.pixel_width)
+                        .filter(|&w| w > 0)
+                        .min()
+                        .unwrap_or(0),
+                    pixel_height: clients
+                        .iter()
+                        .map(|c| c.size.pixel_height)
+                        .filter(|&h| h > 0)
+                        .min()
+                        .unwrap_or(0),
                 })
             }
         };
@@ -1730,6 +1744,39 @@ mod tests {
         assert_eq!(st.windows[0].active_pane, PaneId(1));
         assert_eq!(st.windows[1].panes[0].0, PaneId(2));
         assert_eq!(st.windows[1].active_pane, PaneId(2));
+    }
+
+    #[tokio::test]
+    async fn effective_size_ignores_zero_pixel_reporters() {
+        // One client reports real pixels, another reports 0 (no pixel support).
+        // The aggregate pixel dims must come from the real reporter, not collapse
+        // to 0, otherwise children couldn't scale graphics on the real terminal.
+        let _g = crate::test_env::isolate();
+        let s = Session::new("pxagg".into(), spec(), size(), cfg()).unwrap();
+        let s2 = Arc::clone(&s);
+        tokio::task::spawn_blocking(move || {
+            s2.register_client(
+                PtySize { rows: 24, cols: 80, pixel_width: 1600, pixel_height: 960 },
+                Arc::new(AtomicBool::new(false)),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let s2 = Arc::clone(&s);
+        tokio::task::spawn_blocking(move || {
+            s2.register_client(
+                PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+                Arc::new(AtomicBool::new(false)),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let s2 = Arc::clone(&s);
+        let eff = tokio::task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+        assert_eq!((eff.pixel_width, eff.pixel_height), (1600, 960), "real pixels survive");
+        assert_eq!((eff.rows, eff.cols), (24, 80));
     }
 
     #[tokio::test]

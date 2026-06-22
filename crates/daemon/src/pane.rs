@@ -154,6 +154,7 @@ impl Pane {
             .unwrap_or_else(|| "xterm-256color".to_string());
         let mut emu = Emulator::new(size.rows, size.cols);
         emu.screen_mut().set_term(child_term);
+        emu.set_pixel_area(size.pixel_width, size.pixel_height);
         // Apply restored scrollback BEFORE the reader thread (spawned below)
         // can advance the emulator. A post-spawn preseed would race the child's
         // first prompt and could land seeded history below it (scrollback push
@@ -459,6 +460,7 @@ impl Pane {
                 .lock()
                 .expect("pane emulator mutex poisoned");
             emu.resize(size.rows, size.cols);
+            emu.set_pixel_area(size.pixel_width, size.pixel_height);
         }
         Ok(())
     }
@@ -817,6 +819,28 @@ mod tests {
 
         p.exit_block_mode();
         assert!(!p.is_in_block_mode());
+        p.kill_child();
+    }
+
+    #[tokio::test]
+    async fn spawn_seeds_pixel_area_into_the_emulator() {
+        let spec = SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+        // 1600x960 over 80x24 gives 20x40 px cells (distinct from the 10x20 fallback).
+        let sz = PtySize { rows: 24, cols: 80, pixel_width: 1600, pixel_height: 960 };
+        let p = Pane::spawn(PaneId(0), spec, sz, Arc::new(Notify::new()), None, cfg(), None)
+            .expect("spawn");
+        assert_eq!(p.with_screen(|s| s.cell_pixels()), (20, 40));
+        p.kill_child();
+    }
+
+    #[tokio::test]
+    async fn resize_updates_pixel_area() {
+        let spec = SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None)
+            .expect("spawn");
+        p.resize(PtySize { rows: 24, cols: 80, pixel_width: 800, pixel_height: 480 })
+            .expect("resize");
+        assert_eq!(p.with_screen(|s| s.cell_pixels()), (10, 20));
         p.kill_child();
     }
 
