@@ -9,7 +9,7 @@ use crate::{
     status::StatusLine,
     virtual_screen::VirtualScreen,
 };
-use plexy_glass_emulator::{Screen, display_width};
+use plexy_glass_emulator::{Attrs, RowMark, Screen, display_width};
 use std::collections::HashMap;
 
 /// Per-pane fold rendering context, built once per frame: the fold projection
@@ -408,6 +408,71 @@ pub fn compose(
         })
         .collect();
     borders::draw(&frames, band, &mut screen, blocks);
+
+    // Fold summaries: a dim, right-aligned "▸ N lines ✓/✗" on each visible
+    // folded command row, shown both in the collapsed live view and the expanded
+    // block-mode view (so folding has feedback while you're choosing). Uses fixed
+    // glyphs like the borders (pane chrome is unicode); omitted when the command
+    // text leaves no room.
+    for v in panes {
+        if v.screen.alt.is_some() {
+            continue;
+        }
+        let ctx = &fold_ctx[&v.id];
+        for r in 0..v.rect.rows {
+            if v.rect.row.saturating_add(r) >= pane_area_rows {
+                continue;
+            }
+            let Some(line) = ctx.line_at(r) else { continue };
+            let folded_prompt = crate::blocks::row_at(v.screen, line).is_some_and(|row| {
+                row.mark.is_folded() && row.mark.contains(RowMark::PROMPT_START)
+            });
+            if !folded_prompt {
+                continue;
+            }
+            let Some((start, end)) = crate::blocks::foldable_output(v.screen, line) else {
+                continue;
+            };
+            let n = end - start + 1;
+            let status = block_status_at(v.screen, line);
+            let glyph = match status {
+                Some(crate::blocks::BlockLineStatus::Ok) => " ✓",
+                Some(crate::blocks::BlockLineStatus::Failed) => " ✗",
+                None => "",
+            };
+            let summary = format!("▸ {n} lines{glyph}");
+            let sw = display_width(&summary);
+            let host_row = pane_row_offset + v.rect.row + r;
+            let pane_right = (v.rect.col + v.rect.cols).min(host_cols);
+            if pane_right <= v.rect.col + sw {
+                continue; // pane too narrow for the summary
+            }
+            let start_col = pane_right - sw;
+            // Don't overwrite the command text: find its right edge and skip if
+            // the summary would collide.
+            let cmd_end = (v.rect.col..start_col)
+                .rev()
+                .find(|&c| screen.cell(host_row, c).is_some_and(|cell| !cell.is_blank()))
+                .map(|c| c + 1)
+                .unwrap_or(v.rect.col);
+            if cmd_end > start_col {
+                continue;
+            }
+            put_str(&mut screen, host_row, start_col, &summary, Attrs::DIM, pane_right);
+            // Color the summary with the block's ok/fail color when known.
+            if let (Some(bc), Some(st)) = (blocks, status) {
+                let color = match st {
+                    crate::blocks::BlockLineStatus::Ok => bc.ok,
+                    crate::blocks::BlockLineStatus::Failed => bc.fail,
+                };
+                for c in start_col..pane_right {
+                    if let Some(cell) = screen.cell_mut(host_row, c) {
+                        cell.fg = color;
+                    }
+                }
+            }
+        }
+    }
 
     // Inline-image placements: resolve each pane's placements to host cells,
     // clipped to the visible sub-rectangle (viewport rows ∩ pane columns ∩ the
@@ -3612,8 +3677,9 @@ mod tests {
         crate::blocks::set_block_folded(&mut screen, 0, true); // fold "$ one"'s output
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
         let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
-        // Command row kept; out1/out2 collapsed → the next prompt follows directly.
-        assert_eq!(composed_row(&vs, 0), "$ one", "command row stays");
+        // Command row kept (with a right-aligned fold summary); out1/out2
+        // collapsed → the next prompt follows directly.
+        assert!(composed_row(&vs, 0).starts_with("$ one"), "command row stays");
         assert_eq!(composed_row(&vs, 1), "$ two", "output collapsed; next prompt follows");
         assert_eq!(composed_row(&vs, 2), "out3");
     }
@@ -3635,6 +3701,26 @@ mod tests {
         let v1 = plain_view(&screen, Rect::new(0, 0, 8, 40));
         let vs1 = compose(&[v1], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
         assert!(vs1.placements.is_empty(), "image inside a folded block is hidden");
+    }
+
+    #[test]
+    fn folded_block_paints_marker_and_summary() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(8, 40);
+        e.advance(
+            b"\x1b]133;A\x07$ one\r\n\x1b]133;C\x07out1\r\nout2\r\n\
+              \x1b]133;D;0\x07\x1b]133;A\x07$ two\r\n\x1b]133;C\x07out3",
+        );
+        e.advance(b"\x1b[m");
+        let mut screen = e.screen().clone();
+        crate::blocks::set_block_folded(&mut screen, 0, true);
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let row0 = composed_row(&vs, 0);
+        assert!(row0.starts_with("$ one"), "command row kept: {row0:?}");
+        assert!(row0.contains('▸'), "fold marker present: {row0:?}");
+        assert!(row0.contains("2 lines"), "hidden line count: {row0:?}");
+        assert!(row0.contains('✓'), "ok status glyph: {row0:?}");
     }
 
     #[test]
