@@ -4,10 +4,12 @@ Read this before touching the repo.
 
 ## Project
 
-plexy-glass is a Rust terminal multiplexer (tmux/zellij-like) with first-class
-OSC handling and Ghostty-style terminal integration. The original five-phase
-plan is complete and the project has grown well beyond it (see **Project
-status** below). `docs/superpowers/specs/` and `docs/superpowers/plans/` hold
+plexy-glass is **the multiplexer that doesn't downgrade your terminal to 1990**:
+a Rust terminal multiplexer (tmux/zellij-like) that treats the modern terminal —
+inline images, shell integration, keyboard protocols, hyperlinks/clipboard — as
+first-class rather than stripping it, with Ghostty-style terminal integration.
+The original five-phase plan is complete and the project has grown well beyond it
+(see **Project status** below). `docs/superpowers/specs/` and `docs/superpowers/plans/` hold
 the authoritative design and implementation docs — one spec (and usually one
 plan) per feature, newest by date.
 

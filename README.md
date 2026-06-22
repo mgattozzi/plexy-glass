@@ -1,15 +1,19 @@
 # plexy-glass
 
+**The multiplexer that doesn't downgrade your terminal to 1990.**
+
 A terminal multiplexer (in the tmux/zellij family) written in Rust, built as a
 daemon/client pair: a daemon owns the sessions and PTYs, and lightweight
-clients attach, detach, and reattach to them. It treats modern terminal
-escape-sequence traffic as a first-class concern, so OSC 7 (working
-directory), OSC 8 (hyperlinks), OSC 52 (clipboard), OSC 133 (prompt marks),
-OSC 0/1/2 (titles), and OSC 10/11/12 (colors) are parsed and routed per pane
-rather than stripped, and it negotiates keyboard protocols (the Kitty keyboard
-protocol and xterm's modifyOtherKeys) in both directions: panes can ask for
-enhanced keys, and the client negotiates the same with the outer terminal. It
-is designed alongside Ghostty-style terminal integration.
+clients attach, detach, and reattach to them. Other multiplexers strip or
+mangle the modern terminal, so plexy-glass treats rich escape-sequence traffic
+as a first-class concern instead: inline images (Kitty/Sixel/iTerm2), OSC 7
+(working directory), OSC 8 (hyperlinks), OSC 52 (clipboard), OSC 133 (prompt
+marks), OSC 0/1/2 (titles), and OSC 10/11/12 (colors) are parsed and routed
+per pane rather than stripped, and it negotiates keyboard protocols (the Kitty
+keyboard protocol and xterm's modifyOtherKeys) in both directions, so panes
+can ask for the richer key encodings and the client negotiates the same with
+the outer terminal. It's designed alongside Ghostty-style terminal
+integration.
 
 ## Features
 
