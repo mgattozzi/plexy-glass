@@ -263,14 +263,18 @@ fn emit_transmit(out: &mut String, p: &VisiblePlacement) {
 }
 
 /// Place a transmitted image by id at its host cell, forcing the cell box
-/// (`r/c`) so it occupies the same cells on every client.
+/// (`r/c`) so it occupies the same cells on every client. When the visible part
+/// is a strict sub-rectangle of the image (clipped by the viewport or pane
+/// edges), include the Kitty source crop keys `x/y/w/h`.
 fn emit_place(out: &mut String, p: &VisiblePlacement) {
     let _ = write!(out, "\x1b[{};{}H", p.host_row + 1, p.host_col + 1);
-    let _ = write!(
-        out,
-        "\x1b_Ga=p,i={},p={},r={},c={},q=2\x1b\\",
-        p.image_id, p.placement_id, p.rows, p.cols
-    );
+    let cropped =
+        p.src_x > 0 || p.src_y > 0 || p.src_w < p.pixel_w || p.src_h < p.pixel_h;
+    let _ = write!(out, "\x1b_Ga=p,i={},p={}", p.image_id, p.placement_id);
+    if cropped {
+        let _ = write!(out, ",x={},y={},w={},h={}", p.src_x, p.src_y, p.src_w, p.src_h);
+    }
+    let _ = write!(out, ",r={},c={},q=2\x1b\\", p.rows, p.cols);
 }
 
 /// Delete a single placement (lowercase `d=i` keeps the image data for re-place).
@@ -614,6 +618,10 @@ mod tests {
             format: plexy_glass_emulator::ImageFormat::Png,
             pixel_w: 30,
             pixel_h: 40,
+            src_x: 0,
+            src_y: 0,
+            src_w: 30,
+            src_h: 40,
             data_b64: std::sync::Arc::from(&b"QUJD"[..]),
             host_row,
             host_col,
@@ -732,5 +740,26 @@ mod tests {
         assert!(s.contains("\x1b_Ga=d,d=A,q=2\x1b\\"), "full repaint drops old images: {s:?}");
         assert!(s.contains("a=t"), "re-transmits after the repaint: {s:?}");
         assert!(s.contains("a=p,i=7"), "re-places the image: {s:?}");
+    }
+
+    #[test]
+    fn cropped_place_emits_source_rect_full_place_omits_it() {
+        // Full source -> minimal place (no x/y/w/h).
+        let mut d = kitty_renderer();
+        let s = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
+        assert!(s.contains("\x1b_Ga=p,i=7,p=1,r=2,c=3,q=2"), "full place minimal: {s:?}");
+        assert!(!s.contains(",x="), "no crop keys for a full image: {s:?}");
+
+        // Cropped source → x/y/w/h present.
+        let mut d2 = kitty_renderer();
+        let mut p = vp(2, 8, 1, 0, 0);
+        p.src_y = 20; // show lower half vertically
+        p.src_h = 20;
+        p.rows = 1;
+        let s2 = render_str(&mut d2, &frame_with(vec![p]));
+        assert!(
+            s2.contains("a=p,i=8,p=1,x=0,y=20,w=30,h=20,r=1,c=3,q=2"),
+            "cropped place carries the source rect: {s2:?}"
+        );
     }
 }

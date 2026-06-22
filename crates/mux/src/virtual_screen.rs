@@ -23,11 +23,20 @@ pub struct VisiblePlacement {
     /// changes for an already-transmitted id.
     pub generation: u64,
     pub format: ImageFormat,
+    /// Full image dimensions, used by the `a=t` transmit (always the whole image).
     pub pixel_w: u32,
     pub pixel_h: u32,
+    /// Source pixel sub-rectangle to display (the visible part after clipping).
+    /// Equals the full image when uncropped; the renderer emits Kitty `x/y/w/h`
+    /// crop keys only when it's a strict sub-rect.
+    pub src_x: u32,
+    pub src_y: u32,
+    pub src_w: u32,
+    pub src_h: u32,
     pub data_b64: Arc<[u8]>,
     pub host_row: u16,
     pub host_col: u16,
+    /// Displayed cell box (already clipped to the visible region).
     pub rows: u16,
     pub cols: u16,
 }

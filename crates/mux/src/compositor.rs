@@ -388,10 +388,14 @@ pub fn compose(
         .collect();
     borders::draw(&frames, band, &mut screen, blocks);
 
-    // Inline-image placements: resolve each pane's placements to host cells in
-    // the live viewport (copy/block-mode viewports + occlusion are later phases).
-    // The seq is folded with the pane id so per-Screen counters can't collide.
-    {
+    // Inline-image placements: resolve each pane's placements to host cells,
+    // clipped to the visible sub-rectangle (viewport rows ∩ pane columns ∩ the
+    // logical pane band) with a matching source-pixel crop. Copy/block mode is a
+    // per-pane viewport (honoured via effective_scroll_for), so images follow it.
+    // A modal overlay or popup owns the screen, so we suppress all images then,
+    // since a Kitty source rect can't crop around an arbitrary floating box. The
+    // seq is folded with the pane id so per-Screen counters can't collide.
+    if overlay.is_none() && popup.is_none() {
         let mut placements: Vec<crate::virtual_screen::VisiblePlacement> = Vec::new();
         for v in panes {
             if v.screen.alt.is_some() || v.screen.placements.is_empty() {
@@ -400,17 +404,36 @@ pub fn compose(
             let es = effective_scroll_for(v);
             let sb_len = v.screen.scrollback.len() as u32;
             let top = sb_len.saturating_sub(es);
-            let vp_end = top + u32::from(v.rect.rows);
+            // Pane bottom in absolute viewport rows, also bounded by the logical
+            // pane band (so a tall image can't paint over the status bar).
+            let band_rows = u32::from(pane_area_rows.saturating_sub(v.rect.row));
+            let vis_bottom_local = u32::from(v.rect.rows).min(band_rows);
             for p in &v.screen.placements {
-                if p.anchor_line < top || p.anchor_line >= vp_end {
-                    continue;
-                }
                 let Some(img) = v.screen.images.get(p.image_id) else {
                     continue; // image evicted, skip
                 };
-                let local_row = (p.anchor_line - top) as u16;
+                let img_top = p.anchor_line;
+                let img_bot = p.anchor_line + u32::from(p.rows); // exclusive
+                // Vertical visible span, in absolute viewport rows.
+                let vis_top = img_top.max(top);
+                let vis_bot = img_bot.min(top + vis_bottom_local);
+                if vis_bot <= vis_top {
+                    continue; // fully scrolled off / below the band
+                }
+                let rows_off = (vis_top - img_top) as u16; // image rows hidden above
+                let vis_rows = (vis_bot - vis_top) as u16;
+                // Horizontal: clip the cell box to the pane's columns.
+                let avail_cols = v.rect.cols.saturating_sub(p.col);
+                let vis_cols = p.cols.min(avail_cols);
+                if vis_cols == 0 {
+                    continue;
+                }
+                let local_row = (vis_top - top) as u16;
                 let host_row = pane_row_offset + v.rect.row + local_row;
-                let host_col = v.rect.col + p.col.min(v.rect.cols.saturating_sub(1));
+                let host_col = v.rect.col + p.col;
+                // Source pixel crop, proportional to the cell clip.
+                let (src_y, src_h) = crop_axis(img.pixel_h, p.rows, rows_off, vis_rows);
+                let (src_x, src_w) = crop_axis(img.pixel_w, p.cols, 0, vis_cols);
                 let key = (u64::from(v.id.0) << 40) | (p.seq & ((1u64 << 40) - 1));
                 placements.push(crate::virtual_screen::VisiblePlacement {
                     key,
@@ -420,11 +443,15 @@ pub fn compose(
                     format: img.format,
                     pixel_w: img.pixel_w,
                     pixel_h: img.pixel_h,
+                    src_x,
+                    src_y,
+                    src_w,
+                    src_h,
                     data_b64: img.data_b64.clone(),
                     host_row,
                     host_col,
-                    rows: p.rows,
-                    cols: p.cols,
+                    rows: vis_rows,
+                    cols: vis_cols,
                 });
             }
         }
@@ -536,21 +563,37 @@ pub fn compose(
     screen
 }
 
-/// Compute the effective scroll offset for a pane view. This is the single
-/// source of truth used by both the content copy and the block-status scan so
-/// both always show the same viewport.
 /// Fold a pane id and a per-pane (raw) image id into a host-global wire id, so
 /// two panes that each use the same raw Kitty image id don't collide in the
 /// client's single terminal. Multiplicative hash 64→32; non-zero (Kitty treats
-/// i=0 as "no id").
-/// ponytail: collision ~ N²/2³³ over distinct (pane,image) pairs, negligible at
-/// real pane/image counts; swap for a per-client id map if it ever bites.
+/// i=0 as "no id"). ponytail: collision ~ N²/2³³ over distinct (pane,image)
+/// pairs, negligible at real pane/image counts; swap for a per-client id map if
+/// it ever bites.
 fn host_image_id(pane_id: u32, raw_image_id: u32) -> u32 {
     let mixed = ((u64::from(pane_id) << 32) | u64::from(raw_image_id))
         .wrapping_mul(0x9E37_79B9_7F4A_7C15);
     ((mixed >> 32) as u32).max(1)
 }
 
+/// Map a cell-space clip to a source-pixel rectangle along one axis. Given the
+/// full pixel extent, the total cell count the image is displayed in, the number
+/// of leading cells hidden (`off`), and the number of visible cells (`vis`),
+/// returns `(src_offset_px, src_extent_px)`. Uses cumulative endpoints so
+/// rounding never leaves a sub-pixel gap; the uncropped case is exact.
+fn crop_axis(pixels: u32, cells: u16, off: u16, vis: u16) -> (u32, u32) {
+    let cells = u64::from(cells.max(1));
+    if off == 0 && u64::from(vis) >= cells {
+        return (0, pixels); // full extent, no rounding drift
+    }
+    let px = u64::from(pixels);
+    let start = px * u64::from(off) / cells;
+    let end = (px * (u64::from(off) + u64::from(vis)) / cells).min(px);
+    (start as u32, end.saturating_sub(start) as u32)
+}
+
+/// Compute the effective scroll offset for a pane view. This is the single
+/// source of truth used by both the content copy and the block-status scan so
+/// both always show the same viewport.
 fn effective_scroll_for(view: &PaneView<'_>) -> u32 {
     // copy and block mode are mutually exclusive; both pin the viewport via an
     // absolute viewport_top, so derive the scroll offset the same way.
@@ -3256,6 +3299,9 @@ mod tests {
         // anchor_line 2, top 0 → host row = pane_row_offset(0) + rect.row(1) + 2 = 3.
         assert_eq!(p.host_row, 3);
         assert_eq!(p.host_col, 1, "rect.col + 0");
+        // Uncropped: source rect is the whole image (10×20 px, 1×1 cell).
+        assert_eq!((p.src_x, p.src_y, p.src_w, p.src_h), (0, 0, 10, 20));
+        assert_eq!((p.rows, p.cols), (1, 1));
         assert_eq!(p.data_b64.as_ref(), b"QUJD", "carries the image data");
         // key folds the pane id (3) into the high bits.
         assert_eq!(p.key, (3u64 << 40), "pane-3, seq 0");
@@ -3271,5 +3317,157 @@ mod tests {
         assert_ne!(b, 0);
         // Deterministic across frames so transmit-once stays stable.
         assert_eq!(a, host_image_id(1, 5));
+    }
+
+    #[test]
+    fn crop_axis_maps_cells_to_source_pixels() {
+        // Uncropped: exact full extent.
+        assert_eq!(crop_axis(80, 4, 0, 4), (0, 80));
+        // Bottom crop: show top 2 of 4 cells → first 40 px.
+        assert_eq!(crop_axis(80, 4, 0, 2), (0, 40));
+        // Top crop: hide top 1 of 4, show next 3 → offset 20, height 60.
+        assert_eq!(crop_axis(80, 4, 1, 3), (20, 60));
+        // Middle slice: hide 1, show 2 → [20, 60).
+        assert_eq!(crop_axis(80, 4, 1, 2), (20, 40));
+    }
+
+    const TEST_COLOR: plexy_glass_emulator::Color =
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61);
+
+    /// 30×80-px image (= 3 cols × 4 rows at the default 10×20 cell) anchored at
+    /// line 0 of a fresh `rows`-row emulator.
+    fn screen_with_tall_image(rows: u16) -> Screen {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(rows, 40);
+        e.advance(b"\x1b_Ga=T,i=5,f=24,s=30,v=80;QUJD\x1b\\");
+        e.advance(b"\x1b[m");
+        e.screen().clone()
+    }
+
+    fn plain_view<'a>(screen: &'a Screen, rect: Rect) -> PaneView<'a> {
+        PaneView {
+            id: PaneId(1),
+            rect,
+            screen,
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: None,
+            title: None,
+            marked: false,
+        }
+    }
+
+    #[test]
+    fn tall_image_cropped_to_pane_bottom() {
+        let screen = screen_with_tall_image(8);
+        assert_eq!(screen.placements[0].rows, 4, "4-row footprint captured");
+        // Pane only 2 rows tall → image clipped to its top 2 rows.
+        let view = plain_view(&screen, Rect::new(0, 0, 2, 40));
+        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert_eq!(vs.placements.len(), 1);
+        let p = &vs.placements[0];
+        assert_eq!((p.rows, p.cols), (2, 3), "clipped to pane bottom");
+        assert_eq!((p.src_x, p.src_y, p.src_w, p.src_h), (0, 0, 30, 40), "top 2 of 4 rows → 40px");
+    }
+
+    #[test]
+    fn wide_image_cropped_to_pane_right() {
+        let screen = screen_with_tall_image(8);
+        // Pane only 2 cols wide → image clipped to its left 2 cols.
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 2));
+        let vs = compose(&[view], (8, 2), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert_eq!(vs.placements.len(), 1);
+        let p = &vs.placements[0];
+        assert_eq!((p.rows, p.cols), (4, 2), "full height, clipped width");
+        assert_eq!((p.src_x, p.src_w), (0, 20), "left 2 of 3 cols → 20px");
+        assert_eq!(p.src_h, 80, "full height");
+    }
+
+    #[test]
+    fn image_scrolled_off_top_is_dropped() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(3, 40);
+        e.advance(b"\x1b_Ga=T,i=5,f=24,s=10,v=20;QUJD\x1b\\"); // 1×1 image, anchor 0
+        for _ in 0..6 {
+            e.advance(b"\r\n"); // push the image's row up into scrollback
+        }
+        let screen = e.screen().clone();
+        // Viewing at the bottom (scroll_offset 0): the image's line is above the
+        // viewport top → no visible placement.
+        let view = plain_view(&screen, Rect::new(0, 0, 3, 40));
+        let vs = compose(&[view], (4, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert!(vs.placements.is_empty(), "scrolled-off image is dropped");
+    }
+
+    #[test]
+    fn overlay_suppresses_all_images() {
+        let screen = screen_with_tall_image(8);
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let ov = OverlayView::RenamePrompt { label: "rename", buf: "x" };
+        let vs = compose(&[view], (9, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, TEST_COLOR);
+        assert!(vs.placements.is_empty(), "modal overlay owns the screen — no images");
+    }
+
+    #[test]
+    fn popup_suppresses_all_images() {
+        use plexy_glass_emulator::Emulator;
+        let screen = screen_with_tall_image(8);
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let mut pe = Emulator::new(4, 20);
+        pe.advance(b"popup");
+        let pv = PopupView { rect: Rect::new(2, 2, 4, 20), screen: pe.screen(), title: "p" };
+        let vs = compose(&[view], (9, 40), None, StatusPlacement::Bottom, None, None, None, Some(&pv), None, TEST_COLOR);
+        assert!(vs.placements.is_empty(), "popup suppresses underlying images");
+    }
+
+    #[test]
+    fn image_visible_in_copy_mode() {
+        let screen = screen_with_tall_image(4); // active rows == rect.rows → top = viewport_top
+        let cm = crate::CopyMode {
+            cursor: (0, 0),
+            anchor: None,
+            search: crate::SearchState::default(),
+            viewport_top: 0,
+            pane_rows: 4,
+            total_lines: 4,
+        };
+        let view = PaneView { copy_mode: Some(&cm), ..plain_view(&screen, Rect::new(0, 0, 4, 40)) };
+        let vs = compose(&[view], (5, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert_eq!(vs.placements.len(), 1, "image follows the copy-mode viewport");
+    }
+
+    #[test]
+    fn image_visible_in_block_mode() {
+        let screen = screen_with_tall_image(4);
+        let bm = crate::BlockMode { selected: 0, viewport_top: 0, pane_rows: 4, total_lines: 4, filter: None };
+        let view = PaneView { block_mode: Some(&bm), ..plain_view(&screen, Rect::new(0, 0, 4, 40)) };
+        let vs = compose(&[view], (5, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert_eq!(vs.placements.len(), 1, "image follows the block-mode viewport");
+    }
+
+    #[test]
+    fn alt_screen_hides_then_restores_image() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(8, 40);
+        e.advance(b"\x1b_Ga=T,i=5,f=24,s=10,v=20;QUJD\x1b\\");
+        e.advance(b"\x1b[m");
+        // On the main grid: one visible placement.
+        let s_main = e.screen().clone();
+        let v1 = plain_view(&s_main, Rect::new(0, 0, 8, 40));
+        let vs1 = compose(&[v1], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert_eq!(vs1.placements.len(), 1);
+        // Enter alt-screen: image suppressed.
+        e.advance(b"\x1b[?1049h");
+        let s_alt = e.screen().clone();
+        let v2 = plain_view(&s_alt, Rect::new(0, 0, 8, 40));
+        let vs2 = compose(&[v2], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert!(vs2.placements.is_empty(), "no images while on alt-screen");
+        // Leave alt-screen: the main-grid placement resolves again.
+        e.advance(b"\x1b[?1049l");
+        let s_back = e.screen().clone();
+        let v3 = plain_view(&s_back, Rect::new(0, 0, 8, 40));
+        let vs3 = compose(&[v3], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert_eq!(vs3.placements.len(), 1, "image restored after leaving alt-screen");
     }
 }
