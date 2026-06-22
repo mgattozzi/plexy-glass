@@ -38,7 +38,8 @@ pub use buffer::{BufferAction, BufferEntry, BufferOutcome, BufferPickerState, ha
 pub use command_prompt::{Completion, FocusTarget, ParseError, PromptCommand, SwapTarget};
 pub use compositor::{OverlayView, PaneView, PopupView, StatusPlacement, popup_rect};
 pub use copy_mode::{CopyMode, CopyModeAction, MatchSpan, SearchState};
-pub use diff::DiffRenderer;
+pub use diff::{DiffRenderer, GraphicsCaps};
+pub use virtual_screen::VisiblePlacement;
 pub use direction::{Direction, SplitDir};
 pub use key::{Key, KeyEvent, KeyEventKind, Modifiers};
 pub use keymap::{Chord, Command, Keymap, KeymapAction};

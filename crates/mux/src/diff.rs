@@ -1,26 +1,87 @@
 //! Cell-level diff renderer: compares the current `VirtualScreen` against the
 //! previous one and emits minimal ANSI to bring the host TTY up to date.
 
-use crate::virtual_screen::VirtualScreen;
+use crate::virtual_screen::{VirtualScreen, VisiblePlacement};
 use plexy_glass_emulator::{Attrs, Cell, Color, UnderlineStyle};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+
+/// Which inline-graphics protocols the *outer* terminal of a given client
+/// supports. Negotiated per client (Phase 2 Task 4). The renderer emits a
+/// protocol's bytes only when its flag is set; clients without a flag get blank
+/// cells where the image would be (a richer placeholder is later-phase work).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphicsCaps {
+    pub kitty: bool,
+    pub sixel: bool,
+    pub iterm2: bool,
+}
+
+impl Default for GraphicsCaps {
+    fn default() -> Self {
+        // Default to Kitty-capable; the daemon overrides per client from the
+        // negotiated `ClientHello` caps once Task 4 wires it.
+        Self { kitty: true, sixel: false, iterm2: false }
+    }
+}
+
+/// What the renderer last emitted for a placement key (to diff across frames).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PlacedRect {
+    host_row: u16,
+    host_col: u16,
+    image_id: u32,
+    placement_id: u32,
+}
 
 pub struct DiffRenderer {
     previous: Option<VirtualScreen>,
+    graphics: GraphicsCaps,
+    /// Image ids already transmitted to this client's terminal.
+    transmitted: HashSet<u32>,
+    /// Placement key → what we last emitted, for the per-frame placement diff.
+    placed: HashMap<u64, PlacedRect>,
+    /// Set by `invalidate`: the next render first deletes ALL terminal images
+    /// (session switch / re-point) before re-transmitting + re-placing.
+    reset_images: bool,
 }
 
 impl DiffRenderer {
     pub fn new() -> Self {
-        Self { previous: None }
+        Self {
+            previous: None,
+            graphics: GraphicsCaps::default(),
+            transmitted: HashSet::new(),
+            placed: HashMap::new(),
+            reset_images: false,
+        }
     }
 
-    /// Forcibly invalidate the cached frame so the next render is a full repaint.
+    /// Set this client's negotiated graphics capabilities.
+    pub fn set_graphics_caps(&mut self, caps: GraphicsCaps) {
+        self.graphics = caps;
+    }
+
+    /// Forcibly invalidate the cached frame so the next render is a full repaint,
+    /// and (for a session switch / re-point) delete all terminal images first.
     pub fn invalidate(&mut self) {
         self.previous = None;
+        self.reset_images = true;
     }
 
     pub fn render(&mut self, current: &VirtualScreen) -> Vec<u8> {
         let mut out = String::new();
+
+        // Session switch / re-point: drop all terminal images + state before
+        // re-transmitting (the new content's placements transmit fresh).
+        if self.reset_images {
+            if self.graphics.kitty && (!self.transmitted.is_empty() || !self.placed.is_empty()) {
+                out.push_str("\x1b_Ga=d,d=A\x1b\\");
+            }
+            self.transmitted.clear();
+            self.placed.clear();
+            self.reset_images = false;
+        }
 
         let full_repaint = match &self.previous {
             None => true,
@@ -85,6 +146,13 @@ impl DiffRenderer {
             }
         }
 
+        // Inline-image placements (Kitty-capable clients only): transmit each
+        // image once, place by id, and diff placements across frames so they
+        // follow scrolling and are deleted when they leave the viewport.
+        if self.graphics.kitty {
+            self.render_kitty_placements(&mut out, current);
+        }
+
         // Cursor.
         if current.cursor_visible {
             if let Some((r, c)) = current.cursor {
@@ -102,6 +170,88 @@ impl DiffRenderer {
         self.previous = Some(current.clone());
         out.into_bytes()
     }
+
+    /// Per-frame Kitty placement diff: transmit-once, place-by-id for new/moved,
+    /// delete (placement only, data retained) for gone/moved.
+    fn render_kitty_placements(&mut self, out: &mut String, current: &VirtualScreen) {
+        let mut seen: HashSet<u64> = HashSet::with_capacity(current.placements.len());
+        for p in &current.placements {
+            seen.insert(p.key);
+            if self.transmitted.insert(p.image_id) {
+                emit_transmit(out, p);
+            }
+            let rect = PlacedRect {
+                host_row: p.host_row,
+                host_col: p.host_col,
+                image_id: p.image_id,
+                placement_id: p.placement_id,
+            };
+            match self.placed.get(&p.key) {
+                Some(prev) if *prev == rect => {} // unchanged, already on screen
+                Some(prev) => {
+                    emit_delete(out, prev.image_id, prev.placement_id);
+                    emit_place(out, p);
+                    self.placed.insert(p.key, rect);
+                }
+                None => {
+                    emit_place(out, p);
+                    self.placed.insert(p.key, rect);
+                }
+            }
+        }
+        // Delete placements that vanished this frame.
+        let gone: Vec<u64> = self.placed.keys().copied().filter(|k| !seen.contains(k)).collect();
+        for k in gone {
+            if let Some(rect) = self.placed.remove(&k) {
+                emit_delete(out, rect.image_id, rect.placement_id);
+            }
+        }
+    }
+}
+
+/// Transmit an image's data once (`a=t`), re-chunked to ≤4096 base64 bytes.
+fn emit_transmit(out: &mut String, p: &VisiblePlacement) {
+    if p.data_b64.is_empty() {
+        return;
+    }
+    const CHUNK: usize = 4096;
+    let f = p.format.kitty_f();
+    let n = p.data_b64.len();
+    let mut i = 0;
+    let mut first = true;
+    while i < n {
+        let end = (i + CHUNK).min(n);
+        let more = u8::from(end < n);
+        if first {
+            let _ = write!(
+                out,
+                "\x1b_Gi={},a=t,f={},s={},v={},q=2,m={};",
+                p.image_id, f, p.pixel_w, p.pixel_h, more
+            );
+            first = false;
+        } else {
+            let _ = write!(out, "\x1b_Gm={};", more);
+        }
+        out.push_str(&String::from_utf8_lossy(&p.data_b64[i..end]));
+        out.push_str("\x1b\\");
+        i = end;
+    }
+}
+
+/// Place a transmitted image by id at its host cell, forcing the cell box
+/// (`r/c`) so it occupies the same cells on every client.
+fn emit_place(out: &mut String, p: &VisiblePlacement) {
+    let _ = write!(out, "\x1b[{};{}H", p.host_row + 1, p.host_col + 1);
+    let _ = write!(
+        out,
+        "\x1b_Ga=p,i={},p={},r={},c={},q=2\x1b\\",
+        p.image_id, p.placement_id, p.rows, p.cols
+    );
+}
+
+/// Delete a single placement (lowercase `d=i` keeps the image data for re-place).
+fn emit_delete(out: &mut String, image_id: u32, placement_id: u32) {
+    let _ = write!(out, "\x1b_Ga=d,d=i,i={image_id},p={placement_id}\x1b\\");
 }
 
 impl Default for DiffRenderer {
@@ -427,5 +577,87 @@ mod tests {
         let bytes = d.render(&v2);
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.contains("\x1b[58:2:1:2:3m"), "diff path must emit 58: {s:?}");
+    }
+
+    // ── inline-image placement diff ───────────────────────────────────────────
+
+    fn vp(key: u64, image_id: u32, placement_id: u32, host_row: u16, host_col: u16) -> VisiblePlacement {
+        VisiblePlacement {
+            key,
+            image_id,
+            placement_id,
+            format: plexy_glass_emulator::ImageFormat::Png,
+            pixel_w: 30,
+            pixel_h: 40,
+            data_b64: std::sync::Arc::from(&b"QUJD"[..]),
+            host_row,
+            host_col,
+            rows: 2,
+            cols: 3,
+        }
+    }
+
+    fn frame_with(placements: Vec<VisiblePlacement>) -> VirtualScreen {
+        let mut v = VirtualScreen::blank(8, 20);
+        v.placements = placements;
+        v
+    }
+
+    fn render_str(d: &mut DiffRenderer, v: &VirtualScreen) -> String {
+        String::from_utf8_lossy(&d.render(v)).into_owned()
+    }
+
+    #[test]
+    fn first_frame_transmits_then_places() {
+        let mut d = DiffRenderer::new();
+        let s = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
+        assert!(s.contains("\x1b_Gi=7,a=t,f=100,s=30,v=40"), "transmit once: {s:?}");
+        // Place at host (row 3, col 4) 1-based, by id, forcing r/c.
+        assert!(s.contains("\x1b[3;4H\x1b_Ga=p,i=7,p=1,r=2,c=3,q=2\x1b\\"), "place by id: {s:?}");
+    }
+
+    #[test]
+    fn unchanged_frame_re_emits_nothing() {
+        let mut d = DiffRenderer::new();
+        let f = frame_with(vec![vp(1, 7, 1, 2, 3)]);
+        render_str(&mut d, &f);
+        let s = render_str(&mut d, &f);
+        assert!(!s.contains("\x1b_G"), "no graphics re-emitted for an unchanged frame: {s:?}");
+    }
+
+    #[test]
+    fn moved_placement_deletes_old_and_places_new_without_retransmit() {
+        let mut d = DiffRenderer::new();
+        render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
+        let s = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 4, 3)])); // moved down 2 rows
+        assert!(!s.contains("a=t"), "image already transmitted: {s:?}");
+        assert!(s.contains("\x1b_Ga=d,d=i,i=7,p=1\x1b\\"), "delete old placement: {s:?}");
+        assert!(s.contains("\x1b[5;4H\x1b_Ga=p,i=7,p=1"), "re-place at new row: {s:?}");
+    }
+
+    #[test]
+    fn vanished_placement_is_deleted() {
+        let mut d = DiffRenderer::new();
+        render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
+        let s = render_str(&mut d, &frame_with(vec![]));
+        assert!(s.contains("\x1b_Ga=d,d=i,i=7,p=1\x1b\\"), "delete vanished placement: {s:?}");
+    }
+
+    #[test]
+    fn non_kitty_client_emits_no_graphics() {
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(GraphicsCaps { kitty: false, sixel: false, iterm2: false });
+        let s = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
+        assert!(!s.contains("\x1b_G"), "no graphics bytes for a non-kitty client: {s:?}");
+    }
+
+    #[test]
+    fn invalidate_resets_images_then_retransmits() {
+        let mut d = DiffRenderer::new();
+        render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
+        d.invalidate(); // session switch / re-point
+        let s = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
+        assert!(s.contains("\x1b_Ga=d,d=A\x1b\\"), "reset deletes all images: {s:?}");
+        assert!(s.contains("a=t"), "re-transmits after reset: {s:?}");
     }
 }
