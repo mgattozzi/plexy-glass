@@ -3470,4 +3470,70 @@ mod tests {
         let vs3 = compose(&[v3], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
         assert_eq!(vs3.placements.len(), 1, "image restored after leaving alt-screen");
     }
+
+    /// A tall image anchored at line 0, scrolled so its top rows are above the
+    /// viewport (real scrollback so `top > 0`).
+    fn screen_tall_image_scrolled() -> Screen {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(6, 40);
+        e.advance(b"\x1b_Ga=T,i=5,f=24,s=30,v=80;QUJD\x1b\\"); // 3×4-cell image, anchor 0
+        for _ in 0..3 {
+            e.advance(b"\r\n"); // push the image's top rows up into scrollback
+        }
+        e.screen().clone()
+    }
+
+    #[test]
+    fn tall_image_cropped_at_top_when_scrolled() {
+        let screen = screen_tall_image_scrolled();
+        // View at the bottom (scroll_offset 0) → viewport top is inside the image.
+        let view = plain_view(&screen, Rect::new(0, 0, 4, 40));
+        let vs = compose(&[view], (5, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert_eq!(vs.placements.len(), 1);
+        let p = &vs.placements[0];
+        assert_eq!(p.host_row, 0, "visible part starts at the pane top");
+        assert!(p.rows < 4, "top rows clipped");
+        assert!(p.src_y > 0, "source cropped from the top");
+        // Cumulative crop is exact along the bottom edge: src spans the visible rows.
+        assert_eq!(p.src_y, 20 * (4 - u32::from(p.rows)), "skipped rows × cell height");
+        assert_eq!(p.src_h, 20 * u32::from(p.rows), "visible rows × cell height");
+    }
+
+    #[test]
+    fn tall_image_cropped_both_ends_in_a_one_row_pane() {
+        let screen = screen_tall_image_scrolled();
+        // A single-row pane sees a middle slice: cropped above AND below.
+        let view = plain_view(&screen, Rect::new(0, 0, 1, 40));
+        let vs = compose(&[view], (2, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert_eq!(vs.placements.len(), 1);
+        let p = &vs.placements[0];
+        assert_eq!(p.rows, 1, "one visible row");
+        assert!(p.src_y > 0, "cropped above");
+        assert!(p.src_y + p.src_h < p.pixel_h, "cropped below");
+    }
+
+    #[test]
+    fn image_host_row_accounts_for_top_status_bar() {
+        let screen = screen_with_tall_image(8);
+        let status = status_with_left("S");
+        let view = plain_view(&screen, Rect::new(0, 0, 2, 40));
+        let vs = compose(&[view], (3, 40), Some(&status), StatusPlacement::Top, None, None, None, None, None, TEST_COLOR);
+        assert_eq!(vs.placements.len(), 1);
+        let p = &vs.placements[0];
+        assert_eq!(p.host_row, 1, "shifted down by the top status row");
+        assert_eq!(p.rows, 2, "clipped to the 2-row pane band");
+    }
+
+    #[test]
+    fn two_panes_each_with_an_image_resolve_independently() {
+        let s0 = screen_with_tall_image(8);
+        let s1 = screen_with_tall_image(8);
+        let v0 = PaneView { id: PaneId(1), ..plain_view(&s0, Rect::new(0, 0, 8, 20)) };
+        let v1 = PaneView { id: PaneId(2), ..plain_view(&s1, Rect::new(0, 21, 8, 19)) };
+        let vs = compose(&[v0, v1], (9, 41), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert_eq!(vs.placements.len(), 2, "one placement per pane");
+        assert_ne!(vs.placements[0].key, vs.placements[1].key, "distinct keys");
+        assert_ne!(vs.placements[0].image_id, vs.placements[1].image_id, "distinct host ids");
+        assert_eq!(vs.placements[1].host_col, 21, "second pane's column offset");
+    }
 }

@@ -22,12 +22,21 @@ pub struct GraphicsCaps {
 }
 
 /// What the renderer last emitted for a placement key (to diff across frames).
+/// Includes the source crop and the displayed cell box, not just the host cell:
+/// scrolling a tall image through the top of a short pane keeps the host cell
+/// fixed while the crop walks, so a crop-only change must still re-place.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct PlacedRect {
     host_row: u16,
     host_col: u16,
     image_id: u32,
     placement_id: u32,
+    src_x: u32,
+    src_y: u32,
+    src_w: u32,
+    src_h: u32,
+    rows: u16,
+    cols: u16,
 }
 
 pub struct DiffRenderer {
@@ -201,6 +210,12 @@ impl DiffRenderer {
                 host_col: p.host_col,
                 image_id: p.image_id,
                 placement_id: p.placement_id,
+                src_x: p.src_x,
+                src_y: p.src_y,
+                src_w: p.src_w,
+                src_h: p.src_h,
+                rows: p.rows,
+                cols: p.cols,
             };
             match self.placed.get(&p.key) {
                 Some(prev) if *prev == rect => {} // unchanged, already on screen
@@ -760,6 +775,24 @@ mod tests {
         assert!(
             s2.contains("a=p,i=8,p=1,x=0,y=20,w=30,h=20,r=1,c=3,q=2"),
             "cropped place carries the source rect: {s2:?}"
+        );
+    }
+
+    #[test]
+    fn crop_only_change_at_fixed_host_cell_re_places() {
+        // Scrolling a tall image through the top of a short pane keeps the host
+        // cell (and key/ids) fixed while the crop walks. A crop-only change must
+        // still re-emit the place, or the terminal freezes the stale slice.
+        let mut d = kitty_renderer();
+        render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)])); // full image
+        let mut p = vp(1, 7, 1, 2, 3); // same key, host, ids
+        p.src_y = 20; // crop changed only
+        p.src_h = 20;
+        p.rows = 1;
+        let s = render_str(&mut d, &frame_with(vec![p]));
+        assert!(
+            s.contains("a=p,i=7,p=1") && s.contains(",y=20,"),
+            "crop-only change re-places with the new source rect: {s:?}"
         );
     }
 }
