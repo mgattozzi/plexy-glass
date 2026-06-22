@@ -189,6 +189,26 @@ fn decode_keymap(node: &KdlNode, src: &str) -> Result<KeymapConfig, ConfigError>
 
 // --- blocks ---
 
+/// Parse a duration threshold: `"<int>ms"`, `"<float>s"`, or `"0"` → millis.
+/// Returns `None` for unparseable or negative values (caller maps to an error).
+fn parse_duration_threshold(s: &str) -> Option<u32> {
+    let s = s.trim();
+    if s == "0" {
+        return Some(0);
+    }
+    if let Some(ms) = s.strip_suffix("ms") {
+        return ms.trim().parse::<u32>().ok();
+    }
+    if let Some(secs) = s.strip_suffix('s') {
+        let secs: f64 = secs.trim().parse().ok()?;
+        if secs < 0.0 || !secs.is_finite() {
+            return None;
+        }
+        return Some((secs * 1000.0).round() as u32);
+    }
+    None
+}
+
 fn decode_blocks(node: &KdlNode, src: &str) -> Result<BlocksConfig, ConfigError> {
     ensure_no_props(node, src)?;
     // Start from the built-in default and override only the fields the node specifies.
@@ -201,6 +221,20 @@ fn decode_blocks(node: &KdlNode, src: &str) -> Result<BlocksConfig, ConfigError>
                 "fail-color" => blocks.fail_color = string_arg(child, 0, src, "fail-color")?.to_string(),
                 "select-color" => {
                     blocks.select_color = string_arg(child, 0, src, "select-color")?.to_string()
+                }
+                "sticky-header" => {
+                    blocks.sticky_header = bool_arg(child, 0, src, "sticky-header")?
+                }
+                "duration" => blocks.duration = bool_arg(child, 0, src, "duration")?,
+                "duration-threshold" => {
+                    let s = string_arg(child, 0, src, "duration-threshold")?;
+                    blocks.duration_threshold_ms = parse_duration_threshold(s).ok_or_else(|| {
+                        decode_err(
+                            src,
+                            child,
+                            "invalid duration-threshold (use e.g. \"2s\", \"500ms\", or \"0\")",
+                        )
+                    })?;
                 }
                 other => return Err(decode_err(src, child, &format!("unknown blocks node `{other}`"))),
             }
@@ -1647,6 +1681,38 @@ session "dev" cwd="~/projects/app" {
         assert!(cfg.blocks.enabled);
         assert_eq!(cfg.blocks.ok_color, "ok");
         assert_eq!(cfg.blocks.fail_color, "alert");
+    }
+
+    #[test]
+    fn blocks_annotation_defaults() {
+        let d = BlocksConfig::default();
+        assert!(d.sticky_header);
+        assert!(d.duration);
+        assert_eq!(d.duration_threshold_ms, 2000);
+    }
+
+    #[test]
+    fn blocks_annotation_round_trip() {
+        let cfg = parse_config(
+            r##"blocks { sticky-header #false; duration #false; duration-threshold "500ms" }"##,
+        )
+        .unwrap();
+        assert!(!cfg.blocks.sticky_header);
+        assert!(!cfg.blocks.duration);
+        assert_eq!(cfg.blocks.duration_threshold_ms, 500);
+    }
+
+    #[test]
+    fn blocks_duration_threshold_seconds_and_zero() {
+        let a = parse_config(r##"blocks { duration-threshold "1.5s" }"##).unwrap();
+        assert_eq!(a.blocks.duration_threshold_ms, 1500);
+        let b = parse_config(r##"blocks { duration-threshold "0" }"##).unwrap();
+        assert_eq!(b.blocks.duration_threshold_ms, 0);
+    }
+
+    #[test]
+    fn blocks_duration_threshold_invalid_errors() {
+        assert!(parse_config(r##"blocks { duration-threshold "soon" }"##).is_err());
     }
 
     #[test]

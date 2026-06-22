@@ -37,6 +37,13 @@ pub struct BlocksConfig {
     pub fail_color: String,
     /// Palette name or `#rrggbb` hex for the block-mode selection bracket.
     pub select_color: String,
+    /// Pin the command line at the pane top when its block's output has scrolled
+    /// above the viewport (live view only).
+    pub sticky_header: bool,
+    /// Show a block's wall-clock duration inline (right-aligned on the command row).
+    pub duration: bool,
+    /// Minimum duration (millis) to display; `0` shows every completed block.
+    pub duration_threshold_ms: u32,
 }
 
 impl Default for BlocksConfig {
@@ -46,6 +53,9 @@ impl Default for BlocksConfig {
             ok_color: "ok".to_string(),
             fail_color: "alert".to_string(),
             select_color: "#dca561".to_string(),
+            sticky_header: true,
+            duration: true,
+            duration_threshold_ms: 2000,
         }
     }
 }
