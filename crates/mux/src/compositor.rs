@@ -450,58 +450,77 @@ pub fn compose(
         .collect();
     borders::draw(&frames, band, &mut screen, blocks);
 
-    // Fold summaries: a dim, right-aligned "▸ N lines ✓/✗" on each visible
-    // folded command row, shown both in the collapsed live view and the expanded
-    // block-mode view (so folding has feedback while you're choosing). Uses fixed
-    // glyphs like the borders (pane chrome is unicode); omitted when the command
-    // text leaves no room.
+    // Command-row annotations: a dim, right-aligned note on each visible command
+    // (PROMPT_START) row, composing the fold summary ("▸ N lines ✓/✗", folded
+    // blocks only) with the block's duration ("2.3s", when ≥ threshold). Shown in
+    // the collapsed/live view and block mode (so folding has feedback while you
+    // choose); duration is suppressed in copy mode (raw text for selection). Uses
+    // fixed glyphs like the borders; omitted when the command text leaves no room.
     for v in panes {
         if v.screen.alt.is_some() {
             continue;
         }
         let ctx = &fold_ctx[&v.id];
+        let threshold = blocks.and_then(|b| b.duration_threshold_ms);
+        let duration_on = threshold.is_some() && v.copy_mode.is_none();
         for r in 0..v.rect.rows {
             if v.rect.row.saturating_add(r) >= pane_area_rows {
                 continue;
             }
             let Some(line) = ctx.line_at(r) else { continue };
-            let folded_prompt = crate::blocks::row_at(v.screen, line).is_some_and(|row| {
-                row.mark.is_folded() && row.mark.contains(RowMark::PROMPT_START)
-            });
-            if !folded_prompt {
+            let Some(mark) = crate::blocks::row_at(v.screen, line).map(|row| row.mark) else {
+                continue;
+            };
+            if !mark.contains(RowMark::PROMPT_START) {
                 continue;
             }
-            let Some((start, end)) = crate::blocks::foldable_output(v.screen, line) else {
-                continue;
-            };
-            let n = end - start + 1;
             let status = block_status_at(v.screen, line);
-            let glyph = match status {
-                Some(crate::blocks::BlockLineStatus::Ok) => " ✓",
-                Some(crate::blocks::BlockLineStatus::Failed) => " ✗",
-                None => "",
+            // Fold summary part: folded blocks only (unchanged logic).
+            let summary = if mark.is_folded() {
+                crate::blocks::foldable_output(v.screen, line).map(|(start, end)| {
+                    let n = end - start + 1;
+                    let glyph = match status {
+                        Some(crate::blocks::BlockLineStatus::Ok) => " ✓",
+                        Some(crate::blocks::BlockLineStatus::Failed) => " ✗",
+                        None => "",
+                    };
+                    format!("▸ {n} lines{glyph}")
+                })
+            } else {
+                None
             };
-            let summary = format!("▸ {n} lines{glyph}");
-            let sw = display_width(&summary);
+            // Duration part: gated by the threshold, suppressed in copy mode.
+            let dur = duration_on
+                .then(|| crate::blocks::closing_duration(v.screen, line))
+                .flatten()
+                .filter(|&ms| ms >= threshold.unwrap_or(u32::MAX))
+                .map(crate::blocks::format_duration);
+            let annotation = match (summary, dur) {
+                (Some(s), Some(d)) => format!("{s} · {d}"),
+                (Some(s), None) => s,
+                (None, Some(d)) => d,
+                (None, None) => continue,
+            };
+            let sw = display_width(&annotation);
             let host_row = pane_row_offset + v.rect.row + r;
             let pane_right = (v.rect.col + v.rect.cols).min(host_cols);
             if pane_right <= v.rect.col + sw {
-                continue; // pane too narrow for the summary
+                continue; // pane too narrow for the annotation
             }
             let start_col = pane_right - sw;
             // Don't overwrite the command text: scan the WHOLE pane row (including
-            // the summary columns) for the command's right edge; omit the summary
-            // when the command reaches into (or within one cell of) it.
+            // the annotation columns) for the command's right edge; omit the
+            // annotation when the command reaches into (or within one cell of) it.
             let cmd_end = (v.rect.col..pane_right)
                 .rev()
                 .find(|&c| screen.cell(host_row, c).is_some_and(|cell| !cell.is_blank()))
                 .map(|c| c + 1)
                 .unwrap_or(v.rect.col);
             if cmd_end >= start_col {
-                continue; // command fills the row up to the summary, omit (1-col gap kept)
+                continue; // command fills the row up to the annotation → omit
             }
-            put_str(&mut screen, host_row, start_col, &summary, Attrs::DIM, pane_right);
-            // Color the summary with the block's ok/fail color when known.
+            put_str(&mut screen, host_row, start_col, &annotation, Attrs::DIM, pane_right);
+            // Color the annotation with the block's ok/fail color when known.
             if let (Some(bc), Some(st)) = (blocks, status) {
                 let color = match st {
                     crate::blocks::BlockLineStatus::Ok => bc.ok,
@@ -511,6 +530,62 @@ pub fn compose(
                     if let Some(cell) = screen.cell_mut(host_row, c) {
                         cell.fg = color;
                     }
+                }
+            }
+        }
+    }
+
+    // Sticky command header: when a live pane's top content row sits inside a
+    // block whose command line has scrolled above the viewport, pin that command
+    // on the pane's top row so you always know what produced the output you're
+    // scrolled into. Live view only, since block mode shows command lines already
+    // and copy mode owns selection. Folds compose for free: a folded block has no
+    // visible output rows, so the top line can never land inside one.
+    if blocks.is_some_and(|b| b.sticky_header) {
+        for v in panes {
+            if v.screen.alt.is_some() || v.copy_mode.is_some() || v.block_mode.is_some() {
+                continue;
+            }
+            if v.rect.row >= pane_area_rows {
+                continue;
+            }
+            let ctx = &fold_ctx[&v.id];
+            let Some(top_line) = ctx.line_at(0) else { continue };
+            let Some(prompt) = crate::blocks::prompt_at_or_above(v.screen, top_line) else {
+                continue;
+            };
+            if prompt >= top_line {
+                continue; // the command row itself is visible at the top
+            }
+            let Some(cmd) = crate::blocks::block_command_line(v.screen, prompt) else {
+                continue;
+            };
+            let host_row = pane_row_offset + v.rect.row;
+            let pane_right = (v.rect.col + v.rect.cols).min(host_cols);
+            // Repaint the row as a reverse-video bar: clear, draw the command,
+            // then reverse-fill the remainder so it reads as one pinned header.
+            for c in v.rect.col..pane_right {
+                if let Some(cell) = screen.cell_mut(host_row, c) {
+                    *cell = plexy_glass_emulator::Cell::default();
+                }
+            }
+            let cmd_end =
+                put_str(&mut screen, host_row, v.rect.col, &cmd, Attrs::REVERSE, pane_right);
+            for c in cmd_end..pane_right {
+                if let Some(cell) = screen.cell_mut(host_row, c) {
+                    cell.attrs |= Attrs::REVERSE;
+                }
+            }
+            // Right-aligned duration on the header (same gate as the inline note).
+            if let Some(ms) = blocks
+                .and_then(|b| b.duration_threshold_ms)
+                .and_then(|t| crate::blocks::closing_duration(v.screen, prompt).filter(|&ms| ms >= t))
+            {
+                let d = crate::blocks::format_duration(ms);
+                let dw = display_width(&d);
+                if pane_right > v.rect.col + dw {
+                    let start_col = pane_right - dw;
+                    put_str(&mut screen, host_row, start_col, &d, Attrs::REVERSE, pane_right);
                 }
             }
         }
@@ -2690,6 +2765,8 @@ mod tests {
         BlockBorderColors {
             ok: plexy_glass_emulator::Color::Rgb(135, 169, 135),
             fail: plexy_glass_emulator::Color::Rgb(196, 116, 110),
+            duration_threshold_ms: None,
+            sticky_header: false,
         }
     }
 
@@ -3704,6 +3781,175 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_string()
+    }
+
+    // ── Command duration + sticky header tests ───────────────────────────────
+
+    fn block_colors_with(
+        duration_threshold_ms: Option<u32>,
+        sticky_header: bool,
+    ) -> BlockBorderColors {
+        BlockBorderColors { duration_threshold_ms, sticky_header, ..block_colors() }
+    }
+
+    /// 8×40 screen: one completed block ("$ <cmd>") with a stamped duration on
+    /// its closing D row.
+    fn duration_block_screen(cmd: &str, exit: u8, ms: u32) -> Screen {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(8, 40);
+        let bytes = format!("\x1b]133;A\x07{cmd}\r\n\x1b]133;C\x07out\r\n\x1b]133;D;{exit}\x07done");
+        e.advance(bytes.as_bytes());
+        e.advance(b"\x1b[m");
+        let mut s = e.screen().clone();
+        let d = s
+            .active
+            .rows
+            .iter_mut()
+            .find(|r| r.mark.contains(RowMark::BLOCK_END))
+            .expect("a BLOCK_END row");
+        d.mark.set_duration(Some(ms));
+        s
+    }
+
+    fn frame_has(vs: &VirtualScreen, needle: &str) -> bool {
+        (0..vs.rows).any(|r| composed_row(vs, r).contains(needle))
+    }
+
+    fn row_has_reverse(vs: &VirtualScreen, r: u16) -> bool {
+        (0..vs.cols).any(|c| {
+            vs.cell(r, c)
+                .is_some_and(|cell| cell.attrs.contains(plexy_glass_emulator::Attrs::REVERSE))
+        })
+    }
+
+    #[test]
+    fn inline_duration_painted_above_threshold() {
+        let screen = duration_block_screen("$ slow", 0, 3000);
+        let colors = block_colors_with(Some(2000), false);
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let row0 = composed_row(&vs, 0);
+        assert!(row0.starts_with("$ slow"), "command kept: {row0:?}");
+        assert!(row0.contains("3.0s"), "duration painted: {row0:?}");
+    }
+
+    #[test]
+    fn inline_duration_omitted_below_threshold() {
+        let screen = duration_block_screen("$ quick", 0, 500);
+        let colors = block_colors_with(Some(2000), false);
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        assert_eq!(composed_row(&vs, 0), "$ quick", "below-threshold → no annotation");
+    }
+
+    #[test]
+    fn inline_duration_threshold_zero_shows_all() {
+        let screen = duration_block_screen("$ quick", 0, 500);
+        let colors = block_colors_with(Some(0), false);
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        assert!(composed_row(&vs, 0).contains("500ms"), "threshold 0 shows everything");
+    }
+
+    #[test]
+    fn folded_summary_combines_with_duration() {
+        let mut screen = two_block_fold_screen(); // block 0 folded, 2 hidden lines
+        if let Some(d) = screen
+            .active
+            .rows
+            .iter_mut()
+            .find(|r| r.mark.contains(RowMark::BLOCK_END))
+        {
+            d.mark.set_duration(Some(3000));
+        }
+        let colors = block_colors_with(Some(2000), false);
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let row0 = composed_row(&vs, 0);
+        assert!(row0.contains("2 lines"), "fold summary: {row0:?}");
+        assert!(row0.contains("3.0s"), "duration appended: {row0:?}");
+        assert!(row0.contains('·'), "summary · duration: {row0:?}");
+    }
+
+    #[test]
+    fn duration_suppressed_in_copy_mode() {
+        let screen = duration_block_screen("$ slow", 0, 3000);
+        let cm = crate::CopyMode {
+            cursor: (0, 0),
+            anchor: None,
+            search: crate::SearchState::default(),
+            viewport_top: 0,
+            pane_rows: 8,
+            total_lines: 8,
+        };
+        let view = PaneView { copy_mode: Some(&cm), ..plain_view(&screen, Rect::new(0, 0, 8, 40)) };
+        let colors = block_colors_with(Some(2000), false);
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        assert!(!frame_has(&vs, "3.0s"), "duration suppressed in copy mode");
+    }
+
+    /// 3-row pane fed a prompt + 5 output lines, so the "$ cargo build" command
+    /// scrolls into scrollback (off the pane top). The block is left unclosed.
+    fn tall_block_screen() -> Screen {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(3, 40);
+        e.advance(
+            b"\x1b]133;A\x07$ \x1b]133;B\x07cargo build\r\n\
+              \x1b]133;C\x07l1\r\nl2\r\nl3\r\nl4\r\nl5",
+        );
+        e.advance(b"\x1b[m");
+        e.screen().clone()
+    }
+
+    #[test]
+    fn sticky_header_pins_command_when_scrolled_off() {
+        let screen = tall_block_screen();
+        let colors = block_colors_with(None, true);
+        let view = plain_view(&screen, Rect::new(0, 0, 3, 40));
+        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let row0 = composed_row(&vs, 0);
+        assert!(row0.contains("cargo build"), "header pins the command: {row0:?}");
+        assert!(row_has_reverse(&vs, 0), "header is a reverse-video bar");
+    }
+
+    #[test]
+    fn sticky_header_absent_when_command_visible() {
+        // Same content in an 8-row pane → the command row is visible at the top,
+        // so the header is (correctly) skipped even though a command line exists.
+        let screen = tall_block_screen();
+        let colors = block_colors_with(None, true);
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let row0 = composed_row(&vs, 0);
+        assert!(row0.starts_with("$ cargo build"), "real command row: {row0:?}");
+        assert!(!row_has_reverse(&vs, 0), "no pinned header bar");
+    }
+
+    #[test]
+    fn sticky_header_disabled_paints_nothing() {
+        let screen = tall_block_screen();
+        let colors = block_colors_with(None, false);
+        let view = plain_view(&screen, Rect::new(0, 0, 3, 40));
+        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let row0 = composed_row(&vs, 0);
+        assert!(!row0.contains("cargo build"), "no header when disabled: {row0:?}");
+        assert_eq!(row0, "l3", "real top-of-viewport content");
+    }
+
+    #[test]
+    fn sticky_header_shows_duration() {
+        let mut screen = tall_block_screen();
+        // Close block 0 with a duration on its last output row so the header can
+        // surface it.
+        let last = screen.active.rows.len() - 1;
+        screen.active.rows[last].mark.set(RowMark::BLOCK_END);
+        screen.active.rows[last].mark.set_duration(Some(4000));
+        let colors = block_colors_with(Some(2000), true);
+        let view = plain_view(&screen, Rect::new(0, 0, 3, 40));
+        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let row0 = composed_row(&vs, 0);
+        assert!(row0.contains("cargo build"), "header command: {row0:?}");
+        assert!(row0.contains("4.0s"), "header carries duration: {row0:?}");
     }
 
     #[test]

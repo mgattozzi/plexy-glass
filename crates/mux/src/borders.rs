@@ -12,13 +12,22 @@ use crate::{blocks::BlockLineStatus, rect::Rect, virtual_screen::VirtualScreen};
 use plexy_glass_emulator::{Attrs, Cell, Color, graphemes_with_width};
 use smol_str::SmolStr;
 
-/// Colors used to paint block exit-status segments on a pane's left border.
+/// Colors used to paint block exit-status segments on a pane's left border, plus
+/// the per-frame policy for the other block annotations (duration + sticky
+/// header). Carried together because all three are gated by `blocks.enabled` and
+/// reuse the same `ok`/`fail` colors; `None`/`false` here means the feature is off.
 pub struct BlockBorderColors {
     /// Foreground color for a successfully completed block row (exit code 0).
     pub ok: Color,
     /// Foreground color for a failed block row (nonzero exit code). Also
     /// triggers a `│` → `▌` glyph replacement on plain vertical segments.
     pub fail: Color,
+    /// Minimum duration (millis) to show the inline/header duration annotation;
+    /// `None` disables the duration feature.
+    pub duration_threshold_ms: Option<u32>,
+    /// Pin the command line at the pane top when its block's output has scrolled
+    /// above the viewport (live view only).
+    pub sticky_header: bool,
 }
 
 /// A selected command block to outline with a capped bracket on the pane's
@@ -378,6 +387,8 @@ mod tests {
         BlockBorderColors {
             ok: Color::Rgb(135, 169, 135),   // #87a987
             fail: Color::Rgb(196, 116, 110),  // #c4746e
+            duration_threshold_ms: None,
+            sticky_header: false,
         }
     }
 

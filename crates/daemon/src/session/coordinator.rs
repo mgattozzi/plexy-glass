@@ -491,6 +491,11 @@ pub(super) fn block_border_colors(
     Some(plexy_glass_mux::BlockBorderColors {
         ok: plexy_glass_emulator::Color::Rgb(ok_rgb.r, ok_rgb.g, ok_rgb.b),
         fail: plexy_glass_emulator::Color::Rgb(fail_rgb.r, fail_rgb.g, fail_rgb.b),
+        duration_threshold_ms: cfg
+            .blocks
+            .duration
+            .then_some(cfg.blocks.duration_threshold_ms),
+        sticky_header: cfg.blocks.sticky_header,
     })
 }
 
