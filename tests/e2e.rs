@@ -77,6 +77,11 @@ fn isolate_dirs(tmp: &tempfile::TempDir) -> TestEnv {
             ("TMPDIR".into(), tmp.path().to_string_lossy().into_owned()),
             // Keep the child shell deterministic.
             ("SHELL".into(), "/bin/sh".into()),
+            // Force Kitty graphics caps on: the harness PTY can't answer the
+            // graphics probe, so without this the client would report no support
+            // and the daemon would emit no image bytes. Only affects tests that
+            // plant a graphics sequence (none others do).
+            ("PLEXY_FORCE_KITTY".into(), "1".into()),
             // XDG_CONFIG_HOME is used by the directories crate on Linux; on macOS
             // the crate uses $HOME/Library/Application Support instead.
             ("XDG_CONFIG_HOME".into(), xdg_config.to_string_lossy().into_owned()),
@@ -2480,6 +2485,46 @@ fn block_mode_failed_jump_then_rerun() {
     assert!(
         sess.wait_for_from(mark, b"42", Duration::from_secs(10)),
         "failed-jump + re-run never produced 42. pane: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// A Kitty graphics image emitted by a pane is captured, modeled, and re-emitted
+/// to the (Kitty-capable, forced) client: the rendered output contains a
+/// transmit (`a=t`) and a place-by-id (`a=p`) for the image. Exercises the full
+/// path emulator → compositor → per-client renderer → client bytes.
+#[test]
+fn kitty_image_renders_transmit_and_place() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+
+    // Plant a tiny inline RGB image (2×2px, dims via s=/v=) with id 5.
+    let (st, _, err) = run_cli(
+        &env,
+        &[
+            "send",
+            "--enter",
+            "printf 'IMG_''DONE\\n\\033_Gi=5,a=T,f=24,s=2,v=2,q=2;QUJDQUJDQUJDQUJD\\033\\\\\\n'",
+        ],
+    );
+    assert!(st.success(), "send failed: {err}");
+    // Wait for the marker that follows the image so we know it was processed.
+    assert!(
+        sess.wait_for(b"IMG_DONE", Duration::from_secs(15)),
+        "image-bearing line never rendered. pane: {}",
+        sess.snapshot_str()
+    );
+    // The renderer transmits the image once (a=t) and places it by id (a=p).
+    assert!(
+        sess.wait_for(b"\x1b_Gi=5,a=t", Duration::from_secs(10)),
+        "no transmit emitted. raw: {:?}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for(b"a=p,i=5", Duration::from_secs(10)),
+        "no place-by-id emitted. raw: {:?}",
         sess.snapshot_str()
     );
 }

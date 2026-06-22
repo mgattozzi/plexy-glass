@@ -230,10 +230,12 @@ reload`) so you don't have to restart the daemon to see a change. See
 [docs/configuration.md](docs/configuration.md) for the full reference.
 
 Other topic docs:
-- [docs/scripting.md](docs/scripting.md): the `cmd`, `send`, `capture`, and
-  `run` CLI verbs
-- [docs/command-blocks.md](docs/command-blocks.md): OSC 133 command-block
-  navigation and capture
+- [docs/scripting.md](docs/scripting.md) covers the `cmd`, `send`, `capture`,
+  and `run` CLI verbs
+- [docs/command-blocks.md](docs/command-blocks.md) covers OSC 133
+  command-block navigation and capture
+- [docs/inline-graphics.md](docs/inline-graphics.md) covers inline images in
+  panes (Kitty graphics; Sixel/iTerm2 in progress)
 
 ## Status
 

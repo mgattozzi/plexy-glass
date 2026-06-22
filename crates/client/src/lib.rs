@@ -52,7 +52,14 @@ pub async fn run(
     // terminal can't hang us.
     let probe_reply = negotiate::read_probe_reply(stdin_fd, std::time::Duration::from_millis(120));
     let kbd = negotiate::classify(&probe_reply);
-    let graphics = negotiate::classify_graphics(&probe_reply);
+    // `PLEXY_FORCE_KITTY` forces Kitty graphics caps on regardless of the probe,
+    // a test hook so the e2e harness (whose PTY can't answer the graphics
+    // query) can exercise the full image render path. No effect unless set.
+    let graphics = if std::env::var_os("PLEXY_FORCE_KITTY").is_some() {
+        plexy_glass_protocol::GraphicsCaps { kitty: true, sixel: false, iterm2: false }
+    } else {
+        negotiate::classify_graphics(&probe_reply)
+    };
     // Keystrokes the user typed during the probe window land after the DA1
     // sentinel in `probe_reply`. The pump reads stdin fresh, so without this
     // they'd be dropped; replay them as initial input once the session attaches.
