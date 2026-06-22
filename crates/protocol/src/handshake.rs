@@ -1,5 +1,6 @@
 use crate::{
-    ClientHello, Codec, CodecError, NegotiatedKbd, PROTOCOL_VERSION, ProtocolError, ServerHello,
+    ClientHello, Codec, CodecError, GraphicsCaps, NegotiatedKbd, PROTOCOL_VERSION, ProtocolError,
+    ServerHello,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -59,7 +60,12 @@ where
     W: AsyncWrite + Unpin,
 {
     let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
-    let hello = ClientHello { version: PROTOCOL_VERSION, term, kbd: NegotiatedKbd::Legacy };
+    let hello = ClientHello {
+        version: PROTOCOL_VERSION,
+        term,
+        kbd: NegotiatedKbd::Legacy,
+        graphics: GraphicsCaps::default(),
+    };
     client_handshake_with(reader, writer, hello).await
 }
 
@@ -154,7 +160,12 @@ mod tests {
 
         // Write a bogus (NEWER) ClientHello: we cannot decode a newer wire
         // safely, so the server must still reject it.
-        let bogus = ClientHello { version: 999, term: "x".into(), kbd: NegotiatedKbd::Legacy };
+        let bogus = ClientHello {
+            version: 999,
+            term: "x".into(),
+            kbd: NegotiatedKbd::Legacy,
+            graphics: GraphicsCaps::default(),
+        };
         let bytes = postcard::to_allocvec(&bogus).unwrap();
         Codec::write_frame(&mut a, &bytes).await.unwrap();
 
@@ -177,8 +188,12 @@ mod tests {
         let (mut cr, mut cw) = tokio::io::split(client_side);
         let newer = ServerHello { version: PROTOCOL_VERSION + 1, daemon_pid: 7 };
         Codec::write_frame(&mut a, &postcard::to_allocvec(&newer).unwrap()).await.unwrap();
-        let hello =
-            ClientHello { version: PROTOCOL_VERSION, term: "x".into(), kbd: NegotiatedKbd::Legacy };
+        let hello = ClientHello {
+            version: PROTOCOL_VERSION,
+            term: "x".into(),
+            kbd: NegotiatedKbd::Legacy,
+            graphics: GraphicsCaps::default(),
+        };
         let got = client_handshake_with(&mut cr, &mut cw, hello).await.unwrap();
         assert_eq!(got.version, PROTOCOL_VERSION + 1);
     }
@@ -190,8 +205,12 @@ mod tests {
         let (mut cr, mut cw) = tokio::io::split(client_side);
         let older = ServerHello { version: PROTOCOL_VERSION - 1, daemon_pid: 7 };
         Codec::write_frame(&mut a, &postcard::to_allocvec(&older).unwrap()).await.unwrap();
-        let hello =
-            ClientHello { version: PROTOCOL_VERSION, term: "x".into(), kbd: NegotiatedKbd::Legacy };
+        let hello = ClientHello {
+            version: PROTOCOL_VERSION,
+            term: "x".into(),
+            kbd: NegotiatedKbd::Legacy,
+            graphics: GraphicsCaps::default(),
+        };
         let err = client_handshake_with(&mut cr, &mut cw, hello).await.unwrap_err();
         match err {
             HandshakeError::VersionMismatch { ours, peer } => {
@@ -214,6 +233,7 @@ mod tests {
             version: PROTOCOL_VERSION - 1,
             term: "vt100".into(),
             kbd: NegotiatedKbd::Kitty(31),
+            graphics: GraphicsCaps::default(),
         };
         let bytes = postcard::to_allocvec(&bogus).unwrap();
         Codec::write_frame(&mut a, &bytes).await.unwrap();

@@ -52,6 +52,7 @@ pub async fn run(
     // terminal can't hang us.
     let probe_reply = negotiate::read_probe_reply(stdin_fd, std::time::Duration::from_millis(120));
     let kbd = negotiate::classify(&probe_reply);
+    let graphics = negotiate::classify_graphics(&probe_reply);
     // Keystrokes the user typed during the probe window land after the DA1
     // sentinel in `probe_reply`. The pump reads stdin fresh, so without this
     // they'd be dropped; replay them as initial input once the session attaches.
@@ -75,7 +76,7 @@ pub async fn run(
     tty::install_emergency_restore(stdin_fd, tty_guard.original_termios());
 
     let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
-    let hello = ClientHello { version: PROTOCOL_VERSION, term, kbd };
+    let hello = ClientHello { version: PROTOCOL_VERSION, term, kbd, graphics };
     let server_hello = client_handshake_with(&mut reader, &mut writer, hello).await?;
     info!(daemon_pid = server_hello.daemon_pid, ?kbd, "connected to daemon");
 

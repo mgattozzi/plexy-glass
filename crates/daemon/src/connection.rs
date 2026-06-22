@@ -318,7 +318,15 @@ where
     // writer.
     let frame_rx = handle.frame_rx.clone();
     let (switch_tx, switch_rx) = mpsc::unbounded_channel::<watch::Receiver<Arc<VirtualScreen>>>();
-    let renderer = Renderer::new();
+    let mut renderer = Renderer::new();
+    // Thread this client's negotiated graphics caps so the renderer emits image
+    // protocols only its outer terminal supports.
+    let g = client_hello.graphics;
+    renderer.set_graphics_caps(plexy_glass_mux::GraphicsCaps {
+        kitty: g.kitty,
+        sixel: g.sixel,
+        iterm2: g.iterm2,
+    });
     let mut renderer_task = tokio::spawn(async move {
         let _ = renderer.run(frame_rx, switch_rx, writer).await;
     });

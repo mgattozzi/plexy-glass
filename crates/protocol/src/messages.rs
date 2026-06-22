@@ -64,7 +64,19 @@ pub enum ExitStatus {
 /// - v8: `ExecCommand` / `ExecDone`: synchronous `run` over OSC 133 completion
 /// - v9: `CaptureLastBlock` / `BlockCapture`: structured last-block capture
 ///   (output text + exit code + command line)
-pub const PROTOCOL_VERSION: u16 = 9;
+/// - v10: `ClientHello.graphics`: per-client inline-graphics capabilities
+///   (Kitty/Sixel/iTerm2)
+pub const PROTOCOL_VERSION: u16 = 10;
+
+/// Inline-graphics protocols the client's *outer* terminal supports, probed at
+/// attach. The daemon renders images for a client only in a protocol its
+/// terminal accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GraphicsCaps {
+    pub kitty: bool,
+    pub sixel: bool,
+    pub iterm2: bool,
+}
 
 /// Which keyboard protocol a client negotiated with its *outer* terminal. The
 /// daemon decodes that client's input bytes in this protocol.
@@ -91,6 +103,8 @@ pub struct ClientHello {
     pub term: String,
     /// The keyboard protocol the client negotiated with its outer terminal.
     pub kbd: NegotiatedKbd,
+    /// Inline-graphics protocols the client's outer terminal supports.
+    pub graphics: GraphicsCaps,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,6 +295,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             term: "xterm-256color".into(),
             kbd: NegotiatedKbd::Legacy,
+            graphics: GraphicsCaps::default(),
         };
         let server = ServerHello { version: PROTOCOL_VERSION, daemon_pid: 12345 };
 
@@ -310,6 +325,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             term: "xterm-ghostty".into(),
             kbd: NegotiatedKbd::Kitty(31),
+            graphics: GraphicsCaps { kitty: true, sixel: false, iterm2: false },
         };
         let bytes = postcard::to_allocvec(&hello).expect("serialize");
         let decoded: ClientHello = postcard::from_bytes(&bytes).expect("deserialize");

@@ -3,16 +3,20 @@
 //! `pump.rs`; this module owns the negotiation handshake and its precise
 //! inverse.
 
-use plexy_glass_protocol::NegotiatedKbd;
+use plexy_glass_protocol::{GraphicsCaps, NegotiatedKbd};
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::{Duration, Instant};
 
 /// The probe we write to the outer terminal: query Kitty flags (`\e[?u`),
-/// XTVERSION (`\e[>q`), then DA1 (`\e[c`) **last** as the sentinel. Every
-/// terminal answers DA1, and replies arrive in query order, so seeing the DA1
-/// reply guarantees the Kitty and XTVERSION replies already arrived, and that
-/// lets us consume them all and never leak a late XTVERSION DCS into a pane.
-pub const PROBE: &[u8] = b"\x1b[?u\x1b[>q\x1b[c";
+/// XTVERSION (`\e[>q`), a Kitty graphics query (`\e_G…a=q…\e\\`), then DA1
+/// (`\e[c`) **last** as the sentinel. Every terminal answers DA1, and replies
+/// arrive in query order, so seeing the DA1 reply guarantees the earlier replies
+/// already arrived, and that lets us consume them all and never leak a late reply
+/// (XTVERSION DCS or graphics APC) into a pane. The graphics query transmits a
+/// 1×1 RGB pixel with `a=q` (query, no display); a capable terminal answers
+/// `\e_Gi=31;OK\e\\`.
+pub const PROBE: &[u8] =
+    b"\x1b[?u\x1b[>q\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
 
 /// Kitty flags we PUSH on a Kitty-capable outer terminal. Deliberately
 /// conservative: only `disambiguate` (0b1). We do NOT enable `report_event_types`
@@ -85,6 +89,56 @@ pub fn type_ahead_after_probe(reply: &[u8]) -> &[u8] {
         Some(end) => &reply[end..],
         None => &[],
     }
+}
+
+/// Classify the outer terminal's inline-graphics capabilities from its `PROBE`
+/// reply. Kitty: a graphics-query OK response (`\e_G…;OK\e\\`). Sixel: a `4`
+/// attribute in the DA1 reply. iTerm2 isn't reliably probeable via escapes, so
+/// it's left to environment detection by the caller (Phase 5).
+pub fn classify_graphics(reply: &[u8]) -> GraphicsCaps {
+    GraphicsCaps {
+        kitty: has_kitty_graphics_ok(reply),
+        sixel: da1_lists_sixel(reply),
+        iterm2: false,
+    }
+}
+
+/// True if `reply` contains a Kitty graphics OK response: an `\e_G` APC whose
+/// body contains `;OK` before its `\e\\` terminator.
+fn has_kitty_graphics_ok(reply: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 2 < reply.len() {
+        if reply[i] == 0x1b && reply[i + 1] == b'_' && reply[i + 2] == b'G' {
+            // Find this APC's ST and check for ";OK" within it.
+            let mut j = i + 3;
+            while j + 1 < reply.len() && !(reply[j] == 0x1b && reply[j + 1] == b'\\') {
+                j += 1;
+            }
+            if reply[i..j].windows(3).any(|w| w == b";OK") {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// True if the DA1 reply (`\e[?…c`) lists the Sixel attribute (`4`).
+fn da1_lists_sixel(reply: &[u8]) -> bool {
+    let Some(end) = da1_reply_end(reply) else {
+        return false;
+    };
+    // Find the start of this DA1 reply (`\e[?`) before `end`.
+    let prefix = &reply[..end];
+    let Some(start) = prefix
+        .windows(3)
+        .rposition(|w| w == [0x1b, b'[', b'?'])
+    else {
+        return false;
+    };
+    // Params are between `\e[?` and the trailing `c`, separated by `;`.
+    let params = &prefix[start + 3..end - 1];
+    params.split(|&b| b == b';').any(|p| p == b"4")
 }
 
 /// True if `reply` contains a Kitty flags report `\e[?<digits>u`.
@@ -278,6 +332,31 @@ mod tests {
         // risk injecting a partial escape reply as input).
         assert_eq!(type_ahead_after_probe(b"\x1b[?31u"), b"");
         assert_eq!(type_ahead_after_probe(b""), b"");
+    }
+
+    #[test]
+    fn classify_graphics_detects_kitty_ok() {
+        // Ghostty-style reply: Kitty kbd report, graphics OK, DA1.
+        let reply = b"\x1b[?31u\x1b_Gi=31;OK\x1b\\\x1b[?62;c";
+        let caps = classify_graphics(reply);
+        assert!(caps.kitty, "graphics OK response → kitty");
+        assert!(!caps.sixel);
+    }
+
+    #[test]
+    fn classify_graphics_no_kitty_when_no_ok() {
+        // A terminal that ignores the graphics APC answers with only DA1.
+        let caps = classify_graphics(b"\x1b[?1;2c");
+        assert!(!caps.kitty);
+        // An error response (not OK) also does not count as supported.
+        assert!(!classify_graphics(b"\x1b_Gi=31;ENOENT:bad\x1b\\\x1b[?1;2c").kitty);
+    }
+
+    #[test]
+    fn classify_graphics_detects_sixel_from_da1() {
+        // DA1 listing the sixel attribute (4).
+        assert!(classify_graphics(b"\x1b[?62;4;c").sixel);
+        assert!(!classify_graphics(b"\x1b[?62;22;c").sixel);
     }
 
     #[test]
