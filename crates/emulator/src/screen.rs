@@ -269,11 +269,15 @@ impl Screen {
             self.placements.retain(|p| !evicted.contains(&p.image_id));
             self.virtual_placements.retain(|p| !evicted.contains(&p.image_id));
         }
-        if tx.unicode {
-            // Transmit-and-virtual-place (a=T,U=1): no anchor, no cursor advance.
-            self.add_virtual_placement(tx.id, tx.placement_id, tx.place_rows, tx.place_cols);
-        } else if tx.display {
-            self.add_placement(tx.id, w, h, tx.place_rows, tx.place_cols);
+        // Only a *display* transmission (a=T) places. a=t (transmit only) just
+        // stores the image, even with U=1 set.
+        if tx.display {
+            if tx.unicode {
+                // a=T,U=1: virtual placement, so no anchor and no cursor advance.
+                self.add_virtual_placement(tx.id, tx.placement_id, tx.place_rows, tx.place_cols);
+            } else {
+                self.add_placement(tx.id, w, h, tx.place_rows, tx.place_cols);
+            }
         }
     }
 
@@ -1604,6 +1608,29 @@ mod tests {
         assert_eq!(e.screen().virtual_placements.len(), 1);
         e.advance(b"\x1bc");
         assert!(e.screen().virtual_placements.is_empty());
+    }
+
+    #[test]
+    fn transmit_only_with_unicode_flag_does_not_place() {
+        // a=t (lowercase, transmit only) with U=1 must just store the image,
+        // since only a display (a=T) or an explicit a=p places.
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=t,U=1,i=9,f=24,s=10,v=20;QUJD\x1b\\");
+        let s = e.screen();
+        assert!(s.images.contains(9), "image stored");
+        assert!(s.virtual_placements.is_empty(), "a=t,U=1 does not place");
+        assert!(s.placements.is_empty());
+    }
+
+    #[test]
+    fn virtual_placements_survive_resize() {
+        // Unlike anchored placements (dropped on resize), virtual placements ride
+        // the placeholder cells, which reflow, so they must NOT be dropped.
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,U=1,i=9,f=24,s=10,v=20,c=2,r=1;QUJD\x1b\\");
+        assert_eq!(e.screen().virtual_placements.len(), 1);
+        e.resize(24, 100);
+        assert_eq!(e.screen().virtual_placements.len(), 1, "virtual placement survives resize");
     }
 
     #[test]

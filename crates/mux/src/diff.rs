@@ -47,6 +47,10 @@ pub struct DiffRenderer {
     /// re-transmit (Kitty `a=t` with the same `i=` replaces) instead of showing
     /// stale data.
     transmitted: HashMap<u32, u64>,
+    /// Same, but for virtual (Unicode-placeholder) placements, which transmit
+    /// under the app's RAW image id (no `host_image_id` fold). Kept separate so a
+    /// raw id can't collide with a folded classic host id in one map.
+    transmitted_virtual: HashMap<u32, u64>,
     /// Placement key → what we last emitted, for the per-frame placement diff.
     placed: HashMap<u64, PlacedRect>,
     /// Placement key → the placeholder box last drawn (non-graphics clients).
@@ -68,6 +72,7 @@ impl DiffRenderer {
             previous: None,
             graphics: GraphicsCaps::default(),
             transmitted: HashMap::new(),
+            transmitted_virtual: HashMap::new(),
             placed: HashMap::new(),
             boxed: HashMap::new(),
             virtual_placed: HashMap::new(),
@@ -97,6 +102,7 @@ impl DiffRenderer {
                 out.push_str("\x1b_Ga=d,d=A,q=2\x1b\\");
             }
             self.transmitted.clear();
+            self.transmitted_virtual.clear();
             self.placed.clear();
             self.boxed.clear();
             self.virtual_placed.clear();
@@ -118,6 +124,7 @@ impl DiffRenderer {
                 out.push_str("\x1b_Ga=d,d=A,q=2\x1b\\");
             }
             self.transmitted.clear();
+            self.transmitted_virtual.clear();
             self.placed.clear();
             self.boxed.clear();
             self.virtual_placed.clear();
@@ -267,14 +274,42 @@ impl DiffRenderer {
     }
 
     /// Placeholder fallback for a client whose terminal can't render the
-    /// placement's protocol: draw a labelled box of the image's footprint,
-    /// diffed across frames (drawn on new/moved, the old cells repainted on
-    /// vanish) so the layout matches a graphics-capable client's.
+    /// placement's protocol: draw a labelled box of the image's footprint.
+    ///
+    /// The box is renderer-injected glyphs written only to the output stream, not
+    /// into the `VirtualScreen` grid the cell diff tracks, so the cell diff can
+    /// repaint a cell under a box (punching a hole) and a vanished box's repaint
+    /// can clobber an overlapping survivor. To stay correct without grid-level
+    /// bookkeeping: first repaint every stale region (vanished boxes + the old
+    /// rect of any box whose footprint changed), then redraw ALL current boxes
+    /// last so nothing is left clobbered or holed. ponytail: redraws every box
+    /// each frame, which is cheap (non-graphics clients with images are rare and
+    /// boxes are small); a grid-backed box would avoid it but isn't worth the cost.
     fn render_placeholder_boxes(&mut self, out: &mut String, current: &VirtualScreen) {
         let mut seen: HashSet<u64> = HashSet::with_capacity(current.placements.len());
         for p in &current.placements {
             seen.insert(p.key);
-            let rect = PlacedRect {
+        }
+        // 1. Repaint stale regions: vanished boxes, and the OLD rect of any box
+        //    whose footprint moved/changed this frame.
+        let mut stale: Vec<PlacedRect> = Vec::new();
+        for (k, prev) in &self.boxed {
+            let still = current.placements.iter().find(|p| p.key == *k);
+            match still {
+                None => stale.push(*prev),
+                Some(p) if (prev.host_row, prev.host_col, prev.rows, prev.cols)
+                    != (p.host_row, p.host_col, p.rows, p.cols) => stale.push(*prev),
+                Some(_) => {}
+            }
+        }
+        for rect in stale {
+            paint_cells_rect(out, current, rect.host_row, rect.host_col, rect.rows, rect.cols);
+        }
+        self.boxed.retain(|k, _| seen.contains(k));
+        // 2. Draw every current box last (over any just-repainted region).
+        for p in &current.placements {
+            emit_placeholder_box(out, p);
+            self.boxed.insert(p.key, PlacedRect {
                 host_row: p.host_row,
                 host_col: p.host_col,
                 image_id: p.image_id,
@@ -285,33 +320,14 @@ impl DiffRenderer {
                 src_h: p.src_h,
                 rows: p.rows,
                 cols: p.cols,
-            };
-            match self.boxed.get(&p.key) {
-                Some(prev) if *prev == rect => {} // unchanged, box already drawn
-                Some(prev) => {
-                    paint_cells_rect(out, current, prev.host_row, prev.host_col, prev.rows, prev.cols);
-                    emit_placeholder_box(out, p);
-                    self.boxed.insert(p.key, rect);
-                }
-                None => {
-                    emit_placeholder_box(out, p);
-                    self.boxed.insert(p.key, rect);
-                }
-            }
-        }
-        // Repaint the cells under boxes that vanished this frame.
-        let gone: Vec<u64> = self.boxed.keys().copied().filter(|k| !seen.contains(k)).collect();
-        for k in gone {
-            if let Some(rect) = self.boxed.remove(&k) {
-                paint_cells_rect(out, current, rect.host_row, rect.host_col, rect.rows, rect.cols);
-            }
+            });
         }
     }
 
     /// Unicode-placeholder (virtual) placements for a Kitty client: transmit the
-    /// image once (keyed by raw id + generation, shared with `transmitted`) and
-    /// emit `a=p,U=1` once. The placeholder cells render via the ordinary cell
-    /// diff; deleting the virtual placement removes it from the terminal.
+    /// image once (raw id + generation, in the dedicated `transmitted_virtual`
+    /// cache) and emit `a=p,U=1` once. The placeholder cells render via the
+    /// ordinary cell diff; deleting the virtual placement removes it.
     fn render_virtual_placements(&mut self, out: &mut String, current: &VirtualScreen) {
         let mut seen: HashSet<u64> = HashSet::with_capacity(current.virtual_placements.len());
         for vp in &current.virtual_placements {
@@ -319,16 +335,20 @@ impl DiffRenderer {
                 continue; // nothing to transmit/place
             }
             seen.insert(vp.key);
-            if self.transmitted.get(&vp.image_id) != Some(&vp.generation) {
+            if self.transmitted_virtual.get(&vp.image_id) != Some(&vp.generation) {
                 emit_transmit_bytes(out, vp.image_id, vp.format.kitty_f(), vp.pixel_w, vp.pixel_h, &vp.data_b64);
-                self.transmitted.insert(vp.image_id, vp.generation);
+                self.transmitted_virtual.insert(vp.image_id, vp.generation);
             }
             if let std::collections::hash_map::Entry::Vacant(slot) = self.virtual_placed.entry(vp.key) {
-                let _ = write!(
-                    out,
-                    "\x1b_Ga=p,U=1,i={},p={},c={},r={},q=2\x1b\\",
-                    vp.image_id, vp.placement_id, vp.cols, vp.rows
-                );
+                // Omit c=/r= when 0 (the placeholder cells define the extent).
+                let _ = write!(out, "\x1b_Ga=p,U=1,i={},p={}", vp.image_id, vp.placement_id);
+                if vp.cols > 0 {
+                    let _ = write!(out, ",c={}", vp.cols);
+                }
+                if vp.rows > 0 {
+                    let _ = write!(out, ",r={}", vp.rows);
+                }
+                out.push_str(",q=2\x1b\\");
                 slot.insert((vp.image_id, vp.placement_id));
             }
         }
@@ -338,6 +358,11 @@ impl DiffRenderer {
             if let Some((img, pid)) = self.virtual_placed.remove(&k) {
                 emit_delete(out, img, pid);
             }
+        }
+        // Bound the virtual transmit cache like the classic one.
+        const TRANSMIT_CAP: usize = 256;
+        if self.transmitted_virtual.len() > TRANSMIT_CAP {
+            self.reset_images = true;
         }
     }
 }
@@ -386,14 +411,12 @@ fn emit_placeholder_box(out: &mut String, p: &VisiblePlacement) {
         }
         return;
     }
-    let w = cols as usize;
-    let inner = w - 2;
-    let label = format!("{}x{}", p.pixel_w, p.pixel_h);
-    let label: String = if label.chars().count() > inner {
-        label.chars().take(inner).collect()
-    } else {
-        label
-    };
+    let inner = cols - 2;
+    // The label is ASCII digits + 'x', but we still route width/truncation
+    // through the width module per the project's display-column rule.
+    let raw = format!("{}x{}", p.pixel_w, p.pixel_h);
+    let label = plexy_glass_emulator::truncate_to_width(&raw, inner);
+    let label_w = plexy_glass_emulator::display_width(label);
     let mid = rows / 2;
     for r in 0..rows {
         let _ = write!(out, "\x1b[{};{}H", p.host_row + r + 1, p.host_col + 1);
@@ -411,12 +434,12 @@ fn emit_placeholder_box(out: &mut String, p: &VisiblePlacement) {
             out.push('┘');
         } else if r == mid {
             out.push('│');
-            let pad = inner.saturating_sub(label.chars().count());
+            let pad = inner.saturating_sub(label_w);
             let left = pad / 2;
             for _ in 0..left {
                 out.push(' ');
             }
-            out.push_str(&label);
+            out.push_str(label);
             for _ in 0..(pad - left) {
                 out.push(' ');
             }
@@ -1028,6 +1051,40 @@ mod tests {
         assert!(!s.contains('┌'), "no border when too small: {s:?}");
     }
 
+    #[test]
+    fn placeholder_box_redrawn_over_changed_underlying_cell() {
+        // The box is injected glyphs, not grid cells. If a cell under the box
+        // changes the cell diff repaints it, so the box must be redrawn to avoid
+        // a hole.
+        let mut d = DiffRenderer::new();
+        render_str(&mut d, &frame_with(vec![boxed_vp(3, 10)]));
+        let mut f2 = frame_with(vec![boxed_vp(3, 10)]);
+        f2.put(2, 3, Cell { grapheme: SmolStr::new("X"), ..Cell::default() }); // under the box
+        let s = render_str(&mut d, &f2);
+        assert!(s.contains('┌'), "box redrawn over the changed cell (no hole): {s:?}");
+    }
+
+    #[test]
+    fn surviving_box_redrawn_when_overlapping_neighbor_vanishes() {
+        let mut d = DiffRenderer::new();
+        let a = { let mut p = boxed_vp(3, 10); p.key = 1; p.host_row = 2; p.host_col = 3; p };
+        let b = { let mut p = boxed_vp(3, 10); p.key = 2; p.host_row = 3; p.host_col = 4; p }; // overlaps A
+        render_str(&mut d, &frame_with(vec![a, b.clone()]));
+        let s = render_str(&mut d, &frame_with(vec![b])); // A vanishes
+        assert!(s.contains('┌'), "surviving overlapping box B redrawn after A vanished: {s:?}");
+    }
+
+    #[test]
+    fn placeholder_box_move_repaints_old_and_draws_new() {
+        let mut d = DiffRenderer::new();
+        render_str(&mut d, &frame_with(vec![boxed_vp(3, 10)])); // host_row 2
+        let mut moved = boxed_vp(3, 10);
+        moved.host_row = 4;
+        let s = render_str(&mut d, &frame_with(vec![moved]));
+        assert!(s.contains("\x1b[3;4H"), "repaints the old rect (row 3): {s:?}");
+        assert!(s.contains("\x1b[5;4H"), "draws the new box (row 5): {s:?}");
+    }
+
     // ── virtual (Unicode-placeholder) placements ───────────────────────────────
 
     fn vvp(key: u64, image_id: u32) -> VisibleVirtualPlacement {
@@ -1076,5 +1133,53 @@ mod tests {
         let mut d = DiffRenderer::new(); // no graphics caps
         let s = render_str(&mut d, &frame_with_virtual(vec![vvp(1, 7)]));
         assert!(!s.contains("\x1b_G"), "no graphics for a non-kitty client: {s:?}");
+    }
+
+    #[test]
+    fn virtual_placement_retransmits_on_generation_change() {
+        let mut d = kitty_renderer();
+        render_str(&mut d, &frame_with_virtual(vec![vvp(1, 7)]));
+        let mut vp = vvp(1, 7);
+        vp.generation = 2;
+        vp.data_b64 = std::sync::Arc::from(&b"WFla"[..]);
+        let s = render_str(&mut d, &frame_with_virtual(vec![vp]));
+        assert!(s.contains("a=t"), "changed content re-transmits the virtual image: {s:?}");
+    }
+
+    #[test]
+    fn empty_data_virtual_placement_neither_transmits_nor_places() {
+        let mut d = kitty_renderer();
+        let mut vp = vvp(1, 7);
+        vp.data_b64 = std::sync::Arc::from(&b""[..]);
+        let s = render_str(&mut d, &frame_with_virtual(vec![vp]));
+        assert!(!s.contains("\x1b_G"), "no transmit/place for an empty-data virtual placement: {s:?}");
+        // A later real-data frame still works (raw-id cache not poisoned).
+        let s2 = render_str(&mut d, &frame_with_virtual(vec![vvp(1, 7)]));
+        assert!(s2.contains("a=t") && s2.contains("U=1"), "real data transmits + places: {s2:?}");
+    }
+
+    #[test]
+    fn virtual_place_omits_zero_cell_box() {
+        let mut d = kitty_renderer();
+        let mut vp = vvp(1, 7);
+        vp.cols = 0;
+        vp.rows = 0;
+        let s = render_str(&mut d, &frame_with_virtual(vec![vp]));
+        assert!(s.contains("\x1b_Ga=p,U=1,i=7,p=1,q=2\x1b\\"), "no c=/r= when zero: {s:?}");
+    }
+
+    #[test]
+    fn classic_and_virtual_images_with_same_raw_id_dont_share_transmit_cache() {
+        // A classic placement (folded host id) and a virtual placement (raw id)
+        // in one frame each transmit independently (separate caches).
+        let mut d = kitty_renderer();
+        let mut v = VirtualScreen::blank(8, 20);
+        v.placements = vec![vp(1, 7, 1, 2, 3)];
+        v.virtual_placements = vec![vvp(99, 7)]; // same raw id 7, different key
+        let s = render_str(&mut d, &v);
+        assert!(s.contains("a=p,i=7"), "classic place present: {s:?}");
+        assert!(s.contains("U=1,i=7"), "virtual place present: {s:?}");
+        // Both transmitted (classic under host fold, virtual under raw 7).
+        assert!(s.matches("a=t").count() >= 2, "both images transmitted: {s:?}");
     }
 }

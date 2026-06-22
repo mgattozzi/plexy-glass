@@ -70,6 +70,8 @@ off-screen removes it.
   placements, and a popup rendering its *own* inline images are future work.
 - Two panes that both use Unicode-placeholder mode with the same raw image id
   can collide on one client (the placeholder cells carry the raw id).
-- A pane resize drops its images (the program re-emits on redraw); a
-  reflow-aware anchor remap is later lifecycle work.
+- A pane resize drops its **classic** placements (the program re-emits on
+  redraw); a reflow-aware anchor remap is later lifecycle work.
+  Unicode-placeholder (virtual) placements survive resize, since the
+  placeholder cells reflow with the text.
 - Transmitted image *pixel data* is not persisted across a daemon restart.

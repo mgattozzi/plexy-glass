@@ -3574,6 +3574,21 @@ mod tests {
         let ov = OverlayView::RenamePrompt { label: "r", buf: "x" };
         let vs2 = compose(&[view2], (9, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, TEST_COLOR);
         assert!(vs2.virtual_placements.is_empty(), "overlay suppresses virtual placements");
+
+        // Suppressed under a popup.
+        let mut pe = Emulator::new(4, 20);
+        pe.advance(b"p");
+        let pv = PopupView { rect: Rect::new(2, 2, 4, 20), screen: pe.screen(), title: "p" };
+        let view3 = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs3 = compose(&[view3], (9, 40), None, StatusPlacement::Bottom, None, None, None, Some(&pv), None, TEST_COLOR);
+        assert!(vs3.virtual_placements.is_empty(), "popup suppresses virtual placements");
+
+        // Suppressed on alt-screen.
+        e.advance(b"\x1b[?1049h");
+        let alt = e.screen().clone();
+        let view4 = plain_view(&alt, Rect::new(0, 0, 8, 40));
+        let vs4 = compose(&[view4], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert!(vs4.virtual_placements.is_empty(), "alt-screen suppresses virtual placements");
     }
 
     #[test]
