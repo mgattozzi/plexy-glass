@@ -308,6 +308,72 @@ pub fn sixel_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
+/// Split an iTerm2 `OSC 1337` body (the `;`-rejoined params after `1337`) into
+/// `(File= args, base64 data)`. Returns `None` if it isn't a `File=…:data` form.
+pub fn parse_iterm_file(rejoined: &str) -> Option<(&str, &str)> {
+    let body = rejoined.strip_prefix("File=")?;
+    // Args use `=`/`;` and base64 uses `A-Za-z0-9+/=`, so neither contains `:` and
+    // the first `:` cleanly separates args from data.
+    body.split_once(':')
+}
+
+/// Best-effort `(width, height)` in pixels for an iTerm2 image: prefer explicit
+/// `width=Npx`/`height=Npx` args, else decode the file header (PNG or JPEG) from
+/// the base64 data. `None` if neither yields pixel dimensions (cell/percent
+/// sizing is not interpreted, so the footprint falls back to 1×1).
+pub fn iterm_dimensions(args: &str, b64: &str) -> Option<(u32, u32)> {
+    let arg_px = |key: &str| -> Option<u32> {
+        for kv in args.split(';') {
+            if let Some(v) = kv.strip_prefix(key)
+                && let Some(px) = v.strip_suffix("px")
+            {
+                return px.parse().ok();
+            }
+        }
+        None
+    };
+    if let (Some(w), Some(h)) = (arg_px("width="), arg_px("height=")) {
+        return Some((w, h));
+    }
+    // Decode a prefix of the base64 (enough for the file header) and read it.
+    use base64::Engine as _;
+    let prefix: String = b64.chars().filter(|c| !c.is_whitespace()).take(16384).collect();
+    let bytes = base64::engine::general_purpose::STANDARD.decode(prefix.as_bytes()).ok()?;
+    png_dimensions(&bytes).or_else(|| jpeg_dimensions(&bytes))
+}
+
+/// Read `(width, height)` in pixels from a JPEG by scanning for the first SOF
+/// marker (`FFC0`…`FFCF`, excluding the non-frame `C4`/`C8`/`CC`). `None` if not
+/// found in `bytes`.
+pub fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None; // not a JPEG (no SOI)
+    }
+    let mut i = 2;
+    while i + 9 < bytes.len() {
+        if bytes[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = bytes[i + 1];
+        // SOF markers carry the frame's height/width.
+        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            let h = u32::from(u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]));
+            let w = u32::from(u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]));
+            return Some((w, h));
+        }
+        // Standalone markers (no length): RSTn, SOI, EOI, TEM.
+        if matches!(marker, 0xD0..=0xD9 | 0x01) {
+            i += 2;
+            continue;
+        }
+        // Otherwise a length-prefixed segment: skip it.
+        let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+        i += 2 + len;
+    }
+    None
+}
+
 /// Read `(width, height)` in pixels from a PNG header (8-byte signature + IHDR).
 /// `bytes` is the decoded PNG prefix (≥ 24 bytes). `None` if not a PNG.
 pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
@@ -374,6 +440,43 @@ mod tests {
         assert_eq!(sixel_dimensions(b"!5~"), Some((5, 6)));
         // No data at all.
         assert_eq!(sixel_dimensions(b"#0;2;0;0;0"), None);
+    }
+
+    #[test]
+    fn iterm_file_splits_args_and_data() {
+        assert_eq!(
+            parse_iterm_file("File=inline=1;width=20px:QUJDQUJD"),
+            Some(("inline=1;width=20px", "QUJDQUJD"))
+        );
+        assert_eq!(parse_iterm_file("NotFile=x:y"), None);
+    }
+
+    #[test]
+    fn iterm_dims_from_pixel_args() {
+        assert_eq!(iterm_dimensions("inline=1;width=20px;height=40px", "ignored"), Some((20, 40)));
+        // Cell/percent sizing is not interpreted → falls through (no decodable data here).
+        assert_eq!(iterm_dimensions("inline=1;width=10;height=50%", "!!notb64!!"), None);
+    }
+
+    #[test]
+    fn iterm_dims_from_png_header() {
+        let mut png = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&30u32.to_be_bytes());
+        png.extend_from_slice(&40u32.to_be_bytes());
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        assert_eq!(iterm_dimensions("inline=1", &b64), Some((30, 40)));
+    }
+
+    #[test]
+    fn jpeg_dims_from_sof() {
+        // SOI + SOF0: FFC0 len=0x0011 precision=8 height=0x0028(40) width=0x001E(30) …
+        let mut jpg = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x28, 0x00, 0x1E];
+        jpg.extend_from_slice(&[0x03; 10]); // pad so i+9 < len during the scan
+        assert_eq!(jpeg_dimensions(&jpg), Some((30, 40)));
+        assert_eq!(jpeg_dimensions(b"not a jpeg"), None);
     }
 
     #[test]

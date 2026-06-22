@@ -1313,6 +1313,34 @@ mod tests {
         assert!(s.contains("\x1bP0q"), "re-emits sixel at the new position: {s:?}");
     }
 
+    // ── iTerm2 data placements ─────────────────────────────────────────────────
+
+    fn iterm_vp(key: u64, host_row: u16, host_col: u16) -> VisiblePlacement {
+        let mut p = vp(key, 7, 1, host_row, host_col);
+        p.protocol = plexy_glass_emulator::ImageProtocol::Iterm2;
+        p.iterm_args = Some(std::sync::Arc::from("inline=1;width=10px"));
+        p.data_b64 = std::sync::Arc::from(&b"QUJD"[..]);
+        p
+    }
+
+    #[test]
+    fn iterm2_placement_emitted_for_iterm2_client() {
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(GraphicsCaps { kitty: false, sixel: false, iterm2: true });
+        let s = render_str(&mut d, &frame_with(vec![iterm_vp(1, 2, 3)]));
+        assert!(s.contains("\x1b]1337;File=inline=1;width=10px:QUJD\x07"), "iterm2 sequence: {s:?}");
+        assert!(s.contains("\x1b[3;4H"), "positioned at the host cell: {s:?}");
+        assert!(!s.contains('┌'), "no box for an iterm2-capable client: {s:?}");
+    }
+
+    #[test]
+    fn iterm2_placement_boxed_for_kitty_only_client() {
+        let mut d = kitty_renderer();
+        let s = render_str(&mut d, &frame_with(vec![iterm_vp(1, 2, 3)]));
+        assert!(s.contains('┌'), "iterm2 boxed on a kitty-only client: {s:?}");
+        assert!(!s.contains("1337"), "no iterm2 bytes: {s:?}");
+    }
+
     #[test]
     fn non_kitty_client_emits_no_virtual_graphics() {
         let mut d = DiffRenderer::new(); // no graphics caps

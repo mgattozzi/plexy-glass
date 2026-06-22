@@ -99,8 +99,17 @@ pub fn classify_graphics(reply: &[u8]) -> GraphicsCaps {
     GraphicsCaps {
         kitty: has_kitty_graphics_ok(reply),
         sixel: da1_lists_sixel(reply),
+        // iTerm2 is detected from the environment by the caller (it isn't
+        // reliably probeable via escapes), then OR-ed in.
         iterm2: false,
     }
+}
+
+/// iTerm2's inline-image protocol isn't reliably probeable via escapes, so it's
+/// detected by terminal fingerprint: `TERM_PROGRAM` naming a terminal that
+/// implements it (iTerm2 itself, or WezTerm).
+pub fn term_program_supports_iterm2(term_program: Option<&str>) -> bool {
+    matches!(term_program, Some("iTerm.app") | Some("WezTerm"))
 }
 
 /// True if `reply` contains a Kitty graphics OK response: an `\e_G` APC whose
@@ -350,6 +359,14 @@ mod tests {
         assert!(!caps.kitty);
         // An error response (not OK) also does not count as supported.
         assert!(!classify_graphics(b"\x1b_Gi=31;ENOENT:bad\x1b\\\x1b[?1;2c").kitty);
+    }
+
+    #[test]
+    fn iterm2_detected_from_term_program() {
+        assert!(term_program_supports_iterm2(Some("iTerm.app")));
+        assert!(term_program_supports_iterm2(Some("WezTerm")));
+        assert!(!term_program_supports_iterm2(Some("Apple_Terminal")));
+        assert!(!term_program_supports_iterm2(None));
     }
 
     #[test]

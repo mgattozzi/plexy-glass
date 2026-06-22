@@ -1322,10 +1322,57 @@ impl Screen {
             "12" => self.handle_osc_color_query(params, ColorQuery::Cursor),
             "133" => self.handle_osc_133(params),
             "52" => self.handle_osc_52(params),
+            "1337" => self.handle_iterm(params),
             other => {
                 tracing::trace!(cmd = other, "unhandled OSC");
             }
         }
+    }
+
+    /// iTerm2 inline image: `OSC 1337 ; File = <k=v;…> : <base64> ST`. `vte`
+    /// splits on `;`, so the `File=` args come in spread across `params[1..]` and we
+    /// rejoin them, parse, and (when `inline=1`) store an `Image{protocol:Iterm2}`
+    /// plus an anchored placement. The base64 data + args are kept for re-emit.
+    fn handle_iterm(&mut self, params: &[&[u8]]) {
+        if self.alt.is_some() {
+            return;
+        }
+        // Rejoin params after the "1337" command with ';'.
+        let mut joined = Vec::new();
+        for (i, p) in params.iter().skip(1).enumerate() {
+            if i > 0 {
+                joined.push(b';');
+            }
+            joined.extend_from_slice(p);
+        }
+        let rejoined = String::from_utf8_lossy(&joined);
+        let Some((args, b64)) = crate::graphics::parse_iterm_file(&rejoined) else {
+            return;
+        };
+        // Only render images marked for inline display.
+        if !args.split(';').any(|kv| kv == "inline=1") {
+            return;
+        }
+        let (w, h) = crate::graphics::iterm_dimensions(args, b64).unwrap_or((0, 0));
+        self.image_id_seq = self.image_id_seq.wrapping_add(1);
+        let id = self.image_id_seq;
+        self.image_gen = self.image_gen.wrapping_add(1);
+        let image = Image {
+            id,
+            protocol: ImageProtocol::Iterm2,
+            format: ImageFormat::Png, // unused for iTerm2 re-emit
+            pixel_w: w,
+            pixel_h: h,
+            data_b64: Arc::from(b64.as_bytes()),
+            iterm_args: Some(Arc::from(args)),
+            generation: self.image_gen,
+        };
+        let evicted = self.images.insert(image);
+        if !evicted.is_empty() {
+            self.placements.retain(|p| !evicted.contains(&p.image_id));
+            self.virtual_placements.retain(|p| !evicted.contains(&p.image_id));
+        }
+        self.add_placement(id, ImageProtocol::Iterm2, w, h, None, None);
     }
 
     fn handle_osc_color_query(&mut self, params: &[&[u8]], query: ColorQuery) {
@@ -1694,6 +1741,28 @@ mod tests {
         e.advance(b"\x1b[?1049h");
         e.advance(b"\x1bPq\"1;1;10;20#0;2;0;0;0~~~\x1b\\");
         assert!(e.screen().images.is_empty() && e.screen().placements.is_empty());
+    }
+
+    #[test]
+    fn iterm2_osc_captured_as_image_and_placement() {
+        let mut e = crate::Emulator::new(24, 80);
+        // vte splits the File= args on ';' across OSC params; handle_iterm rejoins.
+        e.advance(b"\x1b]1337;File=inline=1;width=10px;height=20px:QUJD\x07");
+        let s = e.screen();
+        assert_eq!(s.images.len(), 1, "iterm2 image stored");
+        assert_eq!(s.placements.len(), 1);
+        assert_eq!(s.placements[0].protocol, ImageProtocol::Iterm2);
+        assert_eq!(s.cursor.row, 1, "cursor advanced by the 1-row footprint");
+        let img = s.images.get(s.placements[0].image_id).unwrap();
+        assert_eq!(img.data_b64.as_ref(), b"QUJD", "base64 data kept for re-emit");
+        assert_eq!(img.iterm_args.as_deref(), Some("inline=1;width=10px;height=20px"));
+    }
+
+    #[test]
+    fn iterm2_non_inline_is_ignored() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b]1337;File=inline=0;width=10px:QUJD\x07");
+        assert!(e.screen().images.is_empty(), "a non-inline File= is a download, not rendered");
     }
 
     #[test]

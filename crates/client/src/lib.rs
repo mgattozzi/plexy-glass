@@ -55,11 +55,18 @@ pub async fn run(
     // `PLEXY_FORCE_KITTY` forces Kitty graphics caps on regardless of the probe,
     // a test hook so the e2e harness (whose PTY can't answer the graphics
     // query) can exercise the full image render path. No effect unless set.
-    let graphics = if std::env::var_os("PLEXY_FORCE_KITTY").is_some() {
+    let mut graphics = if std::env::var_os("PLEXY_FORCE_KITTY").is_some() {
         plexy_glass_protocol::GraphicsCaps { kitty: true, sixel: false, iterm2: false }
     } else {
         negotiate::classify_graphics(&probe_reply)
     };
+    // iTerm2 isn't probeable via escapes, so detect it from the environment (or a
+    // `PLEXY_FORCE_ITERM2` test hook) and OR it into the negotiated caps.
+    if std::env::var_os("PLEXY_FORCE_ITERM2").is_some()
+        || negotiate::term_program_supports_iterm2(std::env::var("TERM_PROGRAM").ok().as_deref())
+    {
+        graphics.iterm2 = true;
+    }
     // Keystrokes the user typed during the probe window land after the DA1
     // sentinel in `probe_reply`. The pump reads stdin fresh, so without this
     // they'd be dropped; replay them as initial input once the session attaches.
