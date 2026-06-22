@@ -34,6 +34,10 @@ pub struct RowMark {
     /// Exit code payload; meaningful only while the `HAS_EXIT` bit is set
     /// (kept 0 otherwise so the derived `PartialEq` stays well-defined).
     exit_code: i32,
+    /// Block duration in millis (`OSC 133;C` to `;D`); meaningful only while the
+    /// `HAS_DURATION` bit is set (kept 0 otherwise so the derived `PartialEq`
+    /// stays well-defined).
+    duration_ms: u32,
 }
 
 impl RowMark {
@@ -53,6 +57,10 @@ impl RowMark {
     /// rides reflow (merge ORs flags) and eviction (the row drops) like the 133
     /// marks; masked off when persisted (folds are runtime-only).
     pub const FOLDED: u8 = 16;
+    /// **Runtime** presence bit for `duration_ms` (bit 5). Not an OSC 133 bit, so
+    /// it's excluded from persistence like [`RowMark::FOLDED`]; rides reflow via
+    /// `merge` and dies on eviction like the other marks.
+    const HAS_DURATION: u8 = 32;
     /// Private presence bit for `exit_code`.
     const HAS_EXIT: u8 = 1 << 7;
 
@@ -130,6 +138,32 @@ impl RowMark {
         self.flags & Self::FOLDED != 0
     }
 
+    /// Record (or clear) the block duration in millis (`OSC 133;C`→`;D`). Like
+    /// [`RowMark::set_exit`], clears the field to 0 when `None` so the derived
+    /// `PartialEq` stays well-defined.
+    pub fn set_duration(&mut self, dur: Option<u32>) {
+        match dur {
+            Some(ms) => {
+                self.flags |= Self::HAS_DURATION;
+                self.duration_ms = ms;
+            }
+            None => {
+                self.flags &= !Self::HAS_DURATION;
+                self.duration_ms = 0;
+            }
+        }
+    }
+
+    /// The block duration in millis, if one was recorded. `None` when the
+    /// `HAS_DURATION` flag is unset.
+    pub fn duration_ms(self) -> Option<u32> {
+        if self.flags & Self::HAS_DURATION != 0 {
+            Some(self.duration_ms)
+        } else {
+            None
+        }
+    }
+
     /// Fold another row's mark into this one: flags are OR-ed; an exit code on
     /// `other` wins; when `other` carries `PROMPT_END`, its col wins too.
     /// Used by reflow when a logical line's physical rows are merged. Today
@@ -145,6 +179,9 @@ impl RowMark {
         }
         if other.flags & Self::PROMPT_END != 0 {
             self.prompt_end_col = other.prompt_end_col;
+        }
+        if other.flags & Self::HAS_DURATION != 0 {
+            self.duration_ms = other.duration_ms;
         }
     }
 }
@@ -292,7 +329,40 @@ mod tests {
     #[test]
     fn row_mark_stays_small() {
         // Rows are cloned per frame, so the annotation must stay cheap.
-        assert!(std::mem::size_of::<RowMark>() <= 8);
+        assert!(std::mem::size_of::<RowMark>() <= 12);
+    }
+
+    #[test]
+    fn duration_set_clear_and_read() {
+        let mut m = RowMark::default();
+        assert_eq!(m.duration_ms(), None);
+        m.set_duration(Some(2300));
+        assert_eq!(m.duration_ms(), Some(2300));
+        m.set_duration(None);
+        assert_eq!(m.duration_ms(), None);
+        assert_eq!(m, RowMark::default(), "clearing duration restores default");
+    }
+
+    #[test]
+    fn has_duration_does_not_collide_with_other_bits() {
+        let mut m = RowMark::default();
+        m.set_duration(Some(5));
+        assert!(!m.contains(RowMark::PROMPT_START));
+        assert!(!m.contains(RowMark::OUTPUT_START));
+        assert!(!m.contains(RowMark::BLOCK_END));
+        assert!(!m.contains(RowMark::PROMPT_END));
+        assert!(!m.is_folded());
+        assert_eq!(m.exit(), None);
+    }
+
+    #[test]
+    fn merge_carries_duration_other_wins() {
+        let mut base = RowMark::default();
+        base.set(RowMark::BLOCK_END);
+        let mut other = RowMark::default();
+        other.set_duration(Some(1234));
+        base.merge(other);
+        assert_eq!(base.duration_ms(), Some(1234));
     }
 
     #[test]
