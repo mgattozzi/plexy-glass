@@ -1,7 +1,31 @@
 //! In-memory composite output grid. The compositor builds one; the
 //! diff-renderer compares two to produce ANSI bytes.
 
+use plexy_glass_emulator::ImageFormat;
 use plexy_glass_emulator::Cell;
+use std::sync::Arc;
+
+/// An image placement resolved to host (terminal) coordinates, ready for the
+/// per-client renderer to transmit (once) and place. Built by the compositor
+/// from each pane's `Screen::placements` + `images`, clipped to the visible
+/// viewport. Carries the image data so a client seeing it for the first time
+/// can transmit it.
+#[derive(Debug, Clone)]
+pub struct VisiblePlacement {
+    /// Stable per-frame key (pane id folded with the placement seq) for the
+    /// renderer's cross-frame placement diff.
+    pub key: u64,
+    pub image_id: u32,
+    pub placement_id: u32,
+    pub format: ImageFormat,
+    pub pixel_w: u32,
+    pub pixel_h: u32,
+    pub data_b64: Arc<[u8]>,
+    pub host_row: u16,
+    pub host_col: u16,
+    pub rows: u16,
+    pub cols: u16,
+}
 
 #[derive(Debug, Clone)]
 pub struct VirtualScreen {
@@ -10,6 +34,8 @@ pub struct VirtualScreen {
     pub cursor_visible: bool,
     pub rows: u16,
     pub cols: u16,
+    /// Inline-image placements to transmit/place after the cell diff.
+    pub placements: Vec<VisiblePlacement>,
 }
 
 impl VirtualScreen {
@@ -22,6 +48,7 @@ impl VirtualScreen {
             cursor_visible: false,
             rows,
             cols,
+            placements: Vec::new(),
         }
     }
 

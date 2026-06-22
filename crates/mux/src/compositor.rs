@@ -388,6 +388,48 @@ pub fn compose(
         .collect();
     borders::draw(&frames, band, &mut screen, blocks);
 
+    // Inline-image placements: resolve each pane's placements to host cells in
+    // the live viewport (copy/block-mode viewports + occlusion are later phases).
+    // The seq is folded with the pane id so per-Screen counters can't collide.
+    {
+        let mut placements: Vec<crate::virtual_screen::VisiblePlacement> = Vec::new();
+        for v in panes {
+            if v.screen.alt.is_some() || v.screen.placements.is_empty() {
+                continue;
+            }
+            let es = effective_scroll_for(v);
+            let sb_len = v.screen.scrollback.len() as u32;
+            let top = sb_len.saturating_sub(es);
+            let vp_end = top + u32::from(v.rect.rows);
+            for p in &v.screen.placements {
+                if p.anchor_line < top || p.anchor_line >= vp_end {
+                    continue;
+                }
+                let Some(img) = v.screen.images.get(p.image_id) else {
+                    continue; // image evicted, skip
+                };
+                let local_row = (p.anchor_line - top) as u16;
+                let host_row = pane_row_offset + v.rect.row + local_row;
+                let host_col = v.rect.col + p.col.min(v.rect.cols.saturating_sub(1));
+                let key = (u64::from(v.id.0) << 40) | (p.seq & ((1u64 << 40) - 1));
+                placements.push(crate::virtual_screen::VisiblePlacement {
+                    key,
+                    image_id: p.image_id,
+                    placement_id: p.placement_id,
+                    format: img.format,
+                    pixel_w: img.pixel_w,
+                    pixel_h: img.pixel_h,
+                    data_b64: img.data_b64.clone(),
+                    host_row,
+                    host_col,
+                    rows: p.rows,
+                    cols: p.cols,
+                });
+            }
+        }
+        screen.placements = placements;
+    }
+
     // Status bar.
     if let Some(s) = status {
         paint_status_row(&mut screen, s, host_cols, status_row);
@@ -3167,5 +3209,42 @@ mod tests {
                 "alt-screen popup left border row {r}: no ▌"
             );
         }
+    }
+
+    /// A Kitty image fed through a real `Emulator` becomes a placement, and
+    /// `compose()` resolves it to a host-positioned `VisiblePlacement` carrying the
+    /// image id + data.
+    #[test]
+    fn inline_image_resolves_to_visible_placement() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(8, 40);
+        // Two lines of text, then an inline RGB image (10x20px → 1x1 cell at the
+        // default 10x20 cell size) placed at row 2.
+        e.advance(b"line1\r\nline2\r\n\x1b_Ga=T,i=5,f=24,s=10,v=20;QUJD\x1b\\");
+        e.advance(b"\x1b[m");
+        let screen = e.screen().clone();
+        assert_eq!(screen.placements.len(), 1, "emulator captured the placement");
+
+        let view = PaneView {
+            id: PaneId(3),
+            rect: Rect::new(1, 1, 8, 38),
+            screen: &screen,
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: None,
+            title: None,
+            marked: false,
+        };
+        let vs = compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        assert_eq!(vs.placements.len(), 1, "compose resolved one visible placement");
+        let p = &vs.placements[0];
+        assert_eq!(p.image_id, 5);
+        // anchor_line 2, top 0 → host row = pane_row_offset(0) + rect.row(1) + 2 = 3.
+        assert_eq!(p.host_row, 3);
+        assert_eq!(p.host_col, 1, "rect.col + 0");
+        assert_eq!(p.data_b64.as_ref(), b"QUJD", "carries the image data");
+        // key folds the pane id (3) into the high bits.
+        assert_eq!(p.key, (3u64 << 40), "pane-3, seq 0");
     }
 }
