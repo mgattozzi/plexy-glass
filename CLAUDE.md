@@ -364,9 +364,10 @@ runtime-only). A `blocks::FoldProjection` maps unified↔visible line space
 (visible = unified minus folded output ranges); the compositor's per-pane
 `FoldCtx` routes the content copy, per-row block-status border
 (`block_status_at`), inline-image hiding, and the live cursor through it,
-**bottom-anchored** (prompt stays at the bottom, history fills in at the top) and
-translating the daemon's unified `scroll_offset` via `visible_at_or_below`. Copy
-mode and block mode render **expanded** (folds apply on return to the live view).
+**bottom-anchored** (prompt stays at the bottom, history fills in at the top).
+**Block mode renders folds live** (instant collapse on `Tab`, persists across
+re-entry); folded command rows are **dimmed**. Copy mode renders **expanded**
+(raw text for selection).
 Block-mode keys → `BlockModeAction::{ToggleFold,FoldAll,UnfoldAll}` → daemon
 `with_screen_mut` + `blocks::{toggle_block_fold,fold_all_completed,unfold_all}`.
 `scroll_offset` is **visible-line space**: the daemon's wheel, `Ctrl+a <`/`>`,

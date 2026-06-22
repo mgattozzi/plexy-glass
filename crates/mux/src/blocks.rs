@@ -517,6 +517,16 @@ pub(crate) fn row_at_mut(screen: &mut Screen, line: u32) -> Option<&mut Row> {
     }
 }
 
+/// True when `line` is a visible **command** row of a folded block (the prompt
+/// row through the row before its hidden output). Used to dim folded command
+/// rows so a fold reads as folded, not as a command with no output.
+pub fn is_folded_command_line(screen: &Screen, line: u32) -> bool {
+    prompt_at_or_above(screen, line)
+        .filter(|&p| row_at(screen, p).is_some_and(|r| r.mark.is_folded()))
+        .and_then(|p| foldable_output(screen, p))
+        .is_some_and(|(start, _)| line < start)
+}
+
 /// The hidden output range `(start, end)` (inclusive) of a *foldable* block at
 /// `prompt_line`, or `None`. Foldable means: it's a prompt row, the block is
 /// completed (a later prompt exists, so never the active/running block), and it

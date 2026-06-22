@@ -357,22 +357,23 @@ the entry chord is configurable like any other binding (`enter_block_mode`).
 
 `Tab` collapses the selected block's **output**, keeping the command line
 visible; `Tab` again expands it. `Z` folds every completed block at once, `O`
-unfolds them all. A folded block keeps a dim, right-aligned `▸ N lines ✓`/`✗`
-summary on its command row (the hidden line count and the command's exit
-status), so you can see at a glance what's tucked away and whether it passed.
+unfolds them all. The fold takes effect **instantly in block mode** (the output
+collapses as you press `Tab`), and a folded block's command line is **dimmed**
+with a dim, right-aligned `▸ N lines ✓`/`✗` summary (the hidden line count and
+the command's exit status), so a fold reads clearly as folded and not as a
+command with no output.
 
-Folds **persist after you leave block mode**: the whole point is to declutter
-your working view and then keep typing in it. In the live view the output rows
-vanish and the rows below shift up (the prompt stays at the bottom and older
-history fills in at the top). Only **completed** blocks fold, the running
-command and the prompt you're typing at never collapse, and a command with no
-output isn't foldable.
+Folds **persist after you leave block mode** and across re-entering it, and
+that's the whole point: declutter your working view, then keep typing in it.
+In both the live view and block mode the output rows vanish and the rows below
+shift up (the prompt stays at the bottom; older history fills in at the top).
+Note that only **completed** blocks fold, the running command and the prompt
+you're typing at never collapse, and a command with no output isn't foldable.
 
 Notes / current limits:
 
-- Block mode itself renders blocks **expanded** (you see everything to choose
-  from). The marker/summary show which are folded, and the collapse takes
-  visible effect when you return to the normal view.
+- Copy mode renders blocks **expanded** (raw text for selection); the fold
+  markers still show, and the collapse re-applies when you leave copy mode.
 - Folds are **runtime-only**, so they don't survive a daemon restart.
 - Scrolled navigation is fold-exact: wheel scroll moves by visible lines (folds
   skipped, no dead zone), and `Ctrl+a <`/`>` and click-a-prompt-to-jump land the

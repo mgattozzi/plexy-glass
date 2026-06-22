@@ -22,25 +22,36 @@ struct FoldCtx {
 }
 
 impl FoldCtx {
-    /// Build for a pane. Live panes (no copy/block mode) honour folds; the others
-    /// render expanded (folds take visible effect on return to the live view).
+    /// Build for a pane. The live view and **block mode** honour folds; copy mode
+    /// renders expanded (raw text for selection).
     fn for_view(view: &PaneView<'_>) -> Self {
-        let proj = if view.copy_mode.is_none() && view.block_mode.is_none() {
-            FoldProjection::build(view.screen)
+        let rows = u32::from(view.rect.rows);
+        // Copy mode: identity projection, the prior viewport_top behavior.
+        if view.copy_mode.is_some() {
+            let proj = FoldProjection::identity(blocks::total_lines(view.screen));
+            let top_visible = proj
+                .visible_total()
+                .saturating_sub(rows)
+                .saturating_sub(effective_scroll_for(view));
+            return Self { proj, top_visible };
+        }
+        let proj = FoldProjection::build(view.screen);
+        let top_visible = if let Some(bm) = view.block_mode {
+            // Block mode renders folds: show the selected block (recenter pins
+            // `viewport_top` to it) at the top in visible space, clamped so we never
+            // scroll past the bottom screenful.
+            proj.from_unified(bm.viewport_top)
+                .unwrap_or(0)
+                .min(proj.visible_total().saturating_sub(rows))
         } else {
-            FoldProjection::identity(blocks::total_lines(view.screen))
+            // Live + wheel: `scroll_offset` is VISIBLE-line space (the daemon's
+            // wheel / prompt-jump produce visible offsets), so a plain bottom
+            // anchor works: at offset 0 the prompt sits at the bottom, and
+            // scrolling moves by visible lines (folds skipped).
+            proj.visible_total()
+                .saturating_sub(rows)
+                .saturating_sub(view.scroll_offset)
         };
-        // `scroll_offset` is VISIBLE-line space (the daemon's wheel / prompt-jump
-        // produce visible offsets via blocks::{max_scroll_offset,
-        // scroll_offset_for_top}). So the top is a plain bottom-anchor in visible
-        // space: at es=0 the prompt sits at the bottom; scrolling moves by visible
-        // lines (folds skipped). For copy/block panes (identity projection) this
-        // reduces to the prior `viewport_top` behavior.
-        let es = effective_scroll_for(view);
-        let top_visible = proj
-            .visible_total()
-            .saturating_sub(u32::from(view.rect.rows))
-            .saturating_sub(es);
         Self { proj, top_visible }
     }
 
@@ -194,8 +205,9 @@ pub fn compose(
         panes.iter().map(|v| (v.id, FoldCtx::for_view(v))).collect();
 
     // Copy each pane's emulator cells into its rect. Display row `r` maps to a
-    // unified line through the pane's fold context (which folds collapsed blocks
-    // for live panes and is identity in copy/block mode).
+    // unified line through the pane's fold context (which collapses folded blocks
+    // in the live view and block mode; copy mode is identity). A folded block's
+    // command rows are dimmed so a fold reads as folded, not as a no-output run.
     for view in panes {
         let ctx = &fold_ctx[&view.id];
         let max_r = view.rect.rows;
@@ -206,16 +218,23 @@ pub fn compose(
             }
             let Some(line) = ctx.line_at(r) else { continue };
             let Some(row) = crate::blocks::row_at(view.screen, line) else { continue };
+            let dim = !ctx.proj.is_identity() && crate::blocks::is_folded_command_line(view.screen, line);
             let cells = row.cells.as_slice();
             for c in 0..max_c {
                 if view.rect.col.saturating_add(c) >= host_cols {
                     continue;
                 }
                 if let Some(cell) = cells.get(c as usize) {
+                    let mut cell = cell.clone();
+                    // Dim only the actual command glyphs, and keep trailing blanks
+                    // truly blank so the fold summary's overlap check still works.
+                    if dim && !cell.is_blank() {
+                        cell.attrs |= Attrs::DIM;
+                    }
                     screen.put(
                         pane_row_offset + view.rect.row.saturating_add(r),
                         view.rect.col.saturating_add(c),
-                        cell.clone(),
+                        cell,
                     );
                 }
             }
@@ -368,9 +387,8 @@ pub fn compose(
             let mut r = v.rect;
             r.row = r.row.saturating_add(pane_row_offset);
             // Same fold context as the content copy, so block status and the
-            // selection bracket agree with what's painted. `top` is the visible
-            // top (== the old unified top for block-mode/identity panes, where
-            // the bracket is used).
+            // selection bracket agree with what's painted. `top` is the VISIBLE
+            // top line; block extents map into visible space through `ctx.proj`.
             let ctx = &fold_ctx[&v.id];
             let top = ctx.top_visible;
             let block_rows: Vec<Option<crate::blocks::BlockLineStatus>> = if blocks.is_none() {
@@ -393,17 +411,30 @@ pub fn compose(
                 if v.rect.rows == 0 || v.screen.alt.is_some() {
                     return None;
                 }
-                let (a_start, a_end) = crate::blocks::block_extent(v.screen, bm.selected);
-                let vp_end = top + u32::from(v.rect.rows); // exclusive
-                if a_end < top || a_start >= vp_end {
+                let (u_start, u_end_full) = crate::blocks::block_extent(v.screen, bm.selected);
+                // A folded selected block's bracket spans only its visible command
+                // rows (the output is collapsed).
+                let folded = crate::blocks::row_at(v.screen, bm.selected)
+                    .is_some_and(|r| r.mark.is_folded());
+                let u_end = if folded {
+                    crate::blocks::foldable_output(v.screen, bm.selected)
+                        .map_or(u_end_full, |(out_start, _)| out_start.saturating_sub(1))
+                } else {
+                    u_end_full
+                };
+                // Map to visible display rows (prompt + command rows are never folded).
+                let vs = ctx.proj.from_unified(u_start)?;
+                let ve = ctx.proj.from_unified(u_end)?;
+                let vp_end = top + u32::from(v.rect.rows); // exclusive, visible
+                if ve < top || vs >= vp_end {
                     return None; // block entirely off-screen
                 }
-                let vis_start = a_start.max(top);
-                let vis_end = a_end.min(vp_end - 1);
+                let clip_start = vs.max(top);
+                let clip_end = ve.min(vp_end - 1);
                 Some(borders::SelectedBlock {
-                    rows: ((vis_start - top) as u16, (vis_end - top) as u16),
-                    cap_top: a_start >= top,
-                    cap_bottom: a_end < vp_end,
+                    rows: ((clip_start - top) as u16, (clip_end - top) as u16),
+                    cap_top: vs >= top,
+                    cap_bottom: ve < vp_end,
                     color: block_select_color,
                 })
             });
@@ -3732,6 +3763,39 @@ mod tests {
         assert!(row0.contains('▸'), "fold marker present: {row0:?}");
         assert!(row0.contains("2 lines"), "hidden line count: {row0:?}");
         assert!(row0.contains('✓'), "ok status glyph: {row0:?}");
+    }
+
+    fn two_block_fold_screen() -> Screen {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(8, 40);
+        e.advance(
+            b"\x1b]133;A\x07$ one\r\n\x1b]133;C\x07out1\r\nout2\r\n\
+              \x1b]133;D;0\x07\x1b]133;A\x07$ two\r\n\x1b]133;C\x07out3",
+        );
+        e.advance(b"\x1b[m");
+        let mut s = e.screen().clone();
+        crate::blocks::set_block_folded(&mut s, 0, true);
+        s
+    }
+
+    #[test]
+    fn block_mode_renders_folds_collapsed() {
+        // Folding takes effect IN block mode (instant + persists on re-entry).
+        let screen = two_block_fold_screen();
+        let bm = crate::BlockMode { selected: 0, viewport_top: 0, pane_rows: 8, total_lines: 8, filter: None };
+        let view = PaneView { block_mode: Some(&bm), ..plain_view(&screen, Rect::new(0, 0, 8, 40)) };
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert!(composed_row(&vs, 0).starts_with("$ one"), "command row kept");
+        assert_eq!(composed_row(&vs, 1), "$ two", "output collapsed in block mode too");
+    }
+
+    #[test]
+    fn folded_command_row_is_dimmed() {
+        let screen = two_block_fold_screen();
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert!(vs.cell(0, 0).unwrap().attrs.contains(Attrs::DIM), "folded command dimmed");
+        assert!(!vs.cell(1, 0).unwrap().attrs.contains(Attrs::DIM), "unfolded next prompt not dimmed");
     }
 
     #[test]
