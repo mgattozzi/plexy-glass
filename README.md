@@ -235,7 +235,8 @@ Other topic docs:
 - [docs/command-blocks.md](docs/command-blocks.md) covers OSC 133
   command-block navigation and capture
 - [docs/inline-graphics.md](docs/inline-graphics.md) covers inline images in
-  panes (Kitty graphics; Sixel/iTerm2 in progress)
+  panes (Kitty graphics, Sixel, and iTerm2; per-client placeholder box
+  fallback)
 
 ## Status
 

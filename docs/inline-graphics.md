@@ -6,11 +6,12 @@ plexy-glass captures it, models the image as a placement anchored in the grid,
 and re-emits it to each attached client's terminal at the right cell, sized
 correctly, with the next prompt below it, and following as you scroll.
 
-This is built in phases. **The Kitty graphics protocol is supported.** Images
-are clipped to their visible region, follow copy/block-mode scrolling, fall
-back to a labelled placeholder box on terminals without graphics, and support
-Kitty Unicode-placeholder (virtual) placements. Sixel and iTerm2, and native
-Kitty animation, arrive in later phases (see
+All three common terminal graphics protocols are supported: **Kitty graphics**,
+**Sixel**, and **iTerm2** (`OSC 1337`). Images are clipped to their visible
+region, follow copy/block-mode scrolling, and fall back to a labelled
+placeholder box on a client whose terminal can't render that image's protocol.
+Kitty additionally supports Unicode-placeholder (virtual) placements. Only
+native Kitty animation remains unimplemented (see
 `docs/superpowers/specs/2026-06-22-inline-graphics-design.md`).
 
 ## Trying it
@@ -21,51 +22,76 @@ In a Kitty-graphics-capable outer terminal (e.g. Ghostty), inside a pane:
 timg -p kitty <image>      # or: kitten icat <image>, chafa -f kitty <image>
 ```
 
+Sixel and iTerm2 work too, on terminals that support them:
+
+```
+img2sixel <image>          # Sixel (DCS)
+chafa -f sixel <image>
+imgcat <image>             # iTerm2 (OSC 1337), in iTerm2/WezTerm
+```
+
 The image renders in the pane, scales to plexy-glass's cells, and the shell
 prompt lands below it. Scrolling moves the image with the content; scrolling it
-off-screen removes it.
+off-screen removes it. An image is only sent to a client whose terminal speaks
+that image's protocol; other clients see a labelled placeholder box of the same
+size.
 
 ## How it works
 
 - **Cell size relay.** The client reports its terminal's pixel size; the daemon
-  sizes each pane's PTY with it and answers `CSI 14t/16t/18t` so a program like
-  `timg` scales to plexy-glass's *real* cell size. (Phase 1.)
-- **Capture.** The emulator pulls Kitty graphics APC sequences (`ESC _ G … ESC \`)
-  out of the byte stream, accumulates chunked transmissions into an image store,
-  and records a placement at the cursor, advancing the cursor by the image's
-  cell footprint so following output lands below it.
-- **Per-client render.** Each attached client gets the image transmitted **once**
-  and then **placed by id**; a per-frame diff re-places it as it scrolls and
-  deletes it when it leaves the viewport. The image's cell box is forced (`r/c`)
-  so it occupies the same cells on every client regardless of that client's own
-  cell pixel size.
+  sizes each pane's PTY with it and answers `CSI 14t/16t/18t`, so a program
+  like `timg` scales to plexy-glass's *real* cell size. (Phase 1.)
+- **Capture.** The emulator pulls each protocol out of the byte stream into one
+  unified image model: Kitty graphics from APC (`ESC _ G … ESC \`), Sixel from
+  DCS (`ESC P … q … ESC \`), and iTerm2 from `OSC 1337 ; File=`. Each image
+  records its **source protocol** and pixel dimensions (Kitty `s/v` or the
+  PNG/JPEG/Sixel-raster header), and a placement is recorded at the cursor,
+  advancing the cursor by the cell footprint so following output lands below
+  it.
+- **Per-client render, by protocol.** Rendering is per client, gated on the
+  client's support for each image's source protocol, and there is **no
+  transcoding**. A Kitty image is transmitted **once** and **placed by id**
+  with a per-frame diff (re-place on scroll, delete when off-screen, forced
+  `r/c` cell box so it occupies the same cells on every client). Sixel and
+  iTerm2 have no place-by-reference model, so their data is re-emitted at the
+  host cell and the old region repainted when they move. Note that this is
+  best-effort, those protocols are heavier; Kitty is the precise fast path.
 - **Clipping.** A placement is clipped to its visible sub-rectangle (the
   viewport rows intersected with the pane's columns) and the source pixels are
-  cropped to match (Kitty `x/y/w/h`), so an image taller or wider than the space
-  left in the pane never overruns the next pane, a split border, or the status
-  bar, and an image scrolled partway off the top shows its visible lower part.
+  cropped to match (Kitty `x/y/w/h`), so an image taller or wider than the
+  space left in the pane never overruns the next pane, a split border, or the
+  status bar, and an image scrolled partway off the top shows its visible
+  lower part.
 - **Cross-mode.** Images follow copy-mode and block-mode scrolling (those are
-  per-pane viewports, not modal overlays). While an interactive overlay (command
-  prompt, picker, choose-tree/buffer, rename, help) or a popup is open, images
-  are suppressed (the modal owns the screen) and re-established when it closes.
-- **Capability negotiation + placeholder box.** At attach, the client probes its
-  terminal for graphics support and relays it. A client whose terminal lacks
-  Kitty graphics is shown a **placeholder box**, a labelled rectangle of the
-  image's exact footprint, instead of blank cells, so a session attached by both
-  a graphics terminal and a plain one keeps a consistent layout.
+  per-pane viewports, not modal overlays). While an interactive overlay
+  (command prompt, picker, choose-tree/buffer, rename, help) or a popup is
+  open, images are suppressed (the modal owns the screen) and re-established
+  when it closes.
+- **Capability negotiation + placeholder box.** At attach, the client probes
+  its terminal and relays which protocols it supports: Kitty (graphics query),
+  Sixel (DA1 attribute), iTerm2 (`TERM_PROGRAM` fingerprint, iTerm2/WezTerm).
+  A placement whose protocol the client can't render is shown a **placeholder
+  box**, a labelled rectangle of the image's exact footprint, instead of blank
+  cells, so a session attached by both a graphics terminal and a plain one
+  keeps a consistent layout.
 - **Unicode-placeholder (virtual) placements.** Apps that use Kitty's Unicode
   placeholder mode (`a=p,U=1` + `U+10EEEE` cells) are supported: the image is
   transmitted once and the virtual placement emitted once per client, and the
   placeholder cells scroll/reflow with the text natively.
-- **Animation.** Tools that animate by re-transmitting each frame under the same
-  image id (e.g. `timg`, `chafa` on a GIF) play back correctly, since a changed
-  image is re-transmitted to each client automatically. The *native* Kitty
-  animation protocol (`a=f` frames / `a=a` control) is not yet implemented.
+- **Animation.** Tools that animate by re-transmitting each frame under the
+  same image id (e.g. `timg`, `chafa` on a GIF) play back correctly, since a
+  changed image is re-transmitted to each client automatically. The *native*
+  Kitty animation protocol (`a=f` frames / `a=a` control) is not yet
+  implemented.
 
 ## Limitations
 
-- Kitty graphics only. Sixel and iTerm2 inline images are Phase 5.
 - Images are suppressed on the alternate screen.
+- No cross-protocol transcoding: a Sixel image is shown only to Sixel-capable
+  clients (a placeholder box otherwise), and likewise for Kitty/iTerm2.
+- Sixel and iTerm2 images aren't source-cropped under partial occlusion (they're
+  emitted at their visible top-left and the terminal clips at the screen edge);
+  precise crop is Kitty-only.
 - Native Kitty animation (`a=f`/`a=a`), explicit `z`-ordering, relative
   placements, and a popup rendering its *own* inline images are future work.
 - Two panes that both use Unicode-placeholder mode with the same raw image id
