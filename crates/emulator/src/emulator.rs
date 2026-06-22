@@ -23,6 +23,12 @@ impl Emulator {
         self.parser.advance(&mut self.screen, bytes);
     }
 
+    /// Relay the text-area pixel size from the client's terminal to the screen
+    /// (for graphics scaling + `CSI` size-report answers).
+    pub fn set_pixel_area(&mut self, w: u16, h: u16) {
+        self.screen.set_pixel_area(w, h);
+    }
+
     pub fn resize(&mut self, rows: u16, cols: u16) {
         let rows = rows.max(1);
         let cols = cols.max(1);

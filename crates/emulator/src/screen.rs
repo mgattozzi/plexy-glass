@@ -79,6 +79,11 @@ pub struct Screen {
     /// `None` when no `D` has been received, or when the last `D` carried no
     /// parseable exit payload. Survives eviction and clears; reset by RIS.
     pub last_block_exit: Option<i32>,
+    /// Text-area size in pixels, relayed from the attached client's terminal
+    /// (`0` = unknown). Used to derive the cell pixel size for graphics scaling
+    /// and to answer `CSI 14/16/18t` size reports.
+    pub area_px_w: u16,
+    pub area_px_h: u16,
 }
 
 impl Screen {
@@ -105,6 +110,29 @@ impl Screen {
             color_scheme_dark: true,
             blocks_completed: 0,
             last_block_exit: None,
+            area_px_w: 0,
+            area_px_h: 0,
+        }
+    }
+
+    /// Set the text-area pixel size relayed from the client's terminal.
+    pub fn set_pixel_area(&mut self, w: u16, h: u16) {
+        self.area_px_w = w;
+        self.area_px_h = h;
+    }
+
+    /// Cell size in pixels `(width, height)`, derived from the text-area pixel
+    /// size ÷ the current rows/cols. Falls back to a 10×20 default when the area
+    /// is unknown so pixel-aware children always get a usable answer.
+    pub fn cell_pixels(&self) -> (u16, u16) {
+        const DEFAULT_CELL_W: u16 = 10;
+        const DEFAULT_CELL_H: u16 = 20;
+        let cols = self.cols().max(1);
+        let rows = self.rows().max(1);
+        if self.area_px_w == 0 || self.area_px_h == 0 {
+            (DEFAULT_CELL_W, DEFAULT_CELL_H)
+        } else {
+            (self.area_px_w / cols, self.area_px_h / rows)
         }
     }
 
@@ -518,6 +546,45 @@ impl Screen {
                     self.replies.push(reply.into_bytes());
                 } else {
                     tracing::trace!(?intermediates, "unhandled CSI q");
+                }
+            }
+            't' => {
+                // Window-manipulation REPORTS only. We never honor child-driven
+                // window resize/move/title ops (1..13, 20..24), since we are a
+                // multiplexer. Size reports let pixel-aware children (image
+                // viewers) scale to our real cell size, and cell size is derived
+                // from the client-relayed pixel area (or a 10×20 fallback).
+                let (cell_w, cell_h) = self.cell_pixels();
+                let rows = self.rows();
+                let cols = self.cols();
+                match first.unwrap_or(0) {
+                    14 => {
+                        // Text area size in pixels → CSI 4 ; height ; width t
+                        let h = cell_h.saturating_mul(rows);
+                        let w = cell_w.saturating_mul(cols);
+                        self.replies.push(format!("\x1b[4;{h};{w}t").into_bytes());
+                    }
+                    15 => {
+                        // Screen size in pixels → CSI 5 ; height ; width t
+                        let h = cell_h.saturating_mul(rows);
+                        let w = cell_w.saturating_mul(cols);
+                        self.replies.push(format!("\x1b[5;{h};{w}t").into_bytes());
+                    }
+                    16 => {
+                        // Cell size in pixels -> CSI 6 ; height ; width t
+                        self.replies.push(format!("\x1b[6;{cell_h};{cell_w}t").into_bytes());
+                    }
+                    18 => {
+                        // Text area size in chars → CSI 8 ; rows ; cols t
+                        self.replies.push(format!("\x1b[8;{rows};{cols}t").into_bytes());
+                    }
+                    19 => {
+                        // Screen size in chars → CSI 9 ; rows ; cols t
+                        self.replies.push(format!("\x1b[9;{rows};{cols}t").into_bytes());
+                    }
+                    other => {
+                        tracing::trace!(op = other, "ignored window-manipulation op");
+                    }
                 }
             }
             'p' => {
@@ -1137,6 +1204,49 @@ mod tests {
             .filter(|c| !c.is_wide_spacer())
             .map(|c| c.grapheme.as_str())
             .collect::<String>()
+    }
+
+    #[test]
+    fn csi_16t_reports_cell_pixels_from_area() {
+        // 1600x960 area over 80x24 cells → 20x40 px cells.
+        let mut e = crate::Emulator::new(24, 80);
+        e.set_pixel_area(1600, 960);
+        e.advance(b"\x1b[16t");
+        // CSI 6 ; height ; width t
+        assert_eq!(e.take_replies(), vec![b"\x1b[6;40;20t".to_vec()]);
+    }
+
+    #[test]
+    fn csi_16t_falls_back_to_default_cell_when_area_unknown() {
+        let mut e = crate::Emulator::new(24, 80); // no set_pixel_area
+        e.advance(b"\x1b[16t");
+        assert_eq!(e.take_replies(), vec![b"\x1b[6;20;10t".to_vec()], "fallback 10x20");
+    }
+
+    #[test]
+    fn csi_14t_reports_text_area_pixels() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.set_pixel_area(1600, 960);
+        e.advance(b"\x1b[14t");
+        // CSI 4 ; height ; width t: height = 40*24 = 960, width = 20*80 = 1600.
+        assert_eq!(e.take_replies(), vec![b"\x1b[4;960;1600t".to_vec()]);
+    }
+
+    #[test]
+    fn csi_18t_reports_text_area_chars() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b[18t");
+        assert_eq!(e.take_replies(), vec![b"\x1b[8;24;80t".to_vec()]);
+    }
+
+    #[test]
+    fn csi_t_window_ops_are_ignored() {
+        // A child asking to RESIZE the window (CSI 8 ; rows ; cols t) or move it
+        // must produce no reply (we're a multiplexer).
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b[8;40;100t"); // resize request
+        e.advance(b"\x1b[3;0;0t"); // move window
+        assert!(e.take_replies().is_empty(), "window-manipulation ops are ignored");
     }
 
     #[test]
