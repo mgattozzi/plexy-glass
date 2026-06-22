@@ -551,6 +551,80 @@ pub fn unfold_all(screen: &mut Screen) {
     }
 }
 
+/// A fold-aware projection between the **unified** line space (scrollback ++
+/// active) and the **visible** line space (unified minus folded blocks' output
+/// ranges). Built once per frame; every viewport consumer maps through it so a
+/// folded block occupies zero display rows everywhere. O(#folds) per query.
+#[derive(Debug, Clone, Default)]
+pub struct FoldProjection {
+    /// Hidden output ranges (inclusive), sorted and disjoint.
+    hidden: Vec<(u32, u32)>,
+    total: u32,
+}
+
+impl FoldProjection {
+    /// Build from a screen's folded prompt rows.
+    pub fn build(screen: &Screen) -> Self {
+        let total = total_lines(screen);
+        let mut hidden: Vec<(u32, u32)> = all_prompt_lines(screen)
+            .into_iter()
+            .filter(|&p| row_at(screen, p).is_some_and(|r| r.mark.is_folded()))
+            .filter_map(|p| foldable_output(screen, p))
+            .collect();
+        hidden.sort_unstable();
+        // Blocks are disjoint, so ranges shouldn't overlap, but we coalesce
+        // defensively anyway.
+        let mut merged: Vec<(u32, u32)> = Vec::with_capacity(hidden.len());
+        for (s, e) in hidden {
+            match merged.last_mut() {
+                Some((_, pe)) if s <= pe.saturating_add(1) => *pe = (*pe).max(e),
+                _ => merged.push((s, e)),
+            }
+        }
+        Self { hidden: merged, total }
+    }
+
+    /// True when nothing is folded (callers can take the cheap 1:1 path).
+    pub fn is_identity(&self) -> bool {
+        self.hidden.is_empty()
+    }
+
+    /// Count of visible unified lines (`total − Σ hidden`).
+    pub fn visible_total(&self) -> u32 {
+        let hidden: u32 = self.hidden.iter().map(|&(s, e)| e - s + 1).sum();
+        self.total.saturating_sub(hidden)
+    }
+
+    /// The unified line shown at visible position `visible_idx`, clamped to the
+    /// last line when `visible_idx` is past the end.
+    pub fn to_unified(&self, visible_idx: u32) -> u32 {
+        let mut u = visible_idx;
+        for &(s, e) in &self.hidden {
+            if s <= u {
+                u += e - s + 1;
+            } else {
+                break;
+            }
+        }
+        if self.total == 0 { 0 } else { u.min(self.total - 1) }
+    }
+
+    /// The visible index of `unified`, or `None` when it falls inside a fold.
+    pub fn from_unified(&self, unified: u32) -> Option<u32> {
+        let mut vis = unified;
+        for &(s, e) in &self.hidden {
+            if e < unified {
+                vis -= e - s + 1;
+            } else if s <= unified {
+                return None; // hidden inside a fold
+            } else {
+                break;
+            }
+        }
+        Some(vis)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1417,5 +1491,63 @@ mod tests {
         assert_eq!(foldable_output(&s, 0), None);
         set_block_folded(&mut s, 0, true);
         assert!(!row_at(&s, 0).unwrap().mark.is_folded(), "nothing to fold");
+    }
+
+    #[test]
+    fn fold_projection_identity_when_nothing_folded() {
+        let s = two_blocks();
+        let p = FoldProjection::build(&s);
+        assert!(p.is_identity());
+        assert_eq!(p.visible_total(), total_lines(&s));
+        for i in 0..total_lines(&s) {
+            assert_eq!(p.to_unified(i), i);
+            assert_eq!(p.from_unified(i), Some(i));
+        }
+    }
+
+    #[test]
+    fn fold_projection_skips_a_folded_output_range() {
+        // Fold block 0 (output rows 1..=2 hidden); total 8 → 6 visible: 0,3,4,5,6,7.
+        let mut s = two_blocks();
+        set_block_folded(&mut s, 0, true);
+        let p = FoldProjection::build(&s);
+        assert!(!p.is_identity());
+        assert_eq!(p.visible_total(), 6);
+        // Command row stays; output hidden; next prompt follows directly.
+        assert_eq!(p.to_unified(0), 0, "command row visible");
+        assert_eq!(p.to_unified(1), 3, "output 1,2 skipped → next prompt");
+        assert_eq!(p.to_unified(2), 4);
+        // Hidden lines map to None; visible lines round-trip.
+        assert_eq!(p.from_unified(0), Some(0));
+        assert_eq!(p.from_unified(1), None, "inside the fold");
+        assert_eq!(p.from_unified(2), None);
+        assert_eq!(p.from_unified(3), Some(1));
+        assert_eq!(p.from_unified(4), Some(2));
+    }
+
+    #[test]
+    fn fold_projection_accumulates_multiple_folds() {
+        // 4 single-output blocks across 8 lines:
+        //   0:A 1:C  2:A 3:C  4:A 5:C  6:A 7:C(running)
+        let mut s = screen_from(
+            8,
+            20,
+            b"\x1b]133;A\x07$a\r\n\x1b]133;C\x07o\r\n\
+              \x1b]133;A\x07$b\r\n\x1b]133;C\x07o\r\n\
+              \x1b]133;A\x07$c\r\n\x1b]133;C\x07o\r\n\
+              \x1b]133;A\x07$d\r\n\x1b]133;C\x07o",
+        );
+        // Fold blocks at prompts 0 and 2 (each hides one output row: 1 and 3).
+        set_block_folded(&mut s, 0, true);
+        set_block_folded(&mut s, 2, true);
+        let p = FoldProjection::build(&s);
+        assert_eq!(p.visible_total(), 6, "8 − 2 hidden rows");
+        // Visible unified sequence: 0,2,4,5,6,7.
+        assert_eq!(p.to_unified(0), 0);
+        assert_eq!(p.to_unified(1), 2);
+        assert_eq!(p.to_unified(2), 4);
+        assert_eq!(p.from_unified(1), None);
+        assert_eq!(p.from_unified(3), None);
+        assert_eq!(p.from_unified(4), Some(2));
     }
 }
