@@ -327,7 +327,33 @@ implementation; user-facing docs (README / the configuration reference) are
 updated as part of each feature, per **User documentation**. Workflows
 (`Workflow` tool) drive the review fan-outs.
 
-Not yet built (future work): none currently tracked.
+Inline graphics (shipped — `docs/inline-graphics.md`, design
+`docs/superpowers/specs/2026-06-22-inline-graphics-design.md`, five phased
+plans P1–P5 all on `main`, each adversarially reviewed): images render **inside
+panes** across all three terminal graphics protocols — **Kitty** (APC), **Sixel**
+(DCS), and **iTerm2** (`OSC 1337`) — through one unified model. Capture: an APC
+pre-scan ahead of `vte` (Kitty), `Screen::handle_sixel`/`handle_iterm` (DCS/OSC,
+DCS cap raised to 4 MiB), `graphics.rs` owns the model (`Image{protocol,…}`,
+`Placement`/`VirtualPlacement`, `ImageStore` 64 MiB LRU, dim readers for
+PNG/JPEG/Sixel-raster). Cell-size relay (client `TIOCGWINSZ` → daemon PTY +
+`CSI 14/16/18t`) so children scale to real cells; forced `r/c` cell box makes
+the footprint client-independent. Compositor resolves placements to host rects,
+**clips to the visible sub-rectangle with a Kitty source crop**, follows
+copy/block-mode viewports, suppresses under modal overlays/popups and alt-screen.
+Per-client `DiffRenderer` dispatches by `(protocol, negotiated caps)`: Kitty =
+transmit-once + place-by-id + per-frame placement diff (scroll-follow, delete);
+Sixel/iTerm2 = re-emit data at the host cell (ordered `render_overlay_placements`
+— repaint stale, draw boxes, emit data last, re-emitting on overlap/underlying-
+cell change so no hole/clobber); a protocol the client can't render → a labelled
+**placeholder box**; Kitty **Unicode-placeholder (virtual) placements** (`U=1`)
+ride the text grid. Per-client graphics negotiation (Kitty query, Sixel DA1,
+iTerm2 `TERM_PROGRAM` fingerprint; protocol v10 `GraphicsCaps` in `ClientHello`).
+Not transcoded across protocols; native Kitty animation (`a=f`/`a=a`) and
+explicit `z`-ordering are the only deferred pieces (re-transmit-per-frame
+animation works via the `Image::generation` bump).
+
+Not yet built (future work): native Kitty animation protocol + `z`-ordering
+(deferred from the inline-graphics P4 spec, with rationale).
 (Silence monitoring + bell/activity alert messages shipped with the 2026-06-12
 alerts feature; "push notifications on run completion" is cleared by
 monitor-command + the `run` CLI's synchronous exit code — a detached `run`
