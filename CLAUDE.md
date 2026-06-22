@@ -354,8 +354,26 @@ Not transcoded across protocols; native Kitty animation (`a=f`/`a=a`) and
 explicit `z`-ordering are the only deferred pieces (re-transmit-per-frame
 animation works via the `Image::generation` bump).
 
+Command-block **folding** (shipped — `docs/command-blocks.md`, spec/plan
+`docs/superpowers/{specs,plans}/2026-06-22-block-folding*`): collapse a completed
+block's output from block mode (`Tab` toggles the selected block, `Z` folds all
+completed, `O` unfolds all); the command line + a dim right-aligned `▸ N lines
+✓/✗` summary stay. Fold state is a runtime `RowMark::FOLDED` bit on the prompt
+row (rides reflow via the mark merge + eviction; excluded from the persist DTO —
+runtime-only). A `blocks::FoldProjection` maps unified↔visible line space
+(visible = unified minus folded output ranges); the compositor's per-pane
+`FoldCtx` routes the content copy, per-row block-status border
+(`block_status_at`), inline-image hiding, and the live cursor through it,
+**bottom-anchored** (prompt stays at the bottom, history fills in at the top) and
+translating the daemon's unified `scroll_offset` via `visible_at_or_below`. Copy
+mode and block mode render **expanded** (folds apply on return to the live view);
+scrolled-back nav over folds is best-effort (documented). Block-mode keys →
+`BlockModeAction::{ToggleFold,FoldAll,UnfoldAll}` → daemon `with_screen_mut` +
+`blocks::{toggle_block_fold,fold_all_completed,unfold_all}`.
+
 Not yet built (future work): native Kitty animation protocol + `z`-ordering
-(deferred from the inline-graphics P4 spec, with rationale).
+(deferred from the inline-graphics P4 spec, with rationale); fold-aware daemon
+prev/next-prompt + wheel for exact prompt-jump-to-top under folds.
 (Silence monitoring + bell/activity alert messages shipped with the 2026-06-12
 alerts feature; "push notifications on run completion" is cleared by
 monitor-command + the `run` CLI's synchronous exit code — a detached `run`
