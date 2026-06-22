@@ -90,16 +90,6 @@ impl DiffRenderer {
         self.graphics = caps;
     }
 
-    /// Whether this client's terminal can render an image of the given protocol.
-    fn can_emit(&self, protocol: plexy_glass_emulator::ImageProtocol) -> bool {
-        use plexy_glass_emulator::ImageProtocol::*;
-        match protocol {
-            Kitty => self.graphics.kitty,
-            Sixel => self.graphics.sixel,
-            Iterm2 => self.graphics.iterm2,
-        }
-    }
-
     /// Forcibly invalidate the cached frame so the next render is a full repaint,
     /// and (for a session switch / re-point) delete all terminal images first.
     pub fn invalidate(&mut self) {
@@ -210,8 +200,7 @@ impl DiffRenderer {
         // owns a disjoint set of placement keys, so their diff maps never overlap.
         self.render_kitty_placements(&mut out, current);
         self.render_virtual_placements(&mut out, current);
-        self.render_data_placements(&mut out, current);
-        self.render_placeholder_boxes(&mut out, current);
+        self.render_overlay_placements(&mut out, current);
 
         // Cursor.
         if current.cursor_visible {
@@ -297,60 +286,91 @@ impl DiffRenderer {
         }
     }
 
-    /// Placeholder fallback for a client whose terminal can't render the
-    /// placement's protocol: draw a labelled box of the image's footprint.
+    /// Overlay placements that paint into cells (not by-id): the placeholder box
+    /// (for a placement whose protocol this client can't render) and Sixel/iTerm2
+    /// data images. Both are renderer-injected output, NOT cells in the
+    /// `VirtualScreen` grid the cell diff tracks, so the cell diff or one pass's
+    /// repaint can clobber the other. To stay correct, do it in strict order:
     ///
-    /// The box is renderer-injected glyphs written only to the output stream, not
-    /// into the `VirtualScreen` grid the cell diff tracks, so the cell diff can
-    /// repaint a cell under a box (punching a hole) and a vanished box's repaint
-    /// can clobber an overlapping survivor. To stay correct without grid-level
-    /// bookkeeping: first repaint every stale region (vanished boxes + the old
-    /// rect of any box whose footprint changed), then redraw ALL current boxes
-    /// last so nothing is left clobbered or holed. ponytail: redraws every box
-    /// each frame, which is cheap (non-graphics clients with images are rare and
-    /// boxes are small); a grid-backed box would avoid it but isn't worth the cost.
-    fn render_placeholder_boxes(&mut self, out: &mut String, current: &VirtualScreen) {
-        // Boxes are for placements this client CAN'T render in their protocol.
-        let mut seen: HashSet<u64> = HashSet::new();
-        for p in &current.placements {
-            if !self.can_emit(p.protocol) {
-                seen.insert(p.key);
+    ///   1. repaint every stale region (vanished/moved boxes AND data images),
+    ///      collecting the repainted rects,
+    ///   2. draw ALL current boxes (cheap, every frame),
+    ///   3. (re)emit data images, re-emitting when new, when the rect changed,
+    ///      when the footprint overlaps a region repainted in step 1, or when an
+    ///      underlying cell changed this frame (so an in-place redraw like a
+    ///      status line, prompt, or spinner can't leave a hole).
+    ///
+    /// Data emit runs last so no later repaint can clobber the (expensive) image
+    /// bytes; boxes redraw every frame so they're never holed.
+    fn render_overlay_placements(&mut self, out: &mut String, current: &VirtualScreen) {
+        use plexy_glass_emulator::ImageProtocol;
+        let caps = self.graphics; // Copy, so the closures don't borrow self
+        let is_box = move |p: &VisiblePlacement| match p.protocol {
+            ImageProtocol::Kitty => !caps.kitty,
+            ImageProtocol::Sixel => !caps.sixel,
+            ImageProtocol::Iterm2 => !caps.iterm2,
+        };
+        let is_data = move |p: &VisiblePlacement| match p.protocol {
+            ImageProtocol::Sixel => caps.sixel,
+            ImageProtocol::Iterm2 => caps.iterm2,
+            ImageProtocol::Kitty => false,
+        };
+        let rect_of = |p: &VisiblePlacement| PlacedRect {
+            host_row: p.host_row,
+            host_col: p.host_col,
+            image_id: p.image_id,
+            placement_id: p.placement_id,
+            src_x: p.src_x,
+            src_y: p.src_y,
+            src_w: p.src_w,
+            src_h: p.src_h,
+            rows: p.rows,
+            cols: p.cols,
+        };
+
+        // ── Step 1: repaint stale regions (box + data), recording the rects. ──
+        let mut repainted: Vec<PlacedRect> = Vec::new();
+        let box_seen: HashSet<u64> = current.placements.iter().filter(|p| is_box(p)).map(|p| p.key).collect();
+        let data_seen: HashSet<u64> = current.placements.iter().filter(|p| is_data(p)).map(|p| p.key).collect();
+        for (k, prev) in self.boxed.iter().chain(self.placed_data.iter()) {
+            let live = current.placements.iter().find(|p| p.key == *k);
+            let stale = match live {
+                None => true,
+                Some(p) => (prev.host_row, prev.host_col, prev.rows, prev.cols)
+                    != (p.host_row, p.host_col, p.rows, p.cols),
+            };
+            if stale {
+                repainted.push(*prev);
             }
         }
-        // 1. Repaint stale regions: vanished boxes, and the OLD rect of any box
-        //    whose footprint moved/changed this frame.
-        let mut stale: Vec<PlacedRect> = Vec::new();
-        for (k, prev) in &self.boxed {
-            let still = current.placements.iter().find(|p| p.key == *k && !self.can_emit(p.protocol));
-            match still {
-                None => stale.push(*prev),
-                Some(p) if (prev.host_row, prev.host_col, prev.rows, prev.cols)
-                    != (p.host_row, p.host_col, p.rows, p.cols) => stale.push(*prev),
-                Some(_) => {}
-            }
-        }
-        for rect in stale {
+        for rect in &repainted {
             paint_cells_rect(out, current, rect.host_row, rect.host_col, rect.rows, rect.cols);
         }
-        self.boxed.retain(|k, _| seen.contains(k));
-        // 2. Draw every current box last (over any just-repainted region).
-        for p in &current.placements {
-            if self.can_emit(p.protocol) {
+        self.boxed.retain(|k, _| box_seen.contains(k));
+        self.placed_data.retain(|k, _| data_seen.contains(k));
+
+        // ── Step 2: draw every current box (over any just-repainted region). ──
+        for p in current.placements.iter().filter(|p| is_box(p)) {
+            emit_placeholder_box(out, p);
+            self.boxed.insert(p.key, rect_of(p));
+        }
+
+        // ── Step 3: (re)emit data images last. ──
+        let prev = self.previous.as_ref();
+        for p in current.placements.iter().filter(|p| is_data(p)) {
+            if p.data_b64.is_empty() {
                 continue;
             }
-            emit_placeholder_box(out, p);
-            self.boxed.insert(p.key, PlacedRect {
-                host_row: p.host_row,
-                host_col: p.host_col,
-                image_id: p.image_id,
-                placement_id: p.placement_id,
-                src_x: p.src_x,
-                src_y: p.src_y,
-                src_w: p.src_w,
-                src_h: p.src_h,
-                rows: p.rows,
-                cols: p.cols,
-            });
+            let rect = rect_of(p);
+            let disturbed = self.placed_data.get(&p.key) != Some(&rect)
+                || repainted.iter().any(|r| rects_overlap(r, &rect))
+                || footprint_cells_changed(prev, current, &rect);
+            if disturbed {
+                let _ = write!(out, "\x1b7\x1b[{};{}H", p.host_row + 1, p.host_col + 1);
+                emit_data_image(out, p);
+                out.push_str("\x1b8");
+            }
+            self.placed_data.insert(p.key, rect);
         }
     }
 
@@ -399,70 +419,30 @@ impl DiffRenderer {
         }
     }
 
-    /// Sixel / iTerm2 placements for a client that supports the protocol. These
-    /// have no place-by-reference model, so the whole image data is re-emitted at
-    /// the host cell; on move/vanish the old rect is repainted from the grid (the
-    /// same diff shape as the placeholder box). The cursor is saved/restored
-    /// around each emit so the image draw can't drift our cursor. ponytail: these
-    /// protocols can't crop, so a clipped image is emitted at its visible
-    /// top-left and the terminal clips at the screen edge, best-effort, as the
-    /// design intends; Kitty is the precise path.
-    fn render_data_placements(&mut self, out: &mut String, current: &VirtualScreen) {
-        use plexy_glass_emulator::ImageProtocol;
-        let caps = self.graphics; // Copy, so the closure doesn't borrow self
-        let emittable = move |p: &VisiblePlacement| match p.protocol {
-            ImageProtocol::Sixel => caps.sixel,
-            ImageProtocol::Iterm2 => caps.iterm2,
-            ImageProtocol::Kitty => false,
-        };
-        let mut seen: HashSet<u64> = HashSet::new();
-        for p in &current.placements {
-            if emittable(p) {
-                seen.insert(p.key);
-            }
-        }
-        // Repaint stale regions (vanished or moved/changed) before drawing.
-        let mut stale: Vec<PlacedRect> = Vec::new();
-        for (k, prev) in &self.placed_data {
-            let still = current.placements.iter().find(|p| p.key == *k && emittable(p));
-            match still {
-                None => stale.push(*prev),
-                Some(p) if (prev.host_row, prev.host_col, prev.rows, prev.cols)
-                    != (p.host_row, p.host_col, p.rows, p.cols) => stale.push(*prev),
-                Some(_) => {}
-            }
-        }
-        for rect in stale {
-            paint_cells_rect(out, current, rect.host_row, rect.host_col, rect.rows, rect.cols);
-        }
-        self.placed_data.retain(|k, _| seen.contains(k));
-        // (Re)emit only when new or the rect changed (a changed rect was already
-        // repainted above). An unchanged data image stays on screen, so we don't
-        // re-send the (large) payload every frame.
-        for p in &current.placements {
-            if !emittable(p) || p.data_b64.is_empty() {
-                continue;
-            }
-            let rect = PlacedRect {
-                host_row: p.host_row,
-                host_col: p.host_col,
-                image_id: p.image_id,
-                placement_id: p.placement_id,
-                src_x: p.src_x,
-                src_y: p.src_y,
-                src_w: p.src_w,
-                src_h: p.src_h,
-                rows: p.rows,
-                cols: p.cols,
-            };
-            if self.placed_data.get(&p.key) != Some(&rect) {
-                let _ = write!(out, "\x1b7\x1b[{};{}H", p.host_row + 1, p.host_col + 1);
-                emit_data_image(out, p);
-                out.push_str("\x1b8");
-                self.placed_data.insert(p.key, rect);
+}
+
+/// Do two cell rectangles overlap?
+fn rects_overlap(a: &PlacedRect, b: &PlacedRect) -> bool {
+    a.host_row < b.host_row.saturating_add(b.rows)
+        && b.host_row < a.host_row.saturating_add(a.rows)
+        && a.host_col < b.host_col.saturating_add(b.cols)
+        && b.host_col < a.host_col.saturating_add(a.cols)
+}
+
+/// Did any cell within `rect`'s footprint change between the previous frame and
+/// `current`? We use this to redraw a data image when an in-place redraw (status
+/// line, prompt, spinner) repainted a cell under it. A `None` previous is treated
+/// as changed (first frame; handled as a fresh emit anyway).
+fn footprint_cells_changed(prev: Option<&VirtualScreen>, current: &VirtualScreen, rect: &PlacedRect) -> bool {
+    let Some(prev) = prev else { return true };
+    for r in rect.host_row..rect.host_row.saturating_add(rect.rows) {
+        for c in rect.host_col..rect.host_col.saturating_add(rect.cols) {
+            if prev.cell(r, c) != current.cell(r, c) {
+                return true;
             }
         }
     }
+    false
 }
 
 /// Emit a Sixel or iTerm2 image's wire bytes (the cursor is already positioned
@@ -1313,6 +1293,53 @@ mod tests {
         assert!(s.contains("\x1bP0q"), "re-emits sixel at the new position: {s:?}");
     }
 
+    #[test]
+    fn sixel_redrawn_over_changed_underlying_cell() {
+        // Hole-punch regression: an in-place redraw under the image (status line,
+        // spinner) repaints a cell, so the sixel must be re-emitted to cover it.
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(sixel_caps());
+        render_str(&mut d, &frame_with(vec![sixel_vp(1, 2, 3)]));
+        let mut f2 = frame_with(vec![sixel_vp(1, 2, 3)]);
+        f2.put(2, 3, Cell { grapheme: SmolStr::new("X"), ..Cell::default() }); // under the sixel
+        let s = render_str(&mut d, &f2);
+        assert!(s.contains("\x1bP0q"), "sixel re-emitted over the changed cell (no hole): {s:?}");
+    }
+
+    #[test]
+    fn sixel_vanish_repaints_old_rect() {
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(sixel_caps());
+        render_str(&mut d, &frame_with(vec![sixel_vp(1, 2, 3)]));
+        let s = render_str(&mut d, &frame_with(vec![]));
+        assert!(s.contains("\x1b[3;4H"), "repaints the vacated sixel rect: {s:?}");
+        assert!(!s.contains("\x1bP0q"), "vanished sixel not re-emitted: {s:?}");
+    }
+
+    #[test]
+    fn vanishing_box_does_not_clobber_overlapping_sixel() {
+        // Cross-pass regression: on a sixel-only client a Kitty placement is
+        // boxed and a Sixel is a real image; when the overlapping box vanishes,
+        // its repaint must not erase the surviving sixel, so it re-emits.
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(sixel_caps()); // sixel yes, kitty no
+        let sixel = sixel_vp(1, 2, 3);
+        let kitty = vp(2, 9, 1, 2, 3); // Kitty proto → boxed here, overlaps the sixel
+        render_str(&mut d, &frame_with(vec![sixel.clone(), kitty]));
+        let s = render_str(&mut d, &frame_with(vec![sixel])); // box vanishes
+        assert!(s.contains("\x1bP0q"), "overlapping sixel re-emitted after the box vanished: {s:?}");
+    }
+
+    #[test]
+    fn sixel_reestablished_after_invalidate() {
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(sixel_caps());
+        render_str(&mut d, &frame_with(vec![sixel_vp(1, 2, 3)]));
+        d.invalidate(); // reattach / session switch
+        let s = render_str(&mut d, &frame_with(vec![sixel_vp(1, 2, 3)]));
+        assert!(s.contains("\x1bP0q"), "sixel re-emitted after invalidate: {s:?}");
+    }
+
     // ── iTerm2 data placements ─────────────────────────────────────────────────
 
     fn iterm_vp(key: u64, host_row: u16, host_col: u16) -> VisiblePlacement {
@@ -1339,6 +1366,31 @@ mod tests {
         let s = render_str(&mut d, &frame_with(vec![iterm_vp(1, 2, 3)]));
         assert!(s.contains('┌'), "iterm2 boxed on a kitty-only client: {s:?}");
         assert!(!s.contains("1337"), "no iterm2 bytes: {s:?}");
+    }
+
+    #[test]
+    fn mixed_protocol_frame_each_in_its_own_protocol() {
+        // An all-capable client renders each placement in its native protocol:
+        // no boxes, no cross-pass interference (non-overlapping footprints).
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(GraphicsCaps { kitty: true, sixel: true, iterm2: true });
+        let mut v = VirtualScreen::blank(10, 20);
+        v.placements = vec![vp(1, 7, 1, 0, 0), sixel_vp(2, 3, 0), iterm_vp(3, 6, 0)];
+        let s = render_str(&mut d, &v);
+        assert!(s.contains("a=t") && s.contains("a=p,i=7"), "kitty emitted: {s:?}");
+        assert!(s.contains("\x1bP0q"), "sixel emitted: {s:?}");
+        assert!(s.contains("\x1b]1337;File="), "iterm2 emitted: {s:?}");
+        assert!(!s.contains('┌'), "no box for any supported protocol: {s:?}");
+    }
+
+    #[test]
+    fn all_protocols_boxed_for_a_no_graphics_client() {
+        let mut d = DiffRenderer::new(); // caps all-off
+        let mut v = VirtualScreen::blank(10, 20);
+        v.placements = vec![vp(1, 7, 1, 0, 0), sixel_vp(2, 3, 0), iterm_vp(3, 6, 0)];
+        let s = render_str(&mut d, &v);
+        assert!(!s.contains("\x1b_G") && !s.contains("\x1bP0q") && !s.contains("1337"), "no graphics: {s:?}");
+        assert_eq!(s.matches('┌').count(), 3, "all three placements boxed: {s:?}");
     }
 
     #[test]

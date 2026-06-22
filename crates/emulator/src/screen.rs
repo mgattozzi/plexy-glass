@@ -1766,6 +1766,26 @@ mod tests {
     }
 
     #[test]
+    fn iterm2_empty_or_malformed_params_ignored() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b]1337\x07"); // bare 1337, no File=
+        e.advance(b"\x1b]1337;File=\x07"); // File= but no `:data`
+        e.advance(b"\x1b]1337;Foo=bar\x07"); // not a File=
+        assert!(e.screen().images.is_empty(), "malformed/empty 1337 captures nothing");
+    }
+
+    #[test]
+    fn sixel_without_raster_attrs_uses_fallback_dims() {
+        let mut e = crate::Emulator::new(24, 80);
+        // No `"` raster: 3 data columns on one band → 3×6 px → 1×1 cell.
+        e.advance(b"\x1bPq#0;2;0;0;0~~~\x1b\\");
+        let s = e.screen();
+        assert_eq!(s.images.len(), 1);
+        assert_eq!(s.placements.len(), 1, "captured via the fallback scan");
+        assert_eq!(s.placements[0].protocol, ImageProtocol::Sixel);
+    }
+
+    #[test]
     fn dcs_queries_are_not_captured_as_sixel() {
         let mut e = crate::Emulator::new(24, 80);
         e.advance(b"\x1bP$qm\x1b\\"); // DECRQSS

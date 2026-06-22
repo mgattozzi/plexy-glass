@@ -233,7 +233,11 @@ pub fn sixel_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
         let mut cur: Option<u32> = None;
         for &b in &payload[pos + 1..] {
             match b {
-                b'0'..=b'9' => cur = Some(cur.unwrap_or(0) * 10 + u32::from(b - b'0')),
+                // saturating: the payload is child-controlled, so a pathological
+                // run of digits must not overflow-panic.
+                b'0'..=b'9' => {
+                    cur = Some(cur.unwrap_or(0).saturating_mul(10).saturating_add(u32::from(b - b'0')))
+                }
                 b';' => {
                     if idx < 4 {
                         nums[idx] = cur.take().unwrap_or(0);
@@ -264,15 +268,15 @@ pub fn sixel_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
     while i < payload.len() {
         match payload[i] {
             b'!' => {
-                // Repeat count, then one data byte.
+                // Repeat count, then one data byte. Saturating since the count is child-controlled.
                 let mut n: u32 = 0;
                 i += 1;
                 while i < payload.len() && payload[i].is_ascii_digit() {
-                    n = n * 10 + u32::from(payload[i] - b'0');
+                    n = n.saturating_mul(10).saturating_add(u32::from(payload[i] - b'0'));
                     i += 1;
                 }
                 if i < payload.len() && (0x3f..=0x7e).contains(&payload[i]) {
-                    x += n.max(1);
+                    x = x.saturating_add(n.max(1));
                     saw_data = true;
                     i += 1;
                 }
@@ -281,7 +285,7 @@ pub fn sixel_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
             }
             b'$' => x = 0,
             b'-' => {
-                bands += 1;
+                bands = bands.saturating_add(1);
                 x = 0;
             }
             b'#' | b'"' => {
@@ -293,7 +297,7 @@ pub fn sixel_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
                 continue;
             }
             0x3f..=0x7e => {
-                x += 1;
+                x = x.saturating_add(1);
                 saw_data = true;
                 max_x = max_x.max(x);
             }
@@ -302,7 +306,7 @@ pub fn sixel_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
         i += 1;
     }
     if saw_data && max_x > 0 {
-        Some((max_x, bands * 6))
+        Some((max_x, bands.saturating_mul(6)))
     } else {
         None
     }
@@ -350,12 +354,17 @@ pub fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         return None; // not a JPEG (no SOI)
     }
     let mut i = 2;
-    while i + 9 < bytes.len() {
+    while i + 8 < bytes.len() {
         if bytes[i] != 0xFF {
             i += 1;
             continue;
         }
         let marker = bytes[i + 1];
+        // 0xFF fill bytes (and 0xFF00 stuffing) before a marker: skip one byte.
+        if marker == 0xFF || marker == 0x00 {
+            i += 1;
+            continue;
+        }
         // SOF markers carry the frame's height/width.
         if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
             let h = u32::from(u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]));
@@ -367,9 +376,10 @@ pub fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
             i += 2;
             continue;
         }
-        // Otherwise a length-prefixed segment: skip it.
+        // Otherwise a length-prefixed segment: skip it. A zero/short length would
+        // stall, so always advance at least one byte.
         let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
-        i += 2 + len;
+        i += (2 + len).max(1);
     }
     None
 }
@@ -440,6 +450,17 @@ mod tests {
         assert_eq!(sixel_dimensions(b"!5~"), Some((5, 6)));
         // No data at all.
         assert_eq!(sixel_dimensions(b"#0;2;0;0;0"), None);
+    }
+
+    #[test]
+    fn sixel_dimensions_saturates_on_pathological_counts() {
+        // The payload is child-controlled, so huge repeat counts / raster numbers must
+        // not overflow-panic. We just assert these return without panicking.
+        let _ = sixel_dimensions(b"!99999999999999999999~");
+        let _ = sixel_dimensions(b"\"1;1;99999999999999999999;88888888888888888888~~~");
+        let mut many = vec![b'~'; 10];
+        many.splice(0..0, b"!4000000000".iter().copied());
+        let _ = sixel_dimensions(&many);
     }
 
     #[test]
