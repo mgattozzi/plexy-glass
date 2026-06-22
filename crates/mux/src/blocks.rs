@@ -401,6 +401,23 @@ pub fn viewport_block_status(screen: &Screen, top: u32, rows: u16) -> Vec<Option
     result
 }
 
+/// Block exit status for a single unified `line`, the fold-aware analogue of
+/// [`viewport_block_status`], called per *display* row (each mapped through the
+/// fold projection to its unified line). Same attribution rule: a prompt row
+/// takes the status of the block it *starts*.
+pub fn block_status_at(screen: &Screen, line: u32) -> Option<BlockLineStatus> {
+    if screen.alt.is_some() {
+        return None;
+    }
+    let prompt = prompt_at_or_above(screen, line)?;
+    let d = closing_block_end_line(screen, prompt)?;
+    match row_at(screen, d).and_then(|r| r.mark.exit()) {
+        Some(0) => Some(BlockLineStatus::Ok),
+        Some(_) => Some(BlockLineStatus::Failed),
+        None => None, // D without a parseable exit code → unknown
+    }
+}
+
 /// Returns `true` when the pane's active shell is waiting at a prompt and
 /// ready to accept a new command.
 ///
@@ -563,6 +580,12 @@ pub struct FoldProjection {
 }
 
 impl FoldProjection {
+    /// An identity projection over `total` lines (nothing folded), used for panes
+    /// where folds don't apply (copy mode, block mode).
+    pub fn identity(total: u32) -> Self {
+        Self { hidden: Vec::new(), total }
+    }
+
     /// Build from a screen's folded prompt rows.
     pub fn build(screen: &Screen) -> Self {
         let total = total_lines(screen);

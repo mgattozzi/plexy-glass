@@ -2,7 +2,7 @@
 //! and an optional status-bar row.
 
 use crate::{
-    blocks::viewport_block_status,
+    blocks::{self, FoldProjection, block_status_at, viewport_block_status},
     borders::{self, BlockBorderColors},
     pane_id::PaneId,
     rect::Rect,
@@ -10,6 +10,49 @@ use crate::{
     virtual_screen::VirtualScreen,
 };
 use plexy_glass_emulator::{Screen, display_width};
+use std::collections::HashMap;
+
+/// Per-pane fold rendering context, built once per frame: the fold projection
+/// (identity for copy/block-mode panes, where folds don't apply) and the top
+/// **visible** line index for the current scroll position. Display row `r` of a
+/// pane shows unified line `proj.to_unified(top_visible + r)`.
+struct FoldCtx {
+    proj: FoldProjection,
+    top_visible: u32,
+}
+
+impl FoldCtx {
+    /// Build for a pane. Live panes (no copy/block mode) honour folds; the others
+    /// render expanded (folds take visible effect on return to the live view).
+    fn for_view(view: &PaneView<'_>) -> Self {
+        let proj = if view.copy_mode.is_none() && view.block_mode.is_none() {
+            FoldProjection::build(view.screen)
+        } else {
+            FoldProjection::identity(blocks::total_lines(view.screen))
+        };
+        let es = effective_scroll_for(view);
+        let top_visible = proj
+            .visible_total()
+            .saturating_sub(u32::from(view.rect.rows))
+            .saturating_sub(es);
+        Self { proj, top_visible }
+    }
+
+    /// Unified line shown at display row `r`, or `None` when `r` is past the
+    /// pane's visible content (paint blank).
+    fn line_at(&self, r: u16) -> Option<u32> {
+        let v = self.top_visible + u32::from(r);
+        (v < self.proj.visible_total()).then(|| self.proj.to_unified(v))
+    }
+
+    /// Display row of unified `line`, or `None` when it's folded away or outside
+    /// the visible window.
+    fn display_row(&self, line: u32, rows: u16) -> Option<u16> {
+        let v = self.proj.from_unified(line)?;
+        let r = v.checked_sub(self.top_visible)?;
+        (r < u32::from(rows)).then_some(r as u16)
+    }
+}
 
 pub struct PaneView<'a> {
     pub id: PaneId,
@@ -138,51 +181,26 @@ pub fn compose(
         (false, _) => (0, 0),
     };
 
-    // Copy each pane's emulator cells into its rect, mixing in scrollback
-    // when scroll_offset > 0 (or when copy-mode overrides the viewport).
-    // `effective_scroll` is hoisted so the block-status scan (below) uses
-    // the exact same value as the content copy.
+    // Per-pane fold context (projection + visible top), built once and reused by
+    // the content copy, block-status border, inline images, and the cursor so a
+    // folded block occupies zero display rows consistently everywhere.
+    let fold_ctx: HashMap<PaneId, FoldCtx> =
+        panes.iter().map(|v| (v.id, FoldCtx::for_view(v))).collect();
+
+    // Copy each pane's emulator cells into its rect. Display row `r` maps to a
+    // unified line through the pane's fold context (which folds collapsed blocks
+    // for live panes and is identity in copy/block mode).
     for view in panes {
-        let effective_scroll = effective_scroll_for(view);
+        let ctx = &fold_ctx[&view.id];
         let max_r = view.rect.rows;
         let max_c = view.rect.cols.min(view.screen.active.num_cols());
         for r in 0..max_r {
             if view.rect.row.saturating_add(r) >= pane_area_rows {
                 continue;
             }
-            let cells_src: Option<&[plexy_glass_emulator::Cell]> =
-                if effective_scroll > 0 {
-                    let scroll_len = view.screen.scrollback.len() as u32;
-                    let want_from_scrollback = effective_scroll.min(scroll_len);
-                    if (r as u32) < want_from_scrollback {
-                        // This row comes from scrollback.
-                        let sb_idx =
-                            (scroll_len - want_from_scrollback + r as u32) as usize;
-                        // VecDeque::get is O(1); iter().nth(sb_idx) was
-                        // O(sb_idx) per row → O(rows × offset) per frame.
-                        view.screen
-                            .scrollback
-                            .rows()
-                            .get(sb_idx)
-                            .map(|row| row.cells.as_slice())
-                    } else {
-                        // This row comes from the active grid (offset by the
-                        // number of scrollback rows shown above).
-                        let active_r = r - want_from_scrollback as u16;
-                        view.screen
-                            .active
-                            .rows
-                            .get(active_r as usize)
-                            .map(|row| row.cells.as_slice())
-                    }
-                } else {
-                    view.screen
-                        .active
-                        .rows
-                        .get(r as usize)
-                        .map(|row| row.cells.as_slice())
-                };
-            let Some(cells) = cells_src else { continue };
+            let Some(line) = ctx.line_at(r) else { continue };
+            let Some(row) = crate::blocks::row_at(view.screen, line) else { continue };
+            let cells = row.cells.as_slice();
             for c in 0..max_c {
                 if view.rect.col.saturating_add(c) >= host_cols {
                     continue;
@@ -343,13 +361,16 @@ pub fn compose(
         .map(|v| {
             let mut r = v.rect;
             r.row = r.row.saturating_add(pane_row_offset);
-            // Effective viewport top comes from the same source as the content copy,
-            // so block status and the selection bracket agree with the content.
-            let es = effective_scroll_for(v);
-            let sb_len = v.screen.scrollback.len() as u32;
-            let top = sb_len.saturating_sub(es);
-            let block_rows = if blocks.is_some() {
-                viewport_block_status(v.screen, top, v.rect.rows)
+            // Same fold context as the content copy, so block status and the
+            // selection bracket agree with what's painted. `top` is the visible
+            // top (== the old unified top for block-mode/identity panes, where
+            // the bracket is used).
+            let ctx = &fold_ctx[&v.id];
+            let top = ctx.top_visible;
+            let block_rows: Vec<Option<crate::blocks::BlockLineStatus>> = if blocks.is_some() {
+                (0..v.rect.rows)
+                    .map(|r| ctx.line_at(r).and_then(|line| block_status_at(v.screen, line)))
+                    .collect()
             } else {
                 vec![]
             };
@@ -401,10 +422,11 @@ pub fn compose(
             if v.screen.alt.is_some() || v.screen.placements.is_empty() {
                 continue;
             }
-            let es = effective_scroll_for(v);
-            let sb_len = v.screen.scrollback.len() as u32;
-            let top = sb_len.saturating_sub(es);
-            // Pane bottom in absolute viewport rows, also bounded by the logical
+            // Map through the pane's fold context: a folded block's output (and
+            // any image in it) collapses, and the window is in visible space.
+            let ctx = &fold_ctx[&v.id];
+            let top = ctx.top_visible;
+            // Pane bottom in visible viewport rows, also bounded by the logical
             // pane band (so a tall image can't paint over the status bar).
             let band_rows = u32::from(pane_area_rows.saturating_sub(v.rect.row));
             let vis_bottom_local = u32::from(v.rect.rows).min(band_rows);
@@ -412,9 +434,14 @@ pub fn compose(
                 let Some(img) = v.screen.images.get(p.image_id) else {
                     continue; // image evicted, skip
                 };
-                let img_top = p.anchor_line;
-                let img_bot = p.anchor_line + u32::from(p.rows); // exclusive
-                // Vertical visible span, in absolute viewport rows.
+                // The image's top in visible space; `None` when it sits inside a
+                // folded block → hidden. An unfolded block's output is contiguous
+                // and fully visible, so its rows are [img_top, img_top + rows).
+                let Some(img_top) = ctx.proj.from_unified(p.anchor_line) else {
+                    continue;
+                };
+                let img_bot = img_top + u32::from(p.rows); // exclusive
+                // Vertical visible span, in visible viewport rows.
                 let vis_top = img_top.max(top);
                 let vis_bot = img_bot.min(top + vis_bottom_local);
                 if vis_bot <= vis_top {
@@ -513,13 +540,20 @@ pub fn compose(
             }
             None => {
                 let cur = &active.screen.cursor;
-                let r = active.rect.row.saturating_add(cur.row);
                 let c = active.rect.col.saturating_add(cur.col);
-                if r < pane_area_rows && c < host_cols {
-                    Some((r, c))
+                // Live panes map the cursor's unified line through the fold
+                // context (folds above it shift it up; a folded/off-screen cursor
+                // hides). Copy/block panes keep the prior active-grid placement.
+                let local_row = if active.copy_mode.is_none() && active.block_mode.is_none() {
+                    let sb_len = active.screen.scrollback.len() as u32;
+                    fold_ctx[&active.id].display_row(sb_len + u32::from(cur.row), active.rect.rows)
                 } else {
-                    None
-                }
+                    Some(cur.row)
+                };
+                local_row.and_then(|lr| {
+                    let r = active.rect.row.saturating_add(lr);
+                    (r < pane_area_rows && c < host_cols).then_some((r, c))
+                })
             }
         };
         if let Some((r, c)) = cursor_pos
@@ -3391,12 +3425,18 @@ mod tests {
         }
     }
 
+    fn scrolled_view<'a>(screen: &'a Screen, rect: Rect, scroll_offset: u32) -> PaneView<'a> {
+        PaneView { scroll_offset, ..plain_view(screen, rect) }
+    }
+
     #[test]
     fn tall_image_cropped_to_pane_bottom() {
-        let screen = screen_with_tall_image(8);
+        // Realistic: a 4-row image in a 2-row pane (the emulator is pane-sized,
+        // so the image scrolls into scrollback). Scroll up to its top → the pane
+        // shows the top 2 of 4 rows, the rest clipped at the pane bottom.
+        let screen = screen_with_tall_image(2);
         assert_eq!(screen.placements[0].rows, 4, "4-row footprint captured");
-        // Pane only 2 rows tall → image clipped to its top 2 rows.
-        let view = plain_view(&screen, Rect::new(0, 0, 2, 40));
+        let view = scrolled_view(&screen, Rect::new(0, 0, 2, 40), 3);
         let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
         assert_eq!(vs.placements.len(), 1);
         let p = &vs.placements[0];
@@ -3506,20 +3546,11 @@ mod tests {
 
     /// A tall image anchored at line 0, scrolled so its top rows are above the
     /// viewport (real scrollback so `top > 0`).
-    fn screen_tall_image_scrolled() -> Screen {
-        use plexy_glass_emulator::Emulator;
-        let mut e = Emulator::new(6, 40);
-        e.advance(b"\x1b_Ga=T,i=5,f=24,s=30,v=80;QUJD\x1b\\"); // 3×4-cell image, anchor 0
-        for _ in 0..3 {
-            e.advance(b"\r\n"); // push the image's top rows up into scrollback
-        }
-        e.screen().clone()
-    }
-
     #[test]
     fn tall_image_cropped_at_top_when_scrolled() {
-        let screen = screen_tall_image_scrolled();
-        // View at the bottom (scroll_offset 0) → viewport top is inside the image.
+        // A 4-row image in a 4-row pane: its top row scrolled into scrollback, so
+        // the live view shows the lower 3 rows, cropped at the top.
+        let screen = screen_with_tall_image(4);
         let view = plain_view(&screen, Rect::new(0, 0, 4, 40));
         let vs = compose(&[view], (5, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
         assert_eq!(vs.placements.len(), 1);
@@ -3534,9 +3565,10 @@ mod tests {
 
     #[test]
     fn tall_image_cropped_both_ends_in_a_one_row_pane() {
-        let screen = screen_tall_image_scrolled();
-        // A single-row pane sees a middle slice: cropped above AND below.
-        let view = plain_view(&screen, Rect::new(0, 0, 1, 40));
+        // A single-row pane scrolled to a middle row of the image: cropped above
+        // AND below.
+        let screen = screen_with_tall_image(1);
+        let view = scrolled_view(&screen, Rect::new(0, 0, 1, 40), 2);
         let vs = compose(&[view], (2, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
         assert_eq!(vs.placements.len(), 1);
         let p = &vs.placements[0];
@@ -3547,14 +3579,62 @@ mod tests {
 
     #[test]
     fn image_host_row_accounts_for_top_status_bar() {
-        let screen = screen_with_tall_image(8);
+        // 4-row image in a 2-row pane, scrolled to its top, with a top status bar.
+        let screen = screen_with_tall_image(2);
         let status = status_with_left("S");
-        let view = plain_view(&screen, Rect::new(0, 0, 2, 40));
+        let view = scrolled_view(&screen, Rect::new(0, 0, 2, 40), 3);
         let vs = compose(&[view], (3, 40), Some(&status), StatusPlacement::Top, None, None, None, None, None, TEST_COLOR);
         assert_eq!(vs.placements.len(), 1);
         let p = &vs.placements[0];
         assert_eq!(p.host_row, 1, "shifted down by the top status row");
         assert_eq!(p.rows, 2, "clipped to the 2-row pane band");
+    }
+
+    fn composed_row(vs: &VirtualScreen, r: u16) -> String {
+        (0..vs.cols)
+            .filter_map(|c| vs.cell(r, c))
+            .map(|c| c.grapheme.as_str())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn folded_block_hides_output_rows_in_live_view() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(8, 40);
+        e.advance(
+            b"\x1b]133;A\x07$ one\r\n\x1b]133;C\x07out1\r\nout2\r\n\
+              \x1b]133;D;0\x07\x1b]133;A\x07$ two\r\n\x1b]133;C\x07out3",
+        );
+        e.advance(b"\x1b[m");
+        let mut screen = e.screen().clone();
+        crate::blocks::set_block_folded(&mut screen, 0, true); // fold "$ one"'s output
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        // Command row kept; out1/out2 collapsed → the next prompt follows directly.
+        assert_eq!(composed_row(&vs, 0), "$ one", "command row stays");
+        assert_eq!(composed_row(&vs, 1), "$ two", "output collapsed; next prompt follows");
+        assert_eq!(composed_row(&vs, 2), "out3");
+    }
+
+    #[test]
+    fn image_inside_a_folded_block_is_hidden() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(8, 40);
+        // Block 0's output is an inline image; block 1 is the next prompt.
+        e.advance(b"\x1b]133;A\x07$ img\r\n\x1b]133;C\x07\x1b_Ga=T,i=5,f=24,s=10,v=20;QUJD\x1b\\");
+        e.advance(b"\x1b]133;A\x07$ next\r\nx");
+        let mut screen = e.screen().clone();
+        // Before folding: the image resolves to one placement.
+        let v0 = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs0 = compose(&[v0], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert_eq!(vs0.placements.len(), 1, "image visible before folding");
+        // Fold the image's block → the image hides.
+        crate::blocks::set_block_folded(&mut screen, 0, true);
+        let v1 = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs1 = compose(&[v1], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        assert!(vs1.placements.is_empty(), "image inside a folded block is hidden");
     }
 
     #[test]
