@@ -321,25 +321,26 @@ duration. Turn the feature off with `duration #false` in the `blocks` node.
 
 ## Sticky command header
 
-When a single command's output is taller than the pane (a long `cargo build`,
-a big `git log`), its command line scrolls off the top and you lose track of
-what produced the wall of text you're looking at. The **sticky header** pins
-it: the command line stays on the pane's top row (a reverse-video bar) for as
-long as that block's output fills the top of the viewport, whether you got
-there by scrolling back with the wheel or just by the output overflowing the
-screen.
+When you **scroll back** into a long command's output (a big `cargo build`, a
+long `git log`), its command line scrolls off the top and you lose track of
+what produced the wall of text. The **sticky header** pins it: the command
+line stays on the pane's top row (a dim line that blends with your theme, not
+a bright bar) for as long as that block's output fills the top of the
+viewport.
 
 ```
-┌ cargo build --release                                       2.3s ┐   ← pinned header
-│   Compiling plexy-glass-emulator v0.1.0                          │
-│   Compiling plexy-glass-mux v0.1.0                               │
+  cargo build --release                                        2.3s     ← pinned (dim)
+    Compiling plexy-glass-emulator v0.1.0
+    Compiling plexy-glass-mux v0.1.0
 ```
 
-The header carries the block's exit-status duration too (same threshold). It
-appears in the **live view only**, since block mode already lists every command
-line and copy mode owns the selection cursor. A folded block never triggers it
-(its output is collapsed, so nothing of it is on screen to scroll into). Turn
-it off with `sticky-header #false` in the `blocks` node.
+The header carries the block's duration too (same threshold). It appears
+**only while you are scrolled back**, since at the live bottom you're watching
+fresh output and don't need it, and only in the live view (block mode already
+lists every command line, and copy mode owns the selection cursor). A folded
+block never triggers it (its output is collapsed, so nothing of it is on
+screen to scroll into). Turn it off with `sticky-header #false` in the
+`blocks` node.
 
 **Requires OSC 133 shell integration**, same as all the other block features.
 

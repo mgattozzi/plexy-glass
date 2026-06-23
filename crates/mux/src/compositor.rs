@@ -535,15 +535,21 @@ pub fn compose(
         }
     }
 
-    // Sticky command header: when a live pane's top content row sits inside a
-    // block whose command line has scrolled above the viewport, pin that command
-    // on the pane's top row so you always know what produced the output you're
-    // scrolled into. Live view only, since block mode shows command lines already
-    // and copy mode owns selection. Folds compose for free: a folded block has no
-    // visible output rows, so the top line can never land inside one.
+    // Sticky command header: while a live pane is SCROLLED BACK and its top row
+    // sits inside a block whose command line is above the viewport, pin that
+    // command (dimmed, so it blends with the theme rather than shouting) on the
+    // pane's top row, so you know what produced the history you're scrolled into.
+    // Only during scrollback: at the live bottom you're watching fresh output and
+    // don't need it. Block mode shows command lines already; copy mode owns
+    // selection. Folds compose for free: a folded block has no visible output
+    // rows, so the top line can never land inside one.
     if blocks.is_some_and(|b| b.sticky_header) {
         for v in panes {
-            if v.screen.alt.is_some() || v.copy_mode.is_some() || v.block_mode.is_some() {
+            if v.screen.alt.is_some()
+                || v.copy_mode.is_some()
+                || v.block_mode.is_some()
+                || v.scroll_offset == 0
+            {
                 continue;
             }
             if v.rect.row >= pane_area_rows {
@@ -562,21 +568,15 @@ pub fn compose(
             };
             let host_row = pane_row_offset + v.rect.row;
             let pane_right = (v.rect.col + v.rect.cols).min(host_cols);
-            // Repaint the row as a reverse-video bar: clear, draw the command,
-            // then reverse-fill the remainder so it reads as one pinned header.
+            // Replace the row's content with the dimmed command line, no bright
+            // bar: the cleared cells keep the theme background.
             for c in v.rect.col..pane_right {
                 if let Some(cell) = screen.cell_mut(host_row, c) {
                     *cell = plexy_glass_emulator::Cell::default();
                 }
             }
-            let cmd_end =
-                put_str(&mut screen, host_row, v.rect.col, &cmd, Attrs::REVERSE, pane_right);
-            for c in cmd_end..pane_right {
-                if let Some(cell) = screen.cell_mut(host_row, c) {
-                    cell.attrs |= Attrs::REVERSE;
-                }
-            }
-            // Right-aligned duration on the header (same gate as the inline note).
+            let cmd_end = put_str(&mut screen, host_row, v.rect.col, &cmd, Attrs::DIM, pane_right);
+            // Right-aligned duration on the header (same overlap guard as inline).
             if let Some(ms) = blocks
                 .and_then(|b| b.duration_threshold_ms)
                 .and_then(|t| crate::blocks::closing_duration(v.screen, prompt).filter(|&ms| ms >= t))
@@ -585,11 +585,8 @@ pub fn compose(
                 let dw = display_width(&d);
                 if pane_right > v.rect.col + dw {
                     let start_col = pane_right - dw;
-                    // Same overlap guard as the inline annotation: don't clobber the
-                    // command's tail, so omit the duration when the command reaches it
-                    // (`cmd_end` is the column just past the command, keeping a 1-col gap).
                     if cmd_end < start_col {
-                        put_str(&mut screen, host_row, start_col, &d, Attrs::REVERSE, pane_right);
+                        put_str(&mut screen, host_row, start_col, &d, Attrs::DIM, pane_right);
                     }
                 }
             }
@@ -3820,11 +3817,8 @@ mod tests {
         (0..vs.rows).any(|r| composed_row(vs, r).contains(needle))
     }
 
-    fn row_has_reverse(vs: &VirtualScreen, r: u16) -> bool {
-        (0..vs.cols).any(|c| {
-            vs.cell(r, c)
-                .is_some_and(|cell| cell.attrs.contains(plexy_glass_emulator::Attrs::REVERSE))
-        })
+    fn row_has_attr(vs: &VirtualScreen, r: u16, attr: plexy_glass_emulator::Attrs) -> bool {
+        (0..vs.cols).any(|c| vs.cell(r, c).is_some_and(|cell| cell.attrs.contains(attr)))
     }
 
     #[test]
@@ -3907,38 +3901,57 @@ mod tests {
     }
 
     #[test]
-    fn sticky_header_pins_command_when_scrolled_off() {
+    fn sticky_header_pins_command_when_scrolled_back() {
+        // Scrolled back one line → the command line is above the viewport top and
+        // gets pinned as a dim (not reverse) header.
         let screen = tall_block_screen();
         let colors = block_colors_with(None, true);
-        let view = plain_view(&screen, Rect::new(0, 0, 3, 40));
+        let view = scrolled_view(&screen, Rect::new(0, 0, 3, 40), 1);
         let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
         let row0 = composed_row(&vs, 0);
         assert!(row0.contains("cargo build"), "header pins the command: {row0:?}");
-        assert!(row_has_reverse(&vs, 0), "header is a reverse-video bar");
+        assert!(row_has_attr(&vs, 0, Attrs::DIM), "header is dimmed (blends with theme)");
+        assert!(
+            !row_has_attr(&vs, 0, Attrs::REVERSE),
+            "no bright reverse-video bar"
+        );
+    }
+
+    #[test]
+    fn sticky_header_absent_at_live_bottom() {
+        // At the live bottom (scroll_offset 0) the header must NOT appear, even
+        // when the command has overflowed off the top of the pane.
+        let screen = tall_block_screen();
+        let colors = block_colors_with(None, true);
+        let view = plain_view(&screen, Rect::new(0, 0, 3, 40)); // scroll_offset 0
+        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let row0 = composed_row(&vs, 0);
+        assert!(!row0.contains("cargo build"), "no header at the live bottom: {row0:?}");
+        assert_eq!(row0, "l3", "real top-of-viewport content");
     }
 
     #[test]
     fn sticky_header_absent_when_command_visible() {
-        // Same content in an 8-row pane → the command row is visible at the top,
-        // so the header is (correctly) skipped even though a command line exists.
+        // Scrolled all the way to the top → the command row is itself visible, so
+        // the header is (correctly) skipped even though we're scrolled back.
         let screen = tall_block_screen();
         let colors = block_colors_with(None, true);
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
-        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let view = scrolled_view(&screen, Rect::new(0, 0, 3, 40), 3);
+        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
         let row0 = composed_row(&vs, 0);
         assert!(row0.starts_with("$ cargo build"), "real command row: {row0:?}");
-        assert!(!row_has_reverse(&vs, 0), "no pinned header bar");
+        assert!(!row_has_attr(&vs, 0, Attrs::DIM), "no pinned header");
     }
 
     #[test]
     fn sticky_header_disabled_paints_nothing() {
         let screen = tall_block_screen();
         let colors = block_colors_with(None, false);
-        let view = plain_view(&screen, Rect::new(0, 0, 3, 40));
+        let view = scrolled_view(&screen, Rect::new(0, 0, 3, 40), 1);
         let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
         let row0 = composed_row(&vs, 0);
         assert!(!row0.contains("cargo build"), "no header when disabled: {row0:?}");
-        assert_eq!(row0, "l3", "real top-of-viewport content");
+        assert_eq!(row0, "l2", "real top-of-viewport content");
     }
 
     #[test]
@@ -3950,7 +3963,7 @@ mod tests {
         screen.active.rows[last].mark.set(RowMark::BLOCK_END);
         screen.active.rows[last].mark.set_duration(Some(4000));
         let colors = block_colors_with(Some(2000), true);
-        let view = plain_view(&screen, Rect::new(0, 0, 3, 40));
+        let view = scrolled_view(&screen, Rect::new(0, 0, 3, 40), 1);
         let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
         let row0 = composed_row(&vs, 0);
         assert!(row0.contains("cargo build"), "header command: {row0:?}");
@@ -3974,7 +3987,7 @@ mod tests {
         screen.active.rows[last].mark.set(RowMark::BLOCK_END);
         screen.active.rows[last].mark.set_duration(Some(3000));
         let colors = block_colors_with(Some(2000), true);
-        let view = plain_view(&screen, Rect::new(0, 0, 3, 24));
+        let view = scrolled_view(&screen, Rect::new(0, 0, 3, 24), 1);
         let vs = compose(&[view], (3, 60), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
         let row0 = composed_row(&vs, 0);
         assert!(row0.contains("workspace"), "command tail preserved (not clobbered): {row0:?}");

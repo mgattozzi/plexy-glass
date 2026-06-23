@@ -391,7 +391,8 @@ from persistence for free since `mark_to_dto` copies only the four OSC-133 bits
 became a **command-row annotation** pass that composes summary + duration
 (`▸ N lines ✓ · 2.3s`), gated by a config threshold (default 2s, `0` = all),
 suppressed in copy mode. **Sticky command header** — a new live-only compositor
-pass pins the command line as a reverse-video bar on the pane's top row when its
+pass pins the command line (dim, blends with theme — not a reverse bar) on the
+pane's top row **only while scrolled back** (`scroll_offset > 0`) when its
 block's output has scrolled above the viewport top (`prompt_at_or_above(line_at(0))
 < top_line` + `block_command_line`), carrying the duration too; folds compose for
 free (a folded block has no visible output rows, so the top line never lands

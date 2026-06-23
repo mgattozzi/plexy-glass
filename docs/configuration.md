@@ -496,7 +496,7 @@ blocks {
     ok-color "ok"               // palette name or #rrggbb; default: palette `ok`
     fail-color "alert"          // palette name or #rrggbb; default: palette `alert`
     select-color "#dca561"      // palette name or #rrggbb; the block-mode bracket
-    sticky-header #true         // pin the command line when its output scrolls off-top
+    sticky-header #true         // pin the command line (dimmed) while scrolled back
     duration #true              // show each block's wall-clock duration inline
     duration-threshold "2s"     // minimum duration to show; "0" times everything
 }
@@ -522,9 +522,11 @@ blocks {
   value forms as `ok-color`. Default: `"#dca561"`. Note that this one is
   independent of `enabled`: the bracket is part of block-mode navigation, so
   it is drawn even when block-status border coloring is turned off.
-- `sticky-header` is `#true` (default) or `#false`. It pins a block's command
-  line as a reverse-video bar on the pane's top row while that block's output
-  fills the top of the viewport (live view only). Gated by `enabled`.
+- `sticky-header` is `#true` (default) or `#false`. While the pane is
+  scrolled back, it pins the block's command line (dimmed, so it blends with
+  the theme) on the pane's top row when that block's output fills the top of
+  the viewport. Live view only, and it never appears at the live bottom.
+  Gated by `enabled`.
 - `duration` is `#true` (default) or `#false`. It shows each completed
   block's wall-clock duration (`C`→`D`) as a dim, right-aligned note on the
   command row (and on the sticky header). Runtime-only, not persisted across
