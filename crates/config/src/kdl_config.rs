@@ -3,7 +3,8 @@
 //! every downstream consumer are unchanged.
 
 use crate::{
-    BlocksConfig, Config, ConfigError, GlyphTier, KeymapBinding, KeymapConfig, Padding,
+    BlocksConfig, Config, ConfigError, GlyphTier, KeymapBinding, KeymapConfig, NotificationsConfig,
+    Padding,
     PaletteConfig, PaneNode, PaneTemplate, Position, SessionTemplate, SplitDirection, StatusConfig,
     StyleConfig, WidgetSpec, WindowTemplate,
 };
@@ -23,6 +24,7 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
     let mut seen_status = false;
     let mut seen_keymap = false;
     let mut seen_blocks = false;
+    let mut seen_notifications = false;
     let mut seen_glyphs = false;
     let mut seen_auto_rename = false;
     for node in doc.nodes() {
@@ -46,6 +48,11 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
                 dup_check(seen_blocks, "blocks", node, src)?;
                 seen_blocks = true;
                 config.blocks = decode_blocks(node, src)?;
+            }
+            "notifications" => {
+                dup_check(seen_notifications, "notifications", node, src)?;
+                seen_notifications = true;
+                config.notifications = decode_notifications(node, src)?;
             }
             "glyphs" => {
                 dup_check(seen_glyphs, "glyphs", node, src)?;
@@ -207,6 +214,36 @@ fn parse_duration_threshold(s: &str) -> Option<u32> {
         return Some((secs * 1000.0).round() as u32);
     }
     None
+}
+
+fn decode_notifications(node: &KdlNode, src: &str) -> Result<NotificationsConfig, ConfigError> {
+    ensure_no_props(node, src)?;
+    let mut n = NotificationsConfig::default();
+    if let Some(doc) = node.children() {
+        for child in doc.nodes() {
+            match child.name().value() {
+                "enabled" => n.enabled = bool_arg(child, 0, src, "enabled")?,
+                "min-duration" => {
+                    let s = string_arg(child, 0, src, "min-duration")?;
+                    n.min_duration_ms = parse_duration_threshold(s).ok_or_else(|| {
+                        decode_err(
+                            src,
+                            child,
+                            "invalid min-duration (use e.g. \"30s\", \"500ms\", or \"0\")",
+                        )
+                    })?;
+                }
+                other => {
+                    return Err(decode_err(
+                        src,
+                        child,
+                        &format!("unknown notifications node `{other}`"),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(n)
 }
 
 fn decode_blocks(node: &KdlNode, src: &str) -> Result<BlocksConfig, ConfigError> {
@@ -1673,6 +1710,28 @@ session "dev" cwd="~/projects/app" {
     }
 
     // --- blocks ---
+
+    #[test]
+    fn notifications_defaults() {
+        let d = NotificationsConfig::default();
+        assert!(d.enabled);
+        assert_eq!(d.min_duration_ms, 30_000);
+        // Absent node keeps the defaults.
+        let cfg = parse_config("").unwrap();
+        assert_eq!(cfg.notifications, d);
+    }
+
+    #[test]
+    fn notifications_round_trip() {
+        let cfg = parse_config(r##"notifications { enabled #false; min-duration "60s" }"##).unwrap();
+        assert!(!cfg.notifications.enabled);
+        assert_eq!(cfg.notifications.min_duration_ms, 60_000);
+    }
+
+    #[test]
+    fn notifications_min_duration_invalid_errors() {
+        assert!(parse_config(r##"notifications { min-duration "soon" }"##).is_err());
+    }
 
     #[test]
     fn blocks_defaults_when_absent() {

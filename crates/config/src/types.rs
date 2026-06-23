@@ -20,6 +20,7 @@ pub struct Config {
     pub keymap: KeymapConfig,
     pub sessions: Vec<SessionTemplate>,
     pub blocks: BlocksConfig,
+    pub notifications: NotificationsConfig,
     pub glyph_tier: GlyphTier,
     /// tmux's `automatic-rename`: when true, unpinned windows auto-name from
     /// their active pane (command → cwd → shell). Default true.
@@ -57,6 +58,21 @@ impl Default for BlocksConfig {
             duration: true,
             duration_threshold_ms: 2000,
         }
+    }
+}
+
+/// Desktop notifications on command completion (long + unattended).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NotificationsConfig {
+    /// Master switch.
+    pub enabled: bool,
+    /// Only notify for commands that ran at least this long (millis).
+    pub min_duration_ms: u32,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self { enabled: true, min_duration_ms: 30_000 }
     }
 }
 

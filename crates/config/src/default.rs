@@ -1,5 +1,6 @@
 use crate::{
-    BlocksConfig, Config, GlyphTier, KeymapBinding, KeymapConfig, PaletteConfig, Padding, Position,
+    BlocksConfig, Config, GlyphTier, KeymapBinding, KeymapConfig, NotificationsConfig,
+    PaletteConfig, Padding, Position,
     StatusConfig, StyleConfig, WidgetSpec,
 };
 use std::time::Duration;
@@ -44,6 +45,7 @@ pub fn built_in_default() -> Config {
         // sessions are opt-in via `session` nodes in the user's config.
         sessions: Vec::new(),
         blocks: BlocksConfig::default(),
+        notifications: NotificationsConfig::default(),
         glyph_tier: GlyphTier::Unicode,
         auto_rename: true,
         status: StatusConfig {
