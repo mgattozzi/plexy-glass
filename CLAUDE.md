@@ -428,6 +428,28 @@ so scrollback drift can't mis-target; a vanished target flashes
 `Command`/`PromptCommand`/`ConnVerb`, default `binding("prefix /", "history")`,
 interactive-only (headless `refuse("history")`), help label "History palette".
 
+Command-completion **desktop notifications** (shipped — `docs/configuration.md`
+`notifications`, spec/plan
+`docs/superpowers/{specs,plans}/2026-06-23-command-completion-notifications*`):
+a real OS toast (cross-platform via `notify-rust = "4.18"`) when a command runs
+**≥ a threshold** (default 30s) and finishes **unattended** (session detached OR
+the completing window isn't the active one). Reuses the single completion drain:
+the emulator's `D` branch stashes `Screen.last_block_duration` (mirrors
+`last_block_exit`); `Window::drain_command_completion` now returns
+`(Option<CompletionEvent>, Option<Option<i32>>)` — surfacing a `CompletionEvent`
+{exit, duration_ms, command (best-effort via `last_completed_block` →
+`prompt_at_or_above` → `block_command_line`)} for **every** window regardless of
+the per-window `monitor-command` flag, plus the unchanged monitor-flag edge;
+`WindowManager::update_monitor_flags` returns `MonitorDrain { alert_edge,
+notifications: Vec<PendingNotification> }`. The render coordinator (session-
+lifetime, woken by pane output even while detached) applies a pure
+`should_notify(enabled, min_ms, duration_ms, attended)` (attended = attached &&
+active window) off the WM lock and fires `notify_desktop` via `spawn_blocking`,
+errors logged not propagated (headless/no-bus safe). Config `notifications {
+enabled / min-duration }` on by default, read from `config_snapshot()` (live-
+reload free). Independent of `monitor-command` (that's the in-terminal status-flag
+channel). No new protocol.
+
 Not yet built (future work): native Kitty animation protocol + `z`-ordering
 (deferred from the inline-graphics P4 spec, with rationale).
 (Silence monitoring + bell/activity alert messages shipped with the 2026-06-12

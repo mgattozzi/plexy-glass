@@ -546,6 +546,40 @@ The `blocks` node live-reloads with the config (`Ctrl+a R` /
 `plexy-glass reload`), same as `palette` and `status`. A reload that supplies
 new colors shows up on the next rendered frame.
 
+## `notifications`
+
+Desktop notifications when a command finishes running **long** and you're **not
+watching it**, so a build you walked away from (or that finished in a background
+window) reaches you. Cross-platform via [`notify-rust`](https://crates.io/crates/notify-rust)
+(D-Bus on Linux, native on macOS), and there's no external command to install.
+
+```kdl
+notifications {
+    enabled #true            // master switch (default on)
+    min-duration "30s"       // only commands at least this long; "<int>ms" | "<float>s" | "0"
+}
+```
+
+- `enabled`: `#true` (default) or `#false`.
+- `min-duration`: minimum command duration to notify, default `"30s"`. Same
+  grammar as `blocks`'s `duration-threshold` (`"500ms"`, `"2s"`, `"0"`); `"0"`
+  notifies for every unattended completion. An unparseable value is a hard
+  error.
+
+**When it fires:** on a command block completing, if `enabled` and its
+duration is ≥ `min-duration` and the completion is *unattended*, meaning the
+session is detached or the completing window isn't the active one. A command
+you're actively watching in the focused window never notifies. Note that this
+is independent of the per-window [`monitor-command`](command-blocks.md) flag
+(that one is the in-terminal status-flag channel; this is the desktop
+channel).
+
+The notification reads e.g. `plexy-glass: <session>` / `✓ cargo build · exit 0 ·
+2m03s`. It works while detached (the daemon fires it). On a host with no
+desktop / no notification bus (a headless or SSH daemon), the attempt is logged
+and silently skipped, never an error. Note that it requires OSC 133 shell
+integration, like all command-block features.
+
 ## `glyphs`
 
 ```kdl
