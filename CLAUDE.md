@@ -403,6 +403,31 @@ inside one). Both flags ride `BlockBorderColors`
 duration-threshold "2s" }` (`parse_duration_threshold`: `<int>ms` | `<float>s` |
 `0`).
 
+Structured **history palette** (shipped — `docs/command-blocks.md`, spec/plan
+`docs/superpowers/{specs,plans}/2026-06-23-structured-history-palette*`): a
+cross-session, exit-aware finder over command blocks — `Ctrl+a H` / `:history`.
+Mirrors choose-tree end to end: a pure core (`crates/mux/src/history.rs` —
+`HistoryEntry`/`HistoryState`/`HistoryOutcome`/`HistoryTarget` + `handle_history`,
+a fuzzy-finder input model: printables filter, arrows/Ctrl-P/N move, Enter jumps,
+Esc cancels; `visible_indices` matches command **+ output**), an `Overlay::History`
+/ `OverlayView::History` / `paint_history` (modeled on the session picker), and a
+registry-walk corpus built on open. Corpus: `Session::history_snapshot` enumerates
+every pane's blocks (`with_screen` → `all_prompt_lines` + `block_command_line` /
+`closing_exit` / `closing_duration` / `blocks::block_search_text` — lowercased
+command+output capped at 4 KiB), newest-first; the connection's
+`open_history_overlay` + `build_history_entries` flatten them current-pane-first
+(then current session, then others), capped at `HISTORY_ENTRY_CAP=2000`. **No new
+persistence** (restored scrollback marks are read on the fly) and **no new
+protocol** (opens daemon-side on the attached client like choose-tree). The one
+action — Enter — produces `OverlayKeyResult::History(HistoryTarget)`, dispatched
+by `ClientCtx::dispatch_history_jump`: switch session if needed + `select_window_by_id`
++ `focus_pane_by_id`, then `BlockMode::new_at` on the block re-found at jump time
+via `blocks::find_block_by_command` (then `prompt_at_or_above`, then first prompt)
+so scrollback drift can't mis-target; a vanished target flashes
+`"history: block no longer available"`. `history` verb wired through
+`Command`/`PromptCommand`/`ConnVerb`, default `binding("prefix H", "history")`,
+interactive-only (headless `refuse("history")`), help label "History palette".
+
 Not yet built (future work): native Kitty animation protocol + `z`-ordering
 (deferred from the inline-graphics P4 spec, with rationale).
 (Silence monitoring + bell/activity alert messages shipped with the 2026-06-12

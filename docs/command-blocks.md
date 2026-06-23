@@ -426,6 +426,43 @@ Notes / current limits:
   skipped, no dead zone), and `Ctrl+a <`/`>` and click-a-prompt-to-jump land the
   target at the viewport top through the visible-line projection.
 
+## History palette
+
+`Ctrl+a H` (or `:history`) opens the **structured history palette**, a finder
+over your command blocks across **every session**, not just the focused pane.
+Unlike a shell history search (`Ctrl+R`, atuin), it searches a block's
+**output** as well as its command, and it shows the exit status and duration:
+
+```
+ History
+ filter: refused█
+ ✗ 45s    web/1   cargo test --workspace
+ ✓ 2.3s   api/2   docker compose up -d
+ ↑/↓ select · enter jump · esc cancel
+```
+
+- **Type** to filter incrementally over **command + output** (case-insensitive);
+  the count updates live.
+- **↑/↓** (or **Ctrl-P/Ctrl-N**) move the selection; **Home/End** jump to ends.
+- **Enter** jumps to the block: it switches to the block's session/window/pane
+  (as needed) and opens **block mode** on it, where the usual keys (`y`/`o`/`c`
+  yank, `r` re-run, `Tab` fold, `J`/`K` failed-jump) take over. The palette is a
+  *finder*; block mode is where you act.
+- **Esc** cancels.
+
+Each row shows a status glyph (`✓` exit 0, `✗` nonzero), the duration, the
+`session/window` it came from, and the command. Rows are ordered with the
+**current pane's** blocks first (newest first), then the rest of the session,
+then other sessions.
+
+The palette is built when you open it by reading every pane's live grid **and
+scrollback** (blocks restored from before a daemon restart are included, up to
+the 5000-row cap), so there is no separate history database. If a command has
+run in several places, the jump re-finds it by command text at jump time, and
+it lands correctly even if the pane has scrolled since you opened the palette.
+
+**Requires OSC 133 shell integration**, same as all the other block features.
+
 ## Limitations
 
 - **Scrollback cap on restore**: only the most recent 5000 rows per pane are

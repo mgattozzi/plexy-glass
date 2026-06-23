@@ -459,6 +459,7 @@ themselves contain colons and spaces.
 |---|---|
 | `choose_session` | Visual session picker |
 | `choose_tree` | Choose-tree (session → window → pane) |
+| `history` | Structured history palette (cross-session block finder) |
 | `command_prompt` | Open the `:` command prompt |
 | `show_help` | Keybinding help overlay |
 | `detach` | Detach this client |
@@ -937,6 +938,7 @@ cancels. Parse errors appear as a transient status-line message.
 | `pipe-pane` | `[command line…]` | Stream the pane's raw output to a command (no command stops the pipe) |
 | `sessions` | nothing | Session picker |
 | `tree` | nothing | Choose-tree |
+| `history` | nothing | Structured history palette (cross-session block finder) |
 | `switch` | `<session>` | Switch to a session in place |
 | `reload` | nothing | Reload the config |
 | `detach` | nothing | Detach |
