@@ -75,6 +75,27 @@ impl BlockMode {
         Some(state)
     }
 
+    /// Open block mode with a specific block selected (the history-palette jump).
+    /// `prompt_line` is re-anchored to the nearest prompt at-or-above it (then the
+    /// first prompt) for drift safety, then the viewport recenters on it. `None`
+    /// when a full-screen app is active or the pane has no command blocks.
+    pub fn new_at(screen: &Screen, pane_rows: u16, prompt_line: u32) -> Option<Self> {
+        if screen.alt.is_some() {
+            return None;
+        }
+        let selected = crate::blocks::prompt_at_or_above(screen, prompt_line)
+            .or_else(|| crate::blocks::first_prompt_line(screen))?;
+        let mut state = Self {
+            selected,
+            viewport_top: 0,
+            pane_rows,
+            total_lines: crate::blocks::total_lines(screen),
+            filter: None,
+        };
+        state.recenter();
+        Some(state)
+    }
+
     /// Put the selected prompt at the top of the viewport, clamped so we never
     /// scroll past the live bottom (matching the `NextPrompt` snap-to-live).
     fn recenter(&mut self) {
@@ -372,6 +393,22 @@ mod tests {
               \x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07two\r\n\
               \x1b]133;C\x07out3",
         )
+    }
+
+    #[test]
+    fn new_at_selects_given_prompt_line() {
+        let s = two_blocks();
+        let lines = crate::blocks::all_prompt_lines(&s);
+        assert_eq!(lines, vec![0, 3], "prompts at 0 and 3");
+        assert_eq!(BlockMode::new_at(&s, 8, lines[0]).unwrap().selected, 0);
+        assert_eq!(BlockMode::new_at(&s, 8, lines[1]).unwrap().selected, 3);
+    }
+
+    #[test]
+    fn new_at_reanchors_a_non_prompt_line() {
+        let s = two_blocks();
+        // line 1 is block 0's output (not a prompt) → re-anchors up to prompt 0.
+        assert_eq!(BlockMode::new_at(&s, 8, 1).unwrap().selected, 0);
     }
 
     fn key(c: char) -> KeyEvent {
