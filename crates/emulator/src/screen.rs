@@ -99,6 +99,10 @@ pub struct Screen {
     /// `None` when no `D` has been received, or when the last `D` carried no
     /// parseable exit payload. Survives eviction and clears; reset by RIS.
     pub last_block_exit: Option<i32>,
+    /// Duration (millis) of the most recent completed block (`C`→`D`), the
+    /// session-level mirror of `last_block_exit` for the notification policy.
+    /// `None` until a `D` that had a preceding `C`. Survives eviction; reset by RIS.
+    pub last_block_duration: Option<u32>,
     /// Wall-clock instant of the most recent `OSC 133;C` (command start),
     /// consumed at `;D` to record the block duration. Cleared at `;A` so a
     /// command that emits `C` but never `D` can't mis-attribute its time to the
@@ -153,6 +157,7 @@ impl Screen {
             color_scheme_dark: true,
             blocks_completed: 0,
             last_block_exit: None,
+            last_block_duration: None,
             pending_command_start: None,
             area_px_w: 0,
             area_px_h: 0,
@@ -1439,6 +1444,7 @@ impl Screen {
                 });
                 self.blocks_completed += 1;
                 self.last_block_exit = exit_code;
+                self.last_block_duration = duration_ms;
             }
             b'B' => {
                 let col = self.cursor.col;
@@ -3068,6 +3074,18 @@ mod tests {
         let s = parse(b"\x1b]133;D;0\x07");
         assert_eq!(s.blocks_completed, 1);
         assert_eq!(s.last_block_exit, Some(0));
+    }
+
+    #[test]
+    fn last_block_duration_recorded_on_c_then_d() {
+        let s = parse(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07x");
+        assert!(s.last_block_duration.is_some(), "C->D records a session-level duration");
+    }
+
+    #[test]
+    fn last_block_duration_none_without_c() {
+        let s = parse(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;D;0\x07x");
+        assert_eq!(s.last_block_duration, None, "D without C has no duration");
     }
 
     #[test]
