@@ -297,11 +297,14 @@ impl WindowManager {
     /// background window with the matching monitor option on gets its sticky flag
     /// set, and a false→true EDGE on that flag fires a status-line alert message.
     ///
-    /// Returns `true` if any alert message was emitted this drain, so the
-    /// coordinator can schedule the message's TTL-expiry repaint wake after it
-    /// releases the WM lock (the message is set here under the held lock, see
-    /// `set_status_message`'s deadlock note in the coordinator).
-    #[must_use = "schedule the status-message TTL wake when an edge fired"]
+    /// Returns a [`MonitorDrain`]: `alert_edge` is `true` if any status alert
+    /// message was emitted this drain (so the coordinator can schedule the
+    /// message's TTL-expiry repaint wake after it releases the WM lock; the
+    /// message is set here under the held lock, see `set_status_message`'s
+    /// deadlock note in the coordinator); `notifications` lists every window's
+    /// command-completion this drain for the coordinator's desktop-notification
+    /// policy to weigh (independent of the per-window `monitor-command` flag).
+    #[must_use = "schedule the TTL wake on alert_edge and apply the notification policy"]
     pub fn update_monitor_flags(&mut self) -> MonitorDrain {
         let active = self.active;
         // Collect edge messages while iterating (the iterator borrows

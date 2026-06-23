@@ -3147,10 +3147,11 @@ mod tests {
 
     #[test]
     fn ris_resets_counter_and_exit() {
-        // RIS (\ec) rebuilds Screen::new, so the counter must reset to 0 and
-        // exit to None.
-        let s = parse(b"\x1b]133;D;2\x07\x1bc");
+        // RIS (\ec) rebuilds Screen::new, so counter, exit, and duration all reset.
+        // Seed a full C->D block first so last_block_duration is Some before RIS.
+        let s = parse(b"\x1b]133;A\x07\x1b]133;C\x07\x1b]133;D;2\x07\x1bc");
         assert_eq!(s.blocks_completed, 0);
         assert_eq!(s.last_block_exit, None);
+        assert_eq!(s.last_block_duration, None, "RIS clears last_block_duration too");
     }
 }
