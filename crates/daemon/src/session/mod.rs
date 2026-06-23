@@ -426,6 +426,24 @@ pub struct SessionTree {
     pub windows: Vec<WindowTree>,
 }
 
+/// Every command block in a session's panes, for the history palette.
+pub struct SessionHistory {
+    pub name: String,
+    pub blocks: Vec<HistoryBlock>,
+}
+
+/// One block in a [`SessionHistory`]: where it lives + the searchable haystack.
+pub struct HistoryBlock {
+    pub window: WindowId,
+    pub window_idx: u32,
+    pub pane: PaneId,
+    pub prompt_line: u32,
+    pub command: String,
+    pub exit: Option<i32>,
+    pub duration: Option<u32>,
+    pub haystack: String,
+}
+
 /// One window within a [`SessionTree`]. `panes` is in stable DFS-leaf order.
 pub struct WindowTree {
     pub id: WindowId,
@@ -478,6 +496,42 @@ impl Session {
             })
             .collect();
         SessionTree { name: self.name(), active_window, total_panes, windows }
+    }
+
+    /// Snapshot every command block in every pane for the history palette. Async:
+    /// locks the WindowManager via `.lock().await` (never `blocking_lock`).
+    /// Per pane, blocks are newest-first (descending prompt line); blocks with no
+    /// extractable command line (no `133;B`) are skipped.
+    pub async fn history_snapshot(&self) -> SessionHistory {
+        use plexy_glass_mux::blocks;
+        const HAYSTACK_CAP: usize = 4096;
+        let m = self.window_manager.lock().await;
+        let mut out = Vec::new();
+        for (wi, w) in m.windows().iter().enumerate() {
+            for pid in w.layout().dfs_leaves() {
+                let Some(p) = w.pane(pid) else { continue };
+                p.with_screen(|s| {
+                    let mut lines = blocks::all_prompt_lines(s);
+                    lines.sort_unstable_by(|a, b| b.cmp(a)); // newest-first
+                    for line in lines {
+                        let Some(command) = blocks::block_command_line(s, line) else {
+                            continue;
+                        };
+                        out.push(HistoryBlock {
+                            window: w.id,
+                            window_idx: wi as u32,
+                            pane: pid,
+                            prompt_line: line,
+                            command,
+                            exit: blocks::closing_exit(s, line),
+                            duration: blocks::closing_duration(s, line),
+                            haystack: blocks::block_search_text(s, line, HAYSTACK_CAP),
+                        });
+                    }
+                });
+            }
+        }
+        SessionHistory { name: self.name(), blocks: out }
     }
 
     /// `prefix_armed` is the connection's live prefix flag (shared, not
@@ -1744,6 +1798,52 @@ mod tests {
         assert_eq!(st.windows[0].active_pane, PaneId(1));
         assert_eq!(st.windows[1].panes[0].0, PaneId(2));
         assert_eq!(st.windows[1].active_pane, PaneId(2));
+    }
+
+    #[tokio::test]
+    async fn history_snapshot_enumerates_blocks_newest_first() {
+        use plexy_glass_emulator::RowMark;
+        let _g = crate::test_env::isolate();
+        let s = Session::new("hist".into(), cat_spec(), size(), cfg()).unwrap();
+        {
+            let m = s.window_manager.lock().await;
+            let pid = m.active_window().active();
+            m.active_window().pane(pid).unwrap().with_screen_mut(|scr| {
+                let cols = scr.active.cols;
+                // Block A (prompt 0): "$ ls" + output + done.
+                scr.active.rows[0] = marked_row("$ ls", cols, |mk| {
+                    mk.set(RowMark::PROMPT_START);
+                    mk.set_prompt_end(2); // command "ls" starts at col 2
+                });
+                scr.active.rows[1] = marked_row("out-a", cols, |mk| mk.set(RowMark::OUTPUT_START));
+                scr.active.rows[2] = marked_row("done", cols, |mk| {
+                    mk.set(RowMark::BLOCK_END);
+                    mk.set_exit(Some(0));
+                });
+                // Block B (prompt 3): "$ pwd" + output + done (exit 1).
+                scr.active.rows[3] = marked_row("$ pwd", cols, |mk| {
+                    mk.set(RowMark::PROMPT_START);
+                    mk.set_prompt_end(2);
+                });
+                scr.active.rows[4] = marked_row("out-b", cols, |mk| mk.set(RowMark::OUTPUT_START));
+                scr.active.rows[5] = marked_row("done", cols, |mk| {
+                    mk.set(RowMark::BLOCK_END);
+                    mk.set_exit(Some(1));
+                });
+            });
+        }
+        let snap = s.history_snapshot().await;
+        assert_eq!(snap.name, "hist");
+        assert_eq!(snap.blocks.len(), 2, "two blocks enumerated");
+        // Newest-first: prompt 3 ("pwd") before prompt 0 ("ls").
+        assert_eq!(snap.blocks[0].command, "pwd");
+        assert_eq!(snap.blocks[0].exit, Some(1));
+        assert_eq!(snap.blocks[1].command, "ls");
+        assert_eq!(snap.blocks[1].exit, Some(0));
+        // Haystack carries command + output, lowercased.
+        assert!(snap.blocks[1].haystack.contains("ls"));
+        assert!(snap.blocks[1].haystack.contains("out-a"));
+        s.terminate_panes().await;
     }
 
     #[tokio::test]
