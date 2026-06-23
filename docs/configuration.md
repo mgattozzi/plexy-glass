@@ -837,14 +837,14 @@ save.
 
 Scrollback caveats:
 
-- Only the most recent 1000 rows per pane are persisted, and older history
-  is truncated on restore.
-- Rows come back at their saved width and are *not* reflowed until the
-  pane's first resize.
-- OSC 8 hyperlinks are not persisted: restored text keeps its styling but
-  loses link clickability.
-- The alt screen (full-screen TUIs) is never persisted; the saved rows are
-  always the main screen.
+- Only the most recent 5000 rows per pane are persisted, so older history is
+  truncated on restore.
+- Rows come back at their saved width and are *not* reflowed until the pane's
+  first resize.
+- OSC 8 hyperlinks are not persisted: restored text keeps its styling but the
+  links stop being clickable.
+- The alt screen (full-screen TUIs) is never persisted, and the saved rows
+  are always the main screen.
 
 ## Choose-tree (`Ctrl+a W`)
 

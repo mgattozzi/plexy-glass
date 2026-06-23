@@ -475,7 +475,7 @@ scrollback on daemon restart (the fresh shell draws below it). Persist DTOs in
 default-field elision + compact `serde_json::to_vec`, `ColorV1`/`UnderlineStyleV1`/
 `WrapV1`/`RowMarkV1`) with explicit live↔DTO mappers (emulator types stay
 serde-free; `hyperlink_id` dropped, links not persisted); capture via
-`capture_scrollback(screen, N=1000)` over `scrollback ++ main_grid.rows`
+`capture_scrollback(screen, N=5000)` over `scrollback ++ main_grid.rows`
 (`main_grid = screen.alt.unwrap_or(&screen.active)` — MAIN grid even on alt),
 trailing-default-cell trim + blank-trailing-row drop; `Screen::preseed_scrollback`
 threaded THROUGH `Pane::spawn` (applied before the reader thread starts so no

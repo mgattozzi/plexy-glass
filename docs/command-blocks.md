@@ -36,7 +36,7 @@ output line and *not* on detach, see
 back as the pane's **scrollback history** (the new shell starts fresh below
 them), so block navigation, the exit-status border colors, and
 `capture --last-command` all work on the restored content immediately. The most
-recent 1000 rows per pane are kept (older history is truncated), rows seeded at
+recent 5000 rows per pane are kept (older history is truncated), rows seeded at
 their saved width are not reflowed until the first resize, and OSC 8 hyperlinks
 are not persisted (restored text keeps its styling but loses link
 clickability).
@@ -428,10 +428,10 @@ Notes / current limits:
 
 ## Limitations
 
-- **Scrollback cap on restore**: only the most recent 1000 rows per pane are
+- **Scrollback cap on restore**: only the most recent 5000 rows per pane are
   persisted, and older history is truncated. Restored rows keep their saved
   width (no reflow until the first resize), and OSC 8 hyperlinks are not
-  persisted (text and styling survive, link clickability does not). Note that
+  persisted (text and styling survive; link clickability does not). Note that
   persistence is opportunistic: it's captured at the next *structural* save,
   not continuously and not on detach (see
   [Persistence](configuration.md#persistence)).

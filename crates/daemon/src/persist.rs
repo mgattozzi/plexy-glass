@@ -365,7 +365,9 @@ pub(crate) fn row_from_dto(row: &RowV1, cols: u16) -> Row {
 
 /// Default number of persisted rows per pane (scrollback tail + main grid, in
 /// display order). Restore shows the most recent `SCROLLBACK_PERSIST_ROWS`.
-pub const SCROLLBACK_PERSIST_ROWS: usize = 1000;
+/// (The live scrollback ring holds more, `scrollback::DEFAULT_MAX_LINES`, so
+/// this caps only what survives a daemon restart and the on-disk file size.)
+pub const SCROLLBACK_PERSIST_ROWS: usize = 5000;
 
 /// Capture a pane's scrollback for persistence: the last `n` rows of
 /// `scrollback ++ main_grid.rows`, in display order, where the **main** grid is
