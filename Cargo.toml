@@ -39,6 +39,7 @@ humantime = "2.3.0"
 anyhow = "1.0.102"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+notify-rust = "4.18"
 async-trait = "0.1.89"
 nix = { version = "0.31", features = ["signal", "fs", "process", "term", "ioctl", "user"] }
 portable-pty = "0.9"

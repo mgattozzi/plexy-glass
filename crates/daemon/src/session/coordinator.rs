@@ -313,11 +313,69 @@ pub(super) async fn render_coordinator(
         if monitor_drain.alert_edge {
             session.schedule_status_expiry_wake();
         }
+        // Desktop notifications for qualifying completions (off the WM lock).
+        if !monitor_drain.notifications.is_empty() {
+            let cfg = session.config_snapshot();
+            let nt = &cfg.notifications;
+            if nt.enabled {
+                let attached = session.clients.lock().await.len();
+                let title = format!("plexy-glass: {}", session.name());
+                for p in &monitor_drain.notifications {
+                    let attended = attached > 0 && p.is_active_window;
+                    if should_notify(nt.enabled, nt.min_duration_ms, p.event.duration_ms, attended) {
+                        notify_desktop(title.clone(), notification_body(p));
+                    }
+                }
+            }
+        }
         let _ = frame_tx.send(Arc::new(frame));
     }
     session.closing.store(true, Ordering::SeqCst);
     // frame_tx drops here; subscribers will see frame_rx.changed() return Err
     // and exit their loops, which closes their sockets and lets clients restore.
+}
+
+/// Pure desktop-notification policy: notify only for an enabled, **unattended**
+/// completion whose duration is known and ≥ the threshold. `attended` means a
+/// client is attached AND the completing window is the active one.
+fn should_notify(enabled: bool, min_ms: u32, duration_ms: Option<u32>, attended: bool) -> bool {
+    enabled && !attended && duration_ms.is_some_and(|d| d >= min_ms)
+}
+
+/// Notification body: `"✓ cargo build · exit 0 · 2m03s"` (command best-effort;
+/// falls back to the window when the command can't be extracted).
+fn notification_body(p: &crate::window_manager::PendingNotification) -> String {
+    use plexy_glass_mux::blocks::format_duration;
+    let dur = p.event.duration_ms.map(format_duration).unwrap_or_default();
+    let glyph = match p.event.exit {
+        Some(0) => "\u{2713} ", // ✓
+        Some(_) => "\u{2717} ", // ✗
+        None => "",
+    };
+    let exit = match p.event.exit {
+        Some(c) => format!(" \u{b7} exit {c}"),
+        None => String::new(),
+    };
+    match &p.event.command {
+        Some(cmd) => format!("{glyph}{cmd}{exit} \u{b7} {dur}"),
+        None => format!("window {} ({}){exit} \u{b7} {dur}", p.window_index + 1, p.window_name),
+    }
+}
+
+/// Fire a desktop notification, off any lock. Errors (no desktop / no D-Bus /
+/// headless) are logged and swallowed, never propagated and never panicking.
+/// Runs the blocking `notify-rust` call on the blocking pool. Not called by tests.
+fn notify_desktop(title: String, body: String) {
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = notify_rust::Notification::new()
+            .appname("plexy-glass")
+            .summary(&title)
+            .body(&body)
+            .show()
+        {
+            tracing::warn!(error = %e, "desktop notification failed");
+        }
+    });
 }
 
 /// Substitute the `prefix` token (word-wise, case-insensitive) with the
@@ -510,6 +568,44 @@ mod tests {
 
     fn binding(keys: &str, command: &str) -> KeymapBinding {
         KeymapBinding { keys: keys.into(), command: command.into() }
+    }
+
+    #[test]
+    fn should_notify_policy_matrix() {
+        // enabled, min_ms, duration, attended
+        assert!(should_notify(true, 30_000, Some(30_000), false), "long + unattended → notify");
+        assert!(should_notify(true, 30_000, Some(45_000), false));
+        assert!(!should_notify(true, 30_000, Some(29_999), false), "below threshold");
+        assert!(!should_notify(true, 30_000, Some(60_000), true), "attended → suppress");
+        assert!(!should_notify(false, 0, Some(99_999), false), "disabled");
+        assert!(!should_notify(true, 30_000, None, false), "no duration → never");
+        assert!(should_notify(true, 0, Some(1), false), "min 0 notifies any unattended");
+    }
+
+    #[test]
+    fn notification_body_formats_command_exit_duration() {
+        use crate::window::CompletionEvent;
+        let p = crate::window_manager::PendingNotification {
+            window_index: 1,
+            window_name: "api".into(),
+            is_active_window: false,
+            event: CompletionEvent {
+                exit: Some(1),
+                duration_ms: Some(45_000),
+                command: Some("cargo test".into()),
+            },
+        };
+        let body = notification_body(&p);
+        assert!(body.contains("cargo test"), "command: {body:?}");
+        assert!(body.contains("exit 1"), "exit: {body:?}");
+        assert!(body.contains("45s"), "duration: {body:?}");
+        assert!(body.contains('\u{2717}'), "fail glyph: {body:?}");
+        // No command → window fallback.
+        let p2 = crate::window_manager::PendingNotification {
+            event: CompletionEvent { command: None, ..p.event.clone() },
+            ..p
+        };
+        assert!(notification_body(&p2).contains("window 2 (api)"), "fallback to window");
     }
 
     /// Test 1: default config, the output contains ("Ctrl+a c", "New window") and
