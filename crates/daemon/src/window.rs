@@ -18,6 +18,18 @@ use tokio::time::Instant;
 /// Only the most-recent entries matter for the close-pane focus fallback.
 const FOCUS_HISTORY_CAP: usize = 64;
 
+/// A command-completion observed in a window's pane during a drain, surfaced
+/// for the desktop-notification policy regardless of the `monitor-command` flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionEvent {
+    /// Latest completed block's exit (`None` for a codeless `133;D`).
+    pub exit: Option<i32>,
+    /// Its duration in millis (`None` when no `C` preceded the `D`).
+    pub duration_ms: Option<u32>,
+    /// Best-effort command line of that block (`None` when unextractable).
+    pub command: Option<String>,
+}
+
 pub struct Window {
     pub id: WindowId,
     pub name: String,
@@ -656,35 +668,52 @@ impl Window {
     /// active or unmonitored case still advances the baseline but reports
     /// nothing.
     ///
-    /// Returns the alert outcome to message on (`Some(exit)`) when an edge fired
-    /// for a flagged window: `exit` is the latest completed block's exit payload
-    /// (`None` for a codeless `133;D`). The caller formats the message.
-    pub fn drain_command_completion(&mut self, record_flag: bool) -> Option<Option<i32>> {
+    /// Returns `(completion, monitor_edge)`:
+    /// - `completion`: a [`CompletionEvent`] (exit + duration + best-effort
+    ///   command) when any pane completed a block this drain, surfaced
+    ///   *regardless* of `record_flag` (the notification policy weighs it).
+    /// - `monitor_edge`: `Some(exit)` only when an edge fired for a flagged
+    ///   (monitored, non-active) window, the existing status-flag/alert signal.
+    ///
+    /// The per-pane baseline still advances exactly once (no backlog / RIS
+    /// re-baselines silently).
+    pub fn drain_command_completion(
+        &mut self,
+        record_flag: bool,
+    ) -> (Option<CompletionEvent>, Option<Option<i32>>) {
         // Prune baselines for panes that no longer exist (break/swap/kill).
         let live: std::collections::HashSet<PaneId> = self.layout.panes().into_iter().collect();
         self.block_baselines.retain(|id, _| live.contains(id));
 
-        let mut completed_exit: Option<Option<i32>> = None;
+        let mut event: Option<CompletionEvent> = None;
         for id in self.layout.panes() {
             let Some(p) = self.panes.get(&id) else { continue };
-            let (count, exit) = p.with_screen(|s| (s.blocks_completed, s.last_block_exit));
+            let (count, evt) = p.with_screen(|s| {
+                let evt = CompletionEvent {
+                    exit: s.last_block_exit,
+                    duration_ms: s.last_block_duration,
+                    command: plexy_glass_mux::blocks::last_completed_block(s)
+                        .and_then(|(start, _)| plexy_glass_mux::blocks::prompt_at_or_above(s, start))
+                        .and_then(|prompt| plexy_glass_mux::blocks::block_command_line(s, prompt)),
+                };
+                (s.blocks_completed, evt)
+            });
             let baseline = self.block_baselines.entry(id).or_insert(0);
             if count > *baseline {
                 // A new block (or several) completed since the last drain. We
-                // surface the latest exit payload, since the most recent outcome
-                // is what the user cares about.
-                completed_exit = Some(exit);
+                // surface the latest outcome, since the most recent is what matters.
+                event = Some(evt);
             }
             // Update the baseline unconditionally (increase OR decrease/RIS).
             *baseline = count;
         }
-        // Flag + edge only for a monitored non-active window; the active or
-        // unmonitored case still advances the baseline above but reports
-        // nothing.
-        match completed_exit {
-            Some(exit) if record_flag && self.set_done(exit) => Some(exit),
+        // The monitor-command flag/edge fires only for a monitored non-active
+        // window; the active or unmonitored case still advances the baseline.
+        let monitor_edge = match &event {
+            Some(evt) if record_flag && self.set_done(evt.exit) => Some(evt.exit),
             _ => None,
-        }
+        };
+        (event, monitor_edge)
     }
 
     /// The active pane's DFS-leaf neighbor (wrapping): the next leaf if `next`,
@@ -1006,6 +1035,55 @@ mod tests {
         let outcome = w.close_pane(PaneId(1)).unwrap();
         assert_eq!(outcome, CloseOutcome::SiblingPromoted);
         assert!(!w.is_zoomed(), "zoom must clear when its target pane is closed");
+    }
+
+    #[tokio::test]
+    async fn drain_surfaces_completion_event_regardless_of_flag() {
+        use plexy_glass_emulator::{Row, RowMark};
+        let viewport = Rect::new(0, 0, 24, 80);
+        let mut w = Window::spawn_first(
+            WindowId(0),
+            "w0".into(),
+            PaneId(0),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+            None,
+        )
+        .unwrap();
+        w.pane(PaneId(0)).unwrap().with_screen_mut(|s| {
+            let cols = s.active.cols;
+            let mut prompt = Row::blank(cols);
+            for (i, ch) in "$ ls".chars().enumerate() {
+                prompt.cells[i].grapheme = ch.to_string().into();
+            }
+            prompt.mark.set(RowMark::PROMPT_START);
+            prompt.mark.set_prompt_end(2);
+            s.active.rows[0] = prompt;
+            let mut out = Row::blank(cols);
+            out.cells[0].grapheme = "o".into();
+            out.mark.set(RowMark::OUTPUT_START);
+            s.active.rows[1] = out;
+            let mut done = Row::blank(cols);
+            done.mark.set(RowMark::BLOCK_END);
+            done.mark.set_exit(Some(0));
+            s.active.rows[2] = done;
+            s.blocks_completed = 1;
+            s.last_block_exit = Some(0);
+            s.last_block_duration = Some(5000);
+        });
+        // `record_flag=false` (unmonitored): the completion event is still surfaced.
+        let (event, edge) = w.drain_command_completion(false);
+        let event = event.expect("completion event surfaced regardless of flag");
+        assert_eq!(event.exit, Some(0));
+        assert_eq!(event.duration_ms, Some(5000));
+        assert_eq!(event.command.as_deref(), Some("ls"));
+        assert_eq!(edge, None, "monitor-command edge suppressed when record_flag=false");
+        // Second drain: baseline caught up, no new event.
+        let (event2, _) = w.drain_command_completion(false);
+        assert!(event2.is_none(), "no event once the baseline caught up");
     }
 
     fn two_pane_window() -> Window {

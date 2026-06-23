@@ -302,7 +302,7 @@ impl WindowManager {
             // window; the flag/edge is recorded only for a monitored non-active
             // window (background completion you can't see).
             let record_done = i != active && w.monitor_command();
-            let done_edge = w.drain_command_completion(record_done);
+            let (_completion, done_edge) = w.drain_command_completion(record_done);
             if i == active {
                 w.clear_alerts();
             } else {
