@@ -1025,6 +1025,7 @@ keymap {
     bind "prefix :" "command_prompt"
     bind "prefix w" "choose_session"
     bind "prefix W" "choose_tree"
+    bind "prefix H" "history"
     bind "prefix m" "mark_pane"
     bind "prefix !" "break_pane"
     bind "prefix {" "swap_pane_prev"

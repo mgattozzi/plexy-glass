@@ -1035,6 +1035,77 @@ fn build_tree_nodes(
     nodes
 }
 
+/// Cap on the history-palette corpus (newest-first, so the cap drops the oldest).
+const HISTORY_ENTRY_CAP: usize = 2000;
+
+/// Open the structured history palette: walk the registry, snapshot every
+/// session's blocks, assemble a flat entry list (current pane first), and open
+/// the overlay. Mirrors `open_tree_overlay`.
+async fn open_history_overlay(session: &Arc<Session>, registry: &Arc<SessionRegistry>) {
+    let current = session.name();
+    let current_pane = session.active_pane_id().await;
+    let mut snaps: Vec<crate::session::SessionHistory> = Vec::new();
+    for entry in registry.list().await {
+        let Some(s) = registry.get(&entry.name).await else {
+            continue;
+        };
+        snaps.push(s.history_snapshot().await);
+    }
+    let entries = build_history_entries(&snaps, &current, current_pane);
+    {
+        let mut m = session.window_manager.lock().await;
+        m.open_history(entries);
+    }
+    session.notify.notify_one();
+}
+
+/// Flatten per-session block snapshots into palette entries, ordered: the
+/// current pane's blocks first, then the rest of the current session, then other
+/// sessions, each pane's blocks already newest-first from `history_snapshot`.
+/// Capped at [`HISTORY_ENTRY_CAP`] (logged when it triggers). Pure, for testing.
+fn build_history_entries(
+    snaps: &[crate::session::SessionHistory],
+    current_session: &str,
+    current_pane: Option<plexy_glass_mux::PaneId>,
+) -> Vec<plexy_glass_mux::HistoryEntry> {
+    use plexy_glass_mux::HistoryEntry;
+    let mut ranked: Vec<(u8, HistoryEntry)> = Vec::new();
+    for st in snaps {
+        let in_current_session = st.name == current_session;
+        for b in &st.blocks {
+            let rank = if in_current_session && Some(b.pane) == current_pane {
+                0
+            } else if in_current_session {
+                1
+            } else {
+                2
+            };
+            ranked.push((
+                rank,
+                HistoryEntry {
+                    session: st.name.clone(),
+                    window: b.window,
+                    window_idx: b.window_idx,
+                    pane: b.pane,
+                    prompt_line: b.prompt_line,
+                    command: b.command.clone(),
+                    exit: b.exit,
+                    duration: b.duration,
+                    haystack: b.haystack.clone(),
+                },
+            ));
+        }
+    }
+    // Stable sort by rank only, so within a rank the snapshot order
+    // (newest-first per pane) is preserved.
+    ranked.sort_by_key(|(r, _)| *r);
+    if ranked.len() > HISTORY_ENTRY_CAP {
+        tracing::info!(total = ranked.len(), cap = HISTORY_ENTRY_CAP, "history palette truncated");
+        ranked.truncate(HISTORY_ENTRY_CAP);
+    }
+    ranked.into_iter().map(|(_, e)| e).collect()
+}
+
 impl ClientCtx<'_> {
     /// Perform a choose-tree action. `Switch` re-points this client (and focuses
     /// the chosen window/pane); the `Kill*`/`Rename*` actions reach into the
@@ -1156,6 +1227,51 @@ impl ClientCtx<'_> {
             }
         }
     }
+
+    /// Perform a history-palette jump: switch to the target session (if needed,
+    /// like choose-tree's `Switch`), focus its window+pane, and enter block mode
+    /// on the chosen block. The block is re-found at jump time by command (then
+    /// nearest prompt) so scrollback drift since the palette opened can't land us
+    /// on the wrong block; a vanished target flashes a status message.
+    async fn dispatch_history_jump(&mut self, target: plexy_glass_mux::HistoryTarget) {
+        use plexy_glass_mux::{BlockMode, blocks};
+        let on_target = if target.session == self.session.name() {
+            true
+        } else {
+            self.switch_session(target.session.clone()).await
+        };
+        let landed = if on_target {
+            let mut m = self.session.window_manager.lock().await;
+            m.select_window_by_id(target.window);
+            m.focus_pane_by_id(target.pane);
+            match m.active_window().pane(target.pane) {
+                Some(pane) => {
+                    let state = pane.with_screen(|s| {
+                        let line = blocks::find_block_by_command(s, &target.command, target.prompt_line)
+                            .or_else(|| blocks::prompt_at_or_above(s, target.prompt_line))
+                            .or_else(|| blocks::first_prompt_line(s));
+                        line.and_then(|l| BlockMode::new_at(s, s.active.num_rows(), l))
+                    });
+                    match state {
+                        Some(state) => {
+                            pane.enter_block_mode(state);
+                            true
+                        }
+                        None => false,
+                    }
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+        if !landed {
+            self.session
+                .set_status_message("history: block no longer available".into())
+                .await;
+        }
+        self.session.notify.notify_one();
+    }
 }
 
 /// A command verb handled at the connection layer rather than inside the
@@ -1171,6 +1287,7 @@ enum ConnVerb {
     Switch(String),
     ChooseSession,
     ChooseTree,
+    History,
     PasteBuffer(Option<String>),
     ChooseBuffer,
     CopyOutput,
@@ -1192,6 +1309,7 @@ impl ConnVerb {
             Command::ReloadConfig => Ok(Self::Reload),
             Command::ChooseSession => Ok(Self::ChooseSession),
             Command::ChooseTree => Ok(Self::ChooseTree),
+            Command::History => Ok(Self::History),
             Command::PasteBuffer => Ok(Self::PasteBuffer(None)),
             Command::ChooseBuffer => Ok(Self::ChooseBuffer),
             Command::CopyOutput => Ok(Self::CopyOutput),
@@ -1211,6 +1329,7 @@ impl ConnVerb {
             PromptCommand::Switch(name) => Ok(Self::Switch(name)),
             PromptCommand::ChooseSession => Ok(Self::ChooseSession),
             PromptCommand::ChooseTree => Ok(Self::ChooseTree),
+            PromptCommand::History => Ok(Self::History),
             PromptCommand::PasteBuffer(name) => Ok(Self::PasteBuffer(name)),
             PromptCommand::ChooseBuffer => Ok(Self::ChooseBuffer),
             PromptCommand::CopyOutput => Ok(Self::CopyOutput),
@@ -1254,6 +1373,9 @@ async fn run_connection_verb(
         }
         ConnVerb::ChooseTree => {
             open_tree_overlay(ctx.session, ctx.registry).await;
+        }
+        ConnVerb::History => {
+            open_history_overlay(ctx.session, ctx.registry).await;
         }
         ConnVerb::PasteBuffer(None) => {
             paste_top_buffer(ctx.session, ctx.registry).await;
@@ -1320,6 +1442,9 @@ async fn apply_overlay_result(
         }
         OverlayKeyResult::Tree(action) => {
             ctx.dispatch_tree_action(action).await;
+        }
+        OverlayKeyResult::History(target) => {
+            ctx.dispatch_history_jump(target).await;
         }
         OverlayKeyResult::Buffer(action) => {
             use plexy_glass_mux::BufferAction;
@@ -1639,6 +1764,7 @@ async fn run_prompt_line(
         PromptCommand::Help => refuse("help"),
         PromptCommand::ChooseSession => refuse("sessions"),
         PromptCommand::ChooseTree => refuse("tree"),
+        PromptCommand::History => refuse("history"),
         PromptCommand::ChooseBuffer => refuse("buffers"),
         other => match session.handle_prompt_command(other).await {
             Ok(message) => (true, message),
@@ -2362,6 +2488,99 @@ mod tests {
 
         wait_until(0, 1).await;
         server.abort();
+    }
+
+    #[test]
+    fn build_history_entries_orders_current_pane_first_newest_first() {
+        use crate::session::{HistoryBlock, SessionHistory};
+        use plexy_glass_mux::{PaneId, WindowId};
+        let blk = |pane: u32, line: u32, cmd: &str| HistoryBlock {
+            window: WindowId(0),
+            window_idx: 0,
+            pane: PaneId(pane),
+            prompt_line: line,
+            command: cmd.into(),
+            exit: Some(0),
+            duration: None,
+            haystack: cmd.to_lowercase(),
+        };
+        let snaps = vec![
+            SessionHistory {
+                name: "cur".into(),
+                // pane 1 (current) has two blocks newest-first; pane 0 one block.
+                blocks: vec![
+                    blk(1, 9, "cur-p1-new"),
+                    blk(1, 3, "cur-p1-old"),
+                    blk(0, 5, "cur-p0"),
+                ],
+            },
+            SessionHistory { name: "other".into(), blocks: vec![blk(0, 7, "other")] },
+        ];
+        let entries = build_history_entries(&snaps, "cur", Some(PaneId(1)));
+        // Current pane (1) first, newest-first; then current session's pane 0;
+        // then the other session.
+        let cmds: Vec<&str> = entries.iter().map(|e| e.command.as_str()).collect();
+        assert_eq!(cmds, vec!["cur-p1-new", "cur-p1-old", "cur-p0", "other"]);
+        assert!(entries.len() <= HISTORY_ENTRY_CAP);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn history_overlay_open_and_enter_jumps_to_newest_block() {
+        use plexy_glass_emulator::{Row, RowMark};
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("h".into(), script_cat(), script_size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
+        // Build a prompt row "$ <cmd>" with the command starting at col 2.
+        let prompt_row = |cmd: &str, cols: u16| {
+            let mut r = Row::blank(cols);
+            for (i, ch) in format!("$ {cmd}").chars().enumerate() {
+                if (i as u16) < cols {
+                    r.cells[i].grapheme = ch.to_string().into();
+                }
+            }
+            r.mark.set(RowMark::PROMPT_START);
+            r.mark.set_prompt_end(2);
+            r
+        };
+        {
+            let m = session.window_manager.lock().await;
+            let pid = m.active_window().active();
+            m.active_window().pane(pid).unwrap().with_screen_mut(|scr| {
+                let cols = scr.active.cols;
+                scr.active.rows[0] = prompt_row("ls", cols);
+                scr.active.rows[1] = {
+                    let mut r = Row::blank(cols);
+                    r.cells[0].grapheme = "a".into();
+                    r.mark.set(RowMark::OUTPUT_START);
+                    r
+                };
+                scr.active.rows[2] = prompt_row("pwd", cols);
+                scr.active.rows[3] = {
+                    let mut r = Row::blank(cols);
+                    r.cells[0].grapheme = "b".into();
+                    r.mark.set(RowMark::OUTPUT_START);
+                    r
+                };
+            });
+        }
+        open_history_overlay(&session, &registry).await;
+        // Selection defaults to the newest current-pane block ("pwd"); Enter jumps.
+        let result = {
+            let mut m = session.window_manager.lock().await;
+            m.handle_overlay_key(&plexy_glass_mux::KeyEvent::plain(plexy_glass_mux::Key::Enter))
+        };
+        match result {
+            crate::window_manager::OverlayKeyResult::History(t) => {
+                assert_eq!(t.session, "h");
+                assert_eq!(t.command, "pwd", "newest current-pane block selected by default");
+            }
+            other => panic!("expected History jump, got {other:?}"),
+        }
+        session.terminate_panes().await;
     }
 
     #[test]
@@ -3852,7 +4071,7 @@ mod tests {
         // Refused: these act on the calling client (detach/switch), open modal
         // overlays (help/sessions/tree/buffers), or are interactive per-pane
         // modal navigation (block-mode).
-        for line in ["detach", "switch x", "sessions", "tree", "buffers", "help", "block-mode"] {
+        for line in ["detach", "switch x", "sessions", "tree", "history", "buffers", "help", "block-mode"] {
             let (ok, message) = run_prompt_line(&session, &registry, line).await;
             assert!(!ok, "`{line}` must be refused headless, not silently succeed");
             let msg = message.unwrap_or_default();

@@ -280,6 +280,9 @@ pub(super) async fn render_coordinator(
                 Some(plexy_glass_mux::Overlay::BufferPicker(state)) => {
                     Some(plexy_glass_mux::OverlayView::Buffer { state })
                 }
+                Some(plexy_glass_mux::Overlay::History(state)) => {
+                    Some(plexy_glass_mux::OverlayView::History { state })
+                }
                 None => None,
             };
 
@@ -402,6 +405,7 @@ fn command_label(command: &str) -> String {
         "command_prompt" => "Command prompt",
         "choose_session" => "Choose session",
         "choose_tree" => "Choose tree",
+        "history" => "History palette",
         "mark_pane" => "Mark pane",
         "break_pane" => "Break pane",
         "swap_pane_next" => "Swap pane next",

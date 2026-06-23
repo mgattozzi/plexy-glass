@@ -78,6 +78,9 @@ pub enum Overlay {
     /// The choose-buffer overlay. Driven by `crate::buffer::handle_buffers` at the
     /// daemon layer (its actions need the registry's paste buffers).
     BufferPicker(crate::buffer::BufferPickerState),
+    /// The structured history palette. Driven by `crate::history::handle_history`
+    /// at the daemon layer (the jump is cross-session and needs the registry).
+    History(crate::history::HistoryState),
 }
 
 /// The caller's follow-up after feeding a key to an overlay.
@@ -109,10 +112,10 @@ pub fn handle(event: &KeyEvent, overlay: &mut Overlay) -> OverlayAction {
         Overlay::SessionPicker { entries, filter, selected } => {
             handle_session_picker(event, entries, filter, selected)
         }
-        // Tree / buffer-picker overlays are handled by the daemon via their own
-        // pure handlers (actions need the registry); these arms only keep the
-        // match exhaustive and are never reached.
-        Overlay::Tree(_) | Overlay::BufferPicker(_) => OverlayAction::None,
+        // Tree / buffer-picker / history overlays are handled by the daemon via
+        // their own pure handlers (actions need the registry); these arms only
+        // keep the match exhaustive and are never reached.
+        Overlay::Tree(_) | Overlay::BufferPicker(_) | Overlay::History(_) => OverlayAction::None,
     }
 }
 

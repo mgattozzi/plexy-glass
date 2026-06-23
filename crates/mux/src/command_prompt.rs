@@ -50,6 +50,7 @@ pub enum PromptCommand {
     Switch(String),
     ChooseSession,
     ChooseTree,
+    History,
     MarkPane,
     BreakPane,
     JoinPane(SplitDir),
@@ -104,7 +105,7 @@ impl std::error::Error for ParseError {}
 /// Static verb names, sorted, for Tab-completion of the first token.
 pub const VERBS: &[&str] = &[
     "block-mode", "break", "buffers", "close-popup", "copy", "copy-output", "detach", "focus",
-    "help", "join", "kill", "last", "layout", "load-buffer", "mark",
+    "help", "history", "join", "kill", "last", "layout", "load-buffer", "mark",
     "monitor-activity", "monitor-bell", "monitor-command", "monitor-silence", "new", "next",
     "next-prompt", "paste",
     "pipe-pane", "popup", "prev", "prev-prompt", "reload", "rename", "rename-pane", "resize",
@@ -170,6 +171,7 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
         "help" => no_args(PromptCommand::Help),
         "sessions" => no_args(PromptCommand::ChooseSession),
         "tree" => no_args(PromptCommand::ChooseTree),
+        "history" => no_args(PromptCommand::History),
         "mark" => no_args(PromptCommand::MarkPane),
         "break" => no_args(PromptCommand::BreakPane),
         "paste" => match args.as_slice() {

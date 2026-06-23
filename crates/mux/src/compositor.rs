@@ -147,6 +147,10 @@ pub enum OverlayView<'a> {
     /// The choose-buffer overlay: a centered box listing paste buffers
     /// (`name: preview`), the selected one highlighted.
     Buffer { state: &'a crate::buffer::BufferPickerState },
+    /// The structured history palette: a centered box with a filter line and one
+    /// row per matching command block (status glyph, duration, `session/window`
+    /// provenance, command), the selected row highlighted.
+    History { state: &'a crate::history::HistoryState },
 }
 
 /// A render-ready view of the floating popup pane: a live PTY-backed grid in
@@ -963,6 +967,10 @@ fn paint_overlay(
             paint_buffers(screen, state, pane_row_offset, pane_area_rows, cols);
             screen.cursor_visible = false;
         }
+        OverlayView::History { state } => {
+            paint_history(screen, state, pane_row_offset, pane_area_rows, cols);
+            screen.cursor_visible = false;
+        }
         OverlayView::Command { buf } => {
             // A full-width REVERSE bar on the bottom row of the pane band,
             // ":<buf>" with a block cursor just past the text.
@@ -1166,6 +1174,78 @@ fn paint_session_picker(
         put_str(screen, row0 + 2, inner_left, empty_msg, plain, inner_right);
     } else {
         paint_selectable_rows(screen, &rows, row0 + 2, inner_left, inner_right, top, visible, sel);
+    }
+}
+
+/// Draw the centered history-palette box: a filter line plus one row per
+/// matching block (`glyph dur session/window  command`), the selected row
+/// REVERSE, scrolled to keep the selection visible. Mirrors the session picker.
+fn paint_history(
+    screen: &mut VirtualScreen,
+    state: &crate::history::HistoryState,
+    pane_row_offset: u16,
+    pane_area_rows: u16,
+    cols: u16,
+) {
+    let title = " History ";
+    let footer = " \u{2191}/\u{2193} select \u{b7} enter jump \u{b7} esc cancel ";
+    let empty_msg = "(no matching blocks)";
+    let visible = state.visible_indices();
+    let rows: Vec<String> = visible
+        .iter()
+        .map(|&i| {
+            let e = &state.entries[i];
+            let glyph = match e.exit {
+                Some(0) => '\u{2713}', // ✓
+                Some(_) => '\u{2717}', // ✗
+                None => ' ',
+            };
+            let dur = e.duration.map(crate::blocks::format_duration).unwrap_or_default();
+            format!("{glyph} {dur:<6} {}/{}  {}", e.session, e.window_idx, e.command)
+        })
+        .collect();
+    let filter_line = format!("filter: {}", state.filter);
+
+    let max_visible = (pane_area_rows.saturating_sub(3)).max(1) as usize;
+    let row_count = rows.len().max(1);
+    let visible_rows = row_count.min(max_visible);
+
+    let dw = |s: &str| display_width(s) as usize;
+    let content_w = rows
+        .iter()
+        .map(|s| dw(s))
+        .chain([
+            dw(&filter_line),
+            dw(title),
+            dw(footer),
+            if rows.is_empty() { dw(empty_msg) } else { 0 },
+        ])
+        .max()
+        .unwrap_or(0);
+    let inner_w = (content_w + 2).min(cols.saturating_sub(2) as usize);
+    let box_w = (inner_w + 2) as u16;
+    let box_h = (visible_rows as u16) + 3;
+    if box_w < 3 || box_h < 4 || box_w > cols || box_h > pane_area_rows {
+        return;
+    }
+
+    // Position of the selected entry within the visible list.
+    let sel = visible.iter().position(|&i| i == state.selected).unwrap_or(0);
+    let top = if sel >= visible_rows { sel - visible_rows + 1 } else { 0 };
+
+    let row0 = pane_row_offset + (pane_area_rows.saturating_sub(box_h)) / 2;
+    let col0 = (cols.saturating_sub(box_w)) / 2;
+    let plain = plexy_glass_emulator::Attrs::empty();
+
+    draw_box(screen, row0, col0, box_h, box_w, title, footer);
+    let inner_left = col0 + 1;
+    let inner_right = col0 + box_w - 1;
+
+    put_str(screen, row0 + 1, inner_left, &format!("{filter_line}\u{2588}"), plain, inner_right);
+    if rows.is_empty() {
+        put_str(screen, row0 + 2, inner_left, empty_msg, plain, inner_right);
+    } else {
+        paint_selectable_rows(screen, &rows, row0 + 2, inner_left, inner_right, top, visible_rows, sel);
     }
 }
 
@@ -2555,6 +2635,74 @@ mod tests {
             pr.find("pane 2").unwrap() > sr.find("main").unwrap(),
             "deeper node is indented more"
         );
+    }
+
+    #[test]
+    fn history_overlay_renders_rows_and_selection() {
+        use plexy_glass_emulator::Attrs;
+        let mut e = Emulator::new(12, 60);
+        pane(&mut e, b"hi");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 12, 60),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: None,
+            title: None,
+            marked: false,
+        };
+        let mk = |session: &str, cmd: &str, exit: Option<i32>, dur: Option<u32>, line: u32| {
+            crate::history::HistoryEntry {
+                session: session.into(),
+                window: crate::WindowId(0),
+                window_idx: 2,
+                pane: PaneId(0),
+                prompt_line: line,
+                command: cmd.into(),
+                exit,
+                duration: dur,
+                haystack: cmd.to_lowercase(),
+            }
+        };
+        let state = crate::history::HistoryState {
+            entries: vec![
+                mk("api", "docker compose up", Some(0), Some(2300), 10),
+                mk("web", "cargo test", Some(1), Some(45_000), 4),
+            ],
+            selected: 1,
+            filter: String::new(),
+        };
+        let ov = OverlayView::History { state: &state };
+        let vs = compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+
+        let mut found_corner = false;
+        let mut selected_reverse = false;
+        let mut rows: Vec<String> = Vec::new();
+        for r in 0..12 {
+            let mut line = String::new();
+            for c in 0..60 {
+                let cell = vs.cell(r, c).unwrap();
+                line.push_str(cell.grapheme.as_str());
+                if cell.grapheme.as_str() == "\u{250c}" {
+                    found_corner = true;
+                }
+                // selected row is "cargo test" (REVERSE).
+                if cell.grapheme.as_str() == "c" && cell.attrs.contains(Attrs::REVERSE) {
+                    selected_reverse = true;
+                }
+            }
+            rows.push(line);
+        }
+        assert!(found_corner, "history box border drawn");
+        assert!(selected_reverse, "selected row painted REVERSE");
+        assert!(!vs.cursor_visible, "history hides the pane cursor");
+        let joined = rows.join("\n");
+        assert!(joined.contains("docker compose up"), "command rendered: {joined:?}");
+        assert!(joined.contains("api/2"), "provenance rendered: {joined:?}");
+        assert!(joined.contains("2.3s"), "duration rendered: {joined:?}");
+        assert!(joined.contains('\u{2717}'), "fail glyph for the nonzero-exit block");
     }
 
     #[test]

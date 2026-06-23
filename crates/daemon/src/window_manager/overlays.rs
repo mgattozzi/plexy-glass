@@ -1,8 +1,9 @@
 use super::{COMMAND_HISTORY_CAP, WindowManager};
 use plexy_glass_mux::{
-    BufferAction, BufferEntry, BufferOutcome, BufferPickerState, KeyEvent, NodeKey, Overlay,
-    OverlayAction, PickerEntry, RenameTarget, TreeAction, TreeKind, TreeNode,
-    TreeOutcome, TreeState, handle_buffers, handle_tree, session_label,
+    BufferAction, BufferEntry, BufferOutcome, BufferPickerState, HistoryEntry, HistoryOutcome,
+    HistoryState, HistoryTarget, KeyEvent, NodeKey, Overlay, OverlayAction, PickerEntry,
+    RenameTarget, TreeAction, TreeKind, TreeNode, TreeOutcome, TreeState, handle_buffers,
+    handle_history, handle_tree, session_label,
 };
 
 /// How the caller should follow up after feeding a key to the active overlay.
@@ -27,6 +28,10 @@ pub enum OverlayKeyResult {
     /// A choose-buffer action. The connection layer pastes the named buffer into
     /// the active pane or deletes it from the registry's paste buffers.
     Buffer(BufferAction),
+    /// A history-palette jump. The connection layer switches to the target
+    /// session (if needed), focuses its window+pane, and enters block mode on
+    /// the chosen block.
+    History(HistoryTarget),
 }
 
 impl WindowManager {
@@ -92,6 +97,14 @@ impl WindowManager {
     /// Open the choose-buffer overlay over a snapshot of the paste buffers.
     pub fn open_buffer_picker(&mut self, entries: Vec<BufferEntry>) {
         self.overlay = Some(Overlay::BufferPicker(BufferPickerState { entries, selected: 0 }));
+        self.rename_pane_target = None;
+    }
+
+    /// Open the history palette over a pre-built entry snapshot (assembled by the
+    /// connection layer from every live session). Driven by `history::handle_history`;
+    /// the jump is dispatched at the connection layer.
+    pub fn open_history(&mut self, entries: Vec<HistoryEntry>) {
+        self.overlay = Some(Overlay::History(HistoryState::new(entries)));
         self.rename_pane_target = None;
     }
 
@@ -175,6 +188,23 @@ impl WindowManager {
                     OverlayKeyResult::Tree(action)
                 }
                 TreeOutcome::Act(action) => OverlayKeyResult::Tree(action),
+            };
+        }
+        // History palette: driven by the pure `handle_history`; the jump is
+        // cross-session and dispatched at the connection layer. Cancel and Jump
+        // close the overlay here.
+        if let Some(Overlay::History(state)) = self.overlay.as_mut() {
+            return match handle_history(event, state) {
+                HistoryOutcome::None => OverlayKeyResult::Ignored,
+                HistoryOutcome::Redraw => OverlayKeyResult::Redraw,
+                HistoryOutcome::Cancel => {
+                    self.close_overlay();
+                    OverlayKeyResult::Redraw
+                }
+                HistoryOutcome::Jump(target) => {
+                    self.close_overlay();
+                    OverlayKeyResult::History(target)
+                }
             };
         }
         // Choose-buffer: Paste/Cancel close; Delete keeps the overlay open (the

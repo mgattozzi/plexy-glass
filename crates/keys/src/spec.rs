@@ -169,6 +169,7 @@ pub fn parse_command(s: &str) -> Result<Command, KeyParseError> {
         "command_prompt" => Command::CommandPrompt,
         "choose_session" => Command::ChooseSession,
         "choose_tree" => Command::ChooseTree,
+        "history" => Command::History,
         "mark_pane" => Command::MarkPane,
         "break_pane" => Command::BreakPane,
         "swap_pane_next" => Command::SwapPane(true),

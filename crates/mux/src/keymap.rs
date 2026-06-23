@@ -51,6 +51,8 @@ pub enum Command {
     CommandPrompt,
     ChooseSession,
     ChooseTree,
+    /// Open the structured history palette (cross-session block finder).
+    History,
     /// Paste the most-recent paste buffer into the active pane.
     PasteBuffer,
     /// Open the choose-buffer overlay.
