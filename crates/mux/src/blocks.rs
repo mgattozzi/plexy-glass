@@ -198,6 +198,43 @@ pub fn closing_duration(screen: &Screen, prompt_line: u32) -> Option<u32> {
         .and_then(|d| row_at(screen, d)?.mark.duration_ms())
 }
 
+/// Lowercased "command\noutput" for the block at `prompt_line`, output truncated
+/// to `cap` bytes, the history-palette search haystack. Output is the block's
+/// rows from output-start through block end (the same region `o`/copy-output use).
+pub fn block_search_text(screen: &Screen, prompt_line: u32, cap: usize) -> String {
+    let mut s = block_command_line(screen, prompt_line).unwrap_or_default();
+    if let Some((start, end)) = block_output_range(screen, prompt_line) {
+        let mut out = String::new();
+        'rows: for line in start..=end {
+            let Some(row) = row_at(screen, line) else { continue };
+            for cell in &row.cells {
+                out.push_str(cell.grapheme.as_str());
+                if out.len() >= cap {
+                    break 'rows;
+                }
+            }
+            out.push('\n');
+            if out.len() >= cap {
+                break;
+            }
+        }
+        out.truncate(cap);
+        s.push('\n');
+        s.push_str(&out);
+    }
+    s.to_lowercase()
+}
+
+/// Among blocks whose command line equals `command`, the prompt line minimizing
+/// `|line - near|`. `None` if none match. Disambiguates a repeated command at
+/// jump time when scrollback has drifted since the palette was built.
+pub fn find_block_by_command(screen: &Screen, command: &str, near: u32) -> Option<u32> {
+    all_prompt_lines(screen)
+        .into_iter()
+        .filter(|&l| block_command_line(screen, l).as_deref() == Some(command))
+        .min_by_key(|&l| l.abs_diff(near))
+}
+
 /// Human-compact duration: `340ms` / `2.3s` / `45s` / `2m05s`.
 pub fn format_duration(ms: u32) -> String {
     if ms < 1_000 {
@@ -776,6 +813,49 @@ mod tests {
         let s = two_blocks();
         // Block 2 (prompt at line 3) has no closing D in the grid.
         assert_eq!(closing_duration(&s, 3), None);
+    }
+
+    #[test]
+    fn block_search_text_includes_command_and_output_lowercased() {
+        // Full A/B/C block so block_command_line yields the command.
+        let s = screen_from(
+            8,
+            40,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07One\r\n\x1b]133;C\x07Out1\r\nOut2\r\nx",
+        );
+        let t = block_search_text(&s, 0, 4096);
+        assert!(t.contains("one"), "command, lowercased: {t:?}");
+        assert!(t.contains("out1") && t.contains("out2"), "output, lowercased: {t:?}");
+        assert_eq!(t, t.to_lowercase());
+    }
+
+    #[test]
+    fn block_search_text_caps_output_bytes() {
+        let s = screen_from(
+            8,
+            40,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07c\r\n\x1b]133;C\x07aaaaaaaaaa\r\nbbbbbbbbbb\r\nx",
+        );
+        let t = block_search_text(&s, 0, 8);
+        // command "c" + '\n' + at most 8 output bytes.
+        assert!(t.len() <= "c\n".len() + 8, "output capped: {t:?}");
+        assert!(t.starts_with("c\n"));
+    }
+
+    #[test]
+    fn find_block_by_command_matches_nearest() {
+        let s = screen_from(
+            8,
+            40,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07a\r\n\
+              \x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07b\r\nx",
+        );
+        let lines = all_prompt_lines(&s);
+        assert_eq!(lines.len(), 2, "two prompts");
+        let (first, second) = (lines[0], lines[1]);
+        assert_eq!(find_block_by_command(&s, "ls", second), Some(second));
+        assert_eq!(find_block_by_command(&s, "ls", first), Some(first));
+        assert_eq!(find_block_by_command(&s, "nope", first), None);
     }
 
     #[test]
