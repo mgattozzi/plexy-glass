@@ -1233,7 +1233,7 @@ async fn cross_window_swap_into_monitored_window_does_not_replay_done() {
     m.new_window_with_spec(spec(), "api".into()).unwrap(); // W1: pane 1, active
     // pane 1 completed commands before being moved.
     set_block_counter(&m, 1, 3, Some(0));
-    let _ = m.update_monitor_flags(); // establish baselines (W1 active, W0 background)
+    let _ = m.update_monitor_flags().alert_edge; // establish baselines (W1 active, W0 background)
     // Swap marked(pane 0 @ W0) <-> active(pane 1 @ W1): pane 1 (blocks=3) lands
     // in the background, monitored W0.
     m.handle_command(Command::SwapMarkedPane).unwrap();
@@ -1243,7 +1243,7 @@ async fn cross_window_swap_into_monitored_window_does_not_replay_done() {
     );
     let _ = m.take_active_message();
     assert!(
-        !m.update_monitor_flags(),
+        !m.update_monitor_flags().alert_edge,
         "a moved pane must not replay its prior completion as a done alert"
     );
     assert_eq!(m.windows()[0].done_flag(), None, "no spurious done flag");
@@ -1834,7 +1834,7 @@ async fn update_monitor_flags_clears_active_window_alerts() {
     let mut m = mk_mgr();
     m.active_window_mut().set_bell(); // a stale alert on the (current) window
     m.active_window_mut().set_activity();
-    let _ = m.update_monitor_flags();
+    let _ = m.update_monitor_flags().alert_edge;
     assert!(!m.active_window().bell_flag(), "current window's bell cleared");
     assert!(!m.active_window().activity_flag(), "current window's activity cleared");
 }
@@ -1856,7 +1856,7 @@ async fn update_monitor_flags_sets_background_activity_then_clears_on_switch() {
     // Drain into the sticky flag (the coordinator's per-frame step).
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        let _ = m.update_monitor_flags();
+        let _ = m.update_monitor_flags().alert_edge;
         if m.windows()[1].activity_flag() {
             break;
         }
@@ -1868,7 +1868,7 @@ async fn update_monitor_flags_sets_background_activity_then_clears_on_switch() {
     assert!(!m.active_window().activity_flag(), "the current window is never flagged");
     // Switching to the flagged window clears it on the next update.
     m.handle_command(Command::SelectWindow(1)).unwrap();
-    let _ = m.update_monitor_flags();
+    let _ = m.update_monitor_flags().alert_edge;
     assert!(!m.windows()[1].activity_flag(), "flag cleared once the window is current");
 }
 
@@ -1898,7 +1898,7 @@ async fn update_monitor_flags_sets_background_bell_from_a_real_bel() {
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let _ = m.update_monitor_flags();
+        let _ = m.update_monitor_flags().alert_edge;
         if m.windows()[1].bell_flag() {
             break;
         }
@@ -1924,7 +1924,7 @@ async fn drive_until_alert(m: &mut WindowManager, bg_idx: usize) -> Option<Strin
             .send_input(bytes::Bytes::from_static(b"x\n"))
             .await
             .unwrap();
-        if m.update_monitor_flags() {
+        if m.update_monitor_flags().alert_edge {
             return m.take_active_message().map(str::to_string);
         }
         if Instant::now() > deadline {
@@ -1964,7 +1964,7 @@ async fn activity_in_active_window_emits_no_message() {
     // Drain a few times; the active window never flags and never emits an edge
     // alert (`update_monitor_flags` returns false → no alert message set).
     for _ in 0..5 {
-        assert!(!m.update_monitor_flags(), "active window emits no alert message");
+        assert!(!m.update_monitor_flags().alert_edge, "active window emits no alert message");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(!m.active_window().activity_flag(), "active window is never flagged");
@@ -1988,7 +1988,7 @@ async fn activity_does_not_re_message_while_sticky() {
             .send_input(bytes::Bytes::from_static(b"y\n"))
             .await
             .unwrap();
-        assert!(!m.update_monitor_flags(), "no re-message while the flag stays sticky");
+        assert!(!m.update_monitor_flags().alert_edge, "no re-message while the flag stays sticky");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
@@ -2003,7 +2003,7 @@ async fn activity_re_messages_after_view_clears_and_re_edges() {
     let _ = m.take_active_message();
     // View window 1 (clears its flag), then go back to window 0.
     m.handle_command(Command::SelectWindow(1)).unwrap();
-    let _ = m.update_monitor_flags(); // clears the now-active window's flag
+    let _ = m.update_monitor_flags().alert_edge; // clears the now-active window's flag
     assert!(!m.windows()[1].activity_flag(), "viewing cleared the flag");
     m.handle_command(Command::SelectWindow(0)).unwrap();
     // A fresh edge after clearing must message again.
@@ -2047,10 +2047,10 @@ async fn command_completion_nonzero_exit_flags_failed_and_messages() {
     m.new_window_with_spec(spec(), "api".into()).unwrap(); // window 1, active
     m.handle_command(Command::ToggleMonitorCommand).unwrap(); // monitor-command on for window 1
     m.handle_command(Command::SelectWindow(0)).unwrap(); // window 0 active; window 1 background
-    let _ = m.update_monitor_flags(); // baseline window 1 at 0
+    let _ = m.update_monitor_flags().alert_edge; // baseline window 1 at 0
     // A command completes in the background window with a nonzero exit.
     set_block_counter(&m, 1, 1, Some(1));
-    assert!(m.update_monitor_flags(), "completion edge fires a message");
+    assert!(m.update_monitor_flags().alert_edge, "completion edge fires a message");
     assert_eq!(m.take_active_message(), Some("done in window 2 (api): exit 1"));
     assert_eq!(m.windows()[1].done_flag(), Some(false), "✗ flag (failed)");
 }
@@ -2061,11 +2061,34 @@ async fn command_completion_exit_zero_flags_ok_and_messages() {
     m.new_window_with_spec(spec(), "api".into()).unwrap();
     m.handle_command(Command::ToggleMonitorCommand).unwrap();
     m.handle_command(Command::SelectWindow(0)).unwrap();
-    let _ = m.update_monitor_flags();
+    let _ = m.update_monitor_flags().alert_edge;
     set_block_counter(&m, 1, 1, Some(0));
-    assert!(m.update_monitor_flags());
+    assert!(m.update_monitor_flags().alert_edge);
     assert_eq!(m.take_active_message(), Some("done in window 2 (api): exit 0"));
     assert_eq!(m.windows()[1].done_flag(), Some(true), "✓ flag (ok)");
+}
+
+#[tokio::test]
+async fn update_monitor_flags_collects_pending_notifications() {
+    // Completion events are collected for EVERY window regardless of the
+    // monitor-command flag (the notification policy is applied by the coordinator).
+    let mut m = mk_mgr(); // window 0
+    m.new_window_with_spec(spec(), "api".into()).unwrap(); // window 1, active
+    m.handle_command(Command::SelectWindow(0)).unwrap(); // window 0 active; 1 background
+    let _ = m.update_monitor_flags().alert_edge; // baselines
+    // A block completes in the BACKGROUND window (monitor-command never toggled).
+    set_block_counter(&m, 1, 1, Some(0));
+    let pid = m.windows()[1].layout().panes()[0];
+    m.windows()[1].pane(pid).unwrap().with_screen_mut(|s| s.last_block_duration = Some(45_000));
+    let drain = m.update_monitor_flags();
+    let n = drain
+        .notifications
+        .iter()
+        .find(|n| n.window_index == 1)
+        .expect("completion event for the background window, flag or not");
+    assert!(!n.is_active_window);
+    assert_eq!(n.event.exit, Some(0));
+    assert_eq!(n.event.duration_ms, Some(45_000));
 }
 
 #[tokio::test]
@@ -2074,10 +2097,10 @@ async fn command_completion_codeless_d_flags_ok_with_no_exit_clause() {
     m.new_window_with_spec(spec(), "api".into()).unwrap();
     m.handle_command(Command::ToggleMonitorCommand).unwrap();
     m.handle_command(Command::SelectWindow(0)).unwrap();
-    let _ = m.update_monitor_flags();
+    let _ = m.update_monitor_flags().alert_edge;
     // Codeless D: counter incremented but no exit payload.
     set_block_counter(&m, 1, 1, None);
-    assert!(m.update_monitor_flags());
+    assert!(m.update_monitor_flags().alert_edge);
     assert_eq!(
         m.take_active_message(),
         Some("done in window 2 (api)"),
@@ -2090,9 +2113,9 @@ async fn command_completion_codeless_d_flags_ok_with_no_exit_clause() {
 async fn command_completion_in_active_window_neither_flags_nor_messages() {
     let mut m = mk_mgr(); // window 0, active
     m.handle_command(Command::ToggleMonitorCommand).unwrap(); // monitor-command on for the active window
-    let _ = m.update_monitor_flags(); // baseline at 0
+    let _ = m.update_monitor_flags().alert_edge; // baseline at 0
     set_block_counter(&m, 0, 1, Some(1)); // completion in the ACTIVE window
-    assert!(!m.update_monitor_flags(), "active window emits no completion message");
+    assert!(!m.update_monitor_flags().alert_edge, "active window emits no completion message");
     assert_eq!(m.active_window().done_flag(), None, "active window never flagged");
 }
 
@@ -2104,15 +2127,15 @@ async fn command_completion_toggle_on_after_history_does_not_backlog() {
     // Completed history accumulates BEFORE monitor-command is on; the baseline
     // still advances every drain.
     set_block_counter(&m, 1, 3, Some(0));
-    let _ = m.update_monitor_flags();
-    let _ = m.update_monitor_flags();
+    let _ = m.update_monitor_flags().alert_edge;
+    let _ = m.update_monitor_flags().alert_edge;
     // Now turn monitoring on for window 1 (via its own active-window toggle).
     m.handle_command(Command::SelectWindow(1)).unwrap();
     m.handle_command(Command::ToggleMonitorCommand).unwrap();
     let _ = m.take_active_message();
     m.handle_command(Command::SelectWindow(0)).unwrap();
     // No NEW completion since toggle-on → no alert (no history replay).
-    assert!(!m.update_monitor_flags(), "toggle-on does not backlog completed history");
+    assert!(!m.update_monitor_flags().alert_edge, "toggle-on does not backlog completed history");
     assert_eq!(m.windows()[1].done_flag(), None);
 }
 
@@ -2123,23 +2146,23 @@ async fn command_completion_counter_decrease_re_baselines_silently() {
     m.handle_command(Command::ToggleMonitorCommand).unwrap();
     m.handle_command(Command::SelectWindow(0)).unwrap();
     set_block_counter(&m, 1, 5, Some(0));
-    let _ = m.update_monitor_flags(); // baseline at 5
+    let _ = m.update_monitor_flags().alert_edge; // baseline at 5
     let _ = m.take_active_message();
     // A RIS resets the screen → counter drops below the baseline.
     set_block_counter(&m, 1, 0, None);
     assert!(
-        !m.update_monitor_flags(),
+        !m.update_monitor_flags().alert_edge,
         "a counter decrease (RIS) re-baselines silently, never alerts"
     );
     // View window 1 to clear its sticky done flag, then return to window 0. A
     // fresh completion after the reset fires from the new (0) baseline.
     m.handle_command(Command::SelectWindow(1)).unwrap();
-    let _ = m.update_monitor_flags(); // clears the now-active window's done flag
+    let _ = m.update_monitor_flags().alert_edge; // clears the now-active window's done flag
     assert_eq!(m.windows()[1].done_flag(), None, "viewing cleared the done flag");
     m.handle_command(Command::SelectWindow(0)).unwrap();
-    let _ = m.update_monitor_flags(); // re-baseline window 1 at 0 after the view
+    let _ = m.update_monitor_flags().alert_edge; // re-baseline window 1 at 0 after the view
     set_block_counter(&m, 1, 1, Some(2));
-    assert!(m.update_monitor_flags(), "post-reset completion alerts from the new baseline");
+    assert!(m.update_monitor_flags().alert_edge, "post-reset completion alerts from the new baseline");
     assert_eq!(m.take_active_message(), Some("done in window 2 (api): exit 2"));
 }
 
@@ -2226,7 +2249,7 @@ async fn silence_viewing_clears_flag_but_not_latch() {
     assert!(m.windows()[1].silence_flag());
     // View window 1: `clear_alerts` clears the ~ FLAG but not the episode latch.
     m.handle_command(Command::SelectWindow(1)).unwrap();
-    let _ = m.update_monitor_flags(); // clears the now-active window's flag
+    let _ = m.update_monitor_flags().alert_edge; // clears the now-active window's flag
     assert!(!m.windows()[1].silence_flag(), "viewing cleared the ~ flag");
     // Go back to window 0; the window is STILL silent (no output happened), so
     // the latch must prevent a re-fire (no 1 Hz flag loop).

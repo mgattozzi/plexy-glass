@@ -21,6 +21,27 @@ struct StatusMessage {
     expires_at: Instant,
 }
 
+/// One command-completion to weigh against the desktop-notification policy,
+/// collected during a monitor drain. The policy (enabled / threshold /
+/// attended) is applied by the render coordinator, which owns the config + the
+/// attached-client count.
+#[derive(Debug, Clone)]
+pub struct PendingNotification {
+    pub window_index: usize,
+    pub window_name: String,
+    pub is_active_window: bool,
+    pub event: crate::window::CompletionEvent,
+}
+
+/// Outcome of one [`WindowManager::update_monitor_flags`] drain.
+#[derive(Debug, Default)]
+pub struct MonitorDrain {
+    /// An alert-message edge fired (the caller schedules the status TTL wake).
+    pub alert_edge: bool,
+    /// Command-completions to consider notifying about.
+    pub notifications: Vec<PendingNotification>,
+}
+
 pub struct WindowManager {
     windows: Vec<Window>,
     active: usize,
@@ -281,13 +302,16 @@ impl WindowManager {
     /// releases the WM lock (the message is set here under the held lock, see
     /// `set_status_message`'s deadlock note in the coordinator).
     #[must_use = "schedule the status-message TTL wake when an edge fired"]
-    pub fn update_monitor_flags(&mut self) -> bool {
+    pub fn update_monitor_flags(&mut self) -> MonitorDrain {
         let active = self.active;
         // Collect edge messages while iterating (the iterator borrows
         // `windows` mutably; `set_status_message` borrows `self`), then emit
         // after the loop. The status line is a single slot, so on simultaneous
         // edges the LAST message wins (accepted, same as any rapid succession).
         let mut message: Option<String> = None;
+        // Command-completions to weigh against the notification policy (every
+        // window, regardless of the per-window monitor-command flag).
+        let mut notifications: Vec<PendingNotification> = Vec::new();
         // Auto-named windows have an empty structural `name`; alert messages
         // must show the DERIVED name, so read the toggle once before the loop
         // (the loop borrows `self.windows` mutably).
@@ -300,9 +324,19 @@ impl WindowManager {
             w.note_drain_output(acted);
             // Command-completion baselines advance every drain for every
             // window; the flag/edge is recorded only for a monitored non-active
-            // window (background completion you can't see).
+            // window (background completion you can't see), but the completion
+            // event is collected for EVERY window (the notification policy is
+            // applied by the coordinator).
             let record_done = i != active && w.monitor_command();
-            let (_completion, done_edge) = w.drain_command_completion(record_done);
+            let (completion, done_edge) = w.drain_command_completion(record_done);
+            if let Some(event) = completion {
+                notifications.push(PendingNotification {
+                    window_index: i,
+                    window_name: w.display_name(auto_rename),
+                    is_active_window: i == active,
+                    event,
+                });
+            }
             if i == active {
                 w.clear_alerts();
             } else {
@@ -323,12 +357,13 @@ impl WindowManager {
                 }
             }
         }
-        if let Some(text) = message {
+        let alert_edge = if let Some(text) = message {
             self.set_status_message(text);
             true
         } else {
             false
-        }
+        };
+        MonitorDrain { alert_edge, notifications }
     }
 
     /// Whether any window currently arms silence monitoring. The session uses
