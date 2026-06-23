@@ -405,7 +405,7 @@ duration-threshold "2s" }` (`parse_duration_threshold`: `<int>ms` | `<float>s` |
 
 Structured **history palette** (shipped — `docs/command-blocks.md`, spec/plan
 `docs/superpowers/{specs,plans}/2026-06-23-structured-history-palette*`): a
-cross-session, exit-aware finder over command blocks — `Ctrl+a H` / `:history`.
+cross-session, exit-aware finder over command blocks — `Ctrl+a /` / `:history`.
 Mirrors choose-tree end to end: a pure core (`crates/mux/src/history.rs` —
 `HistoryEntry`/`HistoryState`/`HistoryOutcome`/`HistoryTarget` + `handle_history`,
 a fuzzy-finder input model: printables filter, arrows/Ctrl-P/N move, Enter jumps,
@@ -425,7 +425,7 @@ by `ClientCtx::dispatch_history_jump`: switch session if needed + `select_window
 via `blocks::find_block_by_command` (then `prompt_at_or_above`, then first prompt)
 so scrollback drift can't mis-target; a vanished target flashes
 `"history: block no longer available"`. `history` verb wired through
-`Command`/`PromptCommand`/`ConnVerb`, default `binding("prefix H", "history")`,
+`Command`/`PromptCommand`/`ConnVerb`, default `binding("prefix /", "history")`,
 interactive-only (headless `refuse("history")`), help label "History palette".
 
 Not yet built (future work): native Kitty animation protocol + `z`-ordering

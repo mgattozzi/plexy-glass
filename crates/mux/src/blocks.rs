@@ -198,8 +198,8 @@ pub fn closing_duration(screen: &Screen, prompt_line: u32) -> Option<u32> {
         .and_then(|d| row_at(screen, d)?.mark.duration_ms())
 }
 
-/// Lowercased "command\noutput" for the block at `prompt_line`, output truncated
-/// to `cap` bytes, the history-palette search haystack. Output is the block's
+/// Lowercased "command\noutput" for the block at `prompt_line`, output soft-capped
+/// to ~`cap` bytes, the history-palette search haystack. Output is the block's
 /// rows from output-start through block end (the same region `o`/copy-output use).
 pub fn block_search_text(screen: &Screen, prompt_line: u32, cap: usize) -> String {
     let mut s = block_command_line(screen, prompt_line).unwrap_or_default();
@@ -218,7 +218,9 @@ pub fn block_search_text(screen: &Screen, prompt_line: u32, cap: usize) -> Strin
                 break;
             }
         }
-        out.truncate(cap);
+        // Do NOT `out.truncate(cap)`: the per-grapheme break already soft-bounds
+        // `out` (overshoot ≤ one grapheme), and a raw byte truncate at `cap`
+        // panics when it lands mid-grapheme (CJK / emoji / accented).
         s.push('\n');
         s.push_str(&out);
     }
@@ -827,6 +829,20 @@ mod tests {
         assert!(t.contains("one"), "command, lowercased: {t:?}");
         assert!(t.contains("out1") && t.contains("out2"), "output, lowercased: {t:?}");
         assert_eq!(t, t.to_lowercase());
+    }
+
+    #[test]
+    fn block_search_text_multibyte_at_cap_does_not_panic() {
+        // Output is wide CJK; a cap landing mid-grapheme must not panic (the old
+        // `out.truncate(cap)` did). The block's full A/B/C marks give a command.
+        let s = screen_from(
+            8,
+            40,
+            "\u{1b}]133;A\u{07}$ \u{1b}]133;B\u{07}c\r\n\u{1b}]133;C\u{07}\u{4e2d}\u{4e2d}\u{4e2d}\r\nx".as_bytes(),
+        );
+        // cap 5 lands inside a 3-byte grapheme run, and it must return, not panic.
+        let t = block_search_text(&s, 0, 5);
+        assert!(t.contains('\u{4e2d}'), "kept some output: {t:?}");
     }
 
     #[test]

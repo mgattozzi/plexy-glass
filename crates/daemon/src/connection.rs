@@ -2490,6 +2490,73 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn history_jump_lands_in_block_mode_on_the_target_block() {
+        use plexy_glass_emulator::{Row, RowMark};
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let mut session = registry
+            .attach_or_create("h".into(), script_cat(), size, Arc::clone(&cfg))
+            .await
+            .unwrap();
+        let prompt_row = |cmd: &str, cols: u16| {
+            let mut r = Row::blank(cols);
+            for (i, ch) in format!("$ {cmd}").chars().enumerate() {
+                if (i as u16) < cols {
+                    r.cells[i].grapheme = ch.to_string().into();
+                }
+            }
+            r.mark.set(RowMark::PROMPT_START);
+            r.mark.set_prompt_end(2);
+            r
+        };
+        let (target_window, target_pane) = {
+            let m = session.window_manager.lock().await;
+            let pid = m.active_window().active();
+            m.active_window().pane(pid).unwrap().with_screen_mut(|scr| {
+                let cols = scr.active.cols;
+                scr.active.rows[0] = prompt_row("ls", cols);
+                scr.active.rows[1] = {
+                    let mut r = Row::blank(cols);
+                    r.cells[0].grapheme = "a".into();
+                    r.mark.set(RowMark::OUTPUT_START);
+                    r
+                };
+                scr.active.rows[2] = prompt_row("pwd", cols);
+            });
+            (m.active_window().id, pid)
+        };
+
+        let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
+        let mut client_id = 0u64;
+        let prefix_armed = Arc::new(AtomicBool::new(false));
+        let mut ctx = ClientCtx {
+            session: &mut session,
+            client_id: &mut client_id,
+            size,
+            registry: &registry,
+            switch_tx: &switch_tx,
+            prefix_armed: &prefix_armed,
+        };
+        // Jump to the "ls" block (prompt line 0) in the same session.
+        ctx.dispatch_history_jump(plexy_glass_mux::HistoryTarget {
+            session: "h".into(),
+            window: target_window,
+            pane: target_pane,
+            prompt_line: 0,
+            command: "ls".into(),
+        })
+        .await;
+
+        let m = session.window_manager.lock().await;
+        let pane = m.active_window().pane(target_pane).unwrap();
+        assert!(pane.is_in_block_mode(), "jump landed in block mode");
+        drop(m);
+        session.terminate_panes().await;
+    }
+
     #[test]
     fn build_history_entries_orders_current_pane_first_newest_first() {
         use crate::session::{HistoryBlock, SessionHistory};
@@ -4048,8 +4115,8 @@ mod tests {
 
     /// Lockstep guard for the headless verb policy.
     /// `Session::handle_prompt_command` carries a defensive `Ok(None)` arm for
-    /// the connection-level verbs, currently eleven: Detach, Reload, Switch,
-    /// ChooseSession, ChooseTree, PasteBuffer, ChooseBuffer, CopyOutput,
+    /// the connection-level verbs, currently twelve: Detach, Reload, Switch,
+    /// ChooseSession, ChooseTree, History, PasteBuffer, ChooseBuffer, CopyOutput,
     /// SetBuffer, SaveBuffer, LoadBuffer. If a future verb is added to that
     /// arm (and `ConnVerb::from_prompt`) but NOT to `run_prompt_line`'s
     /// intercept, `cmd "<verb>"` would fall through to the defensive arm and

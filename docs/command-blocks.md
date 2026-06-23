@@ -428,14 +428,14 @@ Notes / current limits:
 
 ## History palette
 
-`Ctrl+a H` (or `:history`) opens the **structured history palette**, a finder
+`Ctrl+a /` (or `:history`) opens the **structured history palette**, a finder
 over your command blocks across **every session**, not just the focused pane.
-Unlike a shell history search (`Ctrl+R`, atuin), it searches a block's
-**output** as well as its command, and it shows the exit status and duration:
+Unlike a shell history search (`Ctrl+R`, atuin), it searches a block's **output**
+as well as its command, and shows the exit status and duration:
 
 ```
  History
- filter: refused█
+ filter: refused█                                    1/14
  ✗ 45s    web/1   cargo test --workspace
  ✓ 2.3s   api/2   docker compose up -d
  ↑/↓ select · enter jump · esc cancel

@@ -231,6 +231,16 @@ mod tests {
     }
 
     #[test]
+    fn home_and_end_jump_to_ends() {
+        let mut s = state();
+        // Start at 0; End → last visible (1); Home → first visible (0).
+        assert_eq!(handle_history(&key(Key::End), &mut s), HistoryOutcome::Redraw);
+        assert_eq!(s.selected, 1);
+        assert_eq!(handle_history(&key(Key::Home), &mut s), HistoryOutcome::Redraw);
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
     fn backspace_pops_filter_and_reclamps() {
         let mut s = state();
         s.filter = "cargo".into();

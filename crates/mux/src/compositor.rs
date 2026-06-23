@@ -1242,6 +1242,12 @@ fn paint_history(
     let inner_right = col0 + box_w - 1;
 
     put_str(screen, row0 + 1, inner_left, &format!("{filter_line}\u{2588}"), plain, inner_right);
+    // Right-aligned live count (visible / total).
+    let count = format!("{}/{}", visible.len(), state.entries.len());
+    let cw = display_width(&count);
+    if inner_right > inner_left + cw {
+        put_str(screen, row0 + 1, inner_right - cw, &count, plain, inner_right);
+    }
     if rows.is_empty() {
         put_str(screen, row0 + 2, inner_left, empty_msg, plain, inner_right);
     } else {
@@ -2703,6 +2709,7 @@ mod tests {
         assert!(joined.contains("api/2"), "provenance rendered: {joined:?}");
         assert!(joined.contains("2.3s"), "duration rendered: {joined:?}");
         assert!(joined.contains('\u{2717}'), "fail glyph for the nonzero-exit block");
+        assert!(joined.contains("2/2"), "live visible/total count rendered: {joined:?}");
     }
 
     #[test]

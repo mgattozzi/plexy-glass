@@ -172,7 +172,7 @@ pub fn built_in_keymap() -> KeymapConfig {
             binding("prefix :", "command_prompt"),
             binding("prefix w", "choose_session"),
             binding("prefix W", "choose_tree"),
-            binding("prefix H", "history"),
+            binding("prefix /", "history"),
             binding("prefix m", "mark_pane"),
             binding("prefix !", "break_pane"),
             binding("prefix {", "swap_pane_prev"),
