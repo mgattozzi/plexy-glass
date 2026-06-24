@@ -3,10 +3,9 @@
 //! every downstream consumer are unchanged.
 
 use crate::{
-    BlocksConfig, Config, ConfigError, GlyphTier, HintsConfig, KeymapBinding, KeymapConfig,
-    MouseConfig, NotificationsConfig, Padding, PaletteConfig, PaneNode, PaneTemplate, Position,
-    ReorderModifier, SessionTemplate, SplitDirection, StatusConfig, StyleConfig, WidgetSpec,
-    WindowTemplate,
+    BlocksConfig, Config, ConfigError, DragModifier, GlyphTier, HintsConfig, KeymapBinding,
+    KeymapConfig, MouseConfig, NotificationsConfig, Padding, PaletteConfig, PaneNode, PaneTemplate,
+    Position, SessionTemplate, SplitDirection, StatusConfig, StyleConfig, WidgetSpec, WindowTemplate,
 };
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use std::time::Duration;
@@ -322,17 +321,17 @@ fn decode_mouse(node: &KdlNode, src: &str) -> Result<MouseConfig, ConfigError> {
     if let Some(doc) = node.children() {
         for child in doc.nodes() {
             match child.name().value() {
-                "tab-reorder-modifier" => {
-                    let s = string_arg(child, 0, src, "tab-reorder-modifier")?;
-                    mouse.tab_reorder_modifier = match s {
-                        "alt" => ReorderModifier::Alt,
-                        "ctrl" => ReorderModifier::Ctrl,
+                "drag-modifier" => {
+                    let s = string_arg(child, 0, src, "drag-modifier")?;
+                    mouse.drag_modifier = match s {
+                        "alt" => DragModifier::Alt,
+                        "ctrl" => DragModifier::Ctrl,
                         other => {
                             return Err(decode_err(
                                 src,
                                 child,
                                 &format!(
-                                    "tab-reorder-modifier must be \"alt\" or \"ctrl\" (got {other:?}; \"shift\" is unavailable — terminals reserve shift+drag for native selection)"
+                                    "drag-modifier must be \"alt\" or \"ctrl\" (got {other:?}; \"shift\" is unavailable — terminals reserve shift+drag for native selection)"
                                 ),
                             ));
                         }
@@ -1958,19 +1957,19 @@ hints {
 
     #[test]
     fn decodes_mouse_modifier_ctrl() {
-        let cfg = parse_config("mouse {\n  tab-reorder-modifier \"ctrl\"\n}\n").expect("parse");
-        assert_eq!(cfg.mouse.tab_reorder_modifier, ReorderModifier::Ctrl);
+        let cfg = parse_config("mouse {\n  drag-modifier \"ctrl\"\n}\n").expect("parse");
+        assert_eq!(cfg.mouse.drag_modifier, DragModifier::Ctrl);
     }
 
     #[test]
     fn mouse_defaults_to_alt_when_absent() {
         let cfg = parse_config("").expect("parse");
-        assert_eq!(cfg.mouse.tab_reorder_modifier, ReorderModifier::Alt);
+        assert_eq!(cfg.mouse.drag_modifier, DragModifier::Alt);
     }
 
     #[test]
     fn rejects_shift_and_unknown_mouse_node() {
-        assert!(parse_config("mouse {\n  tab-reorder-modifier \"shift\"\n}\n").is_err());
+        assert!(parse_config("mouse {\n  drag-modifier \"shift\"\n}\n").is_err());
         assert!(parse_config("mouse {\n  bogus \"x\"\n}\n").is_err());
     }
 }

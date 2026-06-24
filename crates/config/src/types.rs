@@ -89,23 +89,23 @@ impl Default for HintsConfig {
     }
 }
 
-/// Which keyboard modifier must be held to drag-reorder window tabs.
-/// `Shift` is intentionally unavailable because terminals reserve Shift+drag
-/// for native text selection, so it never reaches the mux.
+/// Which keyboard modifier must be held to drag-reorder window tabs or
+/// drag-swap panes. `Shift` is intentionally unavailable because terminals
+/// reserve Shift+drag for native text selection, so it never reaches the mux.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReorderModifier {
+pub enum DragModifier {
     Alt,
     Ctrl,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MouseConfig {
-    pub tab_reorder_modifier: ReorderModifier,
+    pub drag_modifier: DragModifier,
 }
 
 impl Default for MouseConfig {
     fn default() -> Self {
-        Self { tab_reorder_modifier: ReorderModifier::Alt }
+        Self { drag_modifier: DragModifier::Alt }
     }
 }
 

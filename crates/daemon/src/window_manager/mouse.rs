@@ -165,9 +165,9 @@ impl WindowManager {
         use plexy_glass_status::ClickAction;
         match hit.action {
             ClickAction::SelectWindow(idx) => {
-                let reorder_held = match self.config.mouse.tab_reorder_modifier {
-                    plexy_glass_config::ReorderModifier::Alt => event.modifiers.alt,
-                    plexy_glass_config::ReorderModifier::Ctrl => event.modifiers.ctrl,
+                let reorder_held = match self.config.mouse.drag_modifier {
+                    plexy_glass_config::DragModifier::Alt => event.modifiers.alt,
+                    plexy_glass_config::DragModifier::Ctrl => event.modifiers.ctrl,
                 };
                 if reorder_held {
                     // Begin a tab-drag; the modal rule above takes the rest.
