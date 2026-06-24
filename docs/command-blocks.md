@@ -89,6 +89,29 @@ prompt, so the 133;D (command end) is emitted there, before the following
 133;A, and that is the correct sequence. The `++ []` append form preserves any
 hooks you already have.
 
+**Using a prompt framework (starship / oh-my-posh)?** The `C`/`D` hooks above
+append, so they always survive, but the snippet's `A`/`B` marks set
+`$env.PROMPT_COMMAND` / `$env.PROMPT_INDICATOR`, and `starship init` (or
+oh-my-posh) *overwrites* those, silently dropping the prompt-start/end marks.
+The symptom: completed blocks are timed (notifications still fire) but you see
+no inline duration, no exit-status border, and an empty history palette,
+because there are no `133;A` prompt-start rows to anchor them.
+
+Fix: keep the `C`/`D` hooks, drop the snippet's `A`/`B` lines, and instead
+**wrap** the framework's prompt, *after* its init runs:
+
+```nu
+# config.nu — AFTER `starship init nu` (or oh-my-posh) has set PROMPT_COMMAND.
+let __osc133_prompt = $env.PROMPT_COMMAND
+$env.PROMPT_COMMAND = {|| $"\u{001b}]133;A\u{0007}(do $__osc133_prompt)" }   # 133;A wraps the prompt
+$env.PROMPT_INDICATOR = $"\u{001b}]133;B\u{0007}($env.PROMPT_INDICATOR)"      # 133;B at the input point
+```
+
+(`starship init` sets `PROMPT_INDICATOR` to `""`, so the second line just
+prepends the `133;B` mark.) Load order matters: `env.nu` runs before `config.nu`,
+so any `A`/`B` you set in `env.nu` gets clobbered by a `config.nu` framework
+init, and the wrap has to come last.
+
 ### bash / zsh
 
 A minimal snippet if you're not already running a terminal integration script:
