@@ -21,6 +21,15 @@ pub(super) struct TabDrag {
     pub(super) source: WindowId,
 }
 
+/// Active pane-swap drag. While `Some`, every mouse event routes to
+/// `handle_pane_drag_event`; cleared on Release. `source` is the dragged
+/// pane; `target` is the pane under the cursor (updated on Move, for the
+/// highlight). Both re-resolved at drop via `swap_panes`.
+pub(super) struct PaneDrag {
+    pub(super) source: PaneId,
+    pub(super) target: Option<PaneId>,
+}
+
 /// Last left-press metadata for multi-click classification (double-click =
 /// Word, triple-click = Line). Resets when the click target changes or the
 /// 400ms window expires.
@@ -84,6 +93,10 @@ impl WindowManager {
         // when the bar is on top; 0 otherwise, leaving bottom placement byte
         // for byte unchanged).
         let event = self.to_pane_coords(event);
+        // Pane-swap drag in progress consumes everything (pane-logical coords).
+        if self.pane_drag.is_some() {
+            return self.handle_pane_drag_event(event).await;
+        }
         // Rule 1: resize-drag in progress consumes everything until release.
         if self.resize_drag.is_some() {
             return self.handle_resize_drag_event(event).await;
@@ -109,6 +122,20 @@ impl WindowManager {
         else {
             return Ok(());
         };
+        // Drag-modifier + left-press starts a pane-swap drag. Placed ahead of
+        // copy-mode, focus-only, and child-mouse forwarding so a pane running an
+        // interactive (mouse-mode) program can still be swapped.
+        if matches!(event.kind, MouseKind::Press) && event.button == MouseButton::Left {
+            let drag_held = match self.config.mouse.drag_modifier {
+                plexy_glass_config::DragModifier::Alt => event.modifiers.alt,
+                plexy_glass_config::DragModifier::Ctrl => event.modifiers.ctrl,
+            };
+            if drag_held {
+                self.pane_drag = Some(PaneDrag { source: pane_id, target: None });
+                self.notify.notify_one();
+                return Ok(());
+            }
+        }
         if self.pane_is_in_copy_mode(pane_id) {
             return self.handle_copy_mode_mouse(pane_id, event).await;
         }
@@ -256,6 +283,45 @@ impl WindowManager {
             }
             _ => Ok(()),
         }
+    }
+
+    async fn handle_pane_drag_event(&mut self, event: MouseEvent) -> Result<(), DaemonError> {
+        match event.kind {
+            MouseKind::Move => {
+                let target = self.drop_target_pane(event.row, event.col);
+                if let Some(drag) = self.pane_drag.as_mut() {
+                    drag.target = target;
+                }
+                self.notify.notify_one();
+                Ok(())
+            }
+            MouseKind::Release => {
+                let Some(drag) = self.pane_drag.take() else {
+                    return Ok(());
+                };
+                if let Some(target) = self.drop_target_pane(event.row, event.col)
+                    && target != drag.source
+                {
+                    let viewport = self.viewport();
+                    let w = self.active_window_mut();
+                    if w.layout_mut().swap_panes(drag.source, target) {
+                        w.focus(drag.source);
+                        w.resize(viewport)?;
+                    }
+                }
+                self.notify.notify_one();
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The pane under physical-translated `(row, col)`, or `None` if off any
+    /// pane. Used for the drag's live target and the drop.
+    fn drop_target_pane(&self, row: u16, col: u16) -> Option<PaneId> {
+        self.active_window()
+            .layout()
+            .pane_at_coord(self.viewport(), row, col)
     }
 
     async fn handle_tab_drag_event(&mut self, event: MouseEvent) -> Result<(), DaemonError> {

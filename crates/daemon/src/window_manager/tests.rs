@@ -3124,6 +3124,86 @@ async fn move_window_keeps_last_active_valid_by_id() {
     );
 }
 
+// ── Pane-swap drag (Task 2) ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn alt_drag_swaps_panes_and_focuses_source() {
+    let mut m = make_two_pane_manager().await; // `PaneId(0)`, `PaneId(1)`; active = 1
+    let vp = m.viewport();
+    let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
+    let r1 = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
+    let (c0r, c0c) = (r0.row + r0.rows / 2, r0.col + r0.cols / 2);
+    let (c1r, c1c) = (r1.row + r1.rows / 2, r1.col + r1.cols / 2);
+
+    // Alt-press in pane 0 → drag begins, source = pane 0.
+    m.handle_mouse(mev(MouseKind::Press, c0r, c0c, true)).await.unwrap();
+    assert_eq!(m.pane_drag_roles(), Some((PaneId(0), None)));
+
+    // Move into pane 1 → target updates.
+    m.handle_mouse(mev(MouseKind::Move, c1r, c1c, false)).await.unwrap();
+    assert_eq!(m.pane_drag_roles(), Some((PaneId(0), Some(PaneId(1)))));
+
+    // Release in pane 1 → swap + focus source + clear.
+    m.handle_mouse(mev(MouseKind::Release, c1r, c1c, false)).await.unwrap();
+    assert_eq!(m.pane_drag_roles(), None, "drag cleared on release");
+    // Slots swapped occupants: pane 0's old position now holds pane 1, and vice versa.
+    assert_eq!(m.active_window().layout().pane_at_coord(vp, c0r, c0c), Some(PaneId(1)));
+    assert_eq!(m.active_window().layout().pane_at_coord(vp, c1r, c1c), Some(PaneId(0)));
+    assert_eq!(m.active_window().active(), PaneId(0), "focus follows dragged pane");
+}
+
+#[tokio::test]
+async fn plain_press_in_pane_does_not_start_drag() {
+    let mut m = make_two_pane_manager().await; // active = 1
+    let vp = m.viewport();
+    let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
+    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, false)).await.unwrap();
+    assert_eq!(m.pane_drag_roles(), None, "no drag without the modifier");
+    assert_eq!(m.active_window().active(), PaneId(0), "plain click focused pane 0");
+}
+
+#[tokio::test]
+async fn alt_drag_release_on_same_pane_is_noop() {
+    let mut m = make_two_pane_manager().await;
+    let vp = m.viewport();
+    let r1 = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
+    let (cr, cc) = (r1.row + r1.rows / 2, r1.col + r1.cols / 2);
+    let before = m.active_window().layout().dfs_leaves();
+    m.handle_mouse(mev(MouseKind::Press, cr, cc, true)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Release, cr, cc, false)).await.unwrap();
+    assert_eq!(m.active_window().layout().dfs_leaves(), before, "no swap on same pane");
+    assert_eq!(m.pane_drag_roles(), None);
+}
+
+#[tokio::test]
+async fn alt_drag_release_off_content_aborts() {
+    let mut m = make_two_pane_manager().await;
+    let vp = m.viewport();
+    let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
+    let before = m.active_window().layout().dfs_leaves();
+    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, true)).await.unwrap();
+    // Release far off the grid → pane_at_coord None → abort.
+    m.handle_mouse(mev(MouseKind::Release, 250, 250, false)).await.unwrap();
+    assert_eq!(m.active_window().layout().dfs_leaves(), before, "no swap off content");
+    assert_eq!(m.pane_drag_roles(), None);
+}
+
+#[tokio::test]
+async fn alt_drag_preempts_child_mouse_mode() {
+    let mut m = make_two_pane_manager().await; // active = PaneId(1)
+    // Turn on mouse reporting in the active pane so a plain press would forward
+    // to the child; the Alt-press must still start the swap drag.
+    m.active_window()
+        .pane(PaneId(1))
+        .unwrap()
+        .with_screen_mut(|s| s.modes.insert(plexy_glass_emulator::Modes::MOUSE_BTN));
+    assert!(m.pane_has_any_mouse_mode(PaneId(1)));
+    let vp = m.viewport();
+    let r1 = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
+    m.handle_mouse(mev(MouseKind::Press, r1.row + 1, r1.col + 1, true)).await.unwrap();
+    assert_eq!(m.pane_drag_roles().map(|(s, _)| s), Some(PaneId(1)), "alt-press pre-empts child");
+}
+
 // M2: `move_window` clamp-collapses-to-noop (to=99 clamps to 2 == from) returns
 // false.
 #[tokio::test]

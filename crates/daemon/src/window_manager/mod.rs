@@ -1,7 +1,7 @@
 //! Owns all windows for one attached client.
 
 use crate::{error::DaemonError, window::Window};
-use mouse::{ClickHistory, ResizeDrag, TabDrag};
+use mouse::{ClickHistory, PaneDrag, ResizeDrag, TabDrag};
 use plexy_glass_mux::{Overlay, PaneId, Rect, Selection, SplitDir, WindowId};
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
@@ -69,6 +69,8 @@ pub struct WindowManager {
     resize_drag: Option<ResizeDrag>,
     /// Tab reorder drag in progress. `None` between drags.
     tab_drag: Option<TabDrag>,
+    /// Pane-swap drag in progress. `None` between drags.
+    pane_drag: Option<PaneDrag>,
     /// Last left-press for multi-click classification.
     click_history: Option<ClickHistory>,
     /// Physical row index where the status bar paints, or `None` if the bar is
@@ -172,6 +174,7 @@ impl WindowManager {
             config,
             resize_drag: None,
             tab_drag: None,
+            pane_drag: None,
             click_history: None,
             status_bar_row: None,
             pane_row_offset: 0,
@@ -191,6 +194,12 @@ impl WindowManager {
     /// marked indicator.
     pub fn marked_pane(&self) -> Option<PaneId> {
         self.marked_pane
+    }
+
+    /// (source, target) pane ids of the active pane-swap drag, if any. Read by
+    /// the frame build to draw the source/target highlight.
+    pub fn pane_drag_roles(&self) -> Option<(PaneId, Option<PaneId>)> {
+        self.pane_drag.as_ref().map(|d| (d.source, d.target))
     }
 
     /// Record the physical status-bar row (or `None` to disable status-bar
