@@ -26,7 +26,9 @@ integration.
   [Persistence](docs/configuration.md#persistence))
 - Multiple clients attached to the same session
 - Copy mode with search
-- Full mouse support, including click-to-focus and drag-resize on split borders
+- Full mouse support, including click-to-focus, drag-resize on split borders, and
+  **Alt+drag a window tab to reorder windows** (plain click still selects; see
+  [`mouse { tab-reorder-modifier }`](docs/configuration.md#mouse))
 - Popup panes: `Ctrl+a P` or `:popup [cmd]` opens a transient floating pane
 - Pipe-pane: stream a pane's raw output to an external command with
   `:pipe-pane <cmd>` (e.g. `:pipe-pane tee -a session.log`), scriptable via

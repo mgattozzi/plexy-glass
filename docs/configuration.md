@@ -635,6 +635,43 @@ desktop / no notification bus (a headless or SSH daemon), the attempt is logged
 and silently skipped, never an error. Note that it requires OSC 133 shell
 integration, like all command-block features.
 
+## `mouse`
+
+Mouse behavior for gestures that go beyond plain click-to-focus.
+
+```kdl
+mouse {
+    tab-reorder-modifier "alt"   // "alt" | "ctrl"; "shift" is rejected
+}
+```
+
+**Tab reorder gesture:** hold the configured modifier and **drag a window tab** in
+the status-bar window list to reorder it. Release over another tab to drop the
+dragged window into that position (drop-to-position), or release to the right of
+all tabs to send it to the end. A plain click (no modifier) still just selects
+the window.
+
+- `tab-reorder-modifier` is the keyboard modifier that has to be held during
+  a status-bar tab drag to activate reordering. Accepted values: `"alt"` (the
+  default) and `"ctrl"`. `"shift"` is explicitly rejected because terminals
+  reserve Shift+drag for native text selection, so it never reaches the mux.
+
+  **Why `"ctrl"` exists:** some terminal emulators (notably those that map the
+  macOS Option key to Meta) intercept Alt+drag before it reaches the application.
+  If Alt+drag does nothing for you, switch to `"ctrl"`:
+
+  ```kdl
+  mouse {
+      tab-reorder-modifier "ctrl"
+  }
+  ```
+
+The reordered window list persists automatically through the existing session
+save path, no extra configuration required.
+
+The `mouse` node live-reloads with the config (`Ctrl+a R` / `plexy-glass
+reload`). The new modifier takes effect on the next drag.
+
 ## `glyphs`
 
 ```kdl

@@ -465,6 +465,21 @@ node (`enabled`, `alphabet`, `label-fg`/`label-bg`/`match-fg` — live-reload vi
 `config_snapshot()`); verb `hints`, default `binding("prefix f", "hints")`,
 interactive-only (headless `refuse("hints")`). No new protocol.
 
+**Tab reorder** (shipped — spec/plan `docs/superpowers/{specs,plans}/2026-06-24-tab-reorder*`):
+Alt+drag a status-bar window tab to reorder it (drop-to-position: release over the
+target tab to insert there, or right of all tabs to send to the end); plain click
+still selects. Implemented as: `WindowManager::move_window` (Vec remove+insert,
+`active`/`last_active_window` re-followed by id, pinned-index contract); a
+`TabDrag { source: usize }` mouse state mirroring `ResizeDrag` (added to
+`MouseState`), gated by the `mouse.tab-reorder-modifier` config field at press
+time, drop resolved via `status_hits` scan; `EvalContext.dragging_window:
+Option<usize>` carries the source index into the status-bar evaluator where the
+dragged tab is rendered with the reversed active style as a visual highlight; a
+`mouse { tab-reorder-modifier }` config node (`ReorderModifier::{Alt,Ctrl}`,
+default `Alt`, `Shift` rejected, decoded from `MouseConfig`, live via
+`config_snapshot()`). Reorder persists for free through the existing structural
+`mark_dirty` path — no extra persistence code.
+
 Not yet built (future work): native Kitty animation protocol + `z`-ordering
 (deferred from the inline-graphics P4 spec, with rationale).
 (Silence monitoring + bell/activity alert messages shipped with the 2026-06-12
@@ -559,4 +574,7 @@ paste→mouse→key parser chain — `InputRouter::has_pending`/`flush_keys` dra
 recreated for cancel-safety, timer gated by `armed`), and overlay input
 isolation (`InputEvent::Bytes`/`Paste` discarded while an overlay is open; the
 per-event dispatch extracted to `dispatch_input_event`) — shipped 2026-06-13
-spec/plan.)
+spec/plan; tab reorder — Alt+drag a status-bar window tab to reorder (drop-to-position)
+via `WindowManager::move_window`, `TabDrag` mouse state, `EvalContext.dragging_window`
+reversed-style highlight, `mouse { tab-reorder-modifier }` config node (alt|ctrl,
+shift rejected), persists free via `mark_dirty` — shipped 2026-06-24 spec/plan.)
