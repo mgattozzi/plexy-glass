@@ -3,8 +3,8 @@
 //! every downstream consumer are unchanged.
 
 use crate::{
-    BlocksConfig, Config, ConfigError, GlyphTier, KeymapBinding, KeymapConfig, NotificationsConfig,
-    Padding,
+    BlocksConfig, Config, ConfigError, GlyphTier, HintsConfig, KeymapBinding, KeymapConfig,
+    NotificationsConfig, Padding,
     PaletteConfig, PaneNode, PaneTemplate, Position, SessionTemplate, SplitDirection, StatusConfig,
     StyleConfig, WidgetSpec, WindowTemplate,
 };
@@ -24,6 +24,7 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
     let mut seen_status = false;
     let mut seen_keymap = false;
     let mut seen_blocks = false;
+    let mut seen_hints = false;
     let mut seen_notifications = false;
     let mut seen_glyphs = false;
     let mut seen_auto_rename = false;
@@ -48,6 +49,11 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
                 dup_check(seen_blocks, "blocks", node, src)?;
                 seen_blocks = true;
                 config.blocks = decode_blocks(node, src)?;
+            }
+            "hints" => {
+                dup_check(seen_hints, "hints", node, src)?;
+                seen_hints = true;
+                config.hints = decode_hints(node, src)?;
             }
             "notifications" => {
                 dup_check(seen_notifications, "notifications", node, src)?;
@@ -278,6 +284,30 @@ fn decode_blocks(node: &KdlNode, src: &str) -> Result<BlocksConfig, ConfigError>
         }
     }
     Ok(blocks)
+}
+
+fn decode_hints(node: &KdlNode, src: &str) -> Result<HintsConfig, ConfigError> {
+    ensure_no_props(node, src)?;
+    let mut hints = HintsConfig::default();
+    if let Some(doc) = node.children() {
+        for child in doc.nodes() {
+            match child.name().value() {
+                "enabled" => hints.enabled = bool_arg(child, 0, src, "enabled")?,
+                "alphabet" => hints.alphabet = string_arg(child, 0, src, "alphabet")?.to_string(),
+                "label-fg" => hints.label_fg = string_arg(child, 0, src, "label-fg")?.to_string(),
+                "label-bg" => hints.label_bg = string_arg(child, 0, src, "label-bg")?.to_string(),
+                "match-fg" => hints.match_fg = string_arg(child, 0, src, "match-fg")?.to_string(),
+                other => {
+                    return Err(decode_err(
+                        src,
+                        child,
+                        &format!("unknown hints node `{other}`"),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(hints)
 }
 
 // --- glyph tier ---
@@ -1857,5 +1887,34 @@ auto-rename #false"#).expect("decode");
         assert!(cfg.auto_rename);
         let err = parse_config(r#"glyphs "wingdings""#).unwrap_err();
         assert!(err.to_string().contains("glyphs"), "msg names the node: {err}");
+    }
+
+    #[test]
+    fn decodes_hints_node() {
+        let src = r##"
+hints {
+    alphabet "qwerty"
+    label-fg "warn"
+    match-fg "#abcdef"
+}
+"##;
+        let cfg = parse_config(src).expect("parse");
+        assert_eq!(cfg.hints.alphabet, "qwerty");
+        assert_eq!(cfg.hints.label_fg, "warn");
+        assert_eq!(cfg.hints.match_fg, "#abcdef");
+        assert!(cfg.hints.enabled); // default
+    }
+
+    #[test]
+    fn hints_defaults_when_absent() {
+        let cfg = parse_config("").expect("parse");
+        assert_eq!(cfg.hints.alphabet, "asdfghjkl");
+        assert!(cfg.hints.enabled);
+    }
+
+    #[test]
+    fn rejects_unknown_hints_node() {
+        let src = "hints {\n  bogus \"x\"\n}\n";
+        assert!(parse_config(src).is_err());
     }
 }

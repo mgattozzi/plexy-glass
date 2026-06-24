@@ -1,5 +1,5 @@
 use crate::{
-    BlocksConfig, Config, GlyphTier, KeymapBinding, KeymapConfig, NotificationsConfig,
+    BlocksConfig, Config, GlyphTier, HintsConfig, KeymapBinding, KeymapConfig, NotificationsConfig,
     PaletteConfig, Padding, Position,
     StatusConfig, StyleConfig, WidgetSpec,
 };
@@ -45,6 +45,7 @@ pub fn built_in_default() -> Config {
         // sessions are opt-in via `session` nodes in the user's config.
         sessions: Vec::new(),
         blocks: BlocksConfig::default(),
+        hints: HintsConfig::default(),
         notifications: NotificationsConfig::default(),
         glyph_tier: GlyphTier::Unicode,
         auto_rename: true,

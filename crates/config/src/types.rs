@@ -20,6 +20,7 @@ pub struct Config {
     pub keymap: KeymapConfig,
     pub sessions: Vec<SessionTemplate>,
     pub blocks: BlocksConfig,
+    pub hints: HintsConfig,
     pub notifications: NotificationsConfig,
     pub glyph_tier: GlyphTier,
     /// tmux's `automatic-rename`: when true, unpinned windows auto-name from
@@ -57,6 +58,32 @@ impl Default for BlocksConfig {
             sticky_header: true,
             duration: true,
             duration_threshold_ms: 2000,
+        }
+    }
+}
+
+/// Configuration for hint mode (`prefix f`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HintsConfig {
+    pub enabled: bool,
+    /// Label characters (home row by default). Must be >= 2 distinct chars;
+    /// shorter values fall back to the default at use time.
+    pub alphabet: String,
+    /// Palette name or `#rrggbb` for the label text / background / highlighted
+    /// match foreground.
+    pub label_fg: String,
+    pub label_bg: String,
+    pub match_fg: String,
+}
+
+impl Default for HintsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            alphabet: "asdfghjkl".to_string(),
+            label_fg: "bg".to_string(),
+            label_bg: "warn".to_string(),
+            match_fg: "ok".to_string(),
         }
     }
 }
