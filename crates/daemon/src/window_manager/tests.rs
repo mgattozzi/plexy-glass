@@ -2853,3 +2853,126 @@ async fn hint_overlay_pick_returns_copy() {
     }
     assert!(wm.overlay().is_none(), "overlay closes on pick");
 }
+
+#[tokio::test]
+async fn move_window_forward_keeps_active_following_window() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh");
+    m.handle_command(Command::NewWindow).unwrap(); // W1
+    m.handle_command(Command::NewWindow).unwrap(); // W2, active = 2
+    let ids: Vec<_> = m.windows().iter().map(|w| w.id).collect(); // [w0, w1, w2]
+    assert_eq!(m.active_idx(), 2);
+
+    // Move w0 (front) to slot 2.
+    assert!(m.move_window(0, 2));
+    let after: Vec<_> = m.windows().iter().map(|w| w.id).collect();
+    assert_eq!(after, vec![ids[1], ids[2], ids[0]], "remove(0)+insert(2)");
+    // active was w2 → now at index 1; it must still be active.
+    assert_eq!(m.windows()[m.active_idx()].id, ids[2]);
+}
+
+#[tokio::test]
+async fn move_window_backward_and_to_end() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh");
+    m.handle_command(Command::NewWindow).unwrap();
+    m.handle_command(Command::NewWindow).unwrap();
+    let ids: Vec<_> = m.windows().iter().map(|w| w.id).collect();
+
+    // backward: w2 → slot 0
+    assert!(m.move_window(2, 0));
+    assert_eq!(
+        m.windows().iter().map(|w| w.id).collect::<Vec<_>>(),
+        vec![ids[2], ids[0], ids[1]]
+    );
+
+    // "past the end" clamps to the last slot: w2 (now at 0) → end
+    assert!(m.move_window(0, 99));
+    assert_eq!(
+        m.windows().iter().map(|w| w.id).collect::<Vec<_>>(),
+        vec![ids[0], ids[1], ids[2]]
+    );
+}
+
+#[tokio::test]
+async fn move_window_keeps_unrelated_active_window() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh");
+    m.handle_command(Command::NewWindow).unwrap();
+    m.handle_command(Command::NewWindow).unwrap();
+    m.handle_command(Command::SelectWindow(1)).unwrap(); // active = W1
+    let ids: Vec<_> = m.windows().iter().map(|w| w.id).collect();
+
+    // Move W0 to the end; W1 (active) shifts but stays active.
+    assert!(m.move_window(0, 2));
+    assert_eq!(m.windows()[m.active_idx()].id, ids[1]);
+}
+
+#[tokio::test]
+async fn move_window_noops() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh");
+    // single window
+    assert!(!m.move_window(0, 0));
+    m.handle_command(Command::NewWindow).unwrap();
+    // same slot
+    assert!(!m.move_window(1, 1));
+    // out of range `from`
+    assert!(!m.move_window(5, 0));
+}
+
+#[tokio::test]
+async fn move_window_by_id_resolves_source() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh");
+    m.handle_command(Command::NewWindow).unwrap();
+    m.handle_command(Command::NewWindow).unwrap();
+    let ids: Vec<_> = m.windows().iter().map(|w| w.id).collect();
+    assert!(m.move_window_by_id(ids[0], 2));
+    assert_eq!(
+        m.windows().iter().map(|w| w.id).collect::<Vec<_>>(),
+        vec![ids[1], ids[2], ids[0]]
+    );
+    // unknown id is a no-op
+    assert!(!m.move_window_by_id(plexy_glass_mux::WindowId(9999), 0));
+}

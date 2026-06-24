@@ -717,6 +717,50 @@ impl WindowManager {
         true
     }
 
+    /// Move the window at `from` to position `to` (drop-to-position): remove at
+    /// `from`, insert at `min(to, len-1)`. `active` and `last_active_window`
+    /// re-follow their windows by id across the shuffle. Returns `false`
+    /// (no mutation) for a single window, an out-of-range `from`, or a no-op.
+    pub fn move_window(&mut self, from: usize, to: usize) -> bool {
+        let len = self.windows.len();
+        if from >= len || len < 2 {
+            return false;
+        }
+        let to = to.min(len - 1);
+        if from == to {
+            return false;
+        }
+        // invariant: `active` and any `last_active_window` index are < len.
+        let active_id = self.windows[self.active].id;
+        let last_active_id = self
+            .last_active_window
+            .and_then(|i| self.windows.get(i))
+            .map(|w| w.id);
+
+        let w = self.windows.remove(from);
+        self.windows.insert(to, w);
+
+        // invariant: `active_id` was present before the move and is only
+        // relocated, never removed, so `position` always finds it.
+        self.active = self
+            .windows
+            .iter()
+            .position(|x| x.id == active_id)
+            .expect("active window survives reorder");
+        self.last_active_window =
+            last_active_id.and_then(|id| self.windows.iter().position(|x| x.id == id));
+        self.notify.notify_one();
+        true
+    }
+
+    /// Move the window with id `id` to position `to`. No-op for an unknown id.
+    pub fn move_window_by_id(&mut self, id: WindowId, to: usize) -> bool {
+        let Some(from) = self.windows.iter().position(|w| w.id == id) else {
+            return false;
+        };
+        self.move_window(from, to)
+    }
+
     /// Focus the pane with `id`: make its window active, clear that window's
     /// zoom so the pane is visible, focus it, and resize. `false` if not found.
     pub fn focus_pane_by_id(&mut self, pane: PaneId) -> bool {
