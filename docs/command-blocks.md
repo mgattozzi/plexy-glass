@@ -54,72 +54,27 @@ you prefer and command blocks work for free, no further configuration needed.
 
 ### Nushell
 
-Nushell doesn't bundle OSC 133 support, but you can add it directly in your
-`config.nu`. I checked the snippet below against nu's hook API and smoke-tested
-it with `nu -c` on a local nu install:
+Nushell ships OSC 133 support built in, so there is no snippet to add. It's
+the `shell_integration.osc133` flag, on by default:
 
 ```nu
-# OSC 133 shell integration for plexy-glass
-# Add this to your config.nu
-
-# 133;A (prompt start) and 133;B (prompt end) wrap the rendered prompt.
-$env.PROMPT_COMMAND = {
-    print -n "\u{001b}]133;A\u{0007}"
-    # Insert your actual prompt here, e.g.:
-    $"(ansi green)(pwd)(ansi reset) "
-}
-$env.PROMPT_INDICATOR = "\u{001b}]133;B\u{0007}> "
-
-# 133;C fires just before the command runs.
-# 133;D fires before the next prompt, recording the previous exit code.
-$env.config = ($env.config | upsert hooks {
-    pre_execution: (
-        ($env.config.hooks.pre_execution? | default []) ++
-        [{|| print -n "\u{001b}]133;C\u{0007}"}]
-    )
-    pre_prompt: (
-        ($env.config.hooks.pre_prompt? | default []) ++
-        [{|| print -n $"\u{001b}]133;D;($env.LAST_EXIT_CODE)\u{0007}"}]
-    )
-})
+# config.nu — on by default; this line just makes it explicit.
+$env.config.shell_integration.osc133 = true
 ```
 
-**Ordering note**: `pre_prompt` runs immediately before nu renders the next
-prompt, so the 133;D (command end) is emitted there, before the following
-133;A, and that is the correct sequence. The `++ []` append form preserves any
-hooks you already have.
+nushell emits all four marks itself, independent of your prompt, so starship
+and oh-my-posh don't interfere, and you should *not* try to set the marks
+manually via `PROMPT_COMMAND` or `pre_execution`/`pre_prompt` hooks. Doing so
+fights the built-in (and if a later `$env.config = { … }` reassignment or a
+prompt-framework `init` runs after your hooks, it silently wipes them), and
+the symptom is `capture --last-command` reporting *no command blocks*. If you
+added a manual snippet from an older version of these docs, remove it and
+rely on the built-in.
 
-**Using a prompt framework (starship / oh-my-posh)?** The `C`/`D` hooks above
-append, so they always survive, but the snippet's `A`/`B` marks set
-`$env.PROMPT_COMMAND` / `$env.PROMPT_INDICATOR`, and `starship init` (or
-oh-my-posh) *overwrites* those, silently dropping the prompt-start/end marks.
-The symptom: completed blocks are timed (notifications still fire) but you see
-no inline duration, no exit-status border, and an empty history palette,
-because there are no `133;A` prompt-start rows to anchor them.
-
-Fix: keep the `C`/`D` hooks, drop the snippet's `A`/`B` lines, and instead
-**wrap** the framework's prompt, *after* its init runs:
-
-```nu
-# config.nu — AFTER `starship init nu` (or oh-my-posh) has set PROMPT_COMMAND.
-let __osc133_prompt = $env.PROMPT_COMMAND
-$env.PROMPT_COMMAND = {|| $"\u{001b}]133;A\u{0007}(do $__osc133_prompt)" }   # 133;A wraps the prompt
-$env.PROMPT_INDICATOR = $"\u{001b}]133;B\u{0007}($env.PROMPT_INDICATOR)"      # 133;B at the input point
-```
-
-(`starship init` sets `PROMPT_INDICATOR` to `""`, so the second line just
-prepends the `133;B` mark.) Load order matters: `env.nu` runs before `config.nu`,
-so any `A`/`B` you set in `env.nu` gets clobbered by a `config.nu` framework
-init, and the wrap has to come last.
-
-**Put the whole integration in `config.nu`, not `env.nu`.** `env.nu` loads
-*first*, and a typical `config.nu` then does a full `$env.config = { … }`
-reassignment, which *wipes* any `pre_execution`/`pre_prompt` hooks you set in
-`env.nu` (the symptom is total: `capture --last-command` reports *no command
-blocks*). Place the `C`/`D` hook `upsert` (and the `A`/`B` prompt wrap) in
-`config.nu`, *after* both the `$env.config = { … }` assignment and the prompt
-framework's `init`. Verify with `$env.config.hooks.pre_execution | length` in a
-*fresh* interactive shell (≥ 1 means the hooks survived).
+> One gotcha: nushell emits the prompt/exec markers only after the terminal
+> answers its startup cursor-position query (`ESC[6n`). Real terminals (Ghostty,
+> iTerm, kitty, wezterm, and plexy-glass itself) answer it, so this is automatic;
+> it only bites synthetic/bare PTYs that don't reply.
 
 ### bash / zsh
 
