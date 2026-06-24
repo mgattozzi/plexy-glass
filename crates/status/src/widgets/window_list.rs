@@ -16,7 +16,12 @@ impl Widget for WindowListWidget {
     async fn evaluate(&mut self, ctx: &EvalContext<'_>) -> StyledText {
         let mut segments = Vec::with_capacity(ctx.windows.len());
         for (i, w) in ctx.windows.iter().enumerate() {
-            let style = if i == ctx.active_window {
+            let style = if Some(i) == ctx.dragging_window {
+                ResolvedStyle {
+                    attrs: self.active_style.attrs | plexy_glass_emulator::Attrs::REVERSE,
+                    ..self.active_style
+                }
+            } else if i == ctx.active_window {
                 self.active_style
             } else {
                 self.inactive_style
@@ -75,6 +80,7 @@ mod tests {
             copy_mode_active: false,
             sync_active: false,
             zoom_active: false,
+            dragging_window: None,
         };
         let out = w.evaluate(&ctx).await;
         assert_eq!(out.segments.len(), 2);
@@ -102,6 +108,7 @@ mod tests {
             copy_mode_active: false,
             sync_active: false,
             zoom_active: false,
+            dragging_window: None,
         };
         let out = w.evaluate(&ctx).await;
         let actions: Vec<_> = out.segments.iter().filter_map(|s| s.click_action).collect();
@@ -130,6 +137,7 @@ mod tests {
             copy_mode_active: false,
             sync_active: false,
             zoom_active: false,
+            dragging_window: None,
         };
         let out = w.evaluate(&ctx).await;
         assert!(!out.segments[0].text.contains('!') && !out.segments[0].text.contains('#'), "clean window has no flags");
@@ -158,6 +166,7 @@ mod tests {
             copy_mode_active: false,
             sync_active: false,
             zoom_active: false,
+            dragging_window: None,
         };
         let out = w.evaluate(&ctx).await;
         assert!(out.segments[1].text.contains("ok✓"), "exit-0 done → '✓'");
@@ -194,8 +203,36 @@ mod tests {
             copy_mode_active: false,
             sync_active: false,
             zoom_active: false,
+            dragging_window: None,
         };
         let out = w.evaluate(&ctx).await;
         assert!(out.segments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dragging_window_segment_is_reversed() {
+        use plexy_glass_emulator::Attrs;
+        let active = ResolvedStyle { fg: None, bg: None, attrs: Attrs::BOLD };
+        let inactive = ResolvedStyle::default();
+        let mut w = WindowListWidget { active_style: active, inactive_style: inactive };
+        let windows = vec![
+            WindowSummary { name: "a".into(), activity: false, bell: false, done: None, silence: false },
+            WindowSummary { name: "b".into(), activity: false, bell: false, done: None, silence: false },
+        ];
+        let ctx = EvalContext {
+            session_name: "main",
+            windows: &windows,
+            active_window: 0,
+            attached_clients: 1,
+            prefix_active: false,
+            active_pane_cwd: None,
+            copy_mode_active: false,
+            sync_active: false,
+            zoom_active: false,
+            dragging_window: Some(1),
+        };
+        let out = w.evaluate(&ctx).await;
+        assert!(out.segments[1].style.attrs.contains(Attrs::REVERSE), "dragged tab reversed");
+        assert!(!out.segments[0].style.attrs.contains(Attrs::REVERSE), "non-dragged not reversed");
     }
 }

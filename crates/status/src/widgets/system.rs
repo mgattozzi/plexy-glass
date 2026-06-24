@@ -126,6 +126,7 @@ mod tests {
             copy_mode_active: false,
             sync_active: false,
             zoom_active: false,
+            dragging_window: None,
         }
     }
 

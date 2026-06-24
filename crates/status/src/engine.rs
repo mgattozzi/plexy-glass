@@ -39,6 +39,9 @@ pub struct EvalContext<'a> {
     pub copy_mode_active: bool,
     pub sync_active: bool,
     pub zoom_active: bool,
+    /// Index of the window currently being drag-reordered, if any. The window
+    /// list renders it with a distinct (reversed) style.
+    pub dragging_window: Option<usize>,
 }
 
 struct WidgetSlot {
@@ -193,6 +196,7 @@ impl SnapshotCtx {
             copy_mode_active: self.copy_mode_active,
             sync_active: self.sync_active,
             zoom_active: self.zoom_active,
+            dragging_window: None,
         }
     }
 }
@@ -452,6 +456,7 @@ mod tests {
             copy_mode_active: false,
             sync_active: false,
             zoom_active: false,
+            dragging_window: None,
         };
         inner.refresh_event_driven(&ctx).await;
         let snap = inner.snapshot().await;
