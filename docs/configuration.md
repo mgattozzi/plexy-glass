@@ -621,13 +621,16 @@ notifications {
   notifies for every unattended completion. An unparseable value is a hard
   error.
 
-**When it fires:** on a command block completing, if `enabled` and its
-duration is ≥ `min-duration` and the completion is *unattended*, meaning the
-session is detached or the completing window isn't the active one. A command
-you're actively watching in the focused window never notifies. Note that this
-is independent of the per-window [`monitor-command`](command-blocks.md) flag
-(that one is the in-terminal status-flag channel; this is the desktop
-channel).
+**When it fires:** on a command block completing, if `enabled` **and** its
+duration ≥ `min-duration` **and** the completion is *unattended*. Unattended
+means any of: the session is **detached**; the completing window is **not the
+active one**; or the **terminal isn't focused** on your machine (you switched
+to another app). A command you're actively watching (attached, in the active
+window, terminal focused) never notifies. (Terminal focus uses `?1004` focus
+reporting; a terminal that doesn't report focus is treated as focused, so it
+never produces a false toast, and you still get the detached / other-window
+cases.) Independent of the per-window [`monitor-command`](command-blocks.md)
+flag (that's the in-terminal status-flag channel; this is the desktop channel).
 
 The notification reads e.g. `plexy-glass: <session>` / `✓ cargo build · exit 0 ·
 2m03s`. It works while detached (the daemon fires it). On a host with no

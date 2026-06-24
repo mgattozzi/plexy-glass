@@ -433,7 +433,10 @@ Command-completion **desktop notifications** (shipped — `docs/configuration.md
 `docs/superpowers/{specs,plans}/2026-06-23-command-completion-notifications*`):
 a real OS toast (cross-platform via `notify-rust = "4.18"`) when a command runs
 **≥ a threshold** (default 30s) and finishes **unattended** (session detached OR
-the completing window isn't the active one). Reuses the single completion drain:
+the completing window isn't the active one OR the terminal isn't OS-focused —
+`Session::client_attention` returns `(attached, any_focused, any_focus_reported)`;
+`attended = attached>0 && active_window && (!focus_reported || any_focused)`, so a
+terminal that never relays `?1004` focus is treated as focused, no false toast). Reuses the single completion drain:
 the emulator's `D` branch stashes `Screen.last_block_duration` (mirrors
 `last_block_exit`); `Window::drain_command_completion` now returns
 `(Option<CompletionEvent>, Option<Option<i32>>)` — surfacing a `CompletionEvent`

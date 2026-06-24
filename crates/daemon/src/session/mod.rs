@@ -21,6 +21,12 @@ pub struct ClientHandle {
     /// Starts `false` because `?1004` reports no initial state on enable, so we
     /// learn it on the first transition. Used for the any-client-focused aggregate.
     pub focused: bool,
+    /// Whether this client has ever relayed a `?1004` focus event. `false` means
+    /// "focus state unknown" (the terminal doesn't report it, or it hasn't
+    /// toggled since attach), and the notification policy treats unknown as
+    /// focused so it never fires a false toast on a terminal that can't report
+    /// focus.
+    pub focus_reported: bool,
     /// Whether this client's keymap prefix is currently armed (mid-chord).
     /// Written by the connection's input loop after every `Keymap::consume`;
     /// read by the render paths for the any-client-armed aggregate that
@@ -558,6 +564,7 @@ impl Session {
                 size,
                 frame_rx: frame_rx_for_session,
                 focused: false,
+                focus_reported: false,
                 prefix_armed: Arc::clone(&prefix_armed),
             });
         }
@@ -567,6 +574,7 @@ impl Session {
             size,
             frame_rx: frame_rx_for_caller,
             focused: false,
+            focus_reported: false,
             prefix_armed,
         })
     }
@@ -748,9 +756,24 @@ impl Session {
         let any_before = clients.iter().any(|c| c.focused);
         if let Some(c) = clients.iter_mut().find(|c| c.client_id == client_id) {
             c.focused = focused;
+            c.focus_reported = true; // we now have real focus state for this client
         }
         let any_after = clients.iter().any(|c| c.focused);
         (any_before != any_after).then_some(any_after)
+    }
+
+    /// Attention summary for the desktop-notification policy:
+    /// `(attached_count, any_focused, any_focus_reported)`. `any_focus_reported`
+    /// is `false` when no attached client has ever relayed a `?1004` event, so
+    /// the coordinator treats focus as unknown→focused (no false notifications on
+    /// terminals that don't report focus).
+    pub async fn client_attention(&self) -> (usize, bool, bool) {
+        let clients = self.clients.lock().await;
+        (
+            clients.len(),
+            clients.iter().any(|c| c.focused),
+            clients.iter().any(|c| c.focus_reported),
+        )
     }
 
     /// Any-client-armed aggregate for the `prefix-indicator` status widget:
@@ -1936,6 +1959,33 @@ mod tests {
         assert_eq!(s.set_client_focus(a.client_id, false).await, None);
         // B loses focus → aggregate true→false (emit focus-out).
         assert_eq!(s.set_client_focus(b.client_id, false).await, Some(false));
+    }
+
+    #[tokio::test]
+    async fn client_attention_tracks_focus_reporting_for_notifications() {
+        let _g = crate::test_env::isolate();
+        let s = Session::new("attn".into(), spec(), size(), cfg()).unwrap();
+        // Detached: nobody attached.
+        assert_eq!(s.client_attention().await, (0, false, false));
+        let s2 = Arc::clone(&s);
+        let a = tokio::task::spawn_blocking(move || {
+            s2.register_client(
+                PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+                Arc::new(AtomicBool::new(false)),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        // Attached but no focus event yet → focus UNKNOWN (focus_reported false).
+        assert_eq!(s.client_attention().await, (1, false, false));
+        // Terminal reports focus-out → reported=true, not focused (the new
+        // "terminal not focused while in the active window" notification case).
+        s.set_client_focus(a.client_id, false).await;
+        assert_eq!(s.client_attention().await, (1, false, true));
+        // Terminal regains focus → focused again.
+        s.set_client_focus(a.client_id, true).await;
+        assert_eq!(s.client_attention().await, (1, true, true));
     }
 
     #[tokio::test]

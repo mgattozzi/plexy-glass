@@ -332,10 +332,14 @@ pub(super) async fn render_coordinator(
             let cfg = session.config_snapshot();
             let nt = &cfg.notifications;
             if nt.enabled {
-                let attached = session.clients.lock().await.len();
+                let (attached, any_focused, focus_reported) = session.client_attention().await;
+                // Unknown focus (terminal doesn't report ?1004) counts as focused,
+                // so we never fire a false toast; a reported FocusOut makes the
+                // active window "unattended" too, which is what the user asked for.
+                let terminal_focused = !focus_reported || any_focused;
                 let title = format!("plexy-glass: {}", session.name());
                 for p in &monitor_drain.notifications {
-                    let attended = attached > 0 && p.is_active_window;
+                    let attended = attached > 0 && p.is_active_window && terminal_focused;
                     if should_notify(nt.enabled, nt.min_duration_ms, p.event.duration_ms, attended) {
                         notify_desktop(title.clone(), notification_body(p));
                     }
