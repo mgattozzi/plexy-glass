@@ -190,6 +190,26 @@ pub fn closing_exit(screen: &Screen, prompt_line: u32) -> Option<i32> {
         .and_then(|d| row_at(screen, d)?.mark.exit())
 }
 
+/// True when `line` is the row a block's typed command sits on: the `OSC 133;B`
+/// (prompt-end) row, or (for shells that emit no `B`) the `OSC 133;A`
+/// (prompt-start) row itself. This is where command-row annotations (duration /
+/// fold summary) anchor, so they land on the command line rather than the top of
+/// a multi-line prompt (e.g. starship's two-line prompt puts `A` a row above `B`).
+pub fn is_command_row(screen: &Screen, line: u32) -> bool {
+    let Some(mark) = row_at(screen, line).map(|r| r.mark) else {
+        return false;
+    };
+    if mark.contains(RowMark::PROMPT_END) {
+        return true;
+    }
+    if !mark.contains(RowMark::PROMPT_START) {
+        return false;
+    }
+    // A prompt-start row is the command row only when its block has no `B` row.
+    let end = next_prompt_line(screen, line).unwrap_or_else(|| total_lines(screen));
+    !(line..end).any(|l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::PROMPT_END)))
+}
+
 /// Wall-clock duration (millis) of the block anchored at `prompt_line`, if its
 /// closing `OSC 133;D` recorded one. `None` when the block is unclosed, the row
 /// was evicted, or `C` never preceded `D`. Mirrors [`closing_exit`].
@@ -800,6 +820,18 @@ mod tests {
         );
         assert_eq!(s.scrollback.rows().len(), 3, "setup: 3 rows scrolled");
         s
+    }
+
+    #[test]
+    fn is_command_row_picks_b_row_or_a_when_no_b() {
+        // Multi-line prompt: 133;A on row 0, 133;B on row 1 (the command row).
+        let s = screen_from(8, 40, b"\x1b]133;A\x07p\r\n\x1b]133;B\x07ls\r\n\x1b]133;C\x07o\r\nx");
+        assert!(!is_command_row(&s, 0), "prompt-start row isn't the command row when a B exists");
+        assert!(is_command_row(&s, 1), "the 133;B row is the command row");
+        assert!(!is_command_row(&s, 2), "an output row is not a command row");
+        // Single-line prompt with no B: the 133;A row IS the command row.
+        let s2 = screen_from(8, 40, b"\x1b]133;A\x07$ ls\r\n\x1b]133;C\x07o\r\nx");
+        assert!(is_command_row(&s2, 0), "a no-B prompt row is the command row");
     }
 
     #[test]

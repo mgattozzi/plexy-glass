@@ -9,7 +9,7 @@ use crate::{
     status::StatusLine,
     virtual_screen::VirtualScreen,
 };
-use plexy_glass_emulator::{Attrs, RowMark, Screen, display_width};
+use plexy_glass_emulator::{Attrs, Screen, display_width};
 use std::collections::HashMap;
 
 /// Resolved render colors for hint mode (built from `cfg.hints`).
@@ -483,11 +483,13 @@ pub fn compose(
     borders::draw(&frames, band, &mut screen, blocks);
 
     // Command-row annotations: a dim, right-aligned note on each visible command
-    // (PROMPT_START) row, composing the fold summary ("▸ N lines ✓/✗", folded
-    // blocks only) with the block's duration ("2.3s", when ≥ threshold). Shown in
-    // the collapsed/live view and block mode (so folding has feedback while you
-    // choose); duration is suppressed in copy mode (raw text for selection). Uses
-    // fixed glyphs like the borders; omitted when the command text leaves no room.
+    // row, composing the fold summary ("▸ N lines ✓/✗", folded blocks only) with
+    // the block's duration ("2.3s", when ≥ threshold). The annotation anchors on
+    // the COMMAND row (the `133;B` prompt-end row, or `133;A` when there's no B),
+    // not the prompt-start row, so it lands on the typed command even under a
+    // multi-line prompt (starship etc.). Block data is keyed off the block's
+    // prompt line. Shown in the collapsed/live view and block mode; duration
+    // suppressed in copy mode; omitted when the command text leaves no room.
     for v in panes {
         if v.screen.alt.is_some() {
             continue;
@@ -500,16 +502,17 @@ pub fn compose(
                 continue;
             }
             let Some(line) = ctx.line_at(r) else { continue };
-            let Some(mark) = crate::blocks::row_at(v.screen, line).map(|row| row.mark) else {
-                continue;
-            };
-            if !mark.contains(RowMark::PROMPT_START) {
+            if !crate::blocks::is_command_row(v.screen, line) {
                 continue;
             }
-            let status = block_status_at(v.screen, line);
+            // The block this command row belongs to (its prompt-start line).
+            let prompt_line = crate::blocks::prompt_at_or_above(v.screen, line).unwrap_or(line);
+            let folded = crate::blocks::row_at(v.screen, prompt_line)
+                .is_some_and(|row| row.mark.is_folded());
+            let status = block_status_at(v.screen, prompt_line);
             // Fold summary part: folded blocks only (unchanged logic).
-            let summary = if mark.is_folded() {
-                crate::blocks::foldable_output(v.screen, line).map(|(start, end)| {
+            let summary = if folded {
+                crate::blocks::foldable_output(v.screen, prompt_line).map(|(start, end)| {
                     let n = end - start + 1;
                     let glyph = match status {
                         Some(crate::blocks::BlockLineStatus::Ok) => " ✓",
@@ -523,7 +526,7 @@ pub fn compose(
             };
             // Duration part: gated by the threshold, suppressed in copy mode.
             let dur = duration_on
-                .then(|| crate::blocks::closing_duration(v.screen, line))
+                .then(|| crate::blocks::closing_duration(v.screen, prompt_line))
                 .flatten()
                 .filter(|&ms| ms >= threshold.unwrap_or(u32::MAX))
                 .map(crate::blocks::format_duration);
@@ -1840,7 +1843,7 @@ fn rgb_to_color(rgb: plexy_glass_status::Rgb) -> plexy_glass_emulator::Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plexy_glass_emulator::Emulator;
+    use plexy_glass_emulator::{Emulator, RowMark};
 
     fn pane(emu: &mut Emulator, bytes: &[u8]) {
         emu.advance(bytes);
@@ -4151,6 +4154,30 @@ mod tests {
         let row0 = composed_row(&vs, 0);
         assert!(row0.starts_with("$ slow"), "command kept: {row0:?}");
         assert!(row0.contains("3.0s"), "duration painted: {row0:?}");
+    }
+
+    #[test]
+    fn duration_anchors_on_command_row_under_multiline_prompt() {
+        use plexy_glass_emulator::Emulator;
+        // Two-line prompt: 133;A on row 0, 133;B + the typed command on row 1.
+        let mut e = Emulator::new(8, 40);
+        e.advance(
+            b"\x1b]133;A\x07prompt\r\n\x1b]133;B\x07sleep 3\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07x",
+        );
+        e.advance(b"\x1b[m");
+        let mut screen = e.screen().clone();
+        let d = screen
+            .active
+            .rows
+            .iter_mut()
+            .find(|r| r.mark.contains(RowMark::BLOCK_END))
+            .expect("BLOCK_END row");
+        d.mark.set_duration(Some(3000));
+        let colors = block_colors_with(Some(2000), false);
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        assert!(!composed_row(&vs, 0).contains("3.0s"), "not on the prompt-start row: {:?}", composed_row(&vs, 0));
+        assert!(composed_row(&vs, 1).contains("3.0s"), "on the command (133;B) row: {:?}", composed_row(&vs, 1));
     }
 
     #[test]
