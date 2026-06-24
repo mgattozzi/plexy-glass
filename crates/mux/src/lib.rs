@@ -43,7 +43,10 @@ pub use copy_mode::{CopyMode, CopyModeAction, MatchSpan, SearchState};
 pub use diff::{DiffRenderer, GraphicsCaps};
 pub use virtual_screen::VisiblePlacement;
 pub use direction::{Direction, SplitDir};
-pub use hint::{HintKind, HintTarget, scan_hints};
+pub use hint::{
+    DEFAULT_ALPHABET, HintAction, HintKind, HintOutcome, HintPick, HintState, HintTarget,
+    assign_labels, handle_hint, scan_hints,
+};
 pub use history::{HistoryEntry, HistoryOutcome, HistoryState, HistoryTarget, handle_history};
 pub use key::{Key, KeyEvent, KeyEventKind, Modifiers};
 pub use keymap::{Chord, Command, Keymap, KeymapAction};
