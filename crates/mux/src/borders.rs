@@ -8,9 +8,14 @@
 //! neighbours are also border cells, which yields correct corners, tees, and
 //! crosses uniformly for the frame and the separators.
 
-use crate::{blocks::BlockLineStatus, rect::Rect, virtual_screen::VirtualScreen};
+use crate::{blocks::BlockLineStatus, compositor::PaneDragRole, rect::Rect, virtual_screen::VirtualScreen};
 use plexy_glass_emulator::{Attrs, Cell, Color, graphemes_with_width};
 use smol_str::SmolStr;
+
+/// Border color of the pane being dragged (source) during a pane-swap drag.
+pub(crate) const SOURCE_DRAG_COLOR: u8 = 14; // bright cyan
+/// Border color of the pane under the cursor (target) during a pane-swap drag.
+pub(crate) const TARGET_DRAG_COLOR: u8 = 10; // bright green
 
 /// Colors used to paint block exit-status segments on a pane's left border, plus
 /// the per-frame policy for the other block annotations (duration + sticky
@@ -52,6 +57,9 @@ pub struct PaneFrame<'a> {
     /// distinctly (bright magenta), independent of `active` and of whether the
     /// pane has a `title`, so an unnamed marked pane is still clearly indicated.
     pub marked: bool,
+    /// Whether this pane is the source or target of an in-progress pane-swap
+    /// drag. `PaneDragRole::None` for panes not involved in a drag.
+    pub drag_role: PaneDragRole,
     pub title: Option<&'a str>,
     /// Per-viewport-row block exit status, indexed by `r` in `0..rect.rows`.
     /// An empty vec means no block painting for this pane (feature disabled or
@@ -86,6 +94,14 @@ pub fn draw(
     let rects: Vec<Rect> = frames.iter().map(|f| f.rect).collect();
     let active_rect = frames.iter().find(|f| f.active).map(|f| f.rect);
     let marked_rect = frames.iter().find(|f| f.marked).map(|f| f.rect);
+    let source_rect = frames
+        .iter()
+        .find(|f| matches!(f.drag_role, PaneDragRole::Source))
+        .map(|f| f.rect);
+    let target_rect = frames
+        .iter()
+        .find(|f| matches!(f.drag_role, PaneDragRole::Target))
+        .map(|f| f.rect);
 
     for r in band.row..=band.bottom_edge_row() {
         for c in band.col..=band.right_edge_col() {
@@ -99,12 +115,22 @@ pub fn draw(
             let glyph = box_glyph(n, s, e, w);
             let mut cell = Cell { grapheme: SmolStr::new(glyph), ..Cell::default() };
 
-            // Precedence: selected bracket > marked > block status > active.
+            // Precedence: selected bracket > drag source/target > marked > block status > active.
             // Selected-block bracket (block mode): color + ┏/┃/┗ glyph.
             if let Some((color, glyph)) = selected_bracket(r, c, frames) {
                 cell.attrs = Attrs::BOLD;
                 cell.fg = color;
                 cell.grapheme = SmolStr::new_static(glyph);
+            } else if let Some(sr) = source_rect
+                && touches(r, c, sr)
+            {
+                cell.attrs = Attrs::BOLD;
+                cell.fg = Color::Indexed(SOURCE_DRAG_COLOR); // bright cyan
+            } else if let Some(tr) = target_rect
+                && touches(r, c, tr)
+            {
+                cell.attrs = Attrs::BOLD;
+                cell.fg = Color::Indexed(TARGET_DRAG_COLOR); // bright green
             } else if let Some(mr) = marked_rect
                 && touches(r, c, mr)
             {
@@ -302,11 +328,27 @@ mod tests {
     use crate::blocks::BlockLineStatus;
 
     fn frame(rect: Rect, active: bool, title: Option<&str>) -> PaneFrame<'_> {
-        PaneFrame { rect, active, marked: false, title, block_rows: vec![], selected_block: None }
+        PaneFrame {
+            rect,
+            active,
+            marked: false,
+            drag_role: PaneDragRole::None,
+            title,
+            block_rows: vec![],
+            selected_block: None,
+        }
     }
 
     fn marked_frame(rect: Rect, active: bool, title: Option<&str>) -> PaneFrame<'_> {
-        PaneFrame { rect, active, marked: true, title, block_rows: vec![], selected_block: None }
+        PaneFrame {
+            rect,
+            active,
+            marked: true,
+            drag_role: PaneDragRole::None,
+            title,
+            block_rows: vec![],
+            selected_block: None,
+        }
     }
 
     fn frame_with_blocks(
@@ -315,7 +357,15 @@ mod tests {
         marked: bool,
         block_rows: Vec<Option<BlockLineStatus>>,
     ) -> PaneFrame<'static> {
-        PaneFrame { rect, active, marked, title: None, block_rows, selected_block: None }
+        PaneFrame {
+            rect,
+            active,
+            marked,
+            drag_role: PaneDragRole::None,
+            title: None,
+            block_rows,
+            selected_block: None,
+        }
     }
 
     fn frame_with_selected(rect: Rect, sel: Option<SelectedBlock>) -> PaneFrame<'static> {
@@ -323,6 +373,7 @@ mod tests {
             rect,
             active: false,
             marked: false,
+            drag_role: PaneDragRole::None,
             title: None,
             block_rows: vec![],
             selected_block: sel,
@@ -371,6 +422,7 @@ mod tests {
             rect: pane,
             active: false,
             marked: false,
+            drag_role: PaneDragRole::None,
             title: None,
             block_rows: vec![Some(BlockLineStatus::Failed); 3],
             selected_block: Some(sel),
@@ -777,6 +829,42 @@ mod tests {
             let cell = screen.cell(r, 0).unwrap();
             assert_eq!(cell.fg, colors.fail, "left segment col 0 row {r} = fail");
         }
+    }
+
+    #[test]
+    fn drag_source_and_target_get_distinct_ring_colors() {
+        // Two side-by-side panes inset in a band; one is the drag source, the other the target.
+        // Band 5x12; src pane (1,1,3,4); tgt pane (1,7,3,4).
+        let band = Rect::new(0, 0, 5, 12);
+        let src_rect = Rect::new(1, 1, 3, 4);
+        let tgt_rect = Rect::new(1, 7, 3, 4);
+        let frames = vec![
+            PaneFrame {
+                rect: src_rect,
+                active: false,
+                marked: false,
+                drag_role: PaneDragRole::Source,
+                title: None,
+                block_rows: vec![],
+                selected_block: None,
+            },
+            PaneFrame {
+                rect: tgt_rect,
+                active: false,
+                marked: false,
+                drag_role: PaneDragRole::Target,
+                title: None,
+                block_rows: vec![],
+                selected_block: None,
+            },
+        ];
+        let mut screen = VirtualScreen::blank(5, 12);
+        draw(&frames, band, &mut screen, None);
+        // A border cell of the source pane uses the source color; the target the target color.
+        let src_cell = screen.cell(0, 0).expect("src border cell");
+        let tgt_cell = screen.cell(0, 11).expect("tgt border cell");
+        assert_eq!(src_cell.fg, plexy_glass_emulator::Color::Indexed(SOURCE_DRAG_COLOR));
+        assert_eq!(tgt_cell.fg, plexy_glass_emulator::Color::Indexed(TARGET_DRAG_COLOR));
     }
 
     /// Status-row safety: with the pane rect hitting the band bottom, the

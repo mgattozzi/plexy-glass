@@ -79,6 +79,16 @@ impl FoldCtx {
     }
 }
 
+/// Which side of an in-progress pane-swap drag a pane is, for the border
+/// highlight. `None` for panes not involved in a drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaneDragRole {
+    #[default]
+    None,
+    Source,
+    Target,
+}
+
 pub struct PaneView<'a> {
     pub id: PaneId,
     pub rect: Rect,
@@ -99,6 +109,9 @@ pub struct PaneView<'a> {
     /// Whether this pane is the session's marked pane (drawn with a distinct
     /// border color).
     pub marked: bool,
+    /// Whether this pane is the source or target of an in-progress pane-swap
+    /// drag, for the border highlight.
+    pub drag_role: PaneDragRole,
 }
 
 /// Minimum popup box (border included): 3-row × 10-col interior.
@@ -460,6 +473,7 @@ pub fn compose(
                 rect: r,
                 active: v.is_active,
                 marked: v.marked,
+                drag_role: v.drag_role,
                 title: v.title,
                 block_rows,
                 selected_block,
@@ -1849,6 +1863,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
@@ -1894,6 +1909,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         // Popup pane: 6x20 grid showing "hi".
         let mut pe = Emulator::new(6, 20);
@@ -1944,6 +1960,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let mut pe = Emulator::new(3, 10);
         pane(&mut pe, b"p ");
@@ -1988,6 +2005,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let mut sel = Selection::start(PaneId(0), 0, 0);
         sel.extend(0, 4, Rect::new(0, 0, 4, 6));
@@ -2021,6 +2039,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let rv = PaneView {
             id: PaneId(1),
@@ -2032,6 +2051,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "L");
@@ -2063,6 +2083,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         // Row 0 should be the last scrollback row (BBBB), not CCCC.
@@ -2097,6 +2118,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         assert_eq!(vs.cursor, Some((3, 7)));
@@ -2126,6 +2148,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         for c in 0..=4 {
@@ -2167,6 +2190,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         for c in 1..=3 {
@@ -2207,6 +2231,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         // The out-of-viewport match must not paint any HIGHLIGHT in the band.
@@ -2250,6 +2275,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         // Prompt bar on the pane's bottom row (rect.row + rect.rows - 1 = 3).
@@ -2308,6 +2334,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let status = status_with_left("中B");
         let vs = compose(&[view], (3, 8), Some(&status), StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
@@ -2332,6 +2359,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let status = status_with_left("AB");
         let vs = compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
@@ -2355,6 +2383,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let status = status_with_left("AB");
         let vs = compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
@@ -2377,6 +2406,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let ov = OverlayView::RenamePrompt { label: "rename window", buf: "hi" };
         let vs = compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
@@ -2401,6 +2431,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let ov = OverlayView::Command { buf: "spl" };
         let vs = compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
@@ -2425,6 +2456,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(
             &[view],
@@ -2458,6 +2490,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let ov = OverlayView::RenamePrompt { label: "rename window", buf: "hi" };
         let vs = compose(
@@ -2491,6 +2524,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
@@ -2535,6 +2569,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let entries = vec![
             picker_view("main", "main - 1 win", true),
@@ -2577,6 +2612,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         // A CJK session name must be sized and placed as one cell + a spacer.
         let entries = vec![picker_view("中文", "中文", false)];
@@ -2612,6 +2648,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let entries = vec![picker_view("main", "main", true)];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "zzz", selected: 0 };
@@ -2642,6 +2679,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
@@ -2694,6 +2732,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let state = crate::tree::TreeState {
             nodes: vec![
@@ -2764,6 +2803,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let mk = |session: &str, cmd: &str, exit: Option<i32>, dur: Option<u32>, line: u32| {
             crate::history::HistoryEntry {
@@ -2833,6 +2873,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let state = crate::buffer::BufferPickerState {
             entries: vec![
@@ -2874,6 +2915,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let state = crate::buffer::BufferPickerState { entries: vec![], selected: 0 };
         let ov = OverlayView::Buffer { state: &state };
@@ -2903,6 +2945,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: true,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (3, 8), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         let mut magenta = false;
@@ -2930,6 +2973,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let state = crate::tree::TreeState {
             nodes: vec![tree_node("main", Some(0), None, 1, "1: shell", false)],
@@ -2962,6 +3006,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let ov = OverlayView::Tree { state };
         let vs = compose(&[view], (rows, cols), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
@@ -3060,6 +3105,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(
             &[view],
@@ -3103,6 +3149,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let colors = block_colors();
         let vs_some = compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
@@ -3153,6 +3200,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs_scrolled = compose(
             &[view_scrolled],
@@ -3187,6 +3235,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs_live = compose(
             &[view_live],
@@ -3244,6 +3293,7 @@ mod tests {
             block_mode: Some(&bm),
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (10, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
         // Left segment col = rect.col - 1 = 0. Block rows 0..=2 → host rows 1..=3.
@@ -3284,6 +3334,7 @@ mod tests {
             block_mode: Some(&bm),
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
         // Topmost visible bracket cell (host row 1) is ┃, not ┏.
@@ -3315,6 +3366,7 @@ mod tests {
             block_mode: Some(&bm),
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (8, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
         // No bracket glyph anywhere on the pane's left border column.
@@ -3365,6 +3417,7 @@ mod tests {
             block_mode: Some(&bm),
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (10, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
         // Block 1 command row = host row 1; "alpha" begins after "$ " at content
@@ -3406,6 +3459,7 @@ mod tests {
             block_mode: Some(&bm),
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (8, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
         for r in 0..8u16 {
@@ -3454,6 +3508,7 @@ mod tests {
             block_mode: Some(&bm),
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (10, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
         // Bottom content row of the pane = rect.row + rect.rows - 1 = 8. Read the
@@ -3495,6 +3550,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let status = status_with_left("AB");
         let vs = compose(
@@ -3565,6 +3621,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(
             &[view],
@@ -3618,6 +3675,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         // Outer box 8 rows × 22 cols at (2, 10); interior = 6 rows × 20 cols.
         let rect = Rect::new(2, 10, 8, 22);
@@ -3805,6 +3863,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         };
         let vs = compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
         assert_eq!(vs.placements.len(), 1, "compose resolved one visible placement");
@@ -3869,6 +3928,7 @@ mod tests {
             block_mode: None,
             title: None,
             marked: false,
+            drag_role: PaneDragRole::None,
         }
     }
 

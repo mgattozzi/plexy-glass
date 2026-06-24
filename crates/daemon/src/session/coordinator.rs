@@ -69,6 +69,7 @@ pub(super) async fn render_coordinator(
             let layout = win.layout();
             let active_id = win.active();
             let marked_pane = m.marked_pane();
+            let pane_drag = m.pane_drag_roles();
             // Ignore a zoom that points at a pane that no longer exists, so a
             // momentarily-stale overlay falls back to rendering all panes
             // instead of a blank viewport.
@@ -115,6 +116,11 @@ pub(super) async fn render_coordinator(
                     block_mode: p.block_mode.as_ref(),
                     title: p.name.as_deref(),
                     marked: marked_pane == Some(p.id),
+                    drag_role: match pane_drag {
+                        Some((src, _)) if src == p.id => plexy_glass_mux::PaneDragRole::Source,
+                        Some((_, Some(tgt))) if tgt == p.id => plexy_glass_mux::PaneDragRole::Target,
+                        _ => plexy_glass_mux::PaneDragRole::None,
+                    },
                 })
                 .collect();
 
