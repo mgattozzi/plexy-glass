@@ -471,11 +471,11 @@ target tab to insert there, or right of all tabs to send to the end); plain clic
 still selects. Implemented as: `WindowManager::move_window` (Vec remove+insert,
 `active`/`last_active_window` re-followed by id, pinned-index contract); a
 `TabDrag { source: WindowId }` mouse state mirroring `ResizeDrag` (added to
-`MouseState`), gated by the `mouse.tab-reorder-modifier` config field at press
+`MouseState`), gated by the `mouse.drag-modifier` config field at press
 time, drop resolved via `status_hits` scan; `EvalContext.dragging_window:
 Option<usize>` carries the source index into the status-bar evaluator where the
 dragged tab is rendered with the reversed active style as a visual highlight; a
-`mouse { tab-reorder-modifier }` config node (`ReorderModifier::{Alt,Ctrl}`,
+`mouse { drag-modifier }` config node (`DragModifier::{Alt,Ctrl}`,
 default `Alt`, `Shift` rejected, decoded from `MouseConfig`, live via
 `config_snapshot()`). Reorder persists for free through the existing structural
 `mark_dirty` path — no extra persistence code.
@@ -576,5 +576,13 @@ isolation (`InputEvent::Bytes`/`Paste` discarded while an overlay is open; the
 per-event dispatch extracted to `dispatch_input_event`) — shipped 2026-06-13
 spec/plan; tab reorder — Alt+drag a status-bar window tab to reorder (drop-to-position)
 via `WindowManager::move_window`, `TabDrag` mouse state, `EvalContext.dragging_window`
-reversed-style highlight, `mouse { tab-reorder-modifier }` config node (alt|ctrl,
-shift rejected), persists free via `mark_dirty` — shipped 2026-06-24 spec/plan.)
+reversed-style highlight, `mouse { drag-modifier }` config node (alt|ctrl,
+shift rejected), persists free via `mark_dirty` — shipped 2026-06-24 spec/plan;
+pane swap — Alt+drag a pane onto another in the same window to swap their
+positions (`Layout::swap_panes` + focus the dragged pane), a `PaneDrag { source,
+target }` mouse state mirroring `TabDrag` (start detection placed ahead of
+child-mouse forwarding so a mouse-mode pane is still swappable; drop resolved via
+`Layout::pane_at_coord`), a source/target border-ring highlight (`PaneDragRole`
+on `PaneView`/`PaneFrame`), sharing the renamed `mouse { drag-modifier }` knob
+(alt|ctrl, shift rejected) with tab reorder — shipped 2026-06-24 spec/plan
+`docs/superpowers/{specs,plans}/2026-06-24-pane-swap-drag*`.)

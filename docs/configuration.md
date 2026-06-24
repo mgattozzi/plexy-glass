@@ -641,7 +641,7 @@ Mouse behavior for gestures that go beyond plain click-to-focus.
 
 ```kdl
 mouse {
-    tab-reorder-modifier "alt"   // "alt" | "ctrl"; "shift" is rejected
+    drag-modifier "alt"   // "alt" | "ctrl"; "shift" is rejected
 }
 ```
 
@@ -651,10 +651,17 @@ dragged window into that position (drop-to-position), or release to the right of
 all tabs to send it to the end. A plain click (no modifier) still just selects
 the window.
 
-- `tab-reorder-modifier` is the keyboard modifier that has to be held during
-  a status-bar tab drag to activate reordering. Accepted values: `"alt"` (the
-  default) and `"ctrl"`. `"shift"` is explicitly rejected because terminals
-  reserve Shift+drag for native text selection, so it never reaches the mux.
+**Pane swap gesture:** hold the configured modifier and **drag from inside a pane**
+to another pane in the **same window**. Release over the target pane to swap their
+positions. Focus follows the dragged pane after the swap. A plain click (no
+modifier) is unchanged. Dragging to a pane in a different window or releasing
+outside any pane aborts the gesture with no change.
+
+- `drag-modifier`: the keyboard modifier that must be held during a status-bar
+  tab drag (reorder) or an in-pane drag (pane swap) to activate the gesture.
+  Accepted values: `"alt"` (default) and `"ctrl"`. We reject `"shift"` outright
+  because terminals reserve Shift+drag for native text selection, so it never
+  reaches the mux.
 
   **Why `"ctrl"` exists:** some terminal emulators (notably those that map the
   macOS Option key to Meta) intercept Alt+drag before it reaches the application.
@@ -662,7 +669,7 @@ the window.
 
   ```kdl
   mouse {
-      tab-reorder-modifier "ctrl"
+      drag-modifier "ctrl"
   }
   ```
 
