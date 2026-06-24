@@ -112,6 +112,15 @@ prepends the `133;B` mark.) Load order matters: `env.nu` runs before `config.nu`
 so any `A`/`B` you set in `env.nu` gets clobbered by a `config.nu` framework
 init, and the wrap has to come last.
 
+**Put the whole integration in `config.nu`, not `env.nu`.** `env.nu` loads
+*first*, and a typical `config.nu` then does a full `$env.config = { … }`
+reassignment, which *wipes* any `pre_execution`/`pre_prompt` hooks you set in
+`env.nu` (the symptom is total: `capture --last-command` reports *no command
+blocks*). Place the `C`/`D` hook `upsert` (and the `A`/`B` prompt wrap) in
+`config.nu`, *after* both the `$env.config = { … }` assignment and the prompt
+framework's `init`. Verify with `$env.config.hooks.pre_execution | length` in a
+*fresh* interactive shell (≥ 1 means the hooks survived).
+
 ### bash / zsh
 
 A minimal snippet if you're not already running a terminal integration script:
