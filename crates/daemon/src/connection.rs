@@ -1063,11 +1063,10 @@ async fn open_history_overlay(session: &Arc<Session>, registry: &Arc<SessionRegi
 /// overlay. Flashes "no hint targets" on the status line when nothing is found.
 async fn open_hints_overlay(session: &Arc<Session>) {
     let cfg = session.config_snapshot();
-    let alphabet = if cfg.hints.alphabet.chars().count() >= 2 {
-        cfg.hints.alphabet.clone()
-    } else {
-        plexy_glass_mux::DEFAULT_ALPHABET.to_string()
-    };
+    if !cfg.hints.enabled {
+        return;
+    }
+    let alphabet = plexy_glass_mux::hint::effective_alphabet(&cfg.hints.alphabet);
     let targets = {
         let m = session.window_manager.lock().await;
         match m.active_window().active_pane() {
@@ -2786,6 +2785,42 @@ mod tests {
             m.overlay().is_some()
         };
         assert!(overlay, "overlay must be open when URL is present");
+        session.terminate_panes().await;
+    }
+
+    /// When `hints.enabled = false`, `open_hints_overlay` must be a no-op
+    /// even when the pane's grid contains a URL.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_hints_overlay_no_op_when_disabled() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let mut cfg = plexy_glass_config::built_in_default();
+        cfg.hints.enabled = false;
+        let cfg = Arc::new(cfg);
+        let session = registry
+            .attach_or_create("h4".into(), script_cat(), script_size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
+        // Write a URL into the active pane's grid.
+        {
+            let m = session.window_manager.lock().await;
+            let pid = m.active_window().active();
+            m.active_window().pane(pid).unwrap().with_screen_mut(|scr| {
+                let url = "https://example.com";
+                for (i, ch) in url.chars().enumerate() {
+                    if (i as u16) < scr.active.cols {
+                        scr.active.rows[0].cells[i].grapheme = ch.to_string().into();
+                    }
+                }
+            });
+        }
+        open_hints_overlay(&session).await;
+        // Overlay must NOT have been opened, `enabled=false` is a no-op.
+        let overlay = {
+            let m = session.window_manager.lock().await;
+            m.overlay().is_some()
+        };
+        assert!(!overlay, "overlay must not open when hints.enabled = false");
         session.terminate_panes().await;
     }
 

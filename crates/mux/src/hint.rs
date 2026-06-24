@@ -3,7 +3,7 @@
 //! core: depends only on the emulator screen + `regex`, so it builds and tests
 //! standalone (like `selection.rs`).
 
-use plexy_glass_emulator::{Screen, display_width};
+use plexy_glass_emulator::Screen;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -144,7 +144,9 @@ fn scan_row(screen: &Screen, row: u16, out: &mut Vec<HintTarget>) {
             let start_col = col_at(m.start());
             spans.push(Span {
                 start_col,
-                end_col: start_col + display_width(text),
+                // Use the raw match end (not the trimmed text width) so the
+                // overlap sweep covers the full raw extent of the match.
+                end_col: col_at(m.end()),
                 kind: pat.kind,
                 text: text.to_string(),
             });
@@ -218,6 +220,23 @@ use crate::key::{Key, KeyEvent, Modifiers};
 
 /// Home-row label characters by default.
 pub const DEFAULT_ALPHABET: &str = "asdfghjkl";
+
+/// The effective label alphabet: the configured chars with duplicates
+/// removed (first occurrence kept). Falls back to `DEFAULT_ALPHABET` when
+/// fewer than 2 distinct chars remain.
+pub fn effective_alphabet(configured: &str) -> String {
+    let mut distinct: Vec<char> = Vec::new();
+    for c in configured.chars() {
+        if !distinct.contains(&c) {
+            distinct.push(c);
+        }
+    }
+    if distinct.len() >= 2 {
+        distinct.into_iter().collect()
+    } else {
+        DEFAULT_ALPHABET.to_string()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HintAction {
@@ -506,5 +525,28 @@ mod tests {
         let mut st = HintState::new(vec![t("x", HintKind::Sha)], "asdf");
         let ev = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
         assert_eq!(handle_hint(&ev, &mut st), HintOutcome::None);
+    }
+
+    #[test]
+    fn effective_alphabet_passthrough() {
+        assert_eq!(effective_alphabet("asdf"), "asdf");
+    }
+
+    #[test]
+    fn effective_alphabet_dup_only_falls_back_to_default() {
+        // "aa" has only 1 distinct char, so it falls back to DEFAULT_ALPHABET.
+        assert_eq!(effective_alphabet("aa"), DEFAULT_ALPHABET);
+    }
+
+    #[test]
+    fn effective_alphabet_dedup_keeps_order() {
+        // "aab" deduplicates to "ab" (order preserved, first occurrence kept).
+        assert_eq!(effective_alphabet("aab"), "ab");
+    }
+
+    #[test]
+    fn effective_alphabet_single_char_falls_back_to_default() {
+        // "x" has only 1 distinct char, so it falls back to DEFAULT_ALPHABET.
+        assert_eq!(effective_alphabet("x"), DEFAULT_ALPHABET);
     }
 }

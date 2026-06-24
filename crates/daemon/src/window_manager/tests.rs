@@ -2824,7 +2824,7 @@ async fn double_click_after_prompt_jump_does_not_panic() {
 }
 
 #[tokio::test]
-async fn hint_overlay_pick_returns_copy_then_open() {
+async fn hint_overlay_pick_returns_copy() {
     let notify = Arc::new(Notify::new());
     let mut wm = WindowManager::new(
         spec(),

@@ -1284,7 +1284,6 @@ fn paint_hint(
     pane_area_rows: u16,
     cols: u16,
 ) {
-    use plexy_glass_emulator::Attrs;
     for r in 0..pane_area_rows {
         for c in 0..cols {
             if let Some(cell) = screen.cell_mut(pane_row_offset + r, c) {

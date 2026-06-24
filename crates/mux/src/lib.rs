@@ -45,7 +45,7 @@ pub use virtual_screen::VisiblePlacement;
 pub use direction::{Direction, SplitDir};
 pub use hint::{
     DEFAULT_ALPHABET, HintAction, HintKind, HintOutcome, HintPick, HintState, HintTarget,
-    assign_labels, handle_hint, scan_hints,
+    assign_labels, effective_alphabet, handle_hint, scan_hints,
 };
 pub use history::{HistoryEntry, HistoryOutcome, HistoryState, HistoryTarget, handle_history};
 pub use key::{Key, KeyEvent, KeyEventKind, Modifiers};
