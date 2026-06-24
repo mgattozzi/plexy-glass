@@ -1272,6 +1272,26 @@ impl ClientCtx<'_> {
         }
         self.session.notify.notify_one();
     }
+
+    /// Perform a hint-mode pick: copy the span's text to the system clipboard
+    /// and push it as a paste buffer (mirroring copy-mode yank), or open the
+    /// span's URL/path in the system opener (fire-and-forget).
+    async fn dispatch_hint(&mut self, pick: plexy_glass_mux::HintPick) {
+        match pick.action {
+            plexy_glass_mux::HintAction::Copy => {
+                // Mirror the copy-mode yank path: system clipboard + paste buffer.
+                let _ = crate::osc_actions::write_clipboard(pick.text.as_bytes()).await;
+                self.registry.push_paste_buffer(pick.text.into_bytes()).await;
+            }
+            plexy_glass_mux::HintAction::Open => {
+                let url = pick.text;
+                tokio::spawn(async move {
+                    let _ = crate::osc_actions::open_url(&url).await;
+                });
+            }
+        }
+        self.session.notify.notify_one();
+    }
 }
 
 /// A command verb handled at the connection layer rather than inside the
@@ -1445,6 +1465,9 @@ async fn apply_overlay_result(
         }
         OverlayKeyResult::History(target) => {
             ctx.dispatch_history_jump(target).await;
+        }
+        OverlayKeyResult::Hint(pick) => {
+            ctx.dispatch_hint(pick).await;
         }
         OverlayKeyResult::Buffer(action) => {
             use plexy_glass_mux::BufferAction;

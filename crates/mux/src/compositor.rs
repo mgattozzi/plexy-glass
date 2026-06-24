@@ -12,6 +12,14 @@ use crate::{
 use plexy_glass_emulator::{Attrs, RowMark, Screen, display_width};
 use std::collections::HashMap;
 
+/// Resolved render colors for hint mode (built from `cfg.hints`).
+#[derive(Debug, Clone, Copy)]
+pub struct HintColors {
+    pub label_fg: plexy_glass_emulator::Color,
+    pub label_bg: plexy_glass_emulator::Color,
+    pub match_fg: plexy_glass_emulator::Color,
+}
+
 /// Per-pane fold rendering context, built once per frame: the fold projection
 /// (identity for copy/block-mode panes, where folds don't apply) and the top
 /// **visible** line index for the current scroll position. Display row `r` of a
@@ -151,6 +159,12 @@ pub enum OverlayView<'a> {
     /// row per matching command block (status glyph, duration, `session/window`
     /// provenance, command), the selected row highlighted.
     History { state: &'a crate::history::HistoryState },
+    /// Hint mode: labels painted over the dimmed pane, one per still-matching
+    /// target. No box, the labels float directly on the pane content.
+    Hint {
+        state: &'a crate::hint::HintState,
+        colors: HintColors,
+    },
 }
 
 /// A render-ready view of the floating popup pane: a live PTY-backed grid in
@@ -971,6 +985,10 @@ fn paint_overlay(
             paint_history(screen, state, pane_row_offset, pane_area_rows, cols);
             screen.cursor_visible = false;
         }
+        OverlayView::Hint { state, colors } => {
+            paint_hint(screen, state, *colors, pane_row_offset, pane_area_rows, cols);
+            screen.cursor_visible = false;
+        }
         OverlayView::Command { buf } => {
             // A full-width REVERSE bar on the bottom row of the pane band,
             // ":<buf>" with a block cursor just past the text.
@@ -1253,6 +1271,95 @@ fn paint_history(
     } else {
         paint_selectable_rows(screen, &rows, row0 + 2, inner_left, inner_right, top, visible_rows, sel);
     }
+}
+
+/// Dim the pane band and paint each still-matching target's label at its start
+/// column. The typed prefix is dim (`match_fg`); the remaining suffix is bold
+/// (`label_fg` on `label_bg`).
+fn paint_hint(
+    screen: &mut VirtualScreen,
+    state: &crate::hint::HintState,
+    colors: HintColors,
+    pane_row_offset: u16,
+    pane_area_rows: u16,
+    cols: u16,
+) {
+    use plexy_glass_emulator::Attrs;
+    for r in 0..pane_area_rows {
+        for c in 0..cols {
+            if let Some(cell) = screen.cell_mut(pane_row_offset + r, c) {
+                cell.attrs |= Attrs::DIM;
+            }
+        }
+    }
+    let typed_len = state.typed.len();
+    for (label, target) in state.visible() {
+        let (trow, tcol) = target.start;
+        if trow >= pane_area_rows {
+            continue;
+        }
+        let r = pane_row_offset + trow;
+        let pre = &label[..typed_len.min(label.len())];
+        let suf = &label[typed_len.min(label.len())..];
+        let after = put_colored(
+            screen,
+            r,
+            tcol,
+            pre,
+            colors.match_fg,
+            plexy_glass_emulator::Color::Default,
+            Attrs::DIM,
+            cols,
+        );
+        put_colored(
+            screen,
+            r,
+            after,
+            suf,
+            colors.label_fg,
+            colors.label_bg,
+            Attrs::BOLD,
+            cols,
+        );
+    }
+}
+
+/// Like `put_str`, but writes explicit fg/bg (the overlay `put_str` only takes
+/// attrs). Returns the column just past the last grapheme.
+// ponytail: 8 cell-paint args (grid coord + text + fg/bg/attrs + clip); a
+// struct would be transient call-site ceremony (cf. `compose`'s allow).
+#[allow(clippy::too_many_arguments)] // 8 cell-paint args: grid coord, text, fg, bg, attrs, clip; no grouping
+fn put_colored(
+    screen: &mut VirtualScreen,
+    row: u16,
+    mut col: u16,
+    text: &str,
+    fg: plexy_glass_emulator::Color,
+    bg: plexy_glass_emulator::Color,
+    attrs: plexy_glass_emulator::Attrs,
+    max_col: u16,
+) -> u16 {
+    for (g, w) in plexy_glass_emulator::graphemes_with_width(text) {
+        if col >= max_col || col >= screen.cols {
+            break;
+        }
+        if w == 2 && (col + 1 >= max_col || col + 1 >= screen.cols) {
+            break;
+        }
+        let cell = plexy_glass_emulator::Cell {
+            grapheme: g.into(),
+            fg,
+            bg,
+            attrs,
+            ..plexy_glass_emulator::Cell::default()
+        };
+        screen.put(row, col, cell);
+        if w == 2 {
+            screen.put(row, col + 1, plexy_glass_emulator::Cell::wide_spacer());
+        }
+        col += w.max(1);
+    }
+    col
 }
 
 /// Draw the centered choose-tree box: depth-indented VISIBLE rows (collapsed

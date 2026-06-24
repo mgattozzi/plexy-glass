@@ -1,9 +1,9 @@
 use super::{COMMAND_HISTORY_CAP, WindowManager};
 use plexy_glass_mux::{
     BufferAction, BufferEntry, BufferOutcome, BufferPickerState, HistoryEntry, HistoryOutcome,
-    HistoryState, HistoryTarget, KeyEvent, NodeKey, Overlay, OverlayAction, PickerEntry,
-    RenameTarget, TreeAction, TreeKind, TreeNode, TreeOutcome, TreeState, handle_buffers,
-    handle_history, handle_tree, session_label,
+    HistoryState, HistoryTarget, HintOutcome, HintPick, HintState, KeyEvent, NodeKey, Overlay,
+    OverlayAction, PickerEntry, RenameTarget, TreeAction, TreeKind, TreeNode, TreeOutcome,
+    TreeState, handle_buffers, handle_hint, handle_history, handle_tree, session_label,
 };
 
 /// How the caller should follow up after feeding a key to the active overlay.
@@ -32,6 +32,9 @@ pub enum OverlayKeyResult {
     /// session (if needed), focuses its window+pane, and enters block mode on
     /// the chosen block.
     History(HistoryTarget),
+    /// A hint-mode pick: copy or open the chosen span (handled at the connection
+    /// layer, which needs the clipboard + paste-buffer registry).
+    Hint(HintPick),
 }
 
 impl WindowManager {
@@ -105,6 +108,14 @@ impl WindowManager {
     /// the jump is dispatched at the connection layer.
     pub fn open_history(&mut self, entries: Vec<HistoryEntry>) {
         self.overlay = Some(Overlay::History(HistoryState::new(entries)));
+        self.rename_pane_target = None;
+    }
+
+    /// Open hint mode with a pre-built `HintState` (labels assigned by the caller
+    /// from the focused pane's active grid). Driven by `hint::handle_hint`; the
+    /// copy/open commit is dispatched at the connection layer.
+    pub fn open_hints(&mut self, state: HintState) {
+        self.overlay = Some(Overlay::Hint(state));
         self.rename_pane_target = None;
     }
 
@@ -204,6 +215,23 @@ impl WindowManager {
                 HistoryOutcome::Jump(target) => {
                     self.close_overlay();
                     OverlayKeyResult::History(target)
+                }
+            };
+        }
+        // Hint mode: driven by the pure `handle_hint`; copy/open is dispatched
+        // at the connection layer (needs clipboard + paste-buffer registry).
+        // Cancel and Pick close the overlay here.
+        if let Some(Overlay::Hint(state)) = self.overlay.as_mut() {
+            return match handle_hint(event, state) {
+                HintOutcome::None => OverlayKeyResult::Ignored,
+                HintOutcome::Redraw => OverlayKeyResult::Redraw,
+                HintOutcome::Cancel => {
+                    self.close_overlay();
+                    OverlayKeyResult::Redraw
+                }
+                HintOutcome::Pick(pick) => {
+                    self.close_overlay();
+                    OverlayKeyResult::Hint(pick)
                 }
             };
         }

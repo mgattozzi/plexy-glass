@@ -81,6 +81,10 @@ pub enum Overlay {
     /// The structured history palette. Driven by `crate::history::handle_history`
     /// at the daemon layer (the jump is cross-session and needs the registry).
     History(crate::history::HistoryState),
+    /// Hint mode: labelled spans in the focused pane. Driven by
+    /// `crate::hint::handle_hint` at the daemon layer (commit needs the
+    /// clipboard + registry).
+    Hint(crate::hint::HintState),
 }
 
 /// The caller's follow-up after feeding a key to an overlay.
@@ -112,10 +116,12 @@ pub fn handle(event: &KeyEvent, overlay: &mut Overlay) -> OverlayAction {
         Overlay::SessionPicker { entries, filter, selected } => {
             handle_session_picker(event, entries, filter, selected)
         }
-        // Tree / buffer-picker / history overlays are handled by the daemon via
-        // their own pure handlers (actions need the registry); these arms only
-        // keep the match exhaustive and are never reached.
-        Overlay::Tree(_) | Overlay::BufferPicker(_) | Overlay::History(_) => OverlayAction::None,
+        // Tree / buffer-picker / history / hint overlays are handled by the
+        // daemon via their own pure handlers (actions need the registry); these
+        // arms only keep the match exhaustive and are never reached.
+        Overlay::Tree(_) | Overlay::BufferPicker(_) | Overlay::History(_) | Overlay::Hint(_) => {
+            OverlayAction::None
+        }
     }
 }
 

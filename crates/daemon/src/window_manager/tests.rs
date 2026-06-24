@@ -1,7 +1,9 @@
 use super::*;
 use plexy_glass_mux::{
-    Command, KeyEvent, MouseButton, MouseEvent, MouseKind, PickerEntry, TreeAction, TreeNode,
+    Command, HintAction, HintKind, HintState, HintTarget, KeyEvent, MouseButton, MouseEvent,
+    MouseKind, PickerEntry, TreeAction, TreeNode,
 };
+use crate::window_manager::OverlayKeyResult;
 
 fn spec() -> SpawnSpec {
     SpawnSpec {
@@ -2819,4 +2821,35 @@ async fn double_click_after_prompt_jump_does_not_panic() {
     // State is sane (no panic). Offset unchanged from 7; selection started.
     assert_eq!(pane.scroll_offset(), 7, "second click: offset unchanged");
     assert!(m.selection().is_some(), "second click: selection started");
+}
+
+#[tokio::test]
+async fn hint_overlay_pick_returns_copy_then_open() {
+    let notify = Arc::new(Notify::new());
+    let mut wm = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    let targets = vec![
+        HintTarget { start: (0, 0), text: "alpha".into(), kind: HintKind::Sha },
+    ];
+    // Single target + single-char alphabet → label "a".
+    let state = HintState::new(targets, "asdf");
+    wm.open_hints(state);
+    assert!(wm.overlay().is_some(), "overlay is open after open_hints");
+
+    // Press 'a' (lowercase) → matches label "a" → Copy action.
+    let res = wm.handle_overlay_key(&KeyEvent::plain(plexy_glass_mux::Key::Char('a')));
+    match res {
+        OverlayKeyResult::Hint(pick) => {
+            assert_eq!(pick.text, "alpha");
+            assert_eq!(pick.action, HintAction::Copy);
+        }
+        other => panic!("expected Hint(Copy), got {other:?}"),
+    }
+    assert!(wm.overlay().is_none(), "overlay closes on pick");
 }

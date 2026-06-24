@@ -283,6 +283,13 @@ pub(super) async fn render_coordinator(
                 Some(plexy_glass_mux::Overlay::History(state)) => {
                     Some(plexy_glass_mux::OverlayView::History { state })
                 }
+                Some(plexy_glass_mux::Overlay::Hint(state)) => {
+                    let cfg = session.config_snapshot();
+                    Some(plexy_glass_mux::OverlayView::Hint {
+                        state,
+                        colors: hint_colors(&cfg),
+                    })
+                }
                 None => None,
             };
 
@@ -507,6 +514,21 @@ fn command_label(command: &str) -> String {
 const DEFAULT_OK_RGB: (u8, u8, u8) = (0x87, 0xa9, 0x87); // #87a987
 const DEFAULT_ALERT_RGB: (u8, u8, u8) = (0xc4, 0x74, 0x6e); // #c4746e
 const DEFAULT_SELECT_RGB: (u8, u8, u8) = (0xdc, 0xa5, 0x61); // #dca561
+
+/// Resolve the hint-mode label/match colors from config.
+pub(super) fn hint_colors(cfg: &plexy_glass_config::Config) -> plexy_glass_mux::HintColors {
+    let resolve = |name: &str, def: (u8, u8, u8)| {
+        let rgb = plexy_glass_status::resolve_color(name, &cfg.palette).unwrap_or(
+            plexy_glass_status::Rgb { r: def.0, g: def.1, b: def.2 },
+        );
+        plexy_glass_emulator::Color::Rgb(rgb.r, rgb.g, rgb.b)
+    };
+    plexy_glass_mux::HintColors {
+        label_fg: resolve(&cfg.hints.label_fg, (29, 28, 25)),
+        label_bg: resolve(&cfg.hints.label_bg, (196, 178, 138)),
+        match_fg: resolve(&cfg.hints.match_fg, (135, 169, 135)),
+    }
+}
 
 /// Resolve the block-mode selection-bracket color from config. Always returns a
 /// color (unlike [`block_border_colors`], which is `None` when blocks are
