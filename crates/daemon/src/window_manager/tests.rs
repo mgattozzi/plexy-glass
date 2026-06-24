@@ -3080,3 +3080,72 @@ async fn alt_drag_release_right_of_tabs_moves_to_end() {
         vec![ids[0], ids[2], ids[1]]
     );
 }
+
+// I1: a popup opened mid alt-drag must clear the in-flight tab_drag so the
+// Release that Rule 0 swallows cannot perform a phantom reorder after close.
+#[tokio::test]
+async fn open_popup_clears_in_flight_tab_drag() {
+    let mut m = three_tab_manager().await;
+    // Alt-press tab 0 → drag begins.
+    m.handle_mouse(mev(MouseKind::Press, 23, 2, true)).await.unwrap();
+    assert!(m.dragging_window_idx().is_some(), "premise: tab drag started");
+    // A popup opens mid-drag (e.g. via a keybinding from another client).
+    m.handle_command(Command::OpenPopup { command: None }).unwrap();
+    assert!(m.dragging_window_idx().is_none(), "popup open must clear the frozen tab drag");
+}
+
+// M1: `last_active_window` re-follows its window by id after `move_window`.
+#[tokio::test]
+async fn move_window_keeps_last_active_valid_by_id() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh");
+    m.handle_command(Command::NewWindow).unwrap(); // W1, active=1, last=Some(0)
+    m.handle_command(Command::NewWindow).unwrap(); // W2, active=2, last=Some(1)
+    // SelectWindow(0) sets last = the previously active window (W2 at index 2).
+    m.handle_command(Command::SelectWindow(0)).unwrap(); // active=0, last=Some(2)=W2
+    let pre_last_id = m.windows()[2].id; // capture W2's id before the reorder
+    // Move W0 (active) to slot 2 → order becomes [W1, W2, W0].
+    // W2 shifts to index 1; `last_active_window` must follow it there.
+    assert!(m.move_window(0, 2));
+    // Trigger `SelectLastWindow` to exercise the last-active follow path.
+    m.handle_command(Command::SelectLastWindow).unwrap();
+    assert_eq!(
+        m.windows()[m.active_idx()].id,
+        pre_last_id,
+        "last_active re-follows W2 to its new index after move_window"
+    );
+}
+
+// M2: `move_window` clamp-collapses-to-noop (to=99 clamps to 2 == from) returns
+// false.
+#[tokio::test]
+async fn move_window_clamp_to_noop() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh");
+    m.handle_command(Command::NewWindow).unwrap();
+    m.handle_command(Command::NewWindow).unwrap(); // 3 windows: indices 0, 1, 2
+    let ids: Vec<_> = m.windows().iter().map(|w| w.id).collect();
+    // from=2, to=99 clamps to 2; from==to → no-op.
+    assert!(!m.move_window(2, 99));
+    assert_eq!(
+        m.windows().iter().map(|w| w.id).collect::<Vec<_>>(),
+        ids,
+        "order unchanged on clamp-to-noop"
+    );
+}

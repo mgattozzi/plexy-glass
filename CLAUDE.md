@@ -470,7 +470,7 @@ Alt+drag a status-bar window tab to reorder it (drop-to-position: release over t
 target tab to insert there, or right of all tabs to send to the end); plain click
 still selects. Implemented as: `WindowManager::move_window` (Vec remove+insert,
 `active`/`last_active_window` re-followed by id, pinned-index contract); a
-`TabDrag { source: usize }` mouse state mirroring `ResizeDrag` (added to
+`TabDrag { source: WindowId }` mouse state mirroring `ResizeDrag` (added to
 `MouseState`), gated by the `mouse.tab-reorder-modifier` config field at press
 time, drop resolved via `status_hits` scan; `EvalContext.dragging_window:
 Option<usize>` carries the source index into the status-bar evaluator where the

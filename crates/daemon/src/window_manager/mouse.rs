@@ -66,8 +66,9 @@ impl WindowManager {
             let _ = pane.send_input(bytes::Bytes::from(bytes)).await;
             return Ok(());
         }
-        // Tab reorder drag in progress consumes everything (physical coords,
-        // since the pointer may leave the status row mid-drag).
+        // Rule 1a: tab-drag modal (physical coords, since the pointer may leave
+        // the status row mid-drag). Takes precedence over the status-bar hit so a
+        // drag that wanders off the tab strip still routes to the drag handler.
         if self.tab_drag.is_some() {
             return self.handle_tab_drag_event(event).await;
         }
