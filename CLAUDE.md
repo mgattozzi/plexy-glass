@@ -450,6 +450,21 @@ enabled / min-duration }` on by default, read from `config_snapshot()` (live-
 reload free). Independent of `monitor-command` (that's the in-terminal status-flag
 channel). No new protocol.
 
+**Hint mode** (shipped — `docs/configuration.md` `hints`, spec/plan
+`docs/superpowers/{specs,plans}/2026-06-23-hint-mode*`): `prefix f` / `:hints`
+overlays short keyboard labels on every detected span in the focused pane's
+**live visible grid** — URLs, file paths (incl. `file:line:col`), git SHAs, IPs,
+UUIDs, hex colors, emails, and OSC 8 hyperlinks — via a pure scanner+state-machine
+core (`crates/mux/src/hint.rs`: `scan_hints` regex set + `resolve_overlaps`
+longest-wins overlap resolution, `assign_labels`, `handle_hint`); an
+`Overlay::Hint` / `paint_hint` that dims the pane, draws labels, and narrows on
+type (modeled on the history palette); the **action model**: lowercase final key =
+copy to clipboard + paste buffer (`file:line:col` keeps the suffix), uppercase
+final key = OS-open (`open_url`, paths strip the `:line:col`); a `hints` config
+node (`enabled`, `alphabet`, `label-fg`/`label-bg`/`match-fg` — live-reload via
+`config_snapshot()`); verb `hints`, default `binding("prefix f", "hints")`,
+interactive-only (headless `refuse("hints")`). No new protocol.
+
 Not yet built (future work): native Kitty animation protocol + `z`-ordering
 (deferred from the inline-graphics P4 spec, with rationale).
 (Silence monitoring + bell/activity alert messages shipped with the 2026-06-12

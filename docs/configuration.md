@@ -547,6 +547,60 @@ The `blocks` node live-reloads with the config (`Ctrl+a R` /
 `plexy-glass reload`), same as `palette` and `status`. A reload that supplies
 new colors shows up on the next rendered frame.
 
+## `hints`
+
+Hint mode (`prefix f` / `:hints`) scans the focused pane's live visible grid
+and labels every detected span (URLs, file paths including `file:line:col`
+references, git SHAs, IP addresses, UUIDs, hex colors, email addresses, and
+OSC 8 hyperlinks) with short keyboard labels, so you can act on them without
+reaching for the mouse.
+
+```kdl
+hints {
+    enabled #true
+    alphabet "asdfghjkl"   // label characters (>= 2 distinct chars)
+    label-fg "bg"          // label text color (palette name or #rrggbb)
+    label-bg "warn"        // label background color
+    match-fg "ok"          // typed-prefix highlight color
+}
+```
+
+**Action model:** type a label to select a span.
+
+- **Lowercase label**: copies the span to the clipboard *and* the paste
+  buffer (the same path as a copy-mode yank, so `prefix ]` pastes it). For a
+  `file:line:col` target the `:line:col` suffix is kept so editors can jump
+  to the exact location.
+- **Uppercase label (Shift held on the final key)**: opens the span via the
+  OS opener (`xdg-open` / `open`). For a `file:line:col` target the
+  `:line:col` suffix is stripped so the opener receives a plain file path.
+
+The overlay dims the pane content and draws the labels in `label-bg` /
+`label-fg`. As you type, the matching label prefix is highlighted in
+`match-fg` and non-matching labels are filtered out. Press `Esc` or a
+non-label key to cancel without acting. Note that v1 scans the live active
+grid only; scrollback-wide hint mode is deferred.
+
+- `enabled`: `#true` (default) or `#false`. The master switch; when `#false`,
+  the `prefix f` chord and the `:hints` verb are no-ops.
+- `alphabet`: the characters used to build labels. Needs at least 2 distinct
+  chars; shorter or duplicate-only values fall back to `"asdfghjkl"`. Default:
+  `"asdfghjkl"` (the standard home row).
+- `label-fg`: foreground color of the label text. Takes a palette name (e.g.
+  `"bg"`, `"fg"`) or a `#rrggbb` hex literal. Default: `"bg"` (the theme
+  background, so the label text reads dark-on-light against `label-bg`).
+- `label-bg`: background color of the label box. Same value forms. Default:
+  `"warn"` (the built-in warning/yellow palette entry).
+- `match-fg`: foreground color for the already-typed prefix within a label (so
+  you can tell matched from still-to-type characters). Default: `"ok"` (the
+  built-in green palette entry).
+
+A bad color value (unknown palette name or malformed hex) falls back to the
+built-in default for that field and is not a hard error.
+
+The `hints` node live-reloads with the config (`Ctrl+a R` / `plexy-glass
+reload`). New colors and alphabet are picked up on the next overlay open.
+
 ## `notifications`
 
 Desktop notifications when a command finishes running **long** and you're **not
