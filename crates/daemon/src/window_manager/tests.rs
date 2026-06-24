@@ -3094,6 +3094,22 @@ async fn open_popup_clears_in_flight_tab_drag() {
     assert!(m.dragging_window_idx().is_none(), "popup open must clear the frozen tab drag");
 }
 
+// I2: a popup opened mid alt-drag must clear the in-flight pane_drag so the
+// Release that Rule 0 swallows cannot perform a phantom pane swap after close.
+#[tokio::test]
+async fn open_popup_clears_in_flight_pane_drag() {
+    let mut m = make_two_pane_manager().await; // `PaneId(0)`, `PaneId(1)`; active = 1
+    let vp = m.viewport();
+    let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
+    let (cr, cc) = (r0.row + r0.rows / 2, r0.col + r0.cols / 2);
+    // Alt-press inside pane 0 → pane drag begins.
+    m.handle_mouse(mev(MouseKind::Press, cr, cc, true)).await.unwrap();
+    assert!(m.pane_drag_roles().is_some(), "premise: pane drag started");
+    // A popup opens mid-drag (e.g. via a keybinding from another client).
+    m.handle_command(Command::OpenPopup { command: None }).unwrap();
+    assert!(m.pane_drag_roles().is_none(), "popup open must clear the frozen pane drag");
+}
+
 // M1: `last_active_window` re-follows its window by id after `move_window`.
 #[tokio::test]
 async fn move_window_keeps_last_active_valid_by_id() {

@@ -647,6 +647,7 @@ impl WindowManager {
         // an active drag/selection would freeze and bite after close. Drop them.
         self.resize_drag = None;
         self.tab_drag = None;
+        self.pane_drag = None;
         self.selection = None;
         let title = command.unwrap_or_else(|| "popup".to_string());
         self.popup = Some(crate::popup::Popup { pane, title });
