@@ -176,6 +176,7 @@ pub fn built_in_keymap() -> KeymapConfig {
             binding("prefix w", "choose_session"),
             binding("prefix W", "choose_tree"),
             binding("prefix /", "history"),
+            binding("prefix f", "hints"),
             binding("prefix m", "mark_pane"),
             binding("prefix !", "break_pane"),
             binding("prefix {", "swap_pane_prev"),

@@ -936,6 +936,7 @@ impl Session {
             | PromptCommand::ChooseSession
             | PromptCommand::ChooseTree
             | PromptCommand::History
+            | PromptCommand::Hints
             | PromptCommand::PasteBuffer(_)
             | PromptCommand::ChooseBuffer
             | PromptCommand::CopyOutput

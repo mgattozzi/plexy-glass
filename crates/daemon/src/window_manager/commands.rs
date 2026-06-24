@@ -298,6 +298,10 @@ impl WindowManager {
                 // Opened at the connection layer (needs the registry to walk
                 // every session's blocks); see serve_attach.
             }
+            Command::Hints => {
+                // Opened at the connection layer (scans the active pane's grid
+                // and builds hint targets); see serve_attach.
+            }
             Command::PasteBuffer | Command::ChooseBuffer => {
                 // Handled at the connection layer (needs the registry's paste
                 // buffers); see serve_attach.

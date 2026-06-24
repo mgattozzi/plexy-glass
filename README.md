@@ -155,6 +155,8 @@ rebindable via the `keymap` block in `config.kdl` (see the
 | `Ctrl+a d` | Detach |
 | `Ctrl+a w` | Choose session |
 | `Ctrl+a W` | Choose tree |
+| `Ctrl+a /` | History palette (cross-session block finder) |
+| `Ctrl+a f` | Hint mode (label on-screen URLs/paths/hashes; key to copy) |
 | `Ctrl+a :` | Command prompt |
 | `Ctrl+a ?` | Help |
 | `Ctrl+a R` | Reload config |

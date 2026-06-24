@@ -471,6 +471,7 @@ fn command_label(command: &str) -> String {
         "choose_session" => "Choose session",
         "choose_tree" => "Choose tree",
         "history" => "History palette",
+        "hints" => "Hints",
         "mark_pane" => "Mark pane",
         "break_pane" => "Break pane",
         "swap_pane_next" => "Swap pane next",

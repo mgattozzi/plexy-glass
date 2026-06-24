@@ -460,6 +460,7 @@ themselves contain colons and spaces.
 | `choose_session` | Visual session picker |
 | `choose_tree` | Choose-tree (session → window → pane) |
 | `history` | Structured history palette (cross-session block finder) |
+| `hints` | Hint mode: overlay labels on URLs, paths, and git hashes, press a label key to copy |
 | `command_prompt` | Open the `:` command prompt |
 | `show_help` | Keybinding help overlay |
 | `detach` | Detach this client |
@@ -940,43 +941,44 @@ cancels. Parse errors appear as a transient status-line message.
 
 | Verb | Arguments | Action |
 |---|---|---|
-| `new` | nothing | New window |
-| `next` / `prev` / `last` | nothing | Next / previous / last window |
+| `new` | — | New window |
+| `next` / `prev` / `last` | — | Next / previous / last window |
 | `win` | `<n>` | Jump to window *n* (**one-based**, 1–256) |
 | `split` | `h` \| `v` | Split stacked (`h`) or side-by-side (`v`) |
-| `zoom` | nothing | Toggle pane zoom |
+| `zoom` | — | Toggle pane zoom |
 | `kill` | nothing \| `win` \| `window` | Kill the active pane, or the window |
 | `focus` | `l`\|`r`\|`u`\|`d`\|`next`\|`prev`\|`last` | Focus a pane |
 | `resize` | `l`\|`r`\|`u`\|`d` `[n]` | Resize by *n* cells (default 1) |
 | `layout` | `<name>` | Apply a preset layout: `even-horizontal`, `even-vertical`, `main-horizontal`, `main-vertical`, `tiled` |
 | `rename` | `<name…>` | Rename the active window (spaces allowed) |
 | `rename-pane` | `<name…>` | Rename the active pane |
-| `mark` | nothing | Mark / unmark the active pane |
-| `break` | nothing | Break the active pane to its own window |
+| `mark` | — | Mark / unmark the active pane |
+| `break` | — | Break the active pane to its own window |
 | `join` (alias `join-pane`) | nothing \| `h` \| `v` | Join the marked pane here (default `v`, side-by-side) |
 | `swap` (alias `swap-pane`) | nothing \| `prev` \| `next` | Swap with the marked pane (across windows of the same session), or with a layout neighbor |
-| `prev-prompt` | nothing | Scroll viewport back to the previous prompt |
-| `next-prompt` | nothing | Scroll viewport forward to the next prompt |
-| `copy-output` | nothing | Yank the last completed command block's output |
-| `copy` | nothing | Enter copy mode |
+| `prev-prompt` | — | Scroll viewport back to the previous prompt |
+| `next-prompt` | — | Scroll viewport forward to the next prompt |
+| `copy-output` | — | Yank the last completed command block's output |
+| `copy` | — | Enter copy mode |
 | `paste` | `[bufferN]` | Paste the newest buffer, or the named one |
-| `buffers` | nothing | Choose-buffer overlay |
+| `buffers` | — | Choose-buffer overlay |
 | `set-buffer` | `<text…>` | Push literal text as a new paste buffer (verbatim; no newlines) |
 | `save-buffer` | `[bufferN] <path…>` | Write a buffer (default: the newest) to a file, bytes verbatim |
 | `load-buffer` | `<path…>` | Read a file into a new paste buffer (regular files only, 10 MiB cap) |
-| `sync` | nothing | Toggle sync-panes |
-| `monitor-activity` / `monitor-bell` / `monitor-command` | nothing | Toggle activity / bell / command-completion monitoring for the window |
+| `sync` | — | Toggle sync-panes |
+| `monitor-activity` / `monitor-bell` / `monitor-command` | — | Toggle activity / bell / command-completion monitoring for the window |
 | `monitor-silence` | `[secs]` | Arm silence monitoring after `secs` of no output (`0` or no arg = off) |
 | `popup` | `[command line…]` | Open a popup (scratch shell if no command) |
-| `close-popup` | nothing | Close the popup |
+| `close-popup` | — | Close the popup |
 | `pipe-pane` | `[command line…]` | Stream the pane's raw output to a command (no command stops the pipe) |
-| `sessions` | nothing | Session picker |
-| `tree` | nothing | Choose-tree |
-| `history` | nothing | Structured history palette (cross-session block finder) |
+| `sessions` | — | Session picker |
+| `tree` | — | Choose-tree |
+| `history` | — | Structured history palette (cross-session block finder) |
+| `hints` | — | Hint mode (labels on-screen URLs/paths/hashes; key copies) |
 | `switch` | `<session>` | Switch to a session in place |
-| `reload` | nothing | Reload the config |
-| `detach` | nothing | Detach |
-| `help` | nothing | Help overlay |
+| `reload` | — | Reload the config |
+| `detach` | — | Detach |
+| `help` | — | Help overlay |
 
 Verbs marked “—” reject arguments. `rename`, `rename-pane`, `switch`,
 `popup`, `pipe-pane`, `set-buffer`, `load-buffer`, and `save-buffer`'s path

@@ -53,6 +53,8 @@ pub enum Command {
     ChooseTree,
     /// Open the structured history palette (cross-session block finder).
     History,
+    /// Open hint mode (label + copy/open on-screen spans).
+    Hints,
     /// Paste the most-recent paste buffer into the active pane.
     PasteBuffer,
     /// Open the choose-buffer overlay.

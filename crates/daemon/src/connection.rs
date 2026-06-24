@@ -1059,6 +1059,34 @@ async fn open_history_overlay(session: &Arc<Session>, registry: &Arc<SessionRegi
     session.notify.notify_one();
 }
 
+/// Scan the active pane's visible grid for hint targets and open the hint-mode
+/// overlay. Flashes "no hint targets" on the status line when nothing is found.
+async fn open_hints_overlay(session: &Arc<Session>) {
+    let cfg = session.config_snapshot();
+    let alphabet = if cfg.hints.alphabet.chars().count() >= 2 {
+        cfg.hints.alphabet.clone()
+    } else {
+        plexy_glass_mux::DEFAULT_ALPHABET.to_string()
+    };
+    let targets = {
+        let m = session.window_manager.lock().await;
+        match m.active_window().active_pane() {
+            Some(pane) => pane.with_screen(plexy_glass_mux::scan_hints),
+            None => Vec::new(),
+        }
+    };
+    if targets.is_empty() {
+        session.set_status_message("no hint targets".into()).await;
+        return;
+    }
+    let state = plexy_glass_mux::HintState::new(targets, &alphabet);
+    {
+        let mut m = session.window_manager.lock().await;
+        m.open_hints(state);
+    }
+    session.notify.notify_one();
+}
+
 /// Flatten per-session block snapshots into palette entries, ordered: the
 /// current pane's blocks first, then the rest of the current session, then other
 /// sessions, each pane's blocks already newest-first from `history_snapshot`.
@@ -1308,6 +1336,7 @@ enum ConnVerb {
     ChooseSession,
     ChooseTree,
     History,
+    Hints,
     PasteBuffer(Option<String>),
     ChooseBuffer,
     CopyOutput,
@@ -1330,6 +1359,7 @@ impl ConnVerb {
             Command::ChooseSession => Ok(Self::ChooseSession),
             Command::ChooseTree => Ok(Self::ChooseTree),
             Command::History => Ok(Self::History),
+            Command::Hints => Ok(Self::Hints),
             Command::PasteBuffer => Ok(Self::PasteBuffer(None)),
             Command::ChooseBuffer => Ok(Self::ChooseBuffer),
             Command::CopyOutput => Ok(Self::CopyOutput),
@@ -1350,6 +1380,7 @@ impl ConnVerb {
             PromptCommand::ChooseSession => Ok(Self::ChooseSession),
             PromptCommand::ChooseTree => Ok(Self::ChooseTree),
             PromptCommand::History => Ok(Self::History),
+            PromptCommand::Hints => Ok(Self::Hints),
             PromptCommand::PasteBuffer(name) => Ok(Self::PasteBuffer(name)),
             PromptCommand::ChooseBuffer => Ok(Self::ChooseBuffer),
             PromptCommand::CopyOutput => Ok(Self::CopyOutput),
@@ -1396,6 +1427,9 @@ async fn run_connection_verb(
         }
         ConnVerb::History => {
             open_history_overlay(ctx.session, ctx.registry).await;
+        }
+        ConnVerb::Hints => {
+            open_hints_overlay(ctx.session).await;
         }
         ConnVerb::PasteBuffer(None) => {
             paste_top_buffer(ctx.session, ctx.registry).await;
@@ -1788,6 +1822,7 @@ async fn run_prompt_line(
         PromptCommand::ChooseSession => refuse("sessions"),
         PromptCommand::ChooseTree => refuse("tree"),
         PromptCommand::History => refuse("history"),
+        PromptCommand::Hints => refuse("hints"),
         PromptCommand::ChooseBuffer => refuse("buffers"),
         other => match session.handle_prompt_command(other).await {
             Ok(message) => (true, message),
@@ -2670,6 +2705,87 @@ mod tests {
             }
             other => panic!("expected History jump, got {other:?}"),
         }
+        session.terminate_panes().await;
+    }
+
+    /// `hints` is interactive-only (opens an overlay over the active pane).
+    /// Headless `cmd "hints"` must be refused with the standard message.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hints_verb_refused_headless() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("h".into(), script_cat(), script_size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
+        let (ok, message) = run_prompt_line(&session, &registry, "hints").await;
+        assert!(!ok, "hints must be refused headless");
+        assert_eq!(
+            message.unwrap_or_default(),
+            "hints: requires an attached client"
+        );
+        session.terminate_panes().await;
+    }
+
+    /// When the pane's grid contains no recognisable hint targets, `open_hints_overlay`
+    /// must flash "no hint targets" on the status line and leave no overlay open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_hints_overlay_flashes_no_targets_on_empty_grid() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("h2".into(), script_cat(), script_size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
+        // The freshly-spawned pane's grid is blank, no URLs or hint targets.
+        open_hints_overlay(&session).await;
+        // Overlay must NOT have been opened.
+        let overlay = {
+            let m = session.window_manager.lock().await;
+            m.overlay().is_some()
+        };
+        assert!(!overlay, "no overlay on empty grid");
+        // Status message must have been set.
+        let msg = {
+            let mut m = session.window_manager.lock().await;
+            m.take_active_message().map(str::to_string)
+        };
+        assert_eq!(msg.as_deref(), Some("no hint targets"));
+        session.terminate_panes().await;
+    }
+
+    /// `open_hints_overlay` opens the hint overlay when the grid contains a URL.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_hints_overlay_opens_overlay_when_targets_found() {
+        let _g = crate::test_env::isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("h3".into(), script_cat(), script_size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
+        // Manually write a URL into the active pane's grid.
+        {
+            let m = session.window_manager.lock().await;
+            let pid = m.active_window().active();
+            m.active_window().pane(pid).unwrap().with_screen_mut(|scr| {
+                let url = "https://example.com";
+                for (i, ch) in url.chars().enumerate() {
+                    if (i as u16) < scr.active.cols {
+                        scr.active.rows[0].cells[i].grapheme = ch.to_string().into();
+                    }
+                }
+            });
+        }
+        open_hints_overlay(&session).await;
+        // Overlay must be open.
+        let overlay = {
+            let m = session.window_manager.lock().await;
+            m.overlay().is_some()
+        };
+        assert!(overlay, "overlay must be open when URL is present");
         session.terminate_panes().await;
     }
 
@@ -4138,12 +4254,12 @@ mod tests {
 
     /// Lockstep guard for the headless verb policy.
     /// `Session::handle_prompt_command` carries a defensive `Ok(None)` arm for
-    /// the connection-level verbs, currently twelve: Detach, Reload, Switch,
-    /// ChooseSession, ChooseTree, History, PasteBuffer, ChooseBuffer, CopyOutput,
-    /// SetBuffer, SaveBuffer, LoadBuffer. If a future verb is added to that
-    /// arm (and `ConnVerb::from_prompt`) but NOT to `run_prompt_line`'s
+    /// the connection-level verbs, currently thirteen: Detach, Reload, Switch,
+    /// ChooseSession, ChooseTree, History, Hints, PasteBuffer, ChooseBuffer,
+    /// CopyOutput, SetBuffer, SaveBuffer, LoadBuffer. If a future verb is added
+    /// to that arm (and `ConnVerb::from_prompt`) but NOT to `run_prompt_line`'s
     /// intercept, `cmd "<verb>"` would fall through to the defensive arm and
-    /// silently exit 0 doing nothing. This test hardcodes the current eleven
+    /// silently exit 0 doing nothing. This test hardcodes the current twelve
     /// (plus `help`, refused for its modal overlay) and asserts each is
     /// either refused with a message or specially handled with a real effect,
     /// never a silent no-op. If you add a connection-level verb, extend
@@ -4161,7 +4277,7 @@ mod tests {
         // Refused: these act on the calling client (detach/switch), open modal
         // overlays (help/sessions/tree/buffers), or are interactive per-pane
         // modal navigation (block-mode).
-        for line in ["detach", "switch x", "sessions", "tree", "history", "buffers", "help", "block-mode"] {
+        for line in ["detach", "switch x", "sessions", "tree", "history", "hints", "buffers", "help", "block-mode"] {
             let (ok, message) = run_prompt_line(&session, &registry, line).await;
             assert!(!ok, "`{line}` must be refused headless, not silently succeed");
             let msg = message.unwrap_or_default();
