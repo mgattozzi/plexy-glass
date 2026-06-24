@@ -2976,3 +2976,107 @@ async fn move_window_by_id_resolves_source() {
     // unknown id is a no-op
     assert!(!m.move_window_by_id(plexy_glass_mux::WindowId(9999), 0));
 }
+
+// ---- Tab drag reorder (Task 4) ----
+
+async fn three_tab_manager() -> WindowManager {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh");
+    m.handle_command(Command::NewWindow).unwrap();
+    m.handle_command(Command::NewWindow).unwrap(); // 3 windows, active = 2
+    m.set_status_layout(Some(23), 0);
+    m.set_status_hits(vec![
+        plexy_glass_status::StatusHit {
+            col_range: 0..5,
+            action: plexy_glass_status::ClickAction::SelectWindow(0),
+        },
+        plexy_glass_status::StatusHit {
+            col_range: 5..10,
+            action: plexy_glass_status::ClickAction::SelectWindow(1),
+        },
+        plexy_glass_status::StatusHit {
+            col_range: 10..15,
+            action: plexy_glass_status::ClickAction::SelectWindow(2),
+        },
+    ]);
+    m
+}
+
+fn mev(kind: MouseKind, row: u16, col: u16, alt: bool) -> MouseEvent {
+    MouseEvent {
+        kind,
+        button: MouseButton::Left,
+        modifiers: plexy_glass_mux::MouseModifiers { shift: false, alt, ctrl: false },
+        row,
+        col,
+    }
+}
+
+#[tokio::test]
+async fn alt_drag_reorders_window_to_drop_slot() {
+    let mut m = three_tab_manager().await;
+    let ids: Vec<_> = m.windows().iter().map(|w| w.id).collect();
+
+    // Alt-press tab 0 → drag begins; highlight points at index 0.
+    m.handle_mouse(mev(MouseKind::Press, 23, 2, true)).await.unwrap();
+    assert_eq!(m.dragging_window_idx(), Some(0), "drag started on tab 0");
+
+    // Release over tab 2 → move W0 to slot 2.
+    m.handle_mouse(mev(MouseKind::Release, 23, 12, false)).await.unwrap();
+    assert_eq!(m.dragging_window_idx(), None, "drag cleared on release");
+    assert_eq!(
+        m.windows().iter().map(|w| w.id).collect::<Vec<_>>(),
+        vec![ids[1], ids[2], ids[0]]
+    );
+}
+
+#[tokio::test]
+async fn plain_press_still_selects_no_drag() {
+    let mut m = three_tab_manager().await;
+    m.handle_mouse(mev(MouseKind::Press, 23, 2, false)).await.unwrap();
+    assert_eq!(m.dragging_window_idx(), None, "no drag without the modifier");
+    assert_eq!(m.active_idx(), 0, "plain click selected tab 0");
+}
+
+#[tokio::test]
+async fn alt_drag_release_on_same_tab_is_noop() {
+    let mut m = three_tab_manager().await;
+    let ids: Vec<_> = m.windows().iter().map(|w| w.id).collect();
+    m.handle_mouse(mev(MouseKind::Press, 23, 2, true)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Release, 23, 3, false)).await.unwrap(); // same tab 0
+    assert_eq!(m.windows().iter().map(|w| w.id).collect::<Vec<_>>(), ids);
+    assert_eq!(m.dragging_window_idx(), None);
+}
+
+#[tokio::test]
+async fn alt_drag_release_off_status_row_aborts() {
+    let mut m = three_tab_manager().await;
+    let ids: Vec<_> = m.windows().iter().map(|w| w.id).collect();
+    m.handle_mouse(mev(MouseKind::Press, 23, 2, true)).await.unwrap();
+    // Move stays in drag; release on a pane row (5) aborts with no reorder.
+    m.handle_mouse(mev(MouseKind::Move, 10, 8, false)).await.unwrap();
+    assert_eq!(m.dragging_window_idx(), Some(0), "still dragging after a move");
+    m.handle_mouse(mev(MouseKind::Release, 5, 8, false)).await.unwrap();
+    assert_eq!(m.windows().iter().map(|w| w.id).collect::<Vec<_>>(), ids);
+    assert_eq!(m.dragging_window_idx(), None);
+}
+
+#[tokio::test]
+async fn alt_drag_release_right_of_tabs_moves_to_end() {
+    let mut m = three_tab_manager().await;
+    let ids: Vec<_> = m.windows().iter().map(|w| w.id).collect();
+    m.handle_mouse(mev(MouseKind::Press, 23, 7, true)).await.unwrap(); // grab tab 1
+    m.handle_mouse(mev(MouseKind::Release, 23, 40, false)).await.unwrap(); // past all tabs
+    assert_eq!(
+        m.windows().iter().map(|w| w.id).collect::<Vec<_>>(),
+        vec![ids[0], ids[2], ids[1]]
+    );
+}

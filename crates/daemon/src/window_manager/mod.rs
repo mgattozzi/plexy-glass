@@ -1,7 +1,7 @@
 //! Owns all windows for one attached client.
 
 use crate::{error::DaemonError, window::Window};
-use mouse::{ClickHistory, ResizeDrag};
+use mouse::{ClickHistory, ResizeDrag, TabDrag};
 use plexy_glass_mux::{Overlay, PaneId, Rect, Selection, SplitDir, WindowId};
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
@@ -67,6 +67,8 @@ pub struct WindowManager {
     config: Arc<plexy_glass_config::Config>,
     /// Border drag-resize in progress. `None` between drags.
     resize_drag: Option<ResizeDrag>,
+    /// Tab reorder drag in progress. `None` between drags.
+    tab_drag: Option<TabDrag>,
     /// Last left-press for multi-click classification.
     click_history: Option<ClickHistory>,
     /// Physical row index where the status bar paints, or `None` if the bar is
@@ -169,6 +171,7 @@ impl WindowManager {
             selection: None,
             config,
             resize_drag: None,
+            tab_drag: None,
             click_history: None,
             status_bar_row: None,
             pane_row_offset: 0,
@@ -830,6 +833,12 @@ impl WindowManager {
 
     pub fn active_idx(&self) -> usize {
         self.active
+    }
+
+    /// The current index of the window being drag-reordered, if any.
+    pub fn dragging_window_idx(&self) -> Option<usize> {
+        let drag = self.tab_drag.as_ref()?;
+        self.windows.iter().position(|w| w.id == drag.source)
     }
 
     /// Switch the active window to `idx`, recording the current window as the

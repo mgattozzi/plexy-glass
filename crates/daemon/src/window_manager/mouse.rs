@@ -2,7 +2,7 @@ use super::WindowManager;
 use crate::error::DaemonError;
 use plexy_glass_mux::{
     BorderHit, BorderSide, Command, MouseButton, MouseEncoding, MouseEvent, MouseKind, PaneId,
-    Rect, Selection, encode_for_child, extract_text, prev_prompt_line,
+    Rect, Selection, WindowId, encode_for_child, extract_text, prev_prompt_line,
 };
 use std::time::Instant;
 
@@ -12,6 +12,13 @@ pub(super) struct ResizeDrag {
     adjacent_pane: PaneId,
     side: BorderSide,
     last_pos: (u16, u16),
+}
+
+/// Active tab reorder drag. While `Some`, every mouse event routes to
+/// `handle_tab_drag_event`; cleared on Release. `source` is the dragged
+/// window's id (re-resolved to its current index on drop).
+pub(super) struct TabDrag {
+    pub(super) source: WindowId,
 }
 
 /// Last left-press metadata for multi-click classification (double-click =
@@ -58,6 +65,11 @@ impl WindowManager {
             let pane = popup.pane.clone();
             let _ = pane.send_input(bytes::Bytes::from(bytes)).await;
             return Ok(());
+        }
+        // Tab reorder drag in progress consumes everything (physical coords,
+        // since the pointer may leave the status row mid-drag).
+        if self.tab_drag.is_some() {
+            return self.handle_tab_drag_event(event).await;
         }
         // Rule 2 (first): status-bar row hit. The bar lives outside the pane
         // band, so test it against the *physical* row before translating. A
@@ -152,10 +164,23 @@ impl WindowManager {
         use plexy_glass_status::ClickAction;
         match hit.action {
             ClickAction::SelectWindow(idx) => {
-                // SelectWindow takes u8; clamp on overflow (unlikely with
-                // realistic window counts).
-                let n = u8::try_from(idx).unwrap_or(u8::MAX);
-                self.handle_command(Command::SelectWindow(n))?;
+                let reorder_held = match self.config.mouse.tab_reorder_modifier {
+                    plexy_glass_config::ReorderModifier::Alt => event.modifiers.alt,
+                    plexy_glass_config::ReorderModifier::Ctrl => event.modifiers.ctrl,
+                };
+                if reorder_held {
+                    // Begin a tab-drag; the modal rule above takes the rest.
+                    let source = self.windows.get(idx).map(|w| w.id);
+                    if let Some(source) = source {
+                        self.tab_drag = Some(TabDrag { source });
+                        self.notify.notify_one();
+                    }
+                } else {
+                    // SelectWindow takes u8; clamp on overflow (unlikely with
+                    // realistic window counts).
+                    let n = u8::try_from(idx).unwrap_or(u8::MAX);
+                    self.handle_command(Command::SelectWindow(n))?;
+                }
             }
             ClickAction::ToggleSyncPanes => {
                 self.handle_command(Command::ToggleSyncPanes)?;
@@ -229,6 +254,51 @@ impl WindowManager {
                 Ok(())
             }
             _ => Ok(()),
+        }
+    }
+
+    async fn handle_tab_drag_event(&mut self, event: MouseEvent) -> Result<(), DaemonError> {
+        if !matches!(event.kind, MouseKind::Release) {
+            // Move / stray press mid-drag: nothing live to update (the
+            // highlight is static for drop-to-position).
+            return Ok(());
+        }
+        let Some(drag) = self.tab_drag.take() else {
+            return Ok(());
+        };
+        if let Some(to) = self.drop_target_at(event.row, event.col) {
+            self.move_window_by_id(drag.source, to);
+        }
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    /// Resolve the drop slot for a tab-drag release at physical `(row, col)`:
+    /// the tab under the cursor, the end if released right of all tabs, or
+    /// `None` (abort) if off the status row or on a non-tab segment.
+    fn drop_target_at(&self, row: u16, col: u16) -> Option<usize> {
+        use plexy_glass_status::ClickAction;
+        if !self.is_status_bar_row(row) {
+            return None;
+        }
+        if let Some(hit) = self.status_hits.iter().find(|h| h.col_range.contains(&col)) {
+            return match hit.action {
+                ClickAction::SelectWindow(t) => Some(t),
+                _ => None,
+            };
+        }
+        // No hit under the cursor: if right of every tab, drop at the end.
+        let max_tab_end = self
+            .status_hits
+            .iter()
+            .filter_map(|h| match h.action {
+                ClickAction::SelectWindow(_) => Some(h.col_range.end),
+                _ => None,
+            })
+            .max();
+        match max_tab_end {
+            Some(end) if col >= end => Some(self.windows.len()),
+            _ => None,
         }
     }
 

@@ -167,7 +167,7 @@ pub(super) async fn render_coordinator(
                 copy_mode_active,
                 sync_active,
                 zoom_active,
-                dragging_window: None,
+                dragging_window: m.dragging_window_idx(),
             };
             let engine = session.status_engine_snapshot();
             engine.refresh_event_driven(&ctx).await;
