@@ -4,9 +4,9 @@
 
 use crate::{
     BlocksConfig, Config, ConfigError, GlyphTier, HintsConfig, KeymapBinding, KeymapConfig,
-    NotificationsConfig, Padding,
-    PaletteConfig, PaneNode, PaneTemplate, Position, SessionTemplate, SplitDirection, StatusConfig,
-    StyleConfig, WidgetSpec, WindowTemplate,
+    MouseConfig, NotificationsConfig, Padding, PaletteConfig, PaneNode, PaneTemplate, Position,
+    ReorderModifier, SessionTemplate, SplitDirection, StatusConfig, StyleConfig, WidgetSpec,
+    WindowTemplate,
 };
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use std::time::Duration;
@@ -25,6 +25,7 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
     let mut seen_keymap = false;
     let mut seen_blocks = false;
     let mut seen_hints = false;
+    let mut seen_mouse = false;
     let mut seen_notifications = false;
     let mut seen_glyphs = false;
     let mut seen_auto_rename = false;
@@ -54,6 +55,11 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
                 dup_check(seen_hints, "hints", node, src)?;
                 seen_hints = true;
                 config.hints = decode_hints(node, src)?;
+            }
+            "mouse" => {
+                dup_check(seen_mouse, "mouse", node, src)?;
+                seen_mouse = true;
+                config.mouse = decode_mouse(node, src)?;
             }
             "notifications" => {
                 dup_check(seen_notifications, "notifications", node, src)?;
@@ -308,6 +314,37 @@ fn decode_hints(node: &KdlNode, src: &str) -> Result<HintsConfig, ConfigError> {
         }
     }
     Ok(hints)
+}
+
+fn decode_mouse(node: &KdlNode, src: &str) -> Result<MouseConfig, ConfigError> {
+    ensure_no_props(node, src)?;
+    let mut mouse = MouseConfig::default();
+    if let Some(doc) = node.children() {
+        for child in doc.nodes() {
+            match child.name().value() {
+                "tab-reorder-modifier" => {
+                    let s = string_arg(child, 0, src, "tab-reorder-modifier")?;
+                    mouse.tab_reorder_modifier = match s {
+                        "alt" => ReorderModifier::Alt,
+                        "ctrl" => ReorderModifier::Ctrl,
+                        other => {
+                            return Err(decode_err(
+                                src,
+                                child,
+                                &format!(
+                                    "tab-reorder-modifier must be \"alt\" or \"ctrl\" (got {other:?}; \"shift\" is unavailable — terminals reserve shift+drag for native selection)"
+                                ),
+                            ));
+                        }
+                    };
+                }
+                other => {
+                    return Err(decode_err(src, child, &format!("unknown mouse node `{other}`")));
+                }
+            }
+        }
+    }
+    Ok(mouse)
 }
 
 // --- glyph tier ---
@@ -1917,5 +1954,23 @@ hints {
     fn rejects_unknown_hints_node() {
         let src = "hints {\n  bogus \"x\"\n}\n";
         assert!(parse_config(src).is_err());
+    }
+
+    #[test]
+    fn decodes_mouse_modifier_ctrl() {
+        let cfg = parse_config("mouse {\n  tab-reorder-modifier \"ctrl\"\n}\n").expect("parse");
+        assert_eq!(cfg.mouse.tab_reorder_modifier, ReorderModifier::Ctrl);
+    }
+
+    #[test]
+    fn mouse_defaults_to_alt_when_absent() {
+        let cfg = parse_config("").expect("parse");
+        assert_eq!(cfg.mouse.tab_reorder_modifier, ReorderModifier::Alt);
+    }
+
+    #[test]
+    fn rejects_shift_and_unknown_mouse_node() {
+        assert!(parse_config("mouse {\n  tab-reorder-modifier \"shift\"\n}\n").is_err());
+        assert!(parse_config("mouse {\n  bogus \"x\"\n}\n").is_err());
     }
 }

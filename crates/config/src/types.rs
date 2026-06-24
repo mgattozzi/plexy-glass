@@ -21,6 +21,7 @@ pub struct Config {
     pub sessions: Vec<SessionTemplate>,
     pub blocks: BlocksConfig,
     pub hints: HintsConfig,
+    pub mouse: MouseConfig,
     pub notifications: NotificationsConfig,
     pub glyph_tier: GlyphTier,
     /// tmux's `automatic-rename`: when true, unpinned windows auto-name from
@@ -85,6 +86,26 @@ impl Default for HintsConfig {
             label_bg: "warn".to_string(),
             match_fg: "ok".to_string(),
         }
+    }
+}
+
+/// Which keyboard modifier must be held to drag-reorder window tabs.
+/// `Shift` is intentionally unavailable because terminals reserve Shift+drag
+/// for native text selection, so it never reaches the mux.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReorderModifier {
+    Alt,
+    Ctrl,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MouseConfig {
+    pub tab_reorder_modifier: ReorderModifier,
+}
+
+impl Default for MouseConfig {
+    fn default() -> Self {
+        Self { tab_reorder_modifier: ReorderModifier::Alt }
     }
 }
 

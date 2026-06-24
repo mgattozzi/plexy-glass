@@ -1,7 +1,6 @@
 use crate::{
-    BlocksConfig, Config, GlyphTier, HintsConfig, KeymapBinding, KeymapConfig, NotificationsConfig,
-    PaletteConfig, Padding, Position,
-    StatusConfig, StyleConfig, WidgetSpec,
+    BlocksConfig, Config, GlyphTier, HintsConfig, KeymapBinding, KeymapConfig, MouseConfig,
+    NotificationsConfig, PaletteConfig, Padding, Position, StatusConfig, StyleConfig, WidgetSpec,
 };
 use std::time::Duration;
 
@@ -46,6 +45,7 @@ pub fn built_in_default() -> Config {
         sessions: Vec::new(),
         blocks: BlocksConfig::default(),
         hints: HintsConfig::default(),
+        mouse: MouseConfig::default(),
         notifications: NotificationsConfig::default(),
         glyph_tier: GlyphTier::Unicode,
         auto_rename: true,
