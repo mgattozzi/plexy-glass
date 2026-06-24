@@ -604,9 +604,14 @@ reload`). New colors and alphabet are picked up on the next overlay open.
 ## `notifications`
 
 Desktop notifications when a command finishes running **long** and you're **not
-watching it**, so a build you walked away from (or that finished in a background
-window) reaches you. Cross-platform via [`notify-rust`](https://crates.io/crates/notify-rust)
-(D-Bus on Linux, native on macOS), and there's no external command to install.
+watching it**, so a build you walked away from (or that finished in a
+background window) reaches you. The daemon shells out to the platform notifier:
+**`osascript`** on macOS (toasts show under "Script Editor" because a bare CLI
+binary has no app bundle for macOS to attribute its own toasts to) and
+**`notify-send`** (libnotify) on Linux. Both are present by default on a
+desktop macOS / Linux. Note that if the notifier is missing or there's no
+desktop session (a headless / SSH daemon), the attempt is logged and silently
+skipped, never an error.
 
 ```kdl
 notifications {

@@ -431,7 +431,12 @@ interactive-only (headless `refuse("history")`), help label "History palette".
 Command-completion **desktop notifications** (shipped — `docs/configuration.md`
 `notifications`, spec/plan
 `docs/superpowers/{specs,plans}/2026-06-23-command-completion-notifications*`):
-a real OS toast (cross-platform via `notify-rust = "4.18"`) when a command runs
+a real OS toast (the daemon shells out to the platform notifier — `osascript` on
+macOS, `notify-send` on Linux, via `notification_argv(macos, title, body)` +
+`tokio::process::Command`, title/body passed as argv so no injection; macOS toasts
+show under "Script Editor" because a bare CLI binary has no app bundle — `notify-rust`
+was dropped, its deprecated `NSUserNotification` path silently no-ops on current
+macOS) when a command runs
 **≥ a threshold** (default 30s) and finishes **unattended** (session detached OR
 the completing window isn't the active one OR the terminal isn't OS-focused —
 `Session::client_attention` returns `(attached, any_focused, any_focus_reported)`;
@@ -447,8 +452,8 @@ the per-window `monitor-command` flag, plus the unchanged monitor-flag edge;
 notifications: Vec<PendingNotification> }`. The render coordinator (session-
 lifetime, woken by pane output even while detached) applies a pure
 `should_notify(enabled, min_ms, duration_ms, attended)` (attended = attached &&
-active window) off the WM lock and fires `notify_desktop` via `spawn_blocking`,
-errors logged not propagated (headless/no-bus safe). Config `notifications {
+active window) off the WM lock and fires `notify_desktop` (spawns the notifier,
+reaps it async), errors logged not propagated (headless/no-notifier safe). Config `notifications {
 enabled / min-duration }` on by default, read from `config_snapshot()` (live-
 reload free). Independent of `monitor-command` (that's the in-terminal status-flag
 channel). No new protocol.

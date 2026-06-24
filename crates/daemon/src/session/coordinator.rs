@@ -380,20 +380,56 @@ fn notification_body(p: &crate::window_manager::PendingNotification) -> String {
     }
 }
 
-/// Fire a desktop notification, off any lock. Errors (no desktop / no D-Bus /
-/// headless) are logged and swallowed, never propagated and never panicking.
-/// Runs the blocking `notify-rust` call on the blocking pool. Not called by tests.
+/// The platform notifier command + args for `(title, body)`. Pure, for testing.
+///
+/// macOS: `osascript`. A bare CLI binary has no app bundle, so the modern
+/// notification API (and `notify-rust`'s deprecated `NSUserNotification` path)
+/// silently drop its toasts; `osascript`'s `display notification` routes through
+/// Script Editor (a signed, authorized app) and actually shows. Title/body are
+/// passed as `argv` (`on run argv`), never interpolated into the script, so no
+/// AppleScript/shell injection from command text.
+///
+/// Linux: `notify-send` (libnotify), title then body as args.
+fn notification_argv(macos: bool, title: &str, body: &str) -> (&'static str, Vec<String>) {
+    if macos {
+        (
+            "osascript",
+            vec![
+                "-e".into(),
+                "on run argv".into(),
+                "-e".into(),
+                "display notification (item 1 of argv) with title (item 2 of argv)".into(),
+                "-e".into(),
+                "end run".into(),
+                body.to_string(),  // item 1 of argv
+                title.to_string(), // item 2 of argv
+            ],
+        )
+    } else {
+        ("notify-send", vec![title.to_string(), body.to_string()])
+    }
+}
+
+/// Fire a desktop notification by spawning the platform notifier, off any lock.
+/// Failures (notifier missing, no desktop session) are logged and swallowed,
+/// never propagated and never panicking. The child is reaped asynchronously so
+/// it can't leave a zombie. Not called by tests (it would pop a real toast).
 fn notify_desktop(title: String, body: String) {
-    tokio::task::spawn_blocking(move || {
-        if let Err(e) = notify_rust::Notification::new()
-            .appname("plexy-glass")
-            .summary(&title)
-            .body(&body)
-            .show()
-        {
-            tracing::warn!(error = %e, "desktop notification failed");
+    let (program, args) = notification_argv(cfg!(target_os = "macos"), &title, &body);
+    match tokio::process::Command::new(program)
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
         }
-    });
+        Err(e) => tracing::warn!(error = %e, program, "desktop notification failed to spawn"),
+    }
 }
 
 /// Substitute the `prefix` token (word-wise, case-insensitive) with the
@@ -614,6 +650,24 @@ mod tests {
         assert!(!should_notify(false, 0, Some(99_999), false), "disabled");
         assert!(!should_notify(true, 30_000, None, false), "no duration → never");
         assert!(should_notify(true, 0, Some(1), false), "min 0 notifies any unattended");
+    }
+
+    #[test]
+    fn notification_argv_macos_uses_osascript_with_argv() {
+        let (prog, args) = notification_argv(true, "plexy-glass: web", "\u{2713} cargo build \u{b7} 2m03s");
+        assert_eq!(prog, "osascript");
+        // Title/body are the trailing argv (body = item 1, title = item 2), never
+        // interpolated into the script, that's the injection-safe contract.
+        assert_eq!(args[args.len() - 2], "\u{2713} cargo build \u{b7} 2m03s");
+        assert_eq!(args[args.len() - 1], "plexy-glass: web");
+        assert!(args.contains(&"display notification (item 1 of argv) with title (item 2 of argv)".to_string()));
+    }
+
+    #[test]
+    fn notification_argv_linux_uses_notify_send() {
+        let (prog, args) = notification_argv(false, "T", "B");
+        assert_eq!(prog, "notify-send");
+        assert_eq!(args, vec!["T".to_string(), "B".to_string()]);
     }
 
     #[test]
