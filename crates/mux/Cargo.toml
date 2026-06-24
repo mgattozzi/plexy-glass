@@ -9,3 +9,4 @@ plexy-glass-status = { path = "../status" }
 bitflags = { workspace = true }
 thiserror = { workspace = true }
 smol_str = { workspace = true }
+regex = { workspace = true }
