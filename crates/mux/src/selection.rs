@@ -98,12 +98,36 @@ pub(crate) fn is_word_char(g: &str) -> bool {
     ch.is_alphanumeric() || matches!(ch, '_' | '.' | '-' | '/' | '~')
 }
 
-/// Return a `Word`-kind `Selection` covering the word at (row, col), or
-/// `None` if the click is on a non-word cell. Walks outward through
-/// graphemes on the same row.
+/// The content row (scrollback or grid) shown at viewport row `vrow`, given the
+/// pane height and scroll position, the same mapping the compositor uses to
+/// place content. `None` when `vrow` is past the visible content. Every mouse
+/// selection helper reads through this so a click made while scrolled back
+/// targets the scrollback, not the live grid underneath it.
+pub(crate) fn viewport_content_row(
+    screen: &plexy_glass_emulator::Screen,
+    pane_rows: u16,
+    scroll_offset: u32,
+    vrow: u16,
+) -> Option<&plexy_glass_emulator::Row> {
+    let proj = crate::blocks::FoldProjection::build(screen);
+    let visible_total = proj.visible_total();
+    let top = visible_total
+        .saturating_sub(u32::from(pane_rows))
+        .saturating_sub(scroll_offset);
+    let idx = top + u32::from(vrow);
+    (idx < visible_total)
+        .then(|| proj.to_unified(idx))
+        .and_then(|u| crate::blocks::row_at(screen, u))
+}
+
+/// Return a `Word`-kind `Selection` covering the word at viewport (row, col), or
+/// `None` if the click is on a non-word cell. Walks outward through graphemes on
+/// the same (scroll-mapped) content row. `row`/`col` stay viewport-relative.
 pub fn word_at(
     source_pane: PaneId,
     screen: &plexy_glass_emulator::Screen,
+    pane_rows: u16,
+    scroll_offset: u32,
     row: u16,
     col: u16,
 ) -> Option<Selection> {
@@ -111,37 +135,23 @@ pub fn word_at(
     if col >= cols {
         return None;
     }
-    let cell = screen.active.get_cell(row, col)?;
-    if !is_word_char(cell.grapheme.as_str()) {
+    let content = viewport_content_row(screen, pane_rows, scroll_offset, row)?;
+    let is_word = |c: u16| {
+        content
+            .cells
+            .get(c as usize)
+            .is_some_and(|cell| is_word_char(cell.grapheme.as_str()))
+    };
+    if !is_word(col) {
         return None;
     }
     let mut start = col;
-    while start > 0 {
-        let prev = start - 1;
-        if screen
-            .active
-            .get_cell(row, prev)
-            .map(|c| is_word_char(c.grapheme.as_str()))
-            .unwrap_or(false)
-        {
-            start = prev;
-        } else {
-            break;
-        }
+    while start > 0 && is_word(start - 1) {
+        start -= 1;
     }
     let mut end = col;
-    while end + 1 < cols {
-        let next = end + 1;
-        if screen
-            .active
-            .get_cell(row, next)
-            .map(|c| is_word_char(c.grapheme.as_str()))
-            .unwrap_or(false)
-        {
-            end = next;
-        } else {
-            break;
-        }
+    while end + 1 < cols && is_word(end + 1) {
+        end += 1;
     }
     Some(Selection {
         source_pane,
@@ -150,19 +160,20 @@ pub fn word_at(
     })
 }
 
-/// Return a `Line`-kind `Selection` covering the row from col 0 to the last
-/// non-blank cell. Returns `None` if the row is entirely blank.
+/// Return a `Line`-kind `Selection` covering viewport `row` from col 0 to the
+/// last non-blank cell of its (scroll-mapped) content row. `None` if blank.
 pub fn line_at(
     source_pane: PaneId,
     screen: &plexy_glass_emulator::Screen,
+    pane_rows: u16,
+    scroll_offset: u32,
     row: u16,
 ) -> Option<Selection> {
     let cols = screen.active.num_cols();
+    let content = viewport_content_row(screen, pane_rows, scroll_offset, row)?;
     let mut last = None;
     for c in 0..cols {
-        if let Some(cell) = screen.active.get_cell(row, c)
-            && !cell.is_blank()
-        {
+        if content.cells.get(c as usize).is_some_and(|cell| !cell.is_blank()) {
             last = Some(c);
         }
     }
@@ -174,35 +185,57 @@ pub fn line_at(
     })
 }
 
-/// Pull the selected text out of `screen`. Walks the cells in selection
-/// order; inserts `\n` at row boundaries. Trailing default-blank cells on
-/// each row are trimmed so empty space at the right edge of the pane
-/// doesn't bloat the copied string. Wide-spacer cells are skipped.
-pub fn extract_text(selection: &Selection, screen: &plexy_glass_emulator::Screen) -> String {
+/// Pull the selected text out of `screen`. Walks the cells in selection order;
+/// inserts `\n` at row boundaries. Trailing default-blank cells on each row are
+/// trimmed so empty space at the right edge doesn't bloat the copied string;
+/// wide-spacer cells are skipped.
+///
+/// The selection's rows are *viewport-relative* (0 = top of the pane). They're
+/// mapped to the actual content row (scrollback or grid) through the SAME
+/// scroll-back + fold projection the compositor uses to place content, so a
+/// selection made while scrolled back copies what's highlighted, not the live
+/// grid underneath. `pane_rows` is the pane's visible height, `scroll_offset` its
+/// current wheel-scroll position (both `0`/full when at the live bottom).
+pub fn extract_text(
+    selection: &Selection,
+    screen: &plexy_glass_emulator::Screen,
+    pane_rows: u16,
+    scroll_offset: u32,
+) -> String {
+    let proj = crate::blocks::FoldProjection::build(screen);
+    let visible_total = proj.visible_total();
+    // Top visible line, matching the compositor's live-pane FoldCtx.
+    let top_visible = visible_total
+        .saturating_sub(u32::from(pane_rows))
+        .saturating_sub(scroll_offset);
     let (start, end) = selection.normalized();
     let cols = screen.active.num_cols();
     let mut out = String::new();
     for r in start.0..=end.0 {
-        let row_start = if r == start.0 { start.1 } else { 0 };
-        let row_end = if r == end.0 {
-            end.1
-        } else {
-            cols.saturating_sub(1)
-        };
-        let mut last_significant = row_start;
-        for c in row_start..=row_end {
-            if let Some(cell) = screen.active.get_cell(r, c)
-                && !cell.is_blank()
-            {
-                last_significant = c;
-            }
-        }
-        for c in row_start..=last_significant {
-            if let Some(cell) = screen.active.get_cell(r, c) {
-                if cell.is_wide_spacer() {
-                    continue;
+        // Viewport row r → unified content line (scrollback ++ grid), via the
+        // fold projection at the current scroll position.
+        let visible_idx = top_visible + u32::from(r);
+        let row = (visible_idx < visible_total)
+            .then(|| proj.to_unified(visible_idx))
+            .and_then(|u| crate::blocks::row_at(screen, u));
+        if let Some(row) = row {
+            let row_start = if r == start.0 { start.1 } else { 0 };
+            let row_end = if r == end.0 { end.1 } else { cols.saturating_sub(1) };
+            let mut last_significant = row_start;
+            for c in row_start..=row_end {
+                if let Some(cell) = row.cells.get(c as usize)
+                    && !cell.is_blank()
+                {
+                    last_significant = c;
                 }
-                out.push_str(cell.grapheme.as_str());
+            }
+            for c in row_start..=last_significant {
+                if let Some(cell) = row.cells.get(c as usize) {
+                    if cell.is_wide_spacer() {
+                        continue;
+                    }
+                    out.push_str(cell.grapheme.as_str());
+                }
             }
         }
         if r < end.0 {
@@ -309,7 +342,7 @@ mod tests {
         let screen = screen_from(2, 10, &["hello", ""]);
         let mut s = Selection::start(PaneId(0), 0, 0);
         s.extend(0, 4, Rect::new(0, 0, 2, 10));
-        assert_eq!(extract_text(&s, &screen), "hello");
+        assert_eq!(extract_text(&s, &screen, 2, 0), "hello");
     }
 
     #[test]
@@ -317,16 +350,31 @@ mod tests {
         let screen = screen_from(2, 10, &["abc", "def"]);
         let mut s = Selection::start(PaneId(0), 0, 0);
         s.extend(1, 2, Rect::new(0, 0, 2, 10));
-        let txt = extract_text(&s, &screen);
+        let txt = extract_text(&s, &screen, 2, 0);
         assert!(txt.starts_with("abc"));
         assert!(txt.contains('\n'));
         assert!(txt.ends_with("def"));
     }
 
     #[test]
+    fn extract_scrolled_back_reads_scrollback_not_grid() {
+        // 2-row pane fed 4 lines, so the top 2 (sb0/sb1) live in scrollback.
+        // Scrolled back by 2, the viewport shows sb0/sb1; a row-0 selection must
+        // copy "sb0", NOT the live grid's row 0 ("grid0").
+        let screen = screen_from(2, 10, &["sb0", "sb1", "grid0", "grid1"]);
+        assert_eq!(screen.scrollback.rows().len(), 2, "setup: 2 rows scrolled off");
+        let mut s = Selection::start(PaneId(0), 0, 0);
+        s.extend(0, 2, Rect::new(0, 0, 2, 10)); // row 0, cols 0..=2
+        // Live (scroll_offset 0): viewport row 0 is the grid's row 0 → "gri".
+        assert_eq!(extract_text(&s, &screen, 2, 0), "gri");
+        // Scrolled back 2: viewport row 0 is scrollback's "sb0" (the bug).
+        assert_eq!(extract_text(&s, &screen, 2, 2), "sb0");
+    }
+
+    #[test]
     fn word_at_returns_word_range() {
         let screen = screen_from(1, 20, &["hello world.foo"]);
-        let s = word_at(PaneId(0), &screen, 0, 2).expect("on 'hello'");
+        let s = word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 2).expect("on 'hello'");
         assert_eq!(s.anchor, (0, 0));
         assert_eq!(s.head, (0, 4));
     }
@@ -334,20 +382,20 @@ mod tests {
     #[test]
     fn word_at_on_whitespace_returns_none() {
         let screen = screen_from(1, 10, &["foo  bar"]);
-        assert!(word_at(PaneId(0), &screen, 0, 3).is_none());
+        assert!(word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 3).is_none());
     }
 
     #[test]
     fn word_at_on_punctuation_returns_none() {
         let screen = screen_from(1, 10, &["foo,bar"]);
-        assert!(word_at(PaneId(0), &screen, 0, 3).is_none());
+        assert!(word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 3).is_none());
     }
 
     #[test]
     fn word_at_includes_underscore_and_dash() {
         // '=' breaks the word; underscore + dash do not.
         let screen = screen_from(1, 20, &["foo_bar-baz=junk"]);
-        let s = word_at(PaneId(0), &screen, 0, 2).expect("on 'foo_bar-baz'");
+        let s = word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 2).expect("on 'foo_bar-baz'");
         assert_eq!(s.anchor, (0, 0));
         assert_eq!(s.head, (0, 10));
     }
@@ -355,7 +403,7 @@ mod tests {
     #[test]
     fn word_at_clamps_at_row_edge() {
         let screen = screen_from(1, 5, &["hello"]);
-        let s = word_at(PaneId(0), &screen, 0, 4).expect("on last 'o'");
+        let s = word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 4).expect("on last 'o'");
         assert_eq!(s.anchor, (0, 0));
         assert_eq!(s.head, (0, 4));
     }
@@ -363,7 +411,7 @@ mod tests {
     #[test]
     fn line_at_trims_trailing_blanks() {
         let screen = screen_from(1, 20, &["hello"]);
-        let s = line_at(PaneId(0), &screen, 0).expect("non-blank row");
+        let s = line_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0).expect("non-blank row");
         assert_eq!(s.anchor, (0, 0));
         assert_eq!(s.head, (0, 4));
     }
@@ -371,7 +419,25 @@ mod tests {
     #[test]
     fn line_at_on_blank_row_returns_none() {
         let screen = screen_from(2, 10, &["hello", ""]);
-        assert!(line_at(PaneId(0), &screen, 1).is_none());
+        assert!(line_at(PaneId(0), &screen, screen.active.num_rows(), 0, 1).is_none());
+    }
+
+    #[test]
+    fn word_and_line_at_scrolled_read_scrollback_not_grid() {
+        // 2-row pane, 4 lines fed → top two ("sb0one"/"sb1") in scrollback.
+        // Scrolled back 2, viewport row 0 is "sb0one": double/triple-click there
+        // must select from scrollback, not the live grid's "grid0" underneath.
+        let screen = screen_from(2, 10, &["sb0one", "sb1", "grid0", "grid1"]);
+        assert_eq!(screen.scrollback.rows().len(), 2, "setup: 2 rows scrolled off");
+
+        // Live (offset 0): viewport row 0 = grid's "grid0".
+        let w = word_at(PaneId(0), &screen, 2, 0, 0, 1).expect("word on grid0");
+        assert_eq!((w.anchor, w.head), ((0, 0), (0, 4)));
+        // Scrolled back 2: viewport row 0 = scrollback's "sb0one".
+        let w = word_at(PaneId(0), &screen, 2, 2, 0, 1).expect("word on sb0one");
+        assert_eq!((w.anchor, w.head), ((0, 0), (0, 5)));
+        let l = line_at(PaneId(0), &screen, 2, 2, 0).expect("line on sb0one");
+        assert_eq!((l.anchor, l.head), ((0, 0), (0, 5)));
     }
 
     // ── screen_text tests ────────────────────────────────────────────────────

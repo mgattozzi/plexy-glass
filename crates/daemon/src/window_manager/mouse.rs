@@ -630,19 +630,31 @@ impl WindowManager {
             return Ok(());
         }
 
-        // Multi-click classification: double = Word, triple = Line.
+        // Multi-click classification: double = Word, triple = Line. Word/line
+        // boundaries are read through the pane's scroll position so a click made
+        // while scrolled back targets the scrollback, not the live grid.
         let count = self.classify_click_count(pane_id, &event);
-        let new_sel = if count >= 3 {
-            self.active_window()
-                .pane(pane_id)
-                .and_then(|p| p.with_screen(|s| plexy_glass_mux::line_at(pane_id, s, local_row)))
-        } else if count == 2 {
-            self.active_window().pane(pane_id).and_then(|p| {
-                p.with_screen(|s| plexy_glass_mux::word_at(pane_id, s, local_row, local_col))
-            })
-        } else {
-            None
-        };
+        let new_sel = self.active_window().pane(pane_id).and_then(|p| {
+            let off = p.scroll_offset();
+            if count >= 3 {
+                p.with_screen(|s| {
+                    plexy_glass_mux::line_at(pane_id, s, s.active.num_rows(), off, local_row)
+                })
+            } else if count == 2 {
+                p.with_screen(|s| {
+                    plexy_glass_mux::word_at(
+                        pane_id,
+                        s,
+                        s.active.num_rows(),
+                        off,
+                        local_row,
+                        local_col,
+                    )
+                })
+            } else {
+                None
+            }
+        });
         self.selection = new_sel.or_else(|| Some(Selection::start(pane_id, local_row, local_col)));
         Ok(())
     }
@@ -669,7 +681,12 @@ impl WindowManager {
             return Ok(());
         }
         if let Some(pane) = self.active_window().pane(sel.source_pane) {
-            let text = pane.with_screen(|s| extract_text(&sel, s));
+            // Map the viewport-relative selection through the pane's current
+            // scroll position so a selection made while scrolled back copies the
+            // highlighted scrollback, not the live grid underneath it.
+            let scroll_offset = pane.scroll_offset();
+            let text =
+                pane.with_screen(|s| extract_text(&sel, s, s.active.num_rows(), scroll_offset));
             if !text.is_empty() {
                 tokio::spawn(async move {
                     let _ = crate::osc_actions::write_clipboard(text.as_bytes()).await;
