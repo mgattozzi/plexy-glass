@@ -567,13 +567,16 @@ hints {
 
 **Action model:** type a label to select a span.
 
-- **Lowercase label**: copies the span to the clipboard *and* the paste
-  buffer (the same path as a copy-mode yank, so `prefix ]` pastes it). For a
-  `file:line:col` target the `:line:col` suffix is kept so editors can jump
-  to the exact location.
-- **Uppercase label (Shift held on the final key)**: opens the span via the
-  OS opener (`xdg-open` / `open`). For a `file:line:col` target the
-  `:line:col` suffix is stripped so the opener receives a plain file path.
+- **Lowercase label**: copies the span to the clipboard and the paste buffer
+  (the same path as a copy-mode yank, so `prefix ]` pastes it). For a
+  `file:line:col` target the `:line:col` suffix is *kept* so editors can jump
+  to the exact location. An OSC 8 hyperlink to a local file (a `file://` URL,
+  as Claude Code / `eza` and friends emit) is copied as its filesystem path,
+  not the URL, and percent escapes like `%20` are decoded. Real `http(s)` URLs
+  copy verbatim.
+- **Uppercase label (Shift held on the final key)**: opens the span via the OS
+  opener (`xdg-open` / `open`). For a `file:line:col` target the `:line:col`
+  suffix is *stripped* so the opener receives a plain file path.
 
 The overlay dims the pane content and draws the labels in `label-bg` /
 `label-fg`. As you type, the matching label prefix is highlighted in

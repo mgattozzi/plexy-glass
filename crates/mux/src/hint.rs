@@ -57,6 +57,15 @@ impl HintTarget {
         }
         self.text.clone()
     }
+
+    /// Text placed on the clipboard / paste buffer for a Copy action. A
+    /// `file://` URL (an OSC 8 hyperlink to a local file, as Claude Code,
+    /// `eza`, and friends emit) is decoded to its filesystem path: the user
+    /// wants the path, not the URL. Everything else copies verbatim (a real URL
+    /// stays a URL; a `Path` keeps its `:line:col` suffix).
+    pub fn copy_text(&self) -> String {
+        file_url_to_path(&self.text).unwrap_or_else(|| self.text.clone())
+    }
 }
 
 static LINE_COL_RE: LazyLock<Regex> =
@@ -160,6 +169,47 @@ fn scan_row(screen: &Screen, row: u16, out: &mut Vec<HintTarget>) {
             text: s.text,
             kind: s.kind,
         });
+    }
+}
+
+/// Decode a `file://` URL to a local filesystem path, or `None` if `s` isn't a
+/// `file://` URL. Drops the optional authority (`file:///p` → empty host,
+/// `file://localhost/p` → `localhost`) and percent-decodes the path so `%20`
+/// becomes a space. Anything that isn't `file://…/…` returns `None`.
+fn file_url_to_path(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("file://")?;
+    // The path is everything from the first '/' (after the optional authority).
+    let slash = rest.find('/')?;
+    Some(percent_decode(&rest[slash..]))
+}
+
+/// Minimal RFC 3986 percent-decoding (`%XX` → byte); invalid escapes pass
+/// through unchanged. Avoids pulling in a URL crate for a few lines.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+        {
+            out.push((h << 4) | l);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -344,7 +394,7 @@ pub fn handle_hint(event: &KeyEvent, state: &mut HintState) -> HintOutcome {
         let text = if open {
             target.open_text()
         } else {
-            target.text.clone()
+            target.copy_text()
         };
         let action = if open { HintAction::Open } else { HintAction::Copy };
         return HintOutcome::Pick(HintPick { text, action });
@@ -486,6 +536,44 @@ mod tests {
         // single target → label "a"
         let out = handle_hint(&press('a'), &mut st);
         assert_eq!(out, HintOutcome::Pick(HintPick { text: "hello".into(), action: HintAction::Copy }));
+    }
+
+    #[test]
+    fn copy_decodes_file_url_to_path() {
+        // An OSC 8 hyperlink to a local file copies as the path, not the URL.
+        let mut st = HintState::new(vec![t("file:///Users/me/foo.rs", HintKind::Hyperlink)], "asdf");
+        let out = handle_hint(&press('a'), &mut st);
+        assert_eq!(
+            out,
+            HintOutcome::Pick(HintPick { text: "/Users/me/foo.rs".into(), action: HintAction::Copy })
+        );
+    }
+
+    #[test]
+    fn copy_file_url_decodes_percent_and_host() {
+        // file://host/path with a percent-encoded space → decoded absolute path.
+        let mut st =
+            HintState::new(vec![t("file://localhost/Users/me/My%20File.rs", HintKind::Hyperlink)], "asdf");
+        let out = handle_hint(&press('a'), &mut st);
+        assert_eq!(
+            out,
+            HintOutcome::Pick(HintPick { text: "/Users/me/My File.rs".into(), action: HintAction::Copy })
+        );
+    }
+
+    #[test]
+    fn copy_leaves_http_url_and_path_untouched() {
+        // A real URL stays a URL; a plain path keeps its :line:col suffix.
+        let mut url = HintState::new(vec![t("https://docs.rs/x", HintKind::Url)], "asdf");
+        assert_eq!(
+            handle_hint(&press('a'), &mut url),
+            HintOutcome::Pick(HintPick { text: "https://docs.rs/x".into(), action: HintAction::Copy })
+        );
+        let mut path = HintState::new(vec![t("src/main.rs:42:7", HintKind::Path)], "asdf");
+        assert_eq!(
+            handle_hint(&press('a'), &mut path),
+            HintOutcome::Pick(HintPick { text: "src/main.rs:42:7".into(), action: HintAction::Copy })
+        );
     }
 
     #[test]
