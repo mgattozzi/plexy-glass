@@ -606,11 +606,13 @@ impl WindowManager {
         }
 
         // OSC 8 hyperlink under the cell? Open in the OS browser; suppress
-        // selection start.
+        // selection start. Read through the pane's scroll position so a click
+        // made while scrolled back opens the link shown, not the live grid's.
         let url = self.active_window().pane(pane_id).and_then(|p| {
+            let off = p.scroll_offset();
             p.with_screen(|s| {
-                s.active
-                    .get_cell(local_row, local_col)
+                plexy_glass_mux::viewport_content_row(s, s.active.num_rows(), off, local_row)
+                    .and_then(|row| row.cells.get(local_col as usize))
                     .and_then(|cell| cell.hyperlink_id)
                     .and_then(|id| s.hyperlinks.get(id).map(str::to_owned))
             })

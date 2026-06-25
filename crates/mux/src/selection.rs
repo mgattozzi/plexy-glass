@@ -103,7 +103,7 @@ pub(crate) fn is_word_char(g: &str) -> bool {
 /// place content. `None` when `vrow` is past the visible content. Every mouse
 /// selection helper reads through this so a click made while scrolled back
 /// targets the scrollback, not the live grid underneath it.
-pub(crate) fn viewport_content_row(
+pub fn viewport_content_row(
     screen: &plexy_glass_emulator::Screen,
     pane_rows: u16,
     scroll_offset: u32,
