@@ -445,9 +445,14 @@ pub enum PersistError {
     Schema(u32),
 }
 
-/// Return the per-session directory. Honors `XDG_STATE_HOME`, falls back to
+/// Return the per-session directory. An explicit `PLEXY_GLASS_DIR` instance
+/// root wins (so a test daemon's saved sessions stay separate from the daily
+/// driver's); otherwise honors `XDG_STATE_HOME`, falling back to
 /// `$HOME/.local/state/plexy-glass/sessions`.
 pub fn sessions_dir() -> PathBuf {
+    if let Some(root) = std::env::var_os("PLEXY_GLASS_DIR") {
+        return PathBuf::from(root).join("sessions");
+    }
     if let Some(xdg) = std::env::var_os("XDG_STATE_HOME") {
         return PathBuf::from(xdg).join("plexy-glass").join("sessions");
     }

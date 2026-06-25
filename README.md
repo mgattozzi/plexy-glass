@@ -119,6 +119,28 @@ Other subcommands:
 (`plexy-glass daemon` exists but auto-spawn runs it for you internally, so
 the only time you'd type it is with `--foreground` for development.)
 
+### Running a second, isolated instance
+
+By default every invocation by the same user shares one daemon (one socket,
+one set of saved sessions). To run a fully separate instance (say, to test a
+build without touching your daily-driver daemon), set `PLEXY_GLASS_DIR` to a
+directory of your choice:
+
+```sh
+PLEXY_GLASS_DIR=~/.plexy-test plexy-glass        # spawns/attaches an isolated daemon
+PLEXY_GLASS_DIR=~/.plexy-test plexy-glass list   # lists only that instance's sessions
+PLEXY_GLASS_DIR=~/.plexy-test plexy-glass kill   # stops only that instance's daemon
+```
+
+When set, the daemon roots its runtime files (`run/`), saved sessions
+(`sessions/`), and logs (`logs/`) under that directory, so the two instances
+never collide. We deliberately do **not** override the config location, so
+both instances read the same `config.kdl`. Because the variable is inherited
+by the auto-spawned daemon, every subcommand run with it set targets the same
+isolated instance. Note that `plexy-glass kill --all` is still a UID-wide
+sweep across *all* instances, so use the scoped `kill` above to leave your
+daily driver alone.
+
 ### Scripting
 
 The `cmd`, `send`, `capture`, and `run` verbs let you drive a running session
