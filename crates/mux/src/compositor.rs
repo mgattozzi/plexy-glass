@@ -841,9 +841,12 @@ pub fn compose(
     }
 
     // Interactive overlay (rename prompt / help), painted last so it sits
-    // on top of panes, borders, and the cursor logic above.
+    // on top of panes, borders, and the cursor logic above. The active pane's
+    // rect lets pane-scoped overlays (hint mode) paint at the focused pane's
+    // origin; full-screen modal overlays ignore it.
     if let Some(ov) = overlay {
-        paint_overlay(&mut screen, ov, pane_row_offset, pane_area_rows, host_cols);
+        let active_rect = panes.iter().find(|v| v.is_active).map(|v| v.rect);
+        paint_overlay(&mut screen, ov, pane_row_offset, pane_area_rows, host_cols, active_rect);
     }
 
     screen
@@ -959,6 +962,7 @@ fn paint_overlay(
     pane_row_offset: u16,
     pane_area_rows: u16,
     cols: u16,
+    active_rect: Option<Rect>,
 ) {
     match overlay {
         OverlayView::RenamePrompt { label, buf } => {
@@ -1003,7 +1007,11 @@ fn paint_overlay(
             screen.cursor_visible = false;
         }
         OverlayView::Hint { state, colors } => {
-            paint_hint(screen, state, *colors, pane_row_offset, pane_area_rows, cols);
+            // Hint mode is pane-scoped: dim and label the FOCUSED pane only, at
+            // its rect origin. Fall back to the full pane band if (impossibly)
+            // there's no active pane.
+            let rect = active_rect.unwrap_or_else(|| Rect::new(0, 0, pane_area_rows, cols));
+            paint_hint(screen, state, *colors, pane_row_offset, rect, cols);
             screen.cursor_visible = false;
         }
         OverlayView::Command { buf } => {
@@ -1298,34 +1306,45 @@ fn paint_hint(
     state: &crate::hint::HintState,
     colors: HintColors,
     pane_row_offset: u16,
-    pane_area_rows: u16,
-    cols: u16,
+    rect: Rect,
+    host_cols: u16,
 ) {
-    for r in 0..pane_area_rows {
-        for c in 0..cols {
-            if let Some(cell) = screen.cell_mut(pane_row_offset + r, c) {
+    // Hint targets are scanned in the focused pane's LOCAL grid coords (row 0 /
+    // col 0 = the pane's top-left), so every paint gets translated by the pane's
+    // rect origin. Without that the labels land at the screen origin, i.e. in
+    // whatever pane sits at column 0. Both the dim wash and the labels stay
+    // inside the focused pane's rect.
+    for r in 0..rect.rows {
+        for c in 0..rect.cols {
+            let col = rect.col + c;
+            if col >= host_cols {
+                break;
+            }
+            if let Some(cell) = screen.cell_mut(pane_row_offset + rect.row + r, col) {
                 cell.attrs |= Attrs::DIM;
             }
         }
     }
+    let clip = (rect.col + rect.cols).min(host_cols);
     let typed_len = state.typed.len();
     for (label, target) in state.visible() {
         let (trow, tcol) = target.start;
-        if trow >= pane_area_rows {
+        if trow >= rect.rows || tcol >= rect.cols {
             continue;
         }
-        let r = pane_row_offset + trow;
+        let r = pane_row_offset + rect.row + trow;
+        let base_col = rect.col + tcol;
         let pre = &label[..typed_len.min(label.len())];
         let suf = &label[typed_len.min(label.len())..];
         let after = put_colored(
             screen,
             r,
-            tcol,
+            base_col,
             pre,
             colors.match_fg,
             plexy_glass_emulator::Color::Default,
             Attrs::DIM,
-            cols,
+            clip,
         );
         put_colored(
             screen,
@@ -1335,7 +1354,7 @@ fn paint_hint(
             colors.label_fg,
             colors.label_bg,
             Attrs::BOLD,
-            cols,
+            clip,
         );
     }
 }
@@ -2061,6 +2080,64 @@ mod tests {
         assert_eq!(vs.cell(0, 4).unwrap().grapheme.as_str(), "R");
         // Border column.
         assert_eq!(vs.cell(0, 3).unwrap().grapheme.as_str(), "│");
+    }
+
+    #[test]
+    fn hint_labels_paint_in_the_focused_pane_not_at_screen_origin() {
+        use crate::hint::{HintKind, HintState, HintTarget};
+        // Two side-by-side 4x3 panes; the RIGHT one (rect.col = 4) is focused.
+        let mut left = Emulator::new(4, 3);
+        let mut right = Emulator::new(4, 3);
+        pane(&mut left, b"L ");
+        pane(&mut right, b"R ");
+        let lv = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 4, 3),
+            screen: left.screen(),
+            is_active: false,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: None,
+            title: None,
+            marked: false,
+            drag_role: PaneDragRole::None,
+        };
+        let rv = PaneView {
+            id: PaneId(1),
+            rect: Rect::new(0, 4, 4, 3),
+            screen: right.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: None,
+            title: None,
+            marked: false,
+            drag_role: PaneDragRole::None,
+        };
+        // One hint target at the focused pane's LOCAL (0,0). It must paint at the
+        // focused pane's screen origin (row 0, col 4), not the screen's (0,0),
+        // which is the unfocused left pane.
+        let target =
+            HintTarget { start: (0, 0), text: "https://x".into(), kind: HintKind::Url };
+        let state = HintState::new(vec![target], "asdf");
+        let first = state.visible().next().unwrap().0.chars().next().unwrap().to_string();
+        let colors = HintColors {
+            label_fg: plexy_glass_emulator::Color::Default,
+            label_bg: plexy_glass_emulator::Color::Default,
+            match_fg: plexy_glass_emulator::Color::Default,
+        };
+        let ov = OverlayView::Hint { state: &state, colors };
+        let vs = compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        assert_eq!(
+            vs.cell(0, 4).unwrap().grapheme.as_str(),
+            first,
+            "hint label belongs at the focused pane's origin (col 4)"
+        );
+        assert_ne!(
+            vs.cell(0, 0).unwrap().grapheme.as_str(),
+            first,
+            "hint label must NOT paint in the unfocused left pane (col 0)"
+        );
     }
 
     #[test]
