@@ -154,7 +154,7 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
     }
 
     let (config, cfg_err) = plexy_glass_config::load_or_default();
-    if let Some(e) = cfg_err {
+    if let Some(e) = &cfg_err {
         tracing::warn!(error = %e, "config load error; using built-in default");
     }
     let config = std::sync::Arc::new(config);
@@ -162,6 +162,9 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
     let listener = listener::Listener::bind(paths)?;
     let daemon_pid = std::process::id();
     let registry = std::sync::Arc::new(SessionRegistry::new());
+    // Surface a boot config error on the next attach (it would otherwise only
+    // reach the log). Cleared by the first clean reload.
+    registry.set_config_error(cfg_err.as_ref().map(|e| e.to_string()));
 
     // Build config-declared default sessions eagerly (Feature B). A failure to
     // build one is logged and skipped, so it never blocks the accept loop. The

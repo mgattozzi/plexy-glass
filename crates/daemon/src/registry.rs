@@ -32,6 +32,11 @@ pub struct SessionRegistry {
     /// Independent of `inner` and never locked while `inner` is held (the
     /// delegates touch only this lock).
     paste_buffers: Mutex<PasteBufferStore>,
+    /// Set when the config failed to load (boot or reload) and the daemon is
+    /// running on built-in defaults. Surfaced on the next attach so the failure
+    /// isn't invisible; cleared by a clean reload. A plain sync mutex, since
+    /// accesses are brief and await-free.
+    config_error: std::sync::Mutex<Option<String>>,
 }
 
 impl SessionRegistry {
@@ -39,7 +44,22 @@ impl SessionRegistry {
         Self {
             inner: Mutex::new(HashMap::new()),
             paste_buffers: Mutex::new(PasteBufferStore::new(PASTE_BUFFER_CAP)),
+            config_error: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Record (or clear) the config-load error state. Best-effort on a poisoned
+    /// lock, a missed warning is better than a panic on the attach path.
+    pub fn set_config_error(&self, err: Option<String>) {
+        if let Ok(mut slot) = self.config_error.lock() {
+            *slot = err;
+        }
+    }
+
+    /// Whether the running config is the fallback default because a load failed
+    /// (boot or last reload). Drives the attach-time "config error" notice.
+    pub fn has_config_error(&self) -> bool {
+        self.config_error.lock().map(|s| s.is_some()).unwrap_or(false)
     }
 
     /// Push a new newest paste buffer (copy-mode yank).
@@ -383,6 +403,9 @@ impl SessionRegistry {
         // 24×80 default as boot (resized on the first attach).
         let reload_size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
         self.build_declared(&new_config, reload_size).await;
+        // A clean reload clears the error state; a failing one refreshes it (the
+        // daemon is still on defaults). Keeps the attach notice honest.
+        self.set_config_error(err.as_ref().map(|e| e.to_string()));
         match err {
             None => Ok(()),
             Some(e) => Err(DaemonError::from(e)),
@@ -435,6 +458,16 @@ mod tests {
         assert_eq!(s.name(), "main");
         let got = r.get("main").await.unwrap();
         assert_eq!(got.name(), "main");
+    }
+
+    #[test]
+    fn config_error_flag_set_and_cleared() {
+        let r = SessionRegistry::new();
+        assert!(!r.has_config_error(), "fresh registry has no config error");
+        r.set_config_error(Some("line 7:3: boom".into()));
+        assert!(r.has_config_error());
+        r.set_config_error(None);
+        assert!(!r.has_config_error(), "a clean reload clears it");
     }
 
     #[tokio::test]

@@ -331,22 +331,36 @@ where
         let _ = renderer.run(frame_rx, switch_rx, writer).await;
     });
 
-    // First-attach onboarding hint (once per state dir): the keystone day-1 cue
-    // orienting a brand-new user to the prefix, help, and detach. Gated by a
-    // marker file so returning users never see it.
-    if crate::persist::take_first_run() {
+    // Input loop. Scope key decode to the client's negotiated outer-terminal
+    // protocol (older/unknown peers downgraded to Legacy upstream).
+    let mut router = InputRouter::with_protocol(decode_protocol(client_kbd));
+    let (km, keymap_skips) = plexy_glass_keys::build_keymap_with_skips(&config.keymap);
+    let mut keymap = km;
+
+    // Attach-time notice, most urgent first: a broken config (running defaults)
+    // beats the first-attach onboarding hint, which beats a dropped-binding
+    // warning. Each makes an otherwise-silent condition visible.
+    if registry.has_config_error() {
+        session
+            .set_status_error(
+                "config error — running defaults; run plexy-glass reload for details".into(),
+            )
+            .await;
+    } else if crate::persist::take_first_run() {
         let prefix = &config.keymap.prefix;
         session
             .set_status_info(format!(
                 "Prefix is {prefix} · {prefix} ? for help · {prefix} d to detach"
             ))
             .await;
+    } else if !keymap_skips.is_empty() {
+        session
+            .set_status_warn(format!(
+                "{} keymap binding(s) skipped — see plexy-glass reload",
+                keymap_skips.len()
+            ))
+            .await;
     }
-
-    // Input loop. Scope key decode to the client's negotiated outer-terminal
-    // protocol (older/unknown peers downgraded to Legacy upstream).
-    let mut router = InputRouter::with_protocol(decode_protocol(client_kbd));
-    let mut keymap = plexy_glass_keys::build_keymap(&config.keymap);
 
     // Esc-disambiguation window: a lone `\x1b` (or a partial CSI) parks in the
     // input parsers awaiting more bytes. If nothing more arrives within this
@@ -1428,20 +1442,27 @@ async fn run_connection_verb(
     match verb {
         ConnVerb::Detach => return true,
         ConnVerb::Reload => {
-            match ctx.registry.reload_config().await {
-                Ok(()) => ctx.session.set_status_ok("config reloaded".into()).await,
-                Err(e) => {
-                    ctx.session
-                        .set_status_error(format!("reload failed: {e}"))
-                        .await
-                }
-            }
+            let result = ctx.registry.reload_config().await;
             // Even on error the registry applied the built-in defaults
             // everywhere, so the keymap rebuild must still happen. Rebuilding
             // this Connection's keymap from the new config means the user who
-            // fired the reload sees binding changes immediately.
+            // fired the reload sees binding changes immediately, and lets us
+            // report any bindings the new config dropped.
             let new_cfg = ctx.session.config_snapshot();
-            *keymap = plexy_glass_keys::build_keymap(&new_cfg.keymap);
+            let (km, skips) = plexy_glass_keys::build_keymap_with_skips(&new_cfg.keymap);
+            *keymap = km;
+            match result {
+                Err(e) => ctx.session.set_status_error(format!("reload failed: {e}")).await,
+                Ok(()) if !skips.is_empty() => {
+                    ctx.session
+                        .set_status_warn(format!(
+                            "config reloaded · {} binding(s) skipped",
+                            skips.len()
+                        ))
+                        .await
+                }
+                Ok(()) => ctx.session.set_status_ok("config reloaded".into()).await,
+            }
             ctx.session.notify.notify_one();
         }
         ConnVerb::Switch(name) => {

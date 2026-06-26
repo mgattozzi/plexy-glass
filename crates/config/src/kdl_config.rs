@@ -13,7 +13,7 @@ use std::time::Duration;
 /// Parse a KDL v2 document into a `Config`. Syntax errors and decode errors both
 /// surface as `ConfigError::Kdl` with a message; this never panics.
 pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
-    let doc = KdlDocument::parse(src).map_err(|e| ConfigError::Kdl(e.to_string()))?;
+    let doc = KdlDocument::parse(src).map_err(|e| ConfigError::Kdl(format_kdl_error(src, &e)))?;
     // Start from the built-in default and treat the document as overrides: a
     // section the user omits keeps its default (so a config with only a
     // `session` still gets the default palette, status bar, and keymap, not
@@ -98,6 +98,30 @@ fn decode_err(src: &str, node: &KdlNode, msg: &str) -> ConfigError {
 }
 
 /// `KdlNode::span()` gives a byte offset; turn it into 1-based line/column.
+/// Turn a `kdl` parse failure into a human message with `line:col` locations,
+/// instead of the bare contentless `"Failed to parse KDL document"`. Walks the
+/// (otherwise-discarded) per-diagnostic spans/messages/help. When there are no
+/// diagnostics, appends the single most common v2 slip as a hint.
+fn format_kdl_error(src: &str, err: &kdl::KdlError) -> String {
+    const V2_HINT: &str = "KDL v2: booleans are #true/#false; strings must be quoted";
+    if err.diagnostics.is_empty() {
+        return format!("could not parse config.kdl ({V2_HINT})");
+    }
+    let parts: Vec<String> = err
+        .diagnostics
+        .iter()
+        .map(|d| {
+            let (line, col) = offset_to_line_col(src, d.span.offset());
+            let msg = d.message.as_deref().unwrap_or("parse error");
+            match &d.help {
+                Some(help) => format!("line {line}:{col}: {msg} (help: {help})"),
+                None => format!("line {line}:{col}: {msg}"),
+            }
+        })
+        .collect();
+    parts.join("; ")
+}
+
 fn offset_to_line_col(src: &str, offset: usize) -> (usize, usize) {
     let mut line = 1;
     let mut col = 1;
@@ -1972,5 +1996,25 @@ hints {
     fn rejects_shift_and_unknown_mouse_node() {
         assert!(parse_config("mouse {\n  drag-modifier \"shift\"\n}\n").is_err());
         assert!(parse_config("mouse {\n  bogus \"x\"\n}\n").is_err());
+    }
+
+    #[test]
+    fn kdl_syntax_error_reports_a_location_or_hint() {
+        // A bare v1 boolean (`#true` is required in v2) must produce something
+        // actionable, not the old contentless "Failed to parse KDL document".
+        let ConfigError::Kdl(msg) = parse_config("blocks {\n  enabled true\n}\n").unwrap_err()
+        else {
+            panic!("expected a Kdl error");
+        };
+        assert!(
+            msg.contains("line ") || msg.contains("#true"),
+            "expected a line:col location or the #true/#false hint; got: {msg:?}"
+        );
+        // And an outright malformed brace points at where it broke.
+        let ConfigError::Kdl(msg) = parse_config("palette {\n  accent \"#fff\"\n").unwrap_err()
+        else {
+            panic!("expected a Kdl error");
+        };
+        assert!(msg.contains("line "), "expected a line:col location; got: {msg:?}");
     }
 }

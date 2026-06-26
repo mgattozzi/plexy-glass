@@ -1053,6 +1053,11 @@ impl Session {
         self.set_status_message(text, Severity::Error).await;
     }
 
+    /// Non-fatal caveat (`⚠`, yellow). Convenience over [`Self::set_status_message`].
+    pub async fn set_status_warn(self: &Arc<Self>, text: String) {
+        self.set_status_message(text, Severity::Warn).await;
+    }
+
     /// Schedule a single wake `STATUS_TTL` from now so an expired status-line
     /// message is repainted away even if nothing else changes. Any prior
     /// pending wake is aborted first (mirroring `status_tick_handle`), so rapid

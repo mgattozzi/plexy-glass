@@ -32,14 +32,20 @@ The file is KDL **v2**. The practical differences from v1 that bite people:
 
 - **Missing file**: the daemon silently uses the built-in defaults. Not an
   error.
-- **Error at daemon start**: the daemon logs a warning and runs on the
-  built-in defaults. The error message varies by kind:
+- **Error at daemon start**: the daemon logs a warning, runs on the built-in
+  defaults, and **the next client to attach sees** `config error — running
+  defaults; run plexy-glass reload for details` on the status line (cleared by
+  the first clean reload). The error message varies by kind:
   - *Decode error* (unknown node, wrong type, duplicate section): names the
     problem with line/column, e.g. `unknown node "foo" (at line 12:1)`.
-  - *KDL syntax error* (e.g. bare `true` instead of `#true`): produces only
-    the generic `Failed to parse KDL document`, with no location and no
-    description, so if your config stops applying after an edit and the
-    message names nothing, suspect a v2 syntax slip.
+  - *KDL syntax error* (e.g. bare `true` instead of `#true`): now reports the
+    `line:col` and the parser's message/help (e.g. `line 7:13: …`); when the
+    parser gives no location, it appends the hint
+    `KDL v2: booleans are #true/#false; strings must be quoted`.
+- **Skipped keymap bindings**: a binding whose chord or verb won't parse is
+  dropped (the rest still apply), and the attaching/reloading client sees
+  `N keymap binding(s) skipped` so a dead key reads as a config mistake, not a
+  bug. Details (which bindings) are in the log.
 - **Reload**: three triggers, all equivalent on the daemon side:
   - `Ctrl+a R` (the default `reload_config` binding),
   - `:reload` in the command prompt,

@@ -38,17 +38,34 @@ fn resolve_prefix(s: &str) -> ChordSpec {
 }
 
 pub fn build_keymap(cfg: &KeymapConfig) -> Keymap {
+    build_keymap_with_skips(cfg).0
+}
+
+/// Like [`build_keymap`], but also reports each skipped *user* binding.
+///
+/// A skipped binding (unparseable chord or unknown verb) gets a one-line
+/// description, and the daemon surfaces "N keymap binding(s) skipped" on
+/// attach/reload so a dead key reads as a config mistake, not a bug. Built-in
+/// defaults are never reported (they are always valid, and if one ever weren't,
+/// it isn't the user's to fix).
+pub fn build_keymap_with_skips(cfg: &KeymapConfig) -> (Keymap, Vec<String>) {
     // Resolve prefix; see `resolve_prefix` for the fallback policy.
     let prefix = resolve_prefix(&cfg.prefix);
     let mut km = Keymap::new();
+    let mut skipped = Vec::new();
     if cfg.inherit_defaults {
-        apply(&mut km, &built_in_keymap().bindings, prefix);
+        apply(&mut km, &built_in_keymap().bindings, prefix, &mut Vec::new());
     }
-    apply(&mut km, &cfg.bindings, prefix);
-    km
+    apply(&mut km, &cfg.bindings, prefix, &mut skipped);
+    (km, skipped)
 }
 
-fn apply(km: &mut Keymap, bindings: &[plexy_glass_config::KeymapBinding], prefix: ChordSpec) {
+fn apply(
+    km: &mut Keymap,
+    bindings: &[plexy_glass_config::KeymapBinding],
+    prefix: ChordSpec,
+    skipped: &mut Vec<String>,
+) {
     for (i, b) in bindings.iter().enumerate() {
         match (parse_chord_seq_with_prefix(&b.keys, prefix), parse_command(&b.command)) {
             (Ok(chords), Ok(command)) => {
@@ -61,6 +78,7 @@ fn apply(km: &mut Keymap, bindings: &[plexy_glass_config::KeymapBinding], prefix
                     error = %e,
                     "skipping invalid keymap binding (keys)"
                 );
+                skipped.push(format!("\"{}\": {e}", b.keys));
             }
             (_, Err(e)) => {
                 tracing::warn!(
@@ -69,6 +87,7 @@ fn apply(km: &mut Keymap, bindings: &[plexy_glass_config::KeymapBinding], prefix
                     error = %e,
                     "skipping invalid keymap binding (command)"
                 );
+                skipped.push(format!("\"{}\": {e}", b.command));
             }
         }
     }
@@ -135,6 +154,21 @@ mod tests {
         km.consume(KeyEvent::new(Key::Char('a'), Modifiers::CTRL), vec![0x01]);
         let action = km.consume(KeyEvent::new(Key::Char('x'), Modifiers::empty()), b"x".to_vec());
         assert!(matches!(action, KeymapAction::Cancel), "got {action:?}");
+    }
+
+    #[test]
+    fn with_skips_reports_only_invalid_user_bindings() {
+        let cfg = KeymapConfig {
+            prefix: "Ctrl+a".into(),
+            inherit_defaults: true, // defaults must NOT count toward skips
+            bindings: vec![
+                KeymapBinding { keys: "Ctrl+a c".into(), command: "new_window".into() }, // valid
+                KeymapBinding { keys: "Ctrl+a x".into(), command: "frobnicate".into() }, // bad verb
+                KeymapBinding { keys: "@@@nope".into(), command: "detach".into() },       // bad chord
+            ],
+        };
+        let (_km, skips) = build_keymap_with_skips(&cfg);
+        assert_eq!(skips.len(), 2, "exactly the two invalid user bindings; got {skips:?}");
     }
 
     #[test]
