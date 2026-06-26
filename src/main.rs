@@ -85,6 +85,15 @@ enum Subcommands {
         #[arg(required = true)]
         text: Vec<String>,
     },
+    /// Print an OSC 133 shell-integration snippet for your shell, then exit.
+    ///
+    /// Add it to your shell's rc file to light up the command-block features
+    /// (exit-status borders, prompt nav, block mode, history output search,
+    /// `run`, completion toasts), e.g. eval "$(plexy-glass shell-integration zsh)".
+    ShellIntegration {
+        /// One of: bash, zsh, fish, nu.
+        shell: String,
+    },
     /// Start the daemon (used internally by auto-spawn; `--foreground` for dev).
     Daemon(plexy_glass_daemon::DaemonArgs),
 }
@@ -191,6 +200,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Subcommands::ShellIntegration { shell } => match plexy_glass_client::shell_integration_snippet(&shell) {
+            Some(snippet) => print!("{snippet}"),
+            None => {
+                eprintln!("plexy-glass: unknown shell {shell:?} (try bash, zsh, fish, or nu)");
+                std::process::exit(1);
+            }
+        },
         Subcommands::Daemon(args) => {
             plexy_glass_daemon::run(args).await?;
         }

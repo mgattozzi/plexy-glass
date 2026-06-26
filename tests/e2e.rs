@@ -2555,6 +2555,23 @@ fn block_mode_refuses_without_blocks() {
     );
 }
 
+/// `prefix /` (history palette) with an empty corpus (no OSC 133 blocks anywhere)
+/// flashes the shell-integration hint instead of opening an empty palette that
+/// reads as "your search found nothing".
+#[test]
+fn history_empty_corpus_explains_shell_integration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    sess.send_prefix(b'/');
+    assert!(
+        sess.wait_for(b"no command blocks", Duration::from_secs(10)),
+        "expected the empty-corpus shell-integration hint. pane: {}",
+        sess.snapshot_str()
+    );
+}
+
 /// `prev-prompt` scrolls the viewport so the previous prompt is visible;
 /// `next-prompt` scrolls back toward the live content.
 ///

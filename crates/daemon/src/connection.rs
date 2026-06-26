@@ -1083,6 +1083,13 @@ async fn open_history_overlay(session: &Arc<Session>, registry: &Arc<SessionRegi
         snaps.push(s.history_snapshot().await);
     }
     let entries = build_history_entries(&snaps, &current, current_pane);
+    // Empty corpus (no command blocks anywhere) is a different state from a
+    // filter that matched nothing, so say so rather than opening a palette that
+    // reads as "your search found nothing". Mirrors hint mode's empty handling.
+    if entries.is_empty() {
+        session.set_status_info(NO_BLOCKS_MSG.into()).await;
+        return;
+    }
     {
         let mut m = session.window_manager.lock().await;
         m.open_history(entries);

@@ -4,11 +4,13 @@ pub mod error;
 pub mod kill;
 pub mod negotiate;
 pub mod pump;
+pub mod shell_integration;
 pub mod transport;
 pub mod tty;
 
 pub use error::ClientError;
 pub use kill::{KillOutcome, kill, kill_all};
+pub use shell_integration::shell_integration_snippet;
 pub use pump::{handshake_spawn, pump};
 pub use transport::{connect_only, connect_or_spawn, default_socket_path};
 pub use tty::{HostTty, current_size};

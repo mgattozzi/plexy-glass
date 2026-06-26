@@ -129,9 +129,30 @@ Other subcommands:
 | `plexy-glass send [-n NAME] [--enter] <TEXT>...` | Type text into the focused pane (popup-aware) |
 | `plexy-glass capture [-n NAME]` | Print the focused pane's visible screen text (popup-aware) |
 | `plexy-glass run [-n NAME] [--timeout SECS] <COMMAND>...` | Type a command into the focused pane, wait for OSC 133 completion, print the output, and exit with the command's exit code (requires shell integration) |
+| `plexy-glass shell-integration <bash\|zsh\|fish\|nu>` | Print an OSC 133 shell-integration snippet for your shell (see below) |
 
 (`plexy-glass daemon` exists but auto-spawn runs it for you internally, so
 the only time you'd type it is with `--foreground` for development.)
+
+### Shell integration (recommended)
+
+Several headline features light up only when your shell emits **OSC 133**
+prompt marks: exit-status pane borders, prompt navigation (`Ctrl+a <` / `>`),
+block mode, the history palette's output search, `plexy-glass run`, and
+command-completion notifications. Wiring it up is one line in your shell's rc
+file:
+
+```sh
+# bash (~/.bashrc) / zsh (~/.zshrc) / fish (~/.config/fish/config.fish)
+eval "$(plexy-glass shell-integration zsh)"
+```
+
+If you use **Ghostty, iTerm2, kitty, or VS Code**, their shell-integration
+scripts already emit OSC 133 and you don't need this. **Nushell** has it built
+in (`plexy-glass shell-integration nu` just prints the config line). Without
+shell integration plexy-glass still works fully, the block-aware features are
+simply inert. See [docs/command-blocks.md](docs/command-blocks.md) for
+details.
 
 ### Running a second, isolated instance
 

@@ -46,6 +46,11 @@ clickability).
 Blocks light up only when your shell emits OSC 133. Several popular terminal
 emulators ship shell-integration scripts that already do this.
 
+**The easy path:** `plexy-glass shell-integration <bash|zsh|fish|nu>` prints a
+ready-to-eval snippet, so add `eval "$(plexy-glass shell-integration zsh)"` (or
+the fish/bash equivalent) to your shell rc and you're done. The snippets below
+are the same thing, for reference or hand-installation.
+
 ### Ghostty / iTerm2 / kitty / VS Code
 
 If you use **bash**, **zsh**, or **fish**, the shell-integration scripts from
