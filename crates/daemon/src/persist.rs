@@ -399,7 +399,42 @@ pub(crate) fn capture_scrollback(
     let seq = || screen.scrollback.rows().iter().chain(main_grid.rows.iter());
     let total = screen.scrollback.len() + main_grid.rows.len();
     let blank_tail = seq().rev().take_while(|r| is_blank(r)).count();
-    let meaningful = total - blank_tail;
+    let mut meaningful = total - blank_tail;
+    // Don't persist trailing **un-executed** prompts. A freshly-spawned shell
+    // recreates its prompt on restore, so a captured live prompt becomes dead
+    // scrollback, and re-capturing it every restart accumulates phantom
+    // "empty prompt" blocks that block mode then navigates to. Walk back over
+    // trailing empty-prompt blocks and drop them: a block `[p, cut)` opened by a
+    // `PROMPT_START` at `p` is empty when no command output started in it
+    // (`OUTPUT_START` absent) and it didn't complete (`BLOCK_END` strictly after
+    // `p`). A `BLOCK_END` *on* `p` is the previous block's done-mark merged onto
+    // the prompt row (shells emit `D` then redraw the prompt without a newline),
+    // so keep that row: the completed block survives. Stop there. Completed
+    // blocks, in-progress commands (output present), and mark-less scrollback
+    // (shell without OSC 133) are all preserved.
+    {
+        use plexy_glass_emulator::RowMark;
+        let kept: Vec<&Row> = seq().take(meaningful).collect();
+        let mut cut = kept.len();
+        while cut > 0 {
+            let Some(p) = kept[..cut].iter().rposition(|r| r.mark.contains(RowMark::PROMPT_START))
+            else {
+                break;
+            };
+            let started = kept[p..cut].iter().any(|r| r.mark.contains(RowMark::OUTPUT_START));
+            let completed_after =
+                kept[(p + 1)..cut].iter().any(|r| r.mark.contains(RowMark::BLOCK_END));
+            if started || completed_after {
+                break; // a real or in-progress block: keep it and everything before
+            }
+            if kept[p].mark.contains(RowMark::BLOCK_END) {
+                cut = p + 1; // keep the merged done-mark row; drop the rest
+                break;
+            }
+            cut = p; // drop this empty prompt block; check the one before it
+        }
+        meaningful = cut;
+    }
     let skip = meaningful.saturating_sub(n);
     let rows: Vec<RowV1> = seq().take(meaningful).skip(skip).map(row_to_dto).collect();
     if rows.is_empty() {
@@ -604,6 +639,60 @@ mod tests {
     fn load_missing_returns_none() {
         let _g = isolate();
         assert!(load_session("nope").expect("ok").is_none());
+    }
+
+    fn prompt_start_count(cap: &PaneScrollbackV1) -> usize {
+        cap.rows
+            .iter()
+            .filter(|r| {
+                r.mark
+                    .as_ref()
+                    .is_some_and(|m| m.flags & plexy_glass_emulator::RowMark::PROMPT_START != 0)
+            })
+            .count()
+    }
+
+    fn has_block_end(cap: &PaneScrollbackV1) -> bool {
+        cap.rows.iter().any(|r| {
+            r.mark
+                .as_ref()
+                .is_some_and(|m| m.flags & plexy_glass_emulator::RowMark::BLOCK_END != 0)
+        })
+    }
+
+    #[test]
+    fn capture_trims_trailing_empty_prompt_keeps_completed_block() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(24, 80);
+        // A completed block (prompt → command → output → done 0), then a fresh,
+        // un-executed prompt on its own row (the live prompt the child recreates).
+        e.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07\r\n");
+        e.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07X ");
+        let cap = capture_scrollback(e.screen(), 5000).expect("has content");
+        assert_eq!(prompt_start_count(&cap), 1, "the trailing empty prompt is trimmed");
+        assert!(has_block_end(&cap), "the completed block's done-mark survives");
+    }
+
+    #[test]
+    fn capture_of_only_empty_prompts_is_none() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(24, 80);
+        // Two bare prompts, no commands ever run, so this is the accumulating-ghost case.
+        e.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07\r\n\x1b]133;A\x07$ \x1b]133;B\x07X ");
+        assert!(
+            capture_scrollback(e.screen(), 5000).is_none(),
+            "a pane that only ever showed prompts has nothing worth persisting"
+        );
+    }
+
+    #[test]
+    fn capture_keeps_an_in_progress_command() {
+        use plexy_glass_emulator::Emulator;
+        let mut e = Emulator::new(24, 80);
+        // A command started (output streaming) but not yet done, so keep it.
+        e.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\r\n\x1b]133;C\x07partial output ");
+        let cap = capture_scrollback(e.screen(), 5000).expect("has content");
+        assert_eq!(prompt_start_count(&cap), 1, "the in-progress block's prompt is kept");
     }
 
     #[test]
