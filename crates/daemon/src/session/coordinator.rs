@@ -498,7 +498,33 @@ fn build_help_lines(config: &plexy_glass_config::Config) -> Vec<(String, String)
         let resolved = substitute_prefix_token(&b.keys, prefix);
         upsert(&mut ordered, &mut index, &resolved, &b.command);
     }
-    ordered
+    // Orientation header: the three things a first-timer most needs (what the
+    // prefix is, how to leave without killing their work, and where config
+    // lives), prepended above the binding table and kept out of the dedup index
+    // so the binding loop can't clobber the annotated detach line.
+    // Note: the key column must never contain the literal word "prefix" (an
+    // unresolved-token guard checks for it), so the first row keys on the
+    // resolved prefix string itself, not the label "Prefix".
+    let mut lines: Vec<(String, String)> = vec![
+        (prefix.clone(), "the prefix — press it, then a key below".to_string()),
+        (format!("{prefix} d"), "Detach — the session keeps running".to_string()),
+        ("Config".to_string(), config_dir_hint()),
+        (String::new(), String::new()),
+    ];
+    lines.extend(ordered);
+    lines
+}
+
+/// Platform location of `config.kdl`, for the help-overlay orientation header.
+fn config_dir_hint() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        "~/Library/Application Support/plexy-glass/config.kdl".to_string()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "~/.config/plexy-glass/config.kdl".to_string()
+    }
 }
 
 /// Friendly label for a keymap command string; falls back to the raw command.

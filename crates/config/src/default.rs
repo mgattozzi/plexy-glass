@@ -71,6 +71,18 @@ pub fn built_in_default() -> Config {
                     },
                     content: " PFX ".into(),
                 },
+                // Always-visible "help is here" breadcrumb: the answer to "how
+                // do I get help" stays one glance away after the first-run hint's
+                // TTL expires. Press the prefix then `?`.
+                WidgetSpec::Text {
+                    value: " ? ".into(),
+                    style: StyleConfig {
+                        fg: Some("bg".into()),
+                        bg: Some("info".into()),
+                        bold: true,
+                        ..Default::default()
+                    },
+                },
             ],
             middle: vec![WidgetSpec::WindowList {
                 active_style: StyleConfig {

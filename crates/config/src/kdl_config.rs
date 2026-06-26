@@ -1072,6 +1072,7 @@ status {
     left {
         session { style fg="bg" bg="accent" bold=#true; padding 1 1 }
         prefix-indicator content=" PFX " { style fg="bg" bg="highlight" bold=#true }
+        text value=" ? " { style fg="bg" bg="info" bold=#true }
     }
     middle {
         window-list { active-style fg="fg" bg="accent"; inactive-style fg="muted" bg="bg_bar" }

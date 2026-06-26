@@ -109,9 +109,11 @@ plexy-glass attach -n work    # attach to (or create) the session "work"
 ```
 
 Running `plexy-glass` with no subcommand is the same as `plexy-glass attach`.
-The daemon is spawned automatically on first attach. Detach with `Ctrl+a d`.
-The session keeps running, and it's also saved to disk so it survives a
-daemon restart.
+The daemon is spawned automatically on first attach. The very first time you
+attach, a one-line hint shows the prefix (`Ctrl+a`), how to open help
+(`Ctrl+a ?`), and how to detach (`Ctrl+a d`). Detach with `Ctrl+a d`. The
+session keeps running, and it's also saved to disk so it survives a daemon
+restart.
 
 Other subcommands:
 

@@ -331,6 +331,18 @@ where
         let _ = renderer.run(frame_rx, switch_rx, writer).await;
     });
 
+    // First-attach onboarding hint (once per state dir): the keystone day-1 cue
+    // orienting a brand-new user to the prefix, help, and detach. Gated by a
+    // marker file so returning users never see it.
+    if crate::persist::take_first_run() {
+        let prefix = &config.keymap.prefix;
+        session
+            .set_status_info(format!(
+                "Prefix is {prefix} · {prefix} ? for help · {prefix} d to detach"
+            ))
+            .await;
+    }
+
     // Input loop. Scope key decode to the client's negotiated outer-terminal
     // protocol (older/unknown peers downgraded to Legacy upstream).
     let mut router = InputRouter::with_protocol(decode_protocol(client_kbd));

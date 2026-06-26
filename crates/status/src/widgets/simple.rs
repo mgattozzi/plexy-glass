@@ -146,24 +146,33 @@ impl Widget for PrefixIndicatorWidget {
         None
     }
     async fn evaluate(&mut self, ctx: &EvalContext<'_>) -> StyledText {
+        // The prefix-pending cue is the most time-sensitive: when the prefix is
+        // armed it must show even while COPY/SYNC/Z owns the segment, so it
+        // composes (`SYNC·PFX`) rather than being masked. The tag is the
+        // configured content (trimmed), so a rebind of the indicator text follows.
+        let pfx = ctx.prefix_active;
+        let tag = self.content.trim();
         if ctx.copy_mode_active {
+            let t = if pfx { format!(" COPY·{tag} ") } else { " COPY ".to_string() };
             return StyledText::single_clickable(
-                SmolStr::new(" COPY "),
+                SmolStr::new(t),
                 self.style,
                 crate::ClickAction::ExitCopyMode,
             );
         }
         if ctx.sync_active {
+            let t = if pfx { format!(" SYNC·{tag} ") } else { " SYNC ".to_string() };
             return StyledText::single_clickable(
-                SmolStr::new(" SYNC "),
+                SmolStr::new(t),
                 self.style,
                 crate::ClickAction::ToggleSyncPanes,
             );
         }
         if ctx.zoom_active {
-            return StyledText::single(SmolStr::new(" Z "), self.style);
+            let t = if pfx { format!(" Z·{tag} ") } else { " Z ".to_string() };
+            return StyledText::single(SmolStr::new(t), self.style);
         }
-        if !ctx.prefix_active {
+        if !pfx {
             return StyledText::empty();
         }
         let text = if self.icon.is_empty() {
@@ -361,6 +370,38 @@ mod tests {
         };
         let out = w.evaluate(&ctx).await;
         assert_eq!(out.segments[0].text.as_str(), "PFX");
+    }
+
+    #[tokio::test]
+    async fn prefix_indicator_composes_pfx_over_active_mode() {
+        let mut w = PrefixIndicatorWidget {
+            style: ResolvedStyle::default(),
+            content: "PFX".into(),
+            icon: SmolStr::new(""),
+        };
+        // SYNC active AND prefix armed: PFX must not be masked, it composes.
+        let ctx = EvalContext {
+            sync_active: true,
+            prefix_active: true,
+            ..ctx_empty()
+        };
+        let out = w.evaluate(&ctx).await;
+        assert_eq!(out.segments[0].text.as_str(), " SYNC·PFX ");
+        // Zoom + prefix composes too.
+        let ctx = EvalContext {
+            zoom_active: true,
+            prefix_active: true,
+            ..ctx_empty()
+        };
+        let out = w.evaluate(&ctx).await;
+        assert_eq!(out.segments[0].text.as_str(), " Z·PFX ");
+        // Sync alone (no prefix) is unchanged.
+        let ctx = EvalContext {
+            sync_active: true,
+            ..ctx_empty()
+        };
+        let out = w.evaluate(&ctx).await;
+        assert_eq!(out.segments[0].text.as_str(), " SYNC ");
     }
 
     #[tokio::test]

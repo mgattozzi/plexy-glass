@@ -466,6 +466,33 @@ fn session_path(name: &str) -> PathBuf {
     sessions_dir().join(format!("{name}.json"))
 }
 
+/// Path to the once-ever "onboarding hint has been shown" marker, a sibling of
+/// the sessions dir in the same state root (so it shares the instance / XDG /
+/// HOME resolution and a test's isolated `XDG_STATE_HOME` never touches the
+/// real one).
+fn first_run_marker() -> PathBuf {
+    let dir = sessions_dir();
+    match dir.parent() {
+        Some(p) => p.join("first-run"),
+        None => dir.join("first-run"),
+    }
+}
+
+/// Returns `true` exactly once per state dir: `true` when the marker was absent
+/// (and creates it), `false` thereafter. Used to show the first-attach
+/// onboarding hint to genuinely new users only. Best-effort: if the write
+/// fails, returns `false` so the hint never loops forever on a read-only dir.
+pub fn take_first_run() -> bool {
+    let path = first_run_marker();
+    if path.exists() {
+        return false;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, b"plexy-glass first-run marker\n").is_ok()
+}
+
 pub fn save_session(state: &SessionStateV1) -> Result<(), PersistError> {
     let dir = sessions_dir();
     std::fs::create_dir_all(&dir)?;
@@ -577,6 +604,14 @@ mod tests {
     fn load_missing_returns_none() {
         let _g = isolate();
         assert!(load_session("nope").expect("ok").is_none());
+    }
+
+    #[test]
+    fn take_first_run_is_true_exactly_once() {
+        let _g = isolate();
+        assert!(take_first_run(), "fresh state dir is a first run");
+        assert!(!take_first_run(), "marker written → no longer a first run");
+        assert!(!take_first_run(), "stays false thereafter");
     }
 
     #[test]
