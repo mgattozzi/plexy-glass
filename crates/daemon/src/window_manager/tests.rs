@@ -1865,6 +1865,17 @@ async fn kill_window_flashes_named_window() {
 }
 
 #[tokio::test]
+async fn welcome_overlay_opens_and_any_key_dismisses() {
+    let mut m = mk_mgr();
+    m.open_welcome();
+    assert!(matches!(m.overlay(), Some(plexy_glass_mux::Overlay::Welcome)));
+    // Any key dismisses the modal (it's a "press any key to continue" banner).
+    let r = m.handle_overlay_key(&key('x'));
+    assert_eq!(r, OverlayKeyResult::Redraw);
+    assert!(m.overlay().is_none(), "any key closes the welcome modal");
+}
+
+#[tokio::test]
 async fn update_monitor_flags_clears_active_window_alerts() {
     let mut m = mk_mgr();
     m.active_window_mut().set_bell(); // a stale alert on the (current) window

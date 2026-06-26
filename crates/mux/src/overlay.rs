@@ -85,6 +85,10 @@ pub enum Overlay {
     /// `crate::hint::handle_hint` at the daemon layer (commit needs the
     /// clipboard + registry).
     Hint(crate::hint::HintState),
+    /// The one-time welcome modal (first ever attach). A static info box, and any
+    /// key dismisses it. Content is built at render time from config (the resolved
+    /// prefix + config path), like the help overlay.
+    Welcome,
 }
 
 /// The caller's follow-up after feeding a key to an overlay.
@@ -110,6 +114,7 @@ pub fn handle(event: &KeyEvent, overlay: &mut Overlay) -> OverlayAction {
     match overlay {
         Overlay::Rename { buf, .. } => handle_rename(event, buf),
         Overlay::Help { scroll } => handle_help(event, scroll),
+        Overlay::Welcome => handle_welcome(event),
         Overlay::Command { buf, history, hist_idx, completions } => {
             handle_command_prompt(event, buf, history, hist_idx, completions)
         }
@@ -178,6 +183,13 @@ fn handle_help(event: &KeyEvent, scroll: &mut u16) -> OverlayAction {
     } else {
         OverlayAction::Redraw
     }
+}
+
+/// The welcome modal dismisses on any key (a "press any key to continue"
+/// banner). The key is swallowed, and `Cancel` closes the overlay at the WM
+/// layer.
+fn handle_welcome(_event: &KeyEvent) -> OverlayAction {
+    OverlayAction::Cancel
 }
 
 fn handle_command_prompt(

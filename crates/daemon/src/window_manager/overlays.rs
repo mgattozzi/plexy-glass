@@ -64,6 +64,12 @@ impl WindowManager {
         self.rename_pane_target = None;
     }
 
+    /// Open the one-time welcome modal (first ever attach). Any key dismisses it.
+    pub fn open_welcome(&mut self) {
+        self.overlay = Some(Overlay::Welcome);
+        self.rename_pane_target = None;
+    }
+
     /// Open the command prompt. `completions` is a snapshot of live session
     /// names for Tab-completing a `switch ` argument. History is cloned from the
     /// durable list so Up/Down recall survives reopening within the session.

@@ -609,6 +609,9 @@ mod tests {
     #[test]
     fn take_first_run_is_true_exactly_once() {
         let _g = isolate();
+        // `isolate()` pre-writes the marker (to suppress the welcome modal in
+        // attach-based tests); remove it to exercise the genuine first-run path.
+        let _ = std::fs::remove_file(first_run_marker());
         assert!(take_first_run(), "fresh state dir is a first run");
         assert!(!take_first_run(), "marker written → no longer a first run");
         assert!(!take_first_run(), "stays false thereafter");

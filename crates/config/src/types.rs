@@ -27,6 +27,10 @@ pub struct Config {
     /// tmux's `automatic-rename`: when true, unpinned windows auto-name from
     /// their active pane (command → cwd → shell). Default true.
     pub auto_rename: bool,
+    /// Show the one-time welcome overlay on a user's first ever attach (gated by
+    /// a state-dir marker, so it appears once). Default true; set `welcome
+    /// #false` to skip it. nushell's `show_banner`, as a modal.
+    pub welcome: bool,
 }
 
 /// Configuration for the block exit-status border feature.

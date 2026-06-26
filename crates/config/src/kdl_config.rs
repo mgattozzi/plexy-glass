@@ -28,6 +28,7 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
     let mut seen_notifications = false;
     let mut seen_glyphs = false;
     let mut seen_auto_rename = false;
+    let mut seen_welcome = false;
     for node in doc.nodes() {
         match node.name().value() {
             "palette" => {
@@ -74,6 +75,11 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
                 dup_check(seen_auto_rename, "auto-rename", node, src)?;
                 seen_auto_rename = true;
                 config.auto_rename = bool_arg(node, 0, src, "#true or #false")?;
+            }
+            "welcome" => {
+                dup_check(seen_welcome, "welcome", node, src)?;
+                seen_welcome = true;
+                config.welcome = bool_arg(node, 0, src, "#true or #false")?;
             }
             "session" => {
                 let template = decode_session(node, src)?;
@@ -1096,7 +1102,6 @@ status {
     left {
         session { style fg="bg" bg="accent" bold=#true; padding 1 1 }
         prefix-indicator content=" PFX " { style fg="bg" bg="highlight" bold=#true }
-        text value=" ? " { style fg="bg" bg="info" bold=#true }
     }
     middle {
         window-list { active-style fg="bg" bg="highlight" bold=#true; inactive-style fg="muted" bg="bg_bar" }
@@ -1949,6 +1954,13 @@ auto-rename #false"#).expect("decode");
         assert!(cfg.auto_rename);
         let err = parse_config(r#"glyphs "wingdings""#).unwrap_err();
         assert!(err.to_string().contains("glyphs"), "msg names the node: {err}");
+    }
+
+    #[test]
+    fn welcome_defaults_true_and_can_be_disabled() {
+        assert!(parse_config("").expect("empty decodes").welcome, "default is on");
+        assert!(!parse_config("welcome #false").expect("decode").welcome, "welcome #false disables");
+        assert!(parse_config("welcome #true").expect("decode").welcome);
     }
 
     #[test]

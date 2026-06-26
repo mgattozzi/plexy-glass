@@ -337,14 +337,21 @@ where
     let (km, keymap_skips) = plexy_glass_keys::build_keymap_with_skips(&config.keymap);
     let mut keymap = km;
 
-    // Attach-time notice (config error > first-run hint > dropped-binding warn).
-    // `take_first_run` has a side effect (writes the marker), so only consume it
-    // when no config error preempts the hint, matching the ladder's precedence.
+    // First ever attach (welcome enabled, no config error preempting it) → open
+    // the one-time welcome modal; `take_first_run` writes the marker so it shows
+    // once. The `&&` short-circuit means a config error or `welcome #false`
+    // leaves the marker unwritten, so the modal is merely deferred, not lost.
+    // Otherwise fall back to a status notice (config error or skipped bindings).
     let has_config_error = registry.has_config_error();
-    let first_run = !has_config_error && crate::persist::take_first_run();
-    if let Some((severity, text)) =
-        attach_notice(has_config_error, first_run, keymap_skips.len(), &config.keymap.prefix)
-    {
+    let show_welcome =
+        !has_config_error && config.welcome && crate::persist::take_first_run();
+    if show_welcome {
+        {
+            let mut m = session.window_manager.lock().await;
+            m.open_welcome();
+        }
+        session.notify.notify_one();
+    } else if let Some((severity, text)) = attach_notice(has_config_error, keymap_skips.len()) {
         session.set_status_message(text, severity).await;
     }
 
@@ -1433,26 +1440,18 @@ impl ConnVerb {
     }
 }
 
-/// The attach-time status notice, most urgent first: a broken config (running
-/// defaults) beats the first-run onboarding hint, which beats a dropped-binding
-/// warning. Pure so the precedence ladder is unit-testable; the caller supplies
-/// `first_run` (already consumed via the marker) and the resolved prefix.
+/// The attach-time status notice (the first-run onboarding moved to the welcome
+/// modal). A broken config (running defaults) outranks a dropped-binding
+/// warning. Pure, so the precedence is unit-testable.
 fn attach_notice(
     has_config_error: bool,
-    first_run: bool,
     skip_count: usize,
-    prefix: &str,
 ) -> Option<(crate::window_manager::Severity, String)> {
     use crate::window_manager::Severity;
     if has_config_error {
         Some((
             Severity::Error,
             "config error — running defaults; run plexy-glass reload for details".to_string(),
-        ))
-    } else if first_run {
-        Some((
-            Severity::Info,
-            format!("Prefix is {prefix} · {prefix} ? for help · {prefix} d to detach"),
         ))
     } else if skip_count > 0 {
         Some((
@@ -2155,22 +2154,19 @@ mod tests {
     }
 
     #[test]
-    fn attach_notice_follows_the_precedence_ladder() {
+    fn attach_notice_prefers_config_error_over_skips() {
         use crate::window_manager::Severity;
-        // Config error wins over everything, including a first run with skips.
-        let (sev, text) = attach_notice(true, true, 3, "Ctrl+a").unwrap();
+        // A broken config wins over a skip warning.
+        let (sev, text) = attach_notice(true, 3).unwrap();
         assert_eq!(sev, Severity::Error);
         assert!(text.starts_with("config error"), "got {text:?}");
-        // No config error → first-run hint wins over a skip warning, prefix substituted.
-        let (sev, text) = attach_notice(false, true, 3, "Ctrl+b").unwrap();
-        assert_eq!(sev, Severity::Info);
-        assert_eq!(text, "Prefix is Ctrl+b · Ctrl+b ? for help · Ctrl+b d to detach");
-        // No error, not first run, but bindings were skipped → warn.
-        let (sev, text) = attach_notice(false, false, 2, "Ctrl+a").unwrap();
+        // No error, but bindings were skipped → warn.
+        let (sev, text) = attach_notice(false, 2).unwrap();
         assert_eq!(sev, Severity::Warn);
         assert_eq!(text, "2 keymap binding(s) skipped — see plexy-glass reload");
-        // Returning user, clean config → no notice.
-        assert!(attach_notice(false, false, 0, "Ctrl+a").is_none());
+        // Clean config, no skips → no status notice (the welcome modal, if any,
+        // is handled separately).
+        assert!(attach_notice(false, 0).is_none());
     }
 
     #[test]

@@ -260,8 +260,9 @@ pub(super) async fn render_coordinator(
                 .map(|t| (t.to_string(), message_severity));
 
             // Build the active overlay's render view (rename prompt / help).
-            // `help_lines` is deferred-init so the Help view can borrow it.
+            // `help_lines`/`welcome_lines` are deferred-init so the views borrow them.
             let help_lines: Vec<(String, String)>;
+            let welcome_lines: Vec<String>;
             let overlay_view = match m.overlay() {
                 Some(plexy_glass_mux::Overlay::Rename { target, buf }) => {
                     let label = match target {
@@ -300,6 +301,11 @@ pub(super) async fn render_coordinator(
                         state,
                         colors: hint_colors(&cfg),
                     })
+                }
+                Some(plexy_glass_mux::Overlay::Welcome) => {
+                    let cfg = session.config_snapshot();
+                    welcome_lines = build_welcome_lines(&cfg);
+                    Some(plexy_glass_mux::OverlayView::Welcome { lines: &welcome_lines })
                 }
                 None => None,
             };
@@ -515,6 +521,26 @@ fn build_help_lines(config: &plexy_glass_config::Config) -> Vec<(String, String)
     ];
     lines.extend(ordered);
     lines
+}
+
+/// The one-time welcome modal's content: a greeting, the essential prefix-keys,
+/// how to detach and get full help, where config lives, and how to turn this
+/// off. The keys are shown bare; the intro line says to press the prefix first.
+fn build_welcome_lines(config: &plexy_glass_config::Config) -> Vec<String> {
+    let prefix = &config.keymap.prefix;
+    vec![
+        String::new(),
+        format!("The prefix is {prefix} — press it, then a key:"),
+        String::new(),
+        "  c   new window        v / s   split".to_string(),
+        "  z   zoom pane          w       switch session".to_string(),
+        "  :   command prompt     ?       full help".to_string(),
+        "  d   detach (your session keeps running)".to_string(),
+        String::new(),
+        format!("Config: {}", config_dir_hint()),
+        "To skip this next time, add  welcome #false  to config.kdl".to_string(),
+        String::new(),
+    ]
 }
 
 /// Platform location of `config.kdl`, for the help-overlay orientation header.

@@ -178,6 +178,9 @@ pub enum OverlayView<'a> {
         state: &'a crate::hint::HintState,
         colors: HintColors,
     },
+    /// The one-time welcome modal: a centered box of pre-built lines (greeting,
+    /// essential keys, how to get help/detach, how to disable). Any key dismisses.
+    Welcome { lines: &'a [String] },
 }
 
 /// A render-ready view of the floating popup pane: a live PTY-backed grid in
@@ -1071,6 +1074,10 @@ fn paint_overlay(
             paint_hint(screen, state, *colors, pane_row_offset, rect, cols);
             screen.cursor_visible = false;
         }
+        OverlayView::Welcome { lines } => {
+            paint_welcome(screen, lines, pane_row_offset, pane_area_rows, cols, chrome);
+            screen.cursor_visible = false;
+        }
         OverlayView::Command { buf } => {
             // A full-width REVERSE bar on the bottom row of the pane band,
             // ":<buf>" with a block cursor just past the text.
@@ -1214,6 +1221,54 @@ fn paint_help_box(
         let pad = " ".repeat(key_w.saturating_sub(dw(keys)));
         let line = format!("{keys}{pad}  {desc}");
         put_str(screen, r, col0 + 1, &line, attrs, col0 + box_w - 1);
+    }
+}
+
+/// Draw the one-time welcome modal: a centered themed box of pre-built lines
+/// (greeting, essential keys, how to get help/detach, how to disable). The lines
+/// are built by the coordinator from config (resolved prefix + config path).
+fn paint_welcome(
+    screen: &mut VirtualScreen,
+    lines: &[String],
+    pane_row_offset: u16,
+    pane_area_rows: u16,
+    cols: u16,
+    chrome: ChromeColors,
+) {
+    let title = " Welcome to plexy-glass ";
+    let footer = " press any key to continue ";
+    let dw = |s: &str| display_width(s) as usize;
+    let content_w = lines
+        .iter()
+        .map(|l| dw(l))
+        .max()
+        .unwrap_or(0)
+        .max(dw(title))
+        .max(dw(footer));
+    let inner_w = (content_w + 2).min(cols.saturating_sub(2) as usize);
+    let box_w = (inner_w + 2) as u16;
+    // Top border + lines + a blank gap + bottom border (footer on it), mirroring
+    // the help box's spacing.
+    let box_h = (lines.len() as u16) + 3;
+    if box_w < 3 || box_h < 4 || box_w > cols || box_h > pane_area_rows {
+        return; // viewport too small to draw without overflowing the pane band
+    }
+    let row0 = pane_row_offset + (pane_area_rows.saturating_sub(box_h)) / 2;
+    let col0 = (cols.saturating_sub(box_w)) / 2;
+    draw_box(screen, row0, col0, box_h, box_w, title, footer, chrome);
+    let plain = plexy_glass_emulator::Attrs::empty();
+    for (i, line) in lines.iter().enumerate() {
+        let r = row0 + 1 + i as u16;
+        put_colored(
+            screen,
+            r,
+            col0 + 1,
+            line,
+            plexy_glass_emulator::Color::Default,
+            chrome.overlay_bg,
+            plain,
+            col0 + box_w - 1,
+        );
     }
 }
 
@@ -2759,6 +2814,50 @@ mod tests {
             }
         }
         assert!(themed_border, "overlay box border was painted");
+    }
+
+    #[test]
+    fn overlay_welcome_renders_box_and_content() {
+        let mut e = Emulator::new(16, 60);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 16, 60),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: None,
+            title: None,
+            marked: false,
+            drag_role: PaneDragRole::None,
+        };
+        let lines = vec![
+            "The prefix is Ctrl+a — press it, then a key:".to_string(),
+            "  c   new window".to_string(),
+        ];
+        let ov = OverlayView::Welcome { lines: &lines };
+        let vs = compose(
+            &[view], (16, 60), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None,
+            plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default(),
+        );
+        let mut found_corner = false;
+        let mut found_text = false;
+        for r in 0..16 {
+            let mut row = String::new();
+            for c in 0..60 {
+                row.push_str(vs.cell(r, c).unwrap().grapheme.as_str());
+            }
+            if row.contains('\u{250c}') {
+                found_corner = true;
+            }
+            if row.contains("new window") {
+                found_text = true;
+            }
+        }
+        assert!(found_corner, "welcome box top-left corner drawn");
+        assert!(found_text, "welcome content drawn");
+        assert!(!vs.cursor_visible, "welcome overlay hides the pane cursor");
     }
 
     fn picker_view(name: &str, label: &str, current: bool) -> crate::overlay::PickerEntry {

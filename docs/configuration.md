@@ -880,7 +880,22 @@ restored after a daemon restart keeps deriving its name (a renamed window stays
 pinned). `auto-rename` is read fresh on every status-bar render, so toggling it
 via reload (`Ctrl+a R` / `plexy-glass reload`) takes effect immediately.
 
-## `session` — declarative sessions
+## `welcome`
+
+```kdl
+welcome #true   // default; #false skips the one-time welcome modal
+```
+
+On a user's **first ever attach**, plexy-glass shows a one-time **welcome
+modal**, a centered box with the prefix, a few essential keys, how to open full
+help (`Ctrl+a ?`) and detach (`Ctrl+a d`), and where `config.kdl` lives. Press
+any key to dismiss it. It appears once (gated by a `first-run` marker in the
+state dir, next to saved sessions) and never again.
+
+Set `welcome #false` to skip it entirely (the modal itself tells you this). A
+broken config takes precedence (you see the config-error notice instead, and the
+welcome is deferred to the next clean attach), so a first-run user never misses
+both.
 
 `session` nodes declare sessions that the daemon builds fresh at boot. For a
 declared name the config wins over the saved on-disk state, so the layout

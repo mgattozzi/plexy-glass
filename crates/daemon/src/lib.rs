@@ -53,6 +53,13 @@ pub(crate) mod test_env {
             std::env::set_var("XDG_STATE_HOME", tmp.path());
             std::env::set_var("SHELL", "/bin/sh");
         }
+        // Pre-mark "first run seen" so the one-time welcome modal never opens in
+        // attach-based tests (it would intercept overlay/screen assertions).
+        // Mirrors a returning user; matches `persist::first_run_marker()` under
+        // this XDG_STATE_HOME. The welcome path is covered by its own unit tests.
+        let plexy_state = tmp.path().join("plexy-glass");
+        let _ = std::fs::create_dir_all(&plexy_state);
+        let _ = std::fs::write(plexy_state.join("first-run"), b"test\n");
         EnvGuard { _lock: lock, old_xdg, old_shell, _tmp: tmp }
     }
 
