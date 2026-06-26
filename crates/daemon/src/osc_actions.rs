@@ -8,6 +8,24 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+/// Build the user-facing acknowledgement for a clipboard write. A multi-line
+/// copy reports the line count; a single line reports the width-truncated text.
+/// Returns no leading glyph, the `Success` severity prepends `✓` at paint time.
+pub(crate) fn copied_message(text: &str) -> String {
+    let line_count = text.lines().count();
+    if line_count > 1 {
+        format!("copied {line_count} lines")
+    } else {
+        let one = text.trim_end_matches(['\n', '\r']);
+        let shown = plexy_glass_emulator::truncate_to_width(one, 40);
+        if shown.len() < one.len() {
+            format!("copied \"{shown}…\"")
+        } else {
+            format!("copied \"{one}\"")
+        }
+    }
+}
+
 /// Shell out to the system default URL opener. macOS: `open`. Linux:
 /// `xdg-open`. Failure is logged at warn level and swallowed; the user
 /// should see no panic / popup if the opener is missing.
@@ -179,6 +197,19 @@ fn graphemes_in_span(cells: &[plexy_glass_emulator::Cell], lo: u16, hi: u16) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copied_message_reports_lines_or_truncated_text() {
+        assert_eq!(copied_message("one line"), "copied \"one line\"");
+        // Trailing newline on a single line is not counted as a second line.
+        assert_eq!(copied_message("one line\n"), "copied \"one line\"");
+        assert_eq!(copied_message("a\nb\nc"), "copied 3 lines");
+        // Long single line is width-truncated with an ellipsis.
+        let long = "x".repeat(80);
+        let msg = copied_message(&long);
+        assert!(msg.starts_with("copied \"") && msg.ends_with("…\""));
+        assert!(msg.len() < long.len() + 12, "should be truncated");
+    }
 
     #[tokio::test]
     async fn open_url_returns_ok_even_when_opener_is_missing() {

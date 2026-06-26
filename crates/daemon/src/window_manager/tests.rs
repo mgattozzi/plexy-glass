@@ -1508,6 +1508,7 @@ async fn swap_marked_pane_same_window_then_cross_window_swaps() {
     m.handle_command(Command::SplitV).unwrap(); // W0 panes 0,1; active 1
     let vp = m.viewport();
     m.handle_command(Command::MarkPane).unwrap(); // marked = 1
+    m.status_message = None; // clear the "marked pane" confirmation
     m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Left)).unwrap(); // active 0
     let before = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
     m.handle_command(Command::SwapMarkedPane).unwrap();
@@ -1532,6 +1533,7 @@ async fn swap_marked_cross_window_exchanges_slots() {
     m.handle_command(Command::NewWindow).unwrap(); // W1: pane 2, active
     m.handle_command(Command::SplitV).unwrap(); // W1 {2,3}, active 3
     m.handle_command(Command::MarkPane).unwrap(); // marked = 3
+    m.status_message = None; // clear the "marked pane" confirmation
     m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0, pane 1
     let vp = m.viewport();
     let slot_a = m.windows()[0].layout().rect_of(PaneId(1), vp).unwrap();
@@ -1641,6 +1643,7 @@ async fn swap_marked_equals_active_is_noop() {
     let mut m = mk_mgr();
     m.handle_command(Command::SplitV).unwrap(); // panes 0,1; active 1
     m.handle_command(Command::MarkPane).unwrap(); // marked = active = 1
+    m.status_message = None; // clear the "marked pane" confirmation
     let vp = m.viewport();
     let before = m.active_window().layout().rect_of(PaneId(1), vp);
     m.handle_command(Command::SwapMarkedPane).unwrap();
@@ -1776,6 +1779,7 @@ async fn mark_survives_break_then_swap_is_cross_window() {
     let mut m = mk_mgr();
     m.handle_command(Command::SplitV).unwrap(); // panes 0,1; active 1
     m.handle_command(Command::MarkPane).unwrap(); // marked = 1 (active)
+    m.status_message = None; // clear the "marked pane" confirmation
     m.handle_command(Command::BreakPane).unwrap(); // pane 1 → new window
     assert_eq!(m.marked_pane(), Some(PaneId(1)), "mark survives a break (pane still lives)");
     m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0 (pane 0)
@@ -1831,6 +1835,29 @@ async fn toggle_monitor_commands_flip_and_message() {
     m.handle_command(Command::ToggleMonitorBell).unwrap();
     assert_eq!(m.take_active_message(), Some("monitor-bell off"));
     assert!(!m.active_window().monitor_bell());
+}
+
+#[tokio::test]
+async fn mark_pane_confirms_set_and_clear() {
+    let mut m = mk_mgr();
+    m.handle_command(Command::MarkPane).unwrap();
+    assert_eq!(m.take_active_message(), Some("marked pane"));
+    assert_eq!(m.active_severity(), Severity::Success);
+    // Marking the same pane again clears it, with a neutral notice.
+    m.handle_command(Command::MarkPane).unwrap();
+    assert_eq!(m.take_active_message(), Some("mark cleared"));
+    assert_eq!(m.active_severity(), Severity::Info);
+}
+
+#[tokio::test]
+async fn kill_window_flashes_named_window() {
+    let mut m = mk_mgr();
+    m.handle_command(Command::NewWindow).unwrap(); // 2 windows, active index 1 (window 2)
+    let _ = m.take_active_message(); // discard any incidental message
+    m.handle_command(Command::KillWindow).unwrap();
+    let msg = m.take_active_message().expect("kill-window flashes a message");
+    assert!(msg.starts_with("killed window 2"), "got {msg:?}");
+    assert_eq!(m.active_severity(), Severity::Success);
 }
 
 #[tokio::test]

@@ -103,6 +103,28 @@ color* (the terminal default). The `fg` and `bg` entries (and `cursor`, falling
 back to `accent`) also answer OSC 10/11/12 color queries from applications
 running inside panes.
 
+## Status-line messages
+
+Transient feedback (copying, reloading, switching sessions, errors, and the
+monitor alerts) appears as a one-line bar on the status row for ~3 seconds.
+Each message carries a **severity** that selects a leading glyph and a color
+from the palette:
+
+| Severity | Glyph (unicode / nerd) | Glyph (ascii) | Palette key |
+|----------|------------------------|---------------|-------------|
+| Info     | `ℹ`                    | `i`           | `info`      |
+| Success  | `✓`                    | `+`           | `ok`        |
+| Warning  | `⚠`                    | `!`           | `warn`      |
+| Error    | `✗`                    | `x`           | `alert`     |
+
+The glyph is the primary, color-independent cue (success vs error reads even on
+a monochrome terminal) and degrades to a plain letter on `glyphs "ascii"`. The
+bar background is the `bg_bar` palette color. Examples you'll see: `✓ copied 3
+lines` / `✓ copied "…"` on any yank or hint-mode copy, `✓ config reloaded`,
+`✓ marked pane` / `mark cleared`, and `✓ killed window 2 (api)`. Recolor any of
+these by overriding the `info` / `ok` / `warn` / `alert` / `bg_bar` entries in
+[`palette`](#palette).
+
 The built-in palette (Kanagawa Dragon):
 
 | Name | Value | | Name | Value |

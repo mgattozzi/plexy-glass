@@ -1,4 +1,4 @@
-use super::WindowManager;
+use super::{Severity, WindowManager};
 use crate::error::DaemonError;
 use plexy_glass_mux::{
     BorderHit, BorderSide, Command, MouseButton, MouseEncoding, MouseEvent, MouseKind, PaneId,
@@ -398,10 +398,12 @@ impl WindowManager {
                     self.notify.notify_one();
                 }
                 CopyModeAction::Yank(text) => {
+                    let msg = crate::osc_actions::copied_message(&text);
                     tokio::spawn(async move {
                         let _ = crate::osc_actions::write_clipboard(text.as_bytes()).await;
                     });
                     pane.exit_copy_mode();
+                    self.set_status_message(msg, Severity::Success);
                     self.notify.notify_one();
                 }
             }
@@ -682,6 +684,7 @@ impl WindowManager {
         if sel.is_empty() {
             return Ok(());
         }
+        let mut copied: Option<String> = None;
         if let Some(pane) = self.active_window().pane(sel.source_pane) {
             // Map the viewport-relative selection through the pane's current
             // scroll position so a selection made while scrolled back copies the
@@ -690,10 +693,15 @@ impl WindowManager {
             let text =
                 pane.with_screen(|s| extract_text(&sel, s, s.active.num_rows(), scroll_offset));
             if !text.is_empty() {
+                copied = Some(crate::osc_actions::copied_message(&text));
                 tokio::spawn(async move {
                     let _ = crate::osc_actions::write_clipboard(text.as_bytes()).await;
                 });
             }
+        }
+        if let Some(msg) = copied {
+            self.set_status_message(msg, Severity::Success);
+            self.notify.notify_one();
         }
         Ok(())
     }

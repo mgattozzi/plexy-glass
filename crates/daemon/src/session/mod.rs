@@ -876,6 +876,10 @@ impl Session {
         // Arm/disarm the silence tick task in response to any monitor-silence
         // change (cheap no-op for every other command).
         self.reconcile_silence_task(armed);
+        // A command may have set a transient message via the WM (mark/monitor/
+        // kill feedback); schedule its TTL clear so it dismisses on the same ~3s
+        // timer as Session-set messages, not lazily on the next render.
+        self.schedule_status_expiry_wake();
         Ok(())
     }
 

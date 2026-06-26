@@ -107,7 +107,13 @@ impl WindowManager {
             }
             Command::MarkPane => {
                 let a = self.active_window().active();
-                self.marked_pane = if self.marked_pane == Some(a) { None } else { Some(a) };
+                if self.marked_pane == Some(a) {
+                    self.marked_pane = None;
+                    self.set_status_message("mark cleared".into(), Severity::Info);
+                } else {
+                    self.marked_pane = Some(a);
+                    self.set_status_message("marked pane".into(), Severity::Success);
+                }
             }
             Command::BreakPane => {
                 if self.active_window().layout().panes().len() < 2 {
@@ -271,7 +277,19 @@ impl WindowManager {
                     .resize_split(active, axis, delta, viewport);
                 self.active_window_mut().resize(viewport)?;
             }
-            Command::KillWindow => self.close_active_window(),
+            Command::KillWindow => {
+                // Capture the identity before the window is gone so the post-hoc
+                // flash can name it (a fat-fingered `kill-window` is alarming
+                // without acknowledgement; this is the lightweight alternative to
+                // a blocking confirm).
+                let idx = self.active;
+                let name = self.active_window().display_name(self.config.auto_rename);
+                self.close_active_window();
+                self.set_status_message(
+                    format!("killed window {} ({name})", idx + 1),
+                    Severity::Success,
+                );
+            }
             Command::RenameWindow => self.open_rename_window(),
             Command::RenamePane => self.open_rename_pane(),
             Command::ShowHelp => self.open_help(),

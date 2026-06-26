@@ -671,14 +671,18 @@ async fn dispatch_input_event(
                             Some(plexy_glass_mux::CopyModeAction::Yank(text)) => {
                                 let _ =
                                     crate::osc_actions::write_clipboard(text.as_bytes()).await;
+                                let msg = crate::osc_actions::copied_message(&text);
                                 // Also push a paste buffer (before re-taking the
                                 // WM lock, so the registry await isn't held under it).
                                 ctx.registry.push_paste_buffer(text.into_bytes()).await;
-                                let m = ctx.session.window_manager.lock().await;
-                                if let Some(p) = m.active_window().active_pane() {
-                                    p.exit_copy_mode();
+                                {
+                                    let m = ctx.session.window_manager.lock().await;
+                                    if let Some(p) = m.active_window().active_pane() {
+                                        p.exit_copy_mode();
+                                    }
                                 }
-                                ctx.session.notify.notify_one();
+                                // `set_status_ok` notifies + schedules the TTL wake.
+                                ctx.session.set_status_ok(msg).await;
                             }
                             None => {}
                         }
@@ -709,9 +713,10 @@ async fn dispatch_input_event(
                             Some(plexy_glass_mux::BlockModeAction::Yank(text)) => {
                                 let _ =
                                     crate::osc_actions::write_clipboard(text.as_bytes()).await;
+                                let msg = crate::osc_actions::copied_message(&text);
                                 // STAY in block mode (unlike copy mode's yank).
                                 ctx.registry.push_paste_buffer(text.into_bytes()).await;
-                                ctx.session.notify.notify_one();
+                                ctx.session.set_status_ok(msg).await;
                             }
                             Some(plexy_glass_mux::BlockModeAction::ReRun(cmd)) => {
                                 // Inject command + Enter directly into the pane
@@ -1308,13 +1313,22 @@ impl ClientCtx<'_> {
             plexy_glass_mux::HintAction::Copy => {
                 // Mirror the copy-mode yank path: system clipboard + paste buffer.
                 let _ = crate::osc_actions::write_clipboard(pick.text.as_bytes()).await;
+                let msg = crate::osc_actions::copied_message(&pick.text);
                 self.registry.push_paste_buffer(pick.text.into_bytes()).await;
+                self.session.set_status_ok(msg).await;
             }
             plexy_glass_mux::HintAction::Open => {
+                // Await the opener (not fire-and-forget) so a missing system
+                // opener becomes a visible message instead of a silent no-op.
                 let url = pick.text;
-                tokio::spawn(async move {
-                    let _ = crate::osc_actions::open_url(&url).await;
-                });
+                match crate::osc_actions::open_url(&url).await {
+                    Ok(()) => self.session.set_status_info(format!("opening {url}")).await,
+                    Err(_) => {
+                        self.session
+                            .set_status_error("couldn't open (no system opener)".into())
+                            .await
+                    }
+                }
             }
         }
         self.session.notify.notify_one();
@@ -1402,10 +1416,13 @@ async fn run_connection_verb(
     match verb {
         ConnVerb::Detach => return true,
         ConnVerb::Reload => {
-            if let Err(e) = ctx.registry.reload_config().await {
-                ctx.session
-                    .set_status_error(format!("reload failed: {e}"))
-                    .await;
+            match ctx.registry.reload_config().await {
+                Ok(()) => ctx.session.set_status_ok("config reloaded".into()).await,
+                Err(e) => {
+                    ctx.session
+                        .set_status_error(format!("reload failed: {e}"))
+                        .await
+                }
             }
             // Even on error the registry applied the built-in defaults
             // everywhere, so the keymap rebuild must still happen. Rebuilding
