@@ -63,6 +63,19 @@ Other top-level rules, all enforced by the decoder: unknown top-level nodes
 are errors; `palette`, `status`, and `keymap` may each appear at most once;
 `session` may appear any number of times but session names must be unique.
 
+### Where the daemon logs
+
+The daemon writes to a log file, not your terminal. When the docs above say
+"the daemon log records it," this is where to look:
+
+- **macOS**: `~/Library/Logs/plexy-glass/daemon.log`
+- **Linux**: `$XDG_STATE_HOME/plexy-glass/daemon.log` (falls back to
+  `~/.local/state/plexy-glass/daemon.log`)
+
+Set `RUST_LOG` before the daemon first spawns to raise the verbosity, e.g.
+`RUST_LOG=plexy_glass=debug plexy-glass`. With `PLEXY_GLASS_DIR` set, logs live
+under `<dir>/logs/daemon.log` instead.
+
 ## `palette`
 
 Named colors, usable anywhere a style takes a color. Each entry is a child

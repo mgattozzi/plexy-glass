@@ -85,14 +85,26 @@ integration.
 
 ## Quick start
 
+Requires Rust 1.85+ (edition 2024), so `rustup update` if you're behind.
+
 ```sh
-cargo build --release
+git clone https://github.com/mgattozzi/plexy-glass
+cd plexy-glass
+cargo install --path .        # installs to ~/.cargo/bin (already on your PATH)
+plexy-glass                   # attach to (or create) the default session "main"
 ```
 
-The binary lands at `target/release/plexy-glass`.
+Prefer not to install? Build it and run from the target directory instead:
 
 ```sh
-plexy-glass attach            # attach to (or create) the default session "main"
+cargo build --release         # binary lands at target/release/plexy-glass
+./target/release/plexy-glass  # or add target/release to your PATH
+```
+
+Then:
+
+```sh
+plexy-glass                   # attach to (or create) the default session "main"
 plexy-glass attach -n work    # attach to (or create) the session "work"
 ```
 
@@ -272,7 +284,28 @@ Other topic docs:
   panes (Kitty graphics, Sixel, and iTerm2; per-client placeholder box
   fallback)
 
+## Troubleshooting
+
+The daemon logs to a file, not your terminal, so if something misbehaves the
+first place to look is:
+
+- **macOS:** `~/Library/Logs/plexy-glass/daemon.log`
+- **Linux:** `$XDG_STATE_HOME/plexy-glass/daemon.log` (falls back to
+  `~/.local/state/plexy-glass/daemon.log`)
+
+Raise the verbosity by setting `RUST_LOG` before the daemon first spawns, e.g.
+`RUST_LOG=plexy_glass=debug plexy-glass`. Note that with `PLEXY_GLASS_DIR` set,
+logs live under `<dir>/logs/daemon.log` instead.
+
 ## Status
 
-A personal project under active development. Design specs for each feature
-live in `docs/superpowers/specs/`.
+Under active development and closing in on a first public release. The design
+spec for each feature lives in `docs/superpowers/specs/`.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. Unless you explicitly state
+otherwise, any contribution intentionally submitted for inclusion in this
+project by you, as defined in the Apache-2.0 license, shall be dual licensed as
+above, without any additional terms or conditions.
