@@ -488,6 +488,47 @@ default `Alt`, `Shift` rejected, decoded from `MouseConfig`, live via
 `config_snapshot()`). Reorder persists for free through the existing structural
 `mark_dirty` path — no extra persistence code.
 
+**Day-1 UX polish** (shipped — spec/plan
+`docs/superpowers/{specs,plans}/2026-06-25-day1-ready*`, seven phases, each
+adversarially reviewed): a release-readiness pass making a newcomer's first ten
+minutes communicative. **Status-message system** — `Severity{Info,Success,Warn,
+Error}` (daemon `window_manager::mod`) selects a leading glyph (the color-
+independent channel, glyph-tier aware: `ℹ`/`✓`/`⚠`/`✗`, ascii → `i`/`+`/`!`/`x`)
+plus a palette color (`info`/`ok`/`warn`/`alert`); the transient bar is themed
+(glyph + color on `bg_bar`) not `REVERSE`, resolved in the coordinator
+(`MessageView`/`message_colors`) so the compositor stays palette-free;
+`set_status_message(text, Severity)` + `set_status_info/ok/warn/error`,
+`active_severity()`/`has_active_message()` peeks. **Action feedback** —
+`osc_actions::copied_message` on all four yank sites + reload/mark/hint;
+`KillWindow` flashes `✓ killed window N (name)` (pane kills stay silent —
+routine + nameless); `Session::handle_command`/`handle_mouse` schedule the TTL
+wake so WM-set messages auto-dismiss. **Onboarding** — once-ever first-attach
+hint (`persist::take_first_run` marker) with the resolved prefix; always-visible
+` ? ` help breadcrumb; help-overlay orientation header; mode widget composes
+`SYNC·PFX`/`Z·PFX`/`COPY·PFX` instead of masking the prefix cue. **Config fails
+loudly** — KDL errors report `line:col` + message via the previously-discarded
+`e.diagnostics` (+ a `#true/#false` hint when empty); `build_keymap_with_skips`
+reports dropped bindings; `SessionRegistry.config_error` surfaces a boot error
+on attach (no protocol bump), cleared by a clean reload; attach-notice ladder
+(config-error > first-run > skips) is a pure `attach_notice`/`reload_notice`.
+**Shell integration** — `plexy-glass shell-integration <bash|zsh|fish|nu>` emits
+an eval-able OSC 133 snippet (`crates/client/src/shell_integration.rs`; nu prints
+the built-in config line); `open_url` returns `Err` on a missing opener and
+`write_clipboard` returns `bool` so hint-copy can warn `clipboard unavailable`;
+history palette distinguishes empty-corpus (shell-integration hint) from
+empty-filter. **Visual cohesion** — palette-driven `ChromeColors` (pane border
+rings active=`highlight`/marked=`warn`/drag=`info`/`ok`; overlay boxes
+border=`accent`/title=`highlight`/footer=`muted`/interior=`bg_bar`) threaded via
+`compose` (test default `ChromeColors`/`RingColors::ansi_default` replicates the
+old look so render tests were unchanged); active window tab on `highlight`.
+**Release gate** — dual `MIT OR Apache-2.0` LICENSE + Cargo metadata + MSRV 1.85;
+copy-paste Quick start (clone → `cargo install` → attach); documented log path.
+User docs: README + `docs/configuration.md` (Status-line messages, chrome
+palette keys, loud config errors) + `docs/command-blocks.md` (shell-integration
+emitter). Deliberately deferred: command-prompt completion footer, persistent
+zellij-style hint bar, Homebrew/Releases packaging, the overlay-selection +
+bottom-bar `REVERSE` theming.
+
 Not yet built (future work): native Kitty animation protocol + `z`-ordering
 (deferred from the inline-graphics P4 spec, with rationale).
 (Silence monitoring + bell/activity alert messages shipped with the 2026-06-12
