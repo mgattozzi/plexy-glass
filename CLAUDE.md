@@ -502,10 +502,15 @@ plus a palette color (`info`/`ok`/`warn`/`alert`); the transient bar is themed
 `osc_actions::copied_message` on all four yank sites + reload/mark/hint;
 `KillWindow` flashes `✓ killed window N (name)` (pane kills stay silent —
 routine + nameless); `Session::handle_command`/`handle_mouse` schedule the TTL
-wake so WM-set messages auto-dismiss. **Onboarding** — once-ever first-attach
-hint (`persist::take_first_run` marker) with the resolved prefix; always-visible
-` ? ` help breadcrumb; help-overlay orientation header; mode widget composes
-`SYNC·PFX`/`Z·PFX`/`COPY·PFX` instead of masking the prefix cue. **Config fails
+wake so WM-set messages auto-dismiss. **Onboarding** — a once-ever **welcome
+modal** on first attach (`Overlay::Welcome`/`paint_welcome`, nushell-banner
+style: prefix + essential keys + help/detach + config path + how to disable;
+any key dismisses), gated by the `persist::take_first_run` marker and a
+top-level `welcome #true|#false` config node (default true); help-overlay
+orientation header; mode widget composes `SYNC·PFX`/`Z·PFX`/`COPY·PFX` instead
+of masking the prefix cue. (An earlier transient hint + always-visible ` ? `
+status-bar breadcrumb were replaced by the modal per user feedback — the chip
+did nothing on click and added clutter.) **Config fails
 loudly** — KDL errors report `line:col` + message via the previously-discarded
 `e.diagnostics` (+ a `#true/#false` hint when empty); `build_keymap_with_skips`
 reports dropped bindings; `SessionRegistry.config_error` surfaces a boot error
@@ -603,7 +608,11 @@ default-field elision + compact `serde_json::to_vec`, `ColorV1`/`UnderlineStyleV
 serde-free; `hyperlink_id` dropped, links not persisted); capture via
 `capture_scrollback(screen, N=5000)` over `scrollback ++ main_grid.rows`
 (`main_grid = screen.alt.unwrap_or(&screen.active)` — MAIN grid even on alt),
-trailing-default-cell trim + blank-trailing-row drop; `Screen::preseed_scrollback`
+trailing-default-cell trim + blank-trailing-row drop + **trailing un-executed
+prompt trim** (a `PROMPT_START` block with no `OUTPUT_START`/`BLOCK_END` is the
+at-prompt block the restored child recreates; persisting it made phantom empty
+block-mode prompts accumulate one per restart — a `BLOCK_END` merged onto the
+prompt row is kept so the prior completed block survives); `Screen::preseed_scrollback`
 threaded THROUGH `Pane::spawn` (applied before the reader thread starts so no
 child byte races the seed) → `Window::spawn_first`/`split`/`split_at` →
 `WindowManager::new_with_preseed`/`new_window_with_spec_preseed`/
