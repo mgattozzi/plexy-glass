@@ -1,4 +1,4 @@
-use super::WindowManager;
+use super::{Severity, WindowManager};
 use crate::{error::DaemonError, window::Window};
 use plexy_glass_mux::{Command, SplitDir, WindowId};
 use std::sync::Arc;
@@ -111,7 +111,7 @@ impl WindowManager {
             }
             Command::BreakPane => {
                 if self.active_window().layout().panes().len() < 2 {
-                    self.set_status_message("only pane in window".into());
+                    self.set_status_message("only pane in window".into(), Severity::Info);
                 } else {
                     let active = self.active_window().active();
                     // invariant: the active pane is always in its window.
@@ -144,7 +144,7 @@ impl WindowManager {
                     let act_idx = self.active;
                     let act_pane = self.windows[act_idx].active();
                     if marked == act_pane {
-                        self.set_status_message("marked pane is the active pane".into());
+                        self.set_status_message("marked pane is the active pane".into(), Severity::Info);
                     } else if let Some(src_idx) =
                         self.windows.iter().position(|w| w.pane(marked).is_some())
                     {
@@ -175,7 +175,7 @@ impl WindowManager {
                         self.marked_pane = None; // marked pane vanished
                     }
                 } else {
-                    self.set_status_message("no marked pane".into());
+                    self.set_status_message("no marked pane".into(), Severity::Info);
                 }
             }
             Command::SwapMarkedPane => {
@@ -222,32 +222,40 @@ impl WindowManager {
                         }
                     }
                 } else {
-                    self.set_status_message("no marked pane".into());
+                    self.set_status_message("no marked pane".into(), Severity::Info);
                 }
             }
             Command::ToggleMonitorActivity => {
                 let on = self.active_window_mut().toggle_monitor_activity();
                 self.set_status_message(
                     format!("monitor-activity {}", if on { "on" } else { "off" }),
+                    Severity::Info,
                 );
             }
             Command::ToggleMonitorBell => {
                 let on = self.active_window_mut().toggle_monitor_bell();
-                self.set_status_message(format!("monitor-bell {}", if on { "on" } else { "off" }));
+                self.set_status_message(
+                    format!("monitor-bell {}", if on { "on" } else { "off" }),
+                    Severity::Info,
+                );
             }
             Command::ToggleMonitorCommand => {
                 let on = self.active_window_mut().toggle_monitor_command();
                 self.set_status_message(
                     format!("monitor-command {}", if on { "on" } else { "off" }),
+                    Severity::Info,
                 );
             }
             Command::SetMonitorSilence(secs) => {
                 let threshold = secs.map(std::time::Duration::from_secs);
                 self.active_window_mut().set_monitor_silence(threshold);
-                self.set_status_message(match secs {
-                    Some(n) => format!("monitor-silence {n}s"),
-                    None => "monitor-silence off".to_string(),
-                });
+                self.set_status_message(
+                    match secs {
+                        Some(n) => format!("monitor-silence {n}s"),
+                        None => "monitor-silence off".to_string(),
+                    },
+                    Severity::Info,
+                );
             }
             Command::ResizePane(dir) => {
                 let active = self.active_window().active();

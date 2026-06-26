@@ -597,7 +597,7 @@ async fn dispatch_input_event(
                         cmd @ (Command::ClosePopup | Command::OpenPopup { .. }),
                     ) => {
                         if let Err(e) = ctx.session.handle_command(cmd).await {
-                            ctx.session.set_status_message(e.to_string()).await;
+                            ctx.session.set_status_error(e.to_string()).await;
                         }
                     }
                     KeymapAction::Command(_) | KeymapAction::Pending | KeymapAction::Cancel => {
@@ -781,7 +781,7 @@ async fn dispatch_input_event(
                     }
                     Err(other) => {
                         if let Err(e) = ctx.session.handle_command(other).await {
-                            ctx.session.set_status_message(e.to_string()).await;
+                            ctx.session.set_status_error(e.to_string()).await;
                         }
                     }
                 },
@@ -891,21 +891,21 @@ impl ClientCtx<'_> {
                             Ok(t) => t,
                             Err(e) => {
                                 self.session
-                                    .set_status_message(format!("cannot switch to {name}: {e}"))
+                                    .set_status_error(format!("cannot switch to {name}: {e}"))
                                     .await;
                                 return false;
                             }
                         }
                     }
                     None => {
-                        self.session.set_status_message(format!("no session: {name}")).await;
+                        self.session.set_status_error(format!("no session: {name}")).await;
                         return false;
                     }
                 }
             }
         };
         if target.name() == self.session.name() {
-            self.session.set_status_message(format!("already on {name}")).await;
+            self.session.set_status_info(format!("already on {name}")).await;
             return false;
         }
         // `register_client` takes a `blocking_lock` internally, so keep it off the runtime.
@@ -920,7 +920,7 @@ impl ClientCtx<'_> {
             Ok(Ok(h)) => h,
             _ => {
                 self.session
-                    .set_status_message(format!("cannot switch to {name}"))
+                    .set_status_error(format!("cannot switch to {name}"))
                     .await;
                 return false;
             }
@@ -930,7 +930,7 @@ impl ClientCtx<'_> {
         let old = std::mem::replace(self.session, target);
         let old_id = std::mem::replace(self.client_id, new_handle.client_id);
         let _ = tokio::task::spawn_blocking(move || old.deregister_client(old_id)).await;
-        self.session.set_status_message(format!("switched to {name}")).await;
+        self.session.set_status_info(format!("switched to {name}")).await;
         true
     }
 }
@@ -1075,7 +1075,7 @@ async fn open_hints_overlay(session: &Arc<Session>) {
         }
     };
     if targets.is_empty() {
-        session.set_status_message("no hint targets".into()).await;
+        session.set_status_info("no hint targets".into()).await;
         return;
     }
     let state = plexy_glass_mux::HintState::new(targets, &alphabet);
@@ -1165,8 +1165,8 @@ impl ClientCtx<'_> {
             }
             TreeAction::KillSession(name) => {
                 match self.registry.kill(&name).await {
-                    Ok(()) => self.session.set_status_message(format!("killed {name}")).await,
-                    Err(e) => self.session.set_status_message(e.to_string()).await,
+                    Ok(()) => self.session.set_status_ok(format!("killed {name}")).await,
+                    Err(e) => self.session.set_status_error(e.to_string()).await,
                 }
                 self.session.notify.notify_one();
             }
@@ -1178,7 +1178,7 @@ impl ClientCtx<'_> {
                     }
                     t.notify.notify_one();
                 } else {
-                    self.session.set_status_message(format!("no session: {tgt}")).await;
+                    self.session.set_status_error(format!("no session: {tgt}")).await;
                 }
                 self.session.notify.notify_one();
             }
@@ -1190,7 +1190,7 @@ impl ClientCtx<'_> {
                     }
                     t.notify.notify_one();
                 } else {
-                    self.session.set_status_message(format!("no session: {tgt}")).await;
+                    self.session.set_status_error(format!("no session: {tgt}")).await;
                 }
                 self.session.notify.notify_one();
             }
@@ -1203,7 +1203,7 @@ impl ClientCtx<'_> {
                     t.mark_dirty();
                     t.notify.notify_one();
                 } else {
-                    self.session.set_status_message(format!("no session: {tgt}")).await;
+                    self.session.set_status_error(format!("no session: {tgt}")).await;
                 }
                 self.session.notify.notify_one();
             }
@@ -1216,7 +1216,7 @@ impl ClientCtx<'_> {
                     t.mark_dirty();
                     t.notify.notify_one();
                 } else {
-                    self.session.set_status_message(format!("no session: {tgt}")).await;
+                    self.session.set_status_error(format!("no session: {tgt}")).await;
                 }
                 self.session.notify.notify_one();
             }
@@ -1232,7 +1232,7 @@ impl ClientCtx<'_> {
                 let cfg = self.session.config_snapshot();
                 if cfg.sessions.iter().any(|t| t.name == new) {
                     self.session
-                        .set_status_message(format!(
+                        .set_status_error(format!(
                             "'{new}' is a declared session name — choose another"
                         ))
                         .await;
@@ -1248,7 +1248,7 @@ impl ClientCtx<'_> {
                         let mut m = self.session.window_manager.lock().await;
                         m.rename_tree_session(&old, &new);
                     }
-                    Err(e) => self.session.set_status_message(e.to_string()).await,
+                    Err(e) => self.session.set_status_error(e.to_string()).await,
                 }
                 self.session.notify.notify_one();
             }
@@ -1294,7 +1294,7 @@ impl ClientCtx<'_> {
         };
         if !landed {
             self.session
-                .set_status_message("history: block no longer available".into())
+                .set_status_error("history: block no longer available".into())
                 .await;
         }
         self.session.notify.notify_one();
@@ -1404,7 +1404,7 @@ async fn run_connection_verb(
         ConnVerb::Reload => {
             if let Err(e) = ctx.registry.reload_config().await {
                 ctx.session
-                    .set_status_message(format!("reload failed: {e}"))
+                    .set_status_error(format!("reload failed: {e}"))
                     .await;
             }
             // Even on error the registry applied the built-in defaults
@@ -1435,7 +1435,7 @@ async fn run_connection_verb(
         }
         ConnVerb::PasteBuffer(Some(name)) => {
             if let Err(e) = paste_named_buffer(ctx.session, ctx.registry, &name).await {
-                ctx.session.set_status_message(e).await;
+                ctx.session.set_status_error(e).await;
             }
         }
         ConnVerb::ChooseBuffer => {
@@ -1450,20 +1450,20 @@ async fn run_connection_verb(
         }
         ConnVerb::SetBuffer(text) => {
             let msg = set_buffer(ctx.registry, text).await;
-            ctx.session.set_status_message(msg).await;
+            ctx.session.set_status_ok(msg).await;
         }
         ConnVerb::SaveBuffer { name, path } => {
-            // Both arms carry the status-line text (success or error).
-            let msg = match save_buffer(ctx.registry, name, &path).await {
-                Ok(m) | Err(m) => m,
-            };
-            ctx.session.set_status_message(msg).await;
+            // Both arms carry the status-line text; the severity follows.
+            match save_buffer(ctx.registry, name, &path).await {
+                Ok(m) => ctx.session.set_status_ok(m).await,
+                Err(m) => ctx.session.set_status_error(m).await,
+            }
         }
         ConnVerb::LoadBuffer(path) => {
-            let msg = match load_buffer(ctx.registry, &path).await {
-                Ok(m) | Err(m) => m,
-            };
-            ctx.session.set_status_message(msg).await;
+            match load_buffer(ctx.registry, &path).await {
+                Ok(m) => ctx.session.set_status_ok(m).await,
+                Err(m) => ctx.session.set_status_error(m).await,
+            }
         }
     }
     false
@@ -1524,17 +1524,17 @@ async fn apply_overlay_result(
         OverlayKeyResult::Command(line) => {
             match plexy_glass_mux::command_prompt::parse(&line) {
                 Err(e) => {
-                    ctx.session.set_status_message(e.to_string()).await;
+                    ctx.session.set_status_error(e.to_string()).await;
                 }
                 Ok(cmd) => match ConnVerb::from_prompt(cmd) {
                     Ok(verb) => return run_connection_verb(ctx, keymap, verb).await,
                     Err(other) => match ctx.session.handle_prompt_command(other).await {
                         Ok(Some(msg)) => {
-                            ctx.session.set_status_message(msg).await;
+                            ctx.session.set_status_info(msg).await;
                         }
                         Ok(None) => {}
                         Err(e) => {
-                            ctx.session.set_status_message(e.to_string()).await;
+                            ctx.session.set_status_error(e.to_string()).await;
                         }
                     },
                 },
@@ -1857,11 +1857,11 @@ async fn copy_last_output(session: &Arc<Session>, registry: &Arc<SessionRegistry
         Some(text) => {
             let _ = crate::osc_actions::write_clipboard(text.as_bytes()).await;
             registry.push_paste_buffer(text.into_bytes()).await;
-            session.set_status_message("copied output of last command".into()).await;
+            session.set_status_ok("copied output of last command".into()).await;
             true
         }
         None => {
-            session.set_status_message(NO_BLOCKS_MSG.into()).await;
+            session.set_status_info(NO_BLOCKS_MSG.into()).await;
             false
         }
     }
@@ -1892,7 +1892,7 @@ async fn enter_block_mode(session: &Arc<Session>) {
         session.notify.notify_one();
     } else {
         session
-            .set_status_message("no command blocks in this pane".into())
+            .set_status_info("no command blocks in this pane".into())
             .await;
     }
 }
@@ -1903,7 +1903,7 @@ async fn enter_block_mode(session: &Arc<Session>) {
 async fn paste_top_buffer(session: &Arc<Session>, registry: &Arc<SessionRegistry>) {
     match registry.paste_buffer_top().await {
         Some(content) => paste_bytes(session, content).await,
-        None => session.set_status_message("no paste buffer".into()).await,
+        None => session.set_status_info("no paste buffer".into()).await,
     }
 }
 

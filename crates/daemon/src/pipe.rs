@@ -232,9 +232,9 @@ async fn drain(
     // audience.
     if let Some(session) = session.upgrade() {
         match reason {
-            PipeCloseReason::TooSlow => session.set_status_message(MSG_TOO_SLOW.into()).await,
+            PipeCloseReason::TooSlow => session.set_status_info(MSG_TOO_SLOW.into()).await,
             PipeCloseReason::ChildExited => {
-                session.set_status_message(MSG_CONSUMER_EXITED.into()).await;
+                session.set_status_info(MSG_CONSUMER_EXITED.into()).await;
             }
             _ => {}
         }

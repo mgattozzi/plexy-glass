@@ -190,9 +190,22 @@ pub struct PopupView<'a> {
     pub title: &'a str,
 }
 
+/// A resolved transient status-line message, ready to paint. The coordinator
+/// resolves the severity to a concrete glyph + colors (mirroring how
+/// [`BlockBorderColors`] are pre-resolved from config), so the compositor stays
+/// config-/palette-free.
+pub struct MessageView<'a> {
+    pub text: &'a str,
+    /// Leading glyph, already selected for the active glyph tier. The non-color
+    /// severity channel (legible without color).
+    pub glyph: &'a str,
+    pub fg: plexy_glass_emulator::Color,
+    pub bg: plexy_glass_emulator::Color,
+}
+
 // One optional layer per frame element (status/selection/overlay/message/
-// popup/blocks); a params struct would just rename the same nine positions.
-#[allow(clippy::too_many_arguments)] // nine optional frame layers; a params struct would just rename them
+// popup/blocks); a params struct would just rename the same positions.
+#[allow(clippy::too_many_arguments)] // optional frame layers; a params struct would just rename them
 pub fn compose(
     panes: &[PaneView<'_>],
     host_size: (u16, u16),
@@ -200,7 +213,7 @@ pub fn compose(
     placement: StatusPlacement,
     selection: Option<&crate::selection::Selection>,
     overlay: Option<&OverlayView<'_>>,
-    message: Option<&str>,
+    message: Option<MessageView<'_>>,
     popup: Option<&PopupView<'_>>,
     // blocks: None = feature disabled (no block work per frame).
     blocks: Option<&BlockBorderColors>,
@@ -820,18 +833,30 @@ pub fn compose(
         );
     }
 
-    // Transient status-line message: a full-width REVERSE bar on the bottom
-    // content row, shown only when no interactive overlay is open (the
-    // overlay owns that row when present).
+    // Transient status-line message: a themed bar on the bottom content row,
+    // shown only when no interactive overlay is open (the overlay owns that row
+    // when present). The leading glyph (a `✓`/`✗`/… severity cue) is the
+    // color-independent channel; the severity color is the secondary one.
     if let Some(msg) = message
         && overlay.is_none()
     {
         let row = pane_row_offset + pane_area_rows.saturating_sub(1);
-        let attrs = plexy_glass_emulator::Attrs::REVERSE;
-        for c in 0..host_cols {
-            put_char(&mut screen, row, c, ' ', attrs);
-        }
-        put_str(&mut screen, row, 0, &format!(" {msg}"), attrs, host_cols);
+        let plain = plexy_glass_emulator::Attrs::empty();
+        // Fill the whole row with the message background.
+        let blank = " ".repeat(host_cols as usize);
+        put_colored(&mut screen, row, 0, &blank, msg.fg, msg.bg, plain, host_cols);
+        // " <glyph> <text>": one-space pad, bold glyph, then the text.
+        let after_glyph = put_colored(
+            &mut screen,
+            row,
+            1,
+            msg.glyph,
+            msg.fg,
+            msg.bg,
+            plexy_glass_emulator::Attrs::BOLD,
+            host_cols,
+        );
+        put_colored(&mut screen, row, after_glyph + 1, msg.text, msg.fg, msg.bg, plain, host_cols);
     }
 
     // Floating popup pane: above panes/borders/status/cursor, below any
@@ -2522,8 +2547,8 @@ mod tests {
     }
 
     #[test]
-    fn status_message_paints_reverse_bottom_row() {
-        use plexy_glass_emulator::Attrs;
+    fn status_message_paints_themed_bottom_row() {
+        use plexy_glass_emulator::{Attrs, Color};
         let mut e = Emulator::new(4, 20);
         pane(&mut e, b"x ");
         let view = PaneView {
@@ -2538,6 +2563,8 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
+        let fg = Color::Rgb(0xc4, 0x74, 0x6e); // alert
+        let bg = Color::Rgb(0x28, 0x27, 0x27); // bg_bar
         let vs = compose(
             &[view],
             (4, 20),
@@ -2545,14 +2572,21 @@ mod tests {
             StatusPlacement::Bottom,
             None,
             None,
-            Some("no session: foo"),
+            Some(MessageView { text: "no session: foo", glyph: "✗", fg, bg }),
             None,
             None,
         plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
-        // Bottom row (3) is a REVERSE message bar; text rendered after a space.
-        assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "message bar is REVERSE");
-        assert_eq!(vs.cell(3, 1).unwrap().grapheme.as_str(), "n");
-        assert_eq!(vs.cell(3, 2).unwrap().grapheme.as_str(), "o");
+        // Bottom row (3): " ✗ <text>", themed, NOT the old REVERSE bar.
+        assert!(!vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "no longer REVERSE");
+        let glyph_cell = vs.cell(3, 1).unwrap();
+        assert_eq!(glyph_cell.grapheme.as_str(), "✗");
+        assert_eq!(glyph_cell.fg, fg);
+        assert_eq!(glyph_cell.bg, bg);
+        assert!(glyph_cell.attrs.contains(Attrs::BOLD), "glyph is bold");
+        // Glyph at col 1 (width 1), a pad at col 2, then the text from col 3.
+        assert_eq!(vs.cell(3, 3).unwrap().grapheme.as_str(), "n");
+        assert_eq!(vs.cell(3, 3).unwrap().fg, fg);
+        assert_eq!(vs.cell(3, 4).unwrap().grapheme.as_str(), "o");
     }
 
     #[test]
@@ -2580,7 +2614,12 @@ mod tests {
             StatusPlacement::Bottom,
             None,
             Some(&ov),
-            Some("this message must not show"),
+            Some(MessageView {
+                text: "this message must not show",
+                glyph: "ℹ",
+                fg: plexy_glass_emulator::Color::Default,
+                bg: plexy_glass_emulator::Color::Default,
+            }),
             None,
             None,
         plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));

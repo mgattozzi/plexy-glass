@@ -3,7 +3,10 @@
 mod coordinator;
 mod restore;
 
-use crate::{error::DaemonError, window_manager::WindowManager};
+use crate::{
+    error::DaemonError,
+    window_manager::{Severity, WindowManager},
+};
 use coordinator::render_coordinator;
 use plexy_glass_mux::{PaneId, VirtualScreen, WindowId};
 use plexy_glass_protocol::{NegotiatedKbd, ProtocolError, PtySize, SessionEntry, SpawnSpec};
@@ -1021,13 +1024,29 @@ impl Session {
     /// expired message is repainted away even if nothing else changes. Any
     /// prior pending wake is aborted first (mirroring `status_tick_handle`), so
     /// rapid messages neither leak tasks nor fire redundant notifies.
-    pub async fn set_status_message(self: &Arc<Self>, text: String) {
+    pub async fn set_status_message(self: &Arc<Self>, text: String, severity: Severity) {
         {
             let mut m = self.window_manager.lock().await;
-            m.set_status_message(text);
+            m.set_status_message(text, severity);
         }
         self.notify.notify_one();
         self.schedule_status_expiry_wake();
+    }
+
+    /// Neutral notice (`ℹ`, teal). Convenience over [`Self::set_status_message`].
+    pub async fn set_status_info(self: &Arc<Self>, text: String) {
+        self.set_status_message(text, Severity::Info).await;
+    }
+
+    /// Positive confirmation (`✓`, green). Convenience over [`Self::set_status_message`].
+    pub async fn set_status_ok(self: &Arc<Self>, text: String) {
+        self.set_status_message(text, Severity::Success).await;
+    }
+
+    /// Failure the user should notice (`✗`, red).
+    /// Convenience over [`Self::set_status_message`].
+    pub async fn set_status_error(self: &Arc<Self>, text: String) {
+        self.set_status_message(text, Severity::Error).await;
     }
 
     /// Schedule a single wake `STATUS_TTL` from now so an expired status-line

@@ -4,6 +4,7 @@ use crate::{error::DaemonError, window::Window};
 use mouse::{ClickHistory, PaneDrag, ResizeDrag, TabDrag};
 use plexy_glass_mux::{Overlay, PaneId, Rect, Selection, SplitDir, WindowId};
 use plexy_glass_protocol::{PtySize, SpawnSpec};
+use plexy_glass_config::GlyphTier;
 use std::sync::Arc;
 use std::time::Duration;
 // See window.rs: tokio::time::Instant is used so unit tests with
@@ -15,9 +16,56 @@ use tokio::time::Instant;
 /// on the next recompose. Mirrored by the `Session` wake timer.
 pub(crate) const STATUS_TTL: Duration = Duration::from_secs(3);
 
+/// Severity of a transient status-line message. Selects both the leading glyph
+/// (the primary, color-independent channel) and the palette color the message
+/// is painted in, so success vs error is legible even without color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+    /// Neutral notice (onboarding hints, "switched to X", monitor alerts).
+    Info,
+    /// A positive action completed (copied, reloaded, marked, killed).
+    Success,
+    /// A non-fatal caveat (e.g. some keymap bindings were skipped).
+    Warn,
+    /// A failure the user should notice (no such session, reload failed).
+    Error,
+}
+
+impl Severity {
+    /// Palette key resolved against the active palette for the message color.
+    pub fn palette_key(self) -> &'static str {
+        match self {
+            Severity::Info => "info",
+            Severity::Success => "ok",
+            Severity::Warn => "warn",
+            Severity::Error => "alert",
+        }
+    }
+
+    /// Leading glyph for the message, by glyph tier. This is the non-color
+    /// channel, so the severity reads correctly on a monochrome terminal and on
+    /// the `ascii` tier.
+    // ponytail: severity glyphs live here (not in the status crate's glyphs.rs)
+    // so message styling stays self-contained in the daemon. The daemon→status
+    // dependency is one-way, so a `Severity`-keyed table can't live over there.
+    pub fn glyph(self, tier: GlyphTier) -> &'static str {
+        match (tier, self) {
+            (GlyphTier::Ascii, Severity::Info) => "i",
+            (GlyphTier::Ascii, Severity::Success) => "+",
+            (GlyphTier::Ascii, Severity::Warn) => "!",
+            (GlyphTier::Ascii, Severity::Error) => "x",
+            (_, Severity::Info) => "ℹ",
+            (_, Severity::Success) => "✓",
+            (_, Severity::Warn) => "⚠",
+            (_, Severity::Error) => "✗",
+        }
+    }
+}
+
 /// A transient status-line message and the instant it stops being shown.
 struct StatusMessage {
     text: String,
+    severity: Severity,
     expires_at: Instant,
 }
 
@@ -224,9 +272,10 @@ impl WindowManager {
 
     /// Set the transient status-line message, expiring `STATUS_TTL` from now.
     /// Replaces any prior message.
-    pub fn set_status_message(&mut self, text: String) {
+    pub fn set_status_message(&mut self, text: String, severity: Severity) {
         self.status_message = Some(StatusMessage {
             text,
+            severity,
             expires_at: Instant::now() + STATUS_TTL,
         });
     }
@@ -242,6 +291,16 @@ impl WindowManager {
             self.status_message = None;
         }
         self.status_message.as_ref().map(|m| m.text.as_str())
+    }
+
+    /// Severity of the currently-set message (a peek that does not clear). The
+    /// coordinator reads this just before [`Self::take_active_message`] so it can
+    /// style the bar; `Info` is a harmless default when no message is set.
+    pub fn active_severity(&self) -> Severity {
+        self.status_message
+            .as_ref()
+            .map(|m| m.severity)
+            .unwrap_or(Severity::Info)
     }
 
     /// Read-only access to the in-flight selection, if any. Used by the
@@ -373,7 +432,9 @@ impl WindowManager {
             }
         }
         let alert_edge = if let Some(text) = message {
-            self.set_status_message(text);
+            // ponytail: monitor alerts are Info; the text already says what
+            // happened. Refining "done: exit N" to Warn/Error is out of scope.
+            self.set_status_message(text, Severity::Info);
             true
         } else {
             false
@@ -411,7 +472,7 @@ impl WindowManager {
             }
         }
         if let Some(text) = message {
-            self.set_status_message(text);
+            self.set_status_message(text, Severity::Info);
             true
         } else {
             false

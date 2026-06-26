@@ -252,8 +252,12 @@ pub(super) async fn render_coordinator(
 
             let status = StatusLine { left, middle: Vec::new(), right };
             let selection = m.selection().cloned();
-            // Transient status-line message (cleared lazily here when expired).
-            let message: Option<String> = m.take_active_message().map(str::to_string);
+            // Transient status-line message (cleared lazily here when expired);
+            // peek the severity before taking the text so it can be styled.
+            let message_severity = m.active_severity();
+            let message: Option<(String, crate::window_manager::Severity)> = m
+                .take_active_message()
+                .map(|t| (t.to_string(), message_severity));
 
             // Build the active overlay's render view (rename prompt / help).
             // `help_lines` is deferred-init so the Help view can borrow it.
@@ -309,6 +313,20 @@ pub(super) async fn render_coordinator(
             let block_colors = block_border_colors(&session.config_snapshot());
             let block_select = block_select_color(&session.config_snapshot());
 
+            // Resolve the transient message's glyph + colors from the current
+            // config (severity → palette color + tier glyph), mirroring how the
+            // block colors are pre-resolved so the compositor stays palette-free.
+            let message_view = message.as_ref().map(|(text, severity)| {
+                let cfg = session.config_snapshot();
+                let (fg, bg) = message_colors(&cfg, *severity);
+                plexy_glass_mux::MessageView {
+                    text: text.as_str(),
+                    glyph: severity.glyph(cfg.glyph_tier),
+                    fg,
+                    bg,
+                }
+            });
+
             plexy_glass_mux::compositor::compose(
                 &views,
                 (host.rows, host.cols),
@@ -316,7 +334,7 @@ pub(super) async fn render_coordinator(
                 placement,
                 selection.as_ref(),
                 overlay_view.as_ref(),
-                message.as_deref(),
+                message_view,
                 popup_view.as_ref(),
                 block_colors.as_ref(),
                 block_select,
@@ -576,6 +594,32 @@ pub(super) fn hint_colors(cfg: &plexy_glass_config::Config) -> plexy_glass_mux::
         label_bg: resolve(&cfg.hints.label_bg, (196, 178, 138)),
         match_fg: resolve(&cfg.hints.match_fg, (135, 169, 135)),
     }
+}
+
+/// Resolve `(fg, bg)` for a transient status-line message of the given severity.
+/// `fg` is the severity's palette color; `bg` is `bg_bar`, so the bar blends
+/// with the themed status bar instead of the harsh global inverse. Fallbacks
+/// match the built-in kanagawa-dragon palette (crates/config/src/default.rs).
+pub(super) fn message_colors(
+    cfg: &plexy_glass_config::Config,
+    severity: crate::window_manager::Severity,
+) -> (plexy_glass_emulator::Color, plexy_glass_emulator::Color) {
+    use crate::window_manager::Severity;
+    let resolve = |name: &str, def: (u8, u8, u8)| {
+        let rgb = plexy_glass_status::resolve_color(name, &cfg.palette).unwrap_or(
+            plexy_glass_status::Rgb { r: def.0, g: def.1, b: def.2 },
+        );
+        plexy_glass_emulator::Color::Rgb(rgb.r, rgb.g, rgb.b)
+    };
+    let fg_def = match severity {
+        Severity::Info => (0x94, 0x9f, 0xb5),    // info
+        Severity::Success => DEFAULT_OK_RGB,     // ok
+        Severity::Warn => (0xc4, 0xb2, 0x8a),    // warn
+        Severity::Error => DEFAULT_ALERT_RGB,    // alert
+    };
+    let fg = resolve(severity.palette_key(), fg_def);
+    let bg = resolve("bg_bar", (0x28, 0x27, 0x27)); // bg_bar
+    (fg, bg)
 }
 
 /// Resolve the block-mode selection-bracket color from config. Always returns a

@@ -70,16 +70,18 @@ async fn status_message_set_and_lazy_expire() {
     )
     .unwrap();
     assert_eq!(m.take_active_message(), None);
-    m.set_status_message("no session: foo".into());
+    m.set_status_message("no session: foo".into(), Severity::Error);
     assert_eq!(m.take_active_message(), Some("no session: foo"));
+    assert_eq!(m.active_severity(), Severity::Error);
     // Force expiry and confirm it clears in place on the next read.
     m.status_message.as_mut().unwrap().expires_at = Instant::now() - Duration::from_secs(1);
     assert_eq!(m.take_active_message(), None);
     assert!(m.status_message.is_none(), "expired message cleared in place");
     // A newer message replaces the prior one.
-    m.set_status_message("first".into());
-    m.set_status_message("second".into());
+    m.set_status_message("first".into(), Severity::Info);
+    m.set_status_message("second".into(), Severity::Success);
     assert_eq!(m.take_active_message(), Some("second"));
+    assert_eq!(m.active_severity(), Severity::Success);
 }
 
 #[tokio::test]
@@ -3244,4 +3246,21 @@ async fn move_window_clamp_to_noop() {
         ids,
         "order unchanged on clamp-to-noop"
     );
+}
+
+#[test]
+fn severity_maps_to_palette_key_and_tier_glyph() {
+    use plexy_glass_config::GlyphTier;
+    assert_eq!(Severity::Info.palette_key(), "info");
+    assert_eq!(Severity::Success.palette_key(), "ok");
+    assert_eq!(Severity::Warn.palette_key(), "warn");
+    assert_eq!(Severity::Error.palette_key(), "alert");
+
+    assert_eq!(Severity::Success.glyph(GlyphTier::Unicode), "✓");
+    assert_eq!(Severity::Error.glyph(GlyphTier::Nerd), "✗");
+    // ascii tier degrades to plain letters (no tofu on a basic font).
+    assert_eq!(Severity::Success.glyph(GlyphTier::Ascii), "+");
+    assert_eq!(Severity::Error.glyph(GlyphTier::Ascii), "x");
+    assert_eq!(Severity::Info.glyph(GlyphTier::Ascii), "i");
+    assert_eq!(Severity::Warn.glyph(GlyphTier::Ascii), "!");
 }

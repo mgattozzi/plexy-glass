@@ -38,7 +38,10 @@ pub use blocks::{
 pub use borders::BlockBorderColors;
 pub use buffer::{BufferAction, BufferEntry, BufferOutcome, BufferPickerState, handle_buffers};
 pub use command_prompt::{Completion, FocusTarget, ParseError, PromptCommand, SwapTarget};
-pub use compositor::{HintColors, OverlayView, PaneDragRole, PaneView, PopupView, StatusPlacement, popup_rect};
+pub use compositor::{
+    HintColors, MessageView, OverlayView, PaneDragRole, PaneView, PopupView, StatusPlacement,
+    popup_rect,
+};
 pub use copy_mode::{CopyMode, CopyModeAction, MatchSpan, SearchState};
 pub use diff::{DiffRenderer, GraphicsCaps};
 pub use virtual_screen::VisiblePlacement;
