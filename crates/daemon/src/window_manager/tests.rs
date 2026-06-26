@@ -223,6 +223,165 @@ async fn click_in_other_pane_changes_focus() {
     assert_eq!(m.active_window().active(), PaneId(0));
 }
 
+/// A plain click (press + release, no drag) on the cursor's own row injects
+/// arrow keys to reposition the shell cursor (even with no OSC 133 prompt
+/// mark) and the synthesized arrows reach the child. A drag, by contrast,
+/// becomes a selection and injects nothing. Exercises the full `handle_mouse`
+/// ladder with a `/bin/cat` child that echoes whatever it receives.
+#[tokio::test]
+async fn click_release_on_cursor_row_repositions_without_a_mark() {
+    use bytes::Bytes;
+    use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
+
+    async fn read_for(rx: &mut tokio::sync::broadcast::Receiver<Bytes>, ms: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(ms);
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let step = (deadline - now).min(Duration::from_millis(150));
+            match tokio::time::timeout(step, rx.recv()).await {
+                Ok(Ok(chunk)) => out.extend_from_slice(&chunk),
+                Ok(Err(_)) => break,          // channel closed or lagged
+                Err(_) if !out.is_empty() => break, // idle after data → done
+                Err(_) => {}                  // still idle, keep waiting to deadline
+            }
+        }
+        out
+    }
+    let press = |row, col| MouseEvent {
+        kind: MouseKind::Press,
+        button: MouseButton::Left,
+        modifiers: MouseModifiers::default(),
+        row,
+        col,
+    };
+    let at = |kind, row, col| MouseEvent {
+        kind,
+        button: MouseButton::Left,
+        modifiers: MouseModifiers::default(),
+        row,
+        col,
+    };
+
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(), // `/bin/cat` echoes input back as output
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    let pane = m.active_window().pane(PaneId(0)).cloned().unwrap();
+    // Cursor at (row 5, col 8), NO PROMPT_END mark, primary screen.
+    pane.with_screen_mut(|s| {
+        s.cursor.row = 5;
+        s.cursor.col = 8;
+    });
+
+    // Physical (6,6) → pane-local (5,5): the frame inset is one cell on each
+    // side (viewport origin (1,1)), and the status bar is unset (offset 0).
+    let mut rx = pane.subscribe_output();
+    m.handle_mouse(press(6, 6)).await.unwrap();
+    m.handle_mouse(at(MouseKind::Release, 6, 6)).await.unwrap();
+    // cursor col 8 → click col 5 = 3 graphemes left → three "\x1b[D" Left
+    // arrows. cat echoes them back (its cooked PTY renders ESC as caret
+    // notation, so match the arrow terminators rather than the raw ESC form).
+    let echoed = read_for(&mut rx, 2000).await;
+    let lefts = echoed.iter().filter(|&&b| b == b'D').count();
+    let rights = echoed.iter().filter(|&&b| b == b'C').count();
+    assert_eq!((lefts, rights), (3, 0), "expected 3 Left arrows, got {echoed:?}");
+
+    // A DRAG (press, move to a different cell, release) must NOT reposition, it is
+    // a selection. No arrows should be injected.
+    pane.with_screen_mut(|s| {
+        s.cursor.row = 5;
+        s.cursor.col = 8;
+    });
+    let mut rx2 = pane.subscribe_output();
+    m.handle_mouse(press(6, 6)).await.unwrap();
+    m.handle_mouse(at(MouseKind::Move, 6, 9)).await.unwrap();
+    m.handle_mouse(at(MouseKind::Release, 6, 9)).await.unwrap();
+    let dragged = read_for(&mut rx2, 400).await;
+    assert!(
+        !dragged.iter().any(|&b| b == b'D' || b == b'C'),
+        "a drag must select, not inject cursor-movement arrows, got {dragged:?}"
+    );
+
+    // A one-cell pointer DRIFT during a click (within the dead-zone) must still
+    // reposition and not degrade into a one-character selection/copy. Press (5,5),
+    // nudge one cell to (5,6), release → repositions to the anchor col 5.
+    pane.with_screen_mut(|s| {
+        s.cursor.row = 5;
+        s.cursor.col = 8;
+    });
+    let mut rx3 = pane.subscribe_output();
+    m.handle_mouse(press(6, 6)).await.unwrap();
+    m.handle_mouse(at(MouseKind::Move, 6, 7)).await.unwrap();
+    m.handle_mouse(at(MouseKind::Release, 6, 7)).await.unwrap();
+    let jittered = read_for(&mut rx3, 2000).await;
+    assert_eq!(
+        jittered.iter().filter(|&&b| b == b'D').count(),
+        3,
+        "a one-cell drift must still reposition (dead-zone), got {jittered:?}"
+    );
+
+    let _ = pane.send_input(Bytes::from_static(&[0x04])).await; // EOF
+}
+
+/// Regression: the click dead-zone must NOT swallow an explicit word/line
+/// selection whose span is ≤ 1 column. Double-clicking a TWO-character word
+/// (e.g. `ls`) yields anchor..head with Δcol == 1, which `is_click()` reports
+/// true, but it is a word selection (double-click), so it must still copy.
+#[tokio::test]
+async fn double_click_on_a_two_char_word_still_copies() {
+    use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
+    let ev = |kind, row, col| MouseEvent {
+        kind,
+        button: MouseButton::Left,
+        modifiers: MouseModifiers::default(),
+        row,
+        col,
+    };
+
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    let pane = m.active_window().pane(PaneId(0)).cloned().unwrap();
+    // "  ls  " on row 5; cursor parked elsewhere so the first click's reposition
+    // path is a no-op (wrong row) and can't interfere.
+    pane.with_screen_mut(|s| {
+        s.cursor.row = 0;
+        s.cursor.col = 0;
+        for (i, ch) in "  ls  ".chars().enumerate() {
+            s.active.rows[5].cells[i].grapheme = ch.to_string().into();
+        }
+    });
+    assert_eq!(m.take_active_message(), None);
+
+    // Double-click 'l' at physical (6,3) → pane-local (5,2). Two press/release
+    // pairs in quick succession → the second press classifies as count==2 →
+    // word_at selects "ls".
+    for _ in 0..2 {
+        m.handle_mouse(ev(MouseKind::Press, 6, 3)).await.unwrap();
+        m.handle_mouse(ev(MouseKind::Release, 6, 3)).await.unwrap();
+    }
+    let msg = m.take_active_message();
+    assert!(
+        msg.is_some_and(|s| s.starts_with("copied")),
+        "double-clicking a 2-char word must copy it, not be swallowed by the dead-zone"
+    );
+}
+
 #[tokio::test]
 async fn next_window_cycles() {
     let notify = Arc::new(Notify::new());

@@ -52,6 +52,16 @@ impl Selection {
     pub fn is_empty(&self) -> bool {
         self.anchor == self.head
     }
+
+    /// True when the gesture never left a one-cell dead-zone of the click-down
+    /// point (same row, at most one column of drift), i.e. a click, not a
+    /// drag. Mouse reporting is cell-granular, so a firm trackpad press easily
+    /// nudges a cell or two; treating that as a click (rather than a
+    /// one-character selection) keeps click-to-reposition from degrading into a
+    /// stray single-character copy on imprecise hardware.
+    pub fn is_click(&self) -> bool {
+        self.anchor.0 == self.head.0 && self.anchor.1.abs_diff(self.head.1) <= 1
+    }
 }
 
 struct SelectionCells {
@@ -277,6 +287,20 @@ mod tests {
         let mut s = Selection::start(PaneId(0), 1, 2);
         s.extend(3, 5, Rect::new(0, 0, 10, 10));
         assert_eq!(s.head, (3, 5));
+    }
+
+    #[test]
+    fn is_click_holds_within_a_one_cell_dead_zone() {
+        let mut s = Selection::start(PaneId(0), 5, 5);
+        assert!(s.is_click(), "no drift is a click");
+        for head in [(5, 4), (5, 6)] {
+            s.head = head;
+            assert!(s.is_click(), "{head:?}: one-cell drift is still a click");
+        }
+        for head in [(5, 7), (5, 3), (6, 5)] {
+            s.head = head;
+            assert!(!s.is_click(), "{head:?}: a real drag is not a click");
+        }
     }
 
     #[test]

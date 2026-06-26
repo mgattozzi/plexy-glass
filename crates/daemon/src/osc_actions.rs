@@ -145,31 +145,54 @@ pub async fn read_clipboard() -> Vec<u8> {
     Vec::new()
 }
 
-/// Move the shell cursor in `pane` to local column `click_col` by
-/// synthesizing arrow-key bytes. Only fires when the cursor's row carries a
-/// `PROMPT_END` (`OSC 133;B`) mark whose column is <= `click_col`.
-/// Returns `Ok(false)` if no movement was performed; `Ok(true)` if arrow
-/// keys were sent.
-pub async fn click_to_position(pane: &crate::pane::Pane, click_col: u16) -> Result<bool, DaemonError> {
+/// Reposition the shell cursor to the clicked cell by synthesizing arrow-key
+/// bytes, Ghostty-style cursor-click-to-move. `click_row`/`click_col` are
+/// pane-local (viewport == live grid; the caller only invokes this on the live,
+/// unscrolled view).
+///
+/// Fires only when the click lands on the cursor's OWN row of the primary
+/// screen (the editable line), so a click on output, scrollback, or inside a
+/// full-screen (alt-screen) application never injects stray arrows. An
+/// `OSC 133;B` (`PROMPT_END`) mark, when present, is honored as a FLOOR so a
+/// click in the prompt prefix can't drag the cursor backwards into it, but it
+/// is NOT required: most shells running inside a multiplexer never emit it
+/// (the outer terminal's shell integration injects only into the shell it
+/// spawns directly), and the heuristic matches what a bare terminal does.
+///
+/// Returns `Ok(false)` if no movement was performed; `Ok(true)` if the click
+/// was consumed as a reposition (arrow keys sent, or already on target).
+pub async fn click_to_position(
+    pane: &crate::pane::Pane,
+    click_row: u16,
+    click_col: u16,
+) -> Result<bool, DaemonError> {
     let plan = pane.with_screen(|s| {
+        // Only the cursor's own row is the editable line.
+        if click_row != s.cursor.row {
+            return None;
+        }
+        // Never move the cursor of a full-screen app; it owns the grid.
+        if s.modes.contains(plexy_glass_emulator::Modes::ALT_SCREEN) {
+            return None;
+        }
         let cursor = &s.cursor;
         let row = s.active.rows.get(cursor.row as usize);
-        let row_mark = row.map(|r| r.mark).unwrap_or_default();
-        row_mark.prompt_end_col().and_then(|prompt_col| {
-            if click_col < prompt_col {
-                return None; // click is inside the prompt itself
-            }
-            // The shell's line editor moves one GRAPHEME per arrow press, but a
-            // wide (CJK/emoji) grapheme spans two grid columns. Count real
-            // grapheme cells (skipping wide spacers) in the column span so the
-            // synthesized arrows land on the click target instead of
-            // overshooting by one per wide char.
-            let (lo, hi) = (cursor.col.min(click_col), cursor.col.max(click_col));
-            let count = row
-                .map(|r| graphemes_in_span(&r.cells, lo, hi))
-                .unwrap_or(usize::from(hi - lo));
-            Some((click_col > cursor.col, count))
-        })
+        // PROMPT_END is a floor, not a gate: refuse clicks in the prompt prefix
+        // when we know where input starts, but still fire when it's absent.
+        if let Some(prompt_col) = row.and_then(|r| r.mark.prompt_end_col())
+            && click_col < prompt_col
+        {
+            return None;
+        }
+        // The line editor moves one GRAPHEME per arrow press, but a wide
+        // (CJK/emoji) grapheme spans two grid columns. Count real grapheme cells
+        // (skipping wide spacers) so the arrows land on the click target instead
+        // of overshooting by one per wide char.
+        let (lo, hi) = (cursor.col.min(click_col), cursor.col.max(click_col));
+        let count = row
+            .map(|r| graphemes_in_span(&r.cells, lo, hi))
+            .unwrap_or(usize::from(hi - lo));
+        Some((click_col > cursor.col, count))
     });
 
     let Some((rightward, count)) = plan else {
@@ -303,34 +326,87 @@ mod tests {
         assert_eq!(graphemes_in_span(&cells, 0, 5), 4);
     }
 
-    #[tokio::test]
-    async fn click_to_position_emits_arrow_keys() {
+    fn cat_pane() -> crate::pane::Pane {
         use crate::pane::Pane;
         use plexy_glass_mux::PaneId;
         use plexy_glass_protocol::{PtySize, SpawnSpec};
         use std::sync::Arc;
         use tokio::sync::Notify;
-
         let size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
-        let spec = SpawnSpec {
-            program: "/bin/cat".into(),
-            args: vec![],
-            env: vec![],
-            cwd: None,
-        };
+        let spec = SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let p = Pane::spawn(PaneId(0), spec, size, Arc::new(Notify::new()), None, cfg).unwrap();
-        // Inject a PROMPT_END mark at row 0 col 2 (via the row mark) and put
-        // cursor at col 2.
+        Pane::spawn(PaneId(0), spec, size, Arc::new(Notify::new()), None, cfg).unwrap()
+    }
+
+    #[tokio::test]
+    async fn click_to_position_emits_arrow_keys() {
+        let p = cat_pane();
+        // PROMPT_END at row 0 col 2; cursor at col 2; click the same row at col 6.
         p.with_screen_mut(|s| {
             s.active.rows[0].mark.set_prompt_end(2);
             s.cursor.row = 0;
             s.cursor.col = 2;
         });
-        // Click at col 6 → expect movement (4 right-arrow sequences).
-        let moved = click_to_position(&p, 6).await.unwrap();
-        assert!(moved);
-        // Send EOF so cat exits cleanly.
+        assert!(click_to_position(&p, 0, 6).await.unwrap());
+        let _ = p.send_input(Bytes::from_static(&[0x04])).await; // EOF
+    }
+
+    #[tokio::test]
+    async fn click_to_position_fires_without_a_prompt_mark() {
+        // The fix: a shell with no OSC 133 integration (no PROMPT_END mark) must
+        // STILL reposition on a click on the cursor's row, matching a bare
+        // terminal. Regression guard for the dead-on-non-integrated-shell bug.
+        let p = cat_pane();
+        p.with_screen_mut(|s| {
+            s.cursor.row = 5;
+            s.cursor.col = 8;
+        });
+        assert!(
+            click_to_position(&p, 5, 4).await.unwrap(),
+            "click on the cursor row must reposition even without OSC 133;B"
+        );
+        let _ = p.send_input(Bytes::from_static(&[0x04])).await;
+    }
+
+    #[tokio::test]
+    async fn click_to_position_ignores_clicks_off_the_cursor_row() {
+        let p = cat_pane();
+        p.with_screen_mut(|s| {
+            s.cursor.row = 5;
+            s.cursor.col = 8;
+        });
+        // Click on row 3 (not the cursor's row 5) → not the editable line.
+        assert!(!click_to_position(&p, 3, 4).await.unwrap());
+        let _ = p.send_input(Bytes::from_static(&[0x04])).await;
+    }
+
+    #[tokio::test]
+    async fn click_to_position_skips_alt_screen() {
+        let p = cat_pane();
+        p.with_screen_mut(|s| {
+            s.modes.insert(plexy_glass_emulator::Modes::ALT_SCREEN);
+            s.cursor.row = 5;
+            s.cursor.col = 8;
+        });
+        assert!(
+            !click_to_position(&p, 5, 4).await.unwrap(),
+            "must not inject arrows into a full-screen application"
+        );
+        let _ = p.send_input(Bytes::from_static(&[0x04])).await;
+    }
+
+    #[tokio::test]
+    async fn click_to_position_respects_the_prompt_prefix_floor() {
+        let p = cat_pane();
+        p.with_screen_mut(|s| {
+            s.active.rows[0].mark.set_prompt_end(4);
+            s.cursor.row = 0;
+            s.cursor.col = 7;
+        });
+        // Click at col 2 (< prompt input col 4) → refuse, it's the prompt prefix.
+        assert!(!click_to_position(&p, 0, 2).await.unwrap());
+        // Click at col 5 (>= 4) → reposition.
+        assert!(click_to_position(&p, 0, 5).await.unwrap());
         let _ = p.send_input(Bytes::from_static(&[0x04])).await;
     }
 }

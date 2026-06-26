@@ -626,13 +626,12 @@ impl WindowManager {
             return Ok(());
         }
 
-        // OSC 133 click-to-position. If a prompt mark on the current row is
-        // before the click column, walk the shell cursor with arrow keys.
-        if let Some(pane) = self.active_window().pane(pane_id).cloned()
-            && crate::osc_actions::click_to_position(&pane, local_col).await?
-        {
-            return Ok(());
-        }
+        // NOTE: cursor-click-to-move (click_to_position) is handled on RELEASE,
+        // not here (see `handle_left_release`). Firing on the press would
+        // consume the event before a drag could turn it into a selection, so
+        // you could never drag-select the prompt line. A plain click (press +
+        // release with no intervening drag) leaves an empty selection, which
+        // release detects and repositions the cursor for.
 
         // Multi-click classification: double = Word, triple = Line. Word/line
         // boundaries are read through the pane's scroll position so a click made
@@ -659,7 +658,18 @@ impl WindowManager {
                 None
             }
         });
+        // A word/line selection (double/triple-click) is an explicit selection,
+        // never a reposition, so exempt it from the click dead-zone at release.
+        self.selection_word_line = new_sel.is_some();
         self.selection = new_sel.or_else(|| Some(Selection::start(pane_id, local_row, local_col)));
+        // Remember whether the press landed on the live (unscrolled) view, so a
+        // later release can tell a click-to-reposition (anchor in live-grid
+        // space) from a click on scrollback that was wheeled to the bottom.
+        self.selection_press_scroll = self
+            .active_window()
+            .pane(pane_id)
+            .map(|p| p.scroll_offset())
+            .unwrap_or(0);
         Ok(())
     }
 
@@ -681,7 +691,30 @@ impl WindowManager {
         let Some(sel) = self.selection.take() else {
             return Ok(());
         };
-        if sel.is_empty() {
+        if !self.selection_word_line && sel.is_click() {
+            // A click (no drag beyond the one-cell dead-zone, and not an
+            // explicit word/line double/triple-click): on the live,
+            // unscrolled view, treat a click on the cursor's OWN row as a cursor
+            // reposition (Ghostty-style cursor-click-to-move). Both the press
+            // (`selection_press_scroll`) and the current view must be unscrolled,
+            // so the press anchor is in the same live-grid space as the cursor.
+            //
+            // Deliberate minor limitations (kept simple, the move is instant,
+            // not deferred behind a multi-click timer): the first click of a
+            // double/triple-click ON THE INPUT LINE repositions before the
+            // word/line is selected (the selection still copies; rare, since
+            // double-clicking output rows leaves the cursor's row untouched), and
+            // a click on a non-shell input row (a REPL, or a raw password prompt)
+            // still injects arrows, exactly as a bare terminal would.
+            if self.selection_press_scroll == 0
+                && let Some(pane) = self.active_window().pane(sel.source_pane).cloned()
+                && pane.scroll_offset() == 0
+            {
+                let (row, col) = sel.anchor;
+                if crate::osc_actions::click_to_position(&pane, row, col).await? {
+                    self.notify.notify_one();
+                }
+            }
             return Ok(());
         }
         let mut copied: Option<String> = None;

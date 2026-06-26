@@ -27,7 +27,9 @@ integration.
   [declarative sessions](docs/configuration.md#session--declarative-sessions)).
 - Multiple clients attached to the same session
 - Copy mode with search
-- Full mouse support, including click-to-focus, drag-resize on split borders,
+- Full mouse support, including click-to-focus, **click on the shell prompt to
+  move the cursor there** (Ghostty-style; works with any shell, no shell
+  integration required, and drag still selects), drag-resize on split borders,
   **Alt+drag a window tab to reorder windows**, and **Alt+drag a pane onto
   another pane in the same window to swap their positions** (plain click still
   selects; the modifier is configurable, see

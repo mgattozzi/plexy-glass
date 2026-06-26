@@ -110,6 +110,16 @@ pub struct WindowManager {
     /// In-flight mouse selection (left-press → drag → release). `None` between
     /// drags.
     selection: Option<Selection>,
+    /// The active pane's scroll offset captured at the press that began the
+    /// in-flight `selection`. Click-to-reposition only fires when the press
+    /// landed on the live (offset 0) view, so the press anchor is in live-grid
+    /// space; re-checking only at release would miss a press-on-scrollback that
+    /// was wheeled to the bottom before release.
+    selection_press_scroll: u32,
+    /// True when the in-flight `selection` is an explicit word/line selection
+    /// (double/triple-click), so the click dead-zone must NOT treat its small
+    /// span as a reposition (a two-character word like `ls` still copies).
+    selection_word_line: bool,
     /// Active config shared with every pane this manager spawns. Hot reload
     /// swaps this Arc and walks the panes calling `update_config`.
     config: Arc<plexy_glass_config::Config>,
@@ -205,6 +215,8 @@ impl WindowManager {
             session_cwd: None,
             death_tx,
             selection: None,
+            selection_press_scroll: 0,
+            selection_word_line: false,
             config,
             resize_drag: None,
             tab_drag: None,
