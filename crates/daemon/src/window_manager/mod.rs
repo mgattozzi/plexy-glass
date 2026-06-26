@@ -173,19 +173,6 @@ impl WindowManager {
         death_tx: Option<mpsc::Sender<PaneId>>,
         config: Arc<plexy_glass_config::Config>,
     ) -> Result<Self, DaemonError> {
-        Self::new_with_preseed(first_spec, host_size, notify, death_tx, config, None)
-    }
-
-    /// Like `new`, but seeds the first window's first pane with restored
-    /// scrollback (session restore). `preseed` is `None` for fresh sessions.
-    pub fn new_with_preseed(
-        first_spec: SpawnSpec,
-        host_size: PtySize,
-        notify: Arc<Notify>,
-        death_tx: Option<mpsc::Sender<PaneId>>,
-        config: Arc<plexy_glass_config::Config>,
-        preseed: Option<Vec<plexy_glass_emulator::Row>>,
-    ) -> Result<Self, DaemonError> {
         let viewport = host_viewport(host_size);
         let first = Window::spawn_first(
             WindowId(0),
@@ -196,7 +183,6 @@ impl WindowManager {
             Arc::clone(&notify),
             death_tx.clone(),
             Arc::clone(&config),
-            preseed,
         )?;
         Ok(Self {
             windows: vec![first],
@@ -520,24 +506,12 @@ impl WindowManager {
         self.default_spec.program = program.to_string();
     }
 
-    /// Spawn a new window using a caller-supplied spec (used by session
-    /// restore, where every restored window's first pane gets its own cwd).
+    /// Spawn a new window using a caller-supplied spec (declared-template
+    /// builds give every window's first pane its own cwd).
     pub fn new_window_with_spec(
         &mut self,
         spec: SpawnSpec,
         name: String,
-    ) -> Result<(), DaemonError> {
-        self.new_window_with_spec_preseed(spec, name, None)
-    }
-
-    /// Like `new_window_with_spec`, but seeds the first pane's restored
-    /// scrollback (session restore). `preseed` is `None` for interactive
-    /// new-windows.
-    pub fn new_window_with_spec_preseed(
-        &mut self,
-        spec: SpawnSpec,
-        name: String,
-        preseed: Option<Vec<plexy_glass_emulator::Row>>,
     ) -> Result<(), DaemonError> {
         let id = WindowId(self.next_window_id);
         self.next_window_id += 1;
@@ -552,34 +526,20 @@ impl WindowManager {
             Arc::clone(&self.notify),
             self.death_tx.clone(),
             Arc::clone(&self.config),
-            preseed,
         )?;
         self.windows.push(window);
         self.active = self.windows.len() - 1;
         Ok(())
     }
 
-    /// Split an existing window's pane at DFS index `target_dfs_idx`. Used by
-    /// session restore.
+    /// Split an existing window's pane at DFS index `target_dfs_idx`
+    /// (declared-template builds).
     pub fn split_window_at_dfs(
         &mut self,
         window_idx: usize,
         target_dfs_idx: u32,
         dir: SplitDir,
         spec: SpawnSpec,
-    ) -> Result<(), DaemonError> {
-        self.split_window_at_dfs_preseed(window_idx, target_dfs_idx, dir, spec, None)
-    }
-
-    /// Like `split_window_at_dfs`, but seeds the new pane's restored scrollback
-    /// (session restore). `preseed` is `None` for declared-template builds.
-    pub fn split_window_at_dfs_preseed(
-        &mut self,
-        window_idx: usize,
-        target_dfs_idx: u32,
-        dir: SplitDir,
-        spec: SpawnSpec,
-        preseed: Option<Vec<plexy_glass_emulator::Row>>,
     ) -> Result<(), DaemonError> {
         let viewport = self.viewport();
         let new_id = self.alloc_pane_id();
@@ -600,7 +560,6 @@ impl WindowManager {
             Arc::clone(&self.notify),
             self.death_tx.clone(),
             Arc::clone(&self.config),
-            preseed,
         )
     }
 
@@ -707,7 +666,6 @@ impl WindowManager {
             Arc::clone(&self.notify),
             self.death_tx.clone(),
             Arc::clone(&self.config),
-            None,
         )?;
         // Last-wins: only replace (and kill) the old popup once the new one
         // actually spawned, so a spawn failure can't destroy the old popup.

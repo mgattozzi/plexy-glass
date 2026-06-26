@@ -740,8 +740,8 @@ outside any pane aborts the gesture with no change.
   }
   ```
 
-The reordered window list persists automatically through the existing session
-save path, no extra configuration required.
+The reorder takes effect immediately and lasts for the life of the session
+(in memory), so there is nothing extra to configure.
 
 The `mouse` node live-reloads with the config (`Ctrl+a R` / `plexy-glass
 reload`). The new modifier takes effect on the next drag.
@@ -875,10 +875,8 @@ names are shown verbatim regardless of `auto-rename`.
 With `auto-rename #false`, an unnamed window simply shows its shell basename and
 never tracks the running command or directory.
 
-The pinned/auto state is persisted with the session, so a derived-name window
-restored after a daemon restart keeps deriving its name (a renamed window stays
-pinned). `auto-rename` is read fresh on every status-bar render, so toggling it
-via reload (`Ctrl+a R` / `plexy-glass reload`) takes effect immediately.
+`auto-rename` is read fresh on every status-bar render, so toggling it via
+reload (`Ctrl+a R` / `plexy-glass reload`) takes effect immediately.
 
 ## `welcome`
 
@@ -897,10 +895,10 @@ broken config takes precedence (you see the config-error notice instead, and the
 welcome is deferred to the next clean attach), so a first-run user never misses
 both.
 
-`session` nodes declare sessions that the daemon builds fresh at boot. For a
-declared name the config wins over the saved on-disk state, so the layout
-always matches the template, and undeclared session names still restore
-from disk as usual.
+`session` nodes declare sessions that the daemon builds fresh at boot (and on
+first attach to a declared name). The template is the only source of truth:
+we deliberately don't persist sessions to disk, so a declared session is
+rebuilt identically every time the daemon (re)starts.
 
 ```kdl
 session "dev" cwd="~/projects/app" {
@@ -1024,43 +1022,17 @@ An unknown, undeclared name still reports `no session: <name>`. (The headless
 `plexy-glass cmd "switch …"` path remains interactive-only and is refused;
 auto-create applies only to an attached client's switch.)
 
-## Persistence
+## Sessions are in-memory (no on-disk persistence)
 
-Each session is saved to a per-session JSON file under
-`$XDG_STATE_HOME/plexy-glass/sessions/<name>.json` (falling back to
-`~/.local/state/...`). Saves are atomic (write-to-temp + fsync + rename) and run
-off the main loop. A daemon restart restores from these files (attach the same
-name), and `plexy-glass kill` deletes the file.
-
-What is restored:
-
-- **Layout**: windows, panes, split directions and ratios, window/pane names,
-  the per-window home cwd, the sync-input flag, and the active window/pane.
-- **Per-pane cwd**: restored panes spawn a *fresh* shell at the saved working
-  directory.
-- **Scrollback + command-block marks**: each pane's recent history (text,
-  colors/attributes, and the OSC 133 block marks) comes back as the pane's
-  scrollback, and the fresh shell starts below it, so block navigation, the
-  exit-status border colors, and `capture --last-command` all work on the
-  restored history immediately. See [command-blocks.md](command-blocks.md).
-
-When it saves: persistence is *opportunistic*. The session file is rewritten
-at the next *structural* change (a split, a window/pane add / remove /
-rename, a resize that clamps ratios), debounced by ~1.5s. It is *not*
-written on every output line, and *not* flushed on detach, so scrollback is
-captured with whatever history existed at the moment of the next structural
-save.
-
-Scrollback caveats:
-
-- Only the most recent 5000 rows per pane are persisted, so older history is
-  truncated on restore.
-- Rows come back at their saved width and are *not* reflowed until the pane's
-  first resize.
-- OSC 8 hyperlinks are not persisted: restored text keeps its styling but the
-  links stop being clickable.
-- The alt screen (full-screen TUIs) is never persisted, and the saved rows
-  are always the main screen.
+The daemon holds sessions in memory only; it does **not** save them to disk.
+You can detach and reattach freely while the daemon runs (windows, panes, and
+scrollback are preserved live), but when the daemon stops (`plexy-glass kill`,
+a reboot, a crash) its sessions are gone, and the next attach spawns a fresh
+daemon with fresh sessions. To get the same layout back every time, **declare**
+it in `config.kdl` (see [`session`](#session--declarative-sessions)): declared
+sessions are built fresh at boot and on first attach. (The only thing the
+daemon keeps on disk is its log and the one-time [`welcome`](#welcome)
+marker.)
 
 ## Choose-tree (`Ctrl+a W`)
 
@@ -1105,13 +1077,11 @@ name, a collision with a live session, or a config-declared name is refused:
 a transient status message explains why and the tree is left unchanged.
 
 **Declarative sessions note:** renaming a session that was built from a
-`session` template in `config.kdl` decouples it from the template, so at the
-next daemon boot the template name gets built fresh as a new session and the
-renamed session restores from its own saved file under the new name. The
-reverse is refused outright: renaming any session *to* a declared name fails
-with `'<name>' is a declared session name — choose another`, since otherwise
-the template would silently shadow that session's saved state at the next
-daemon boot.
+`session` template in `config.kdl` decouples it from the template: the renamed
+session lives on in memory under its new name, and the template name gets
+built fresh again at the next daemon boot. Renaming any session **to** a
+declared name is refused with `'<name>' is a declared session name — choose
+another`.
 
 ## The command prompt
 

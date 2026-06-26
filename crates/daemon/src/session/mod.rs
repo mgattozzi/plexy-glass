@@ -61,23 +61,6 @@ pub struct Session {
     /// on `death_rx.recv()`), so teardown must abort it explicitly, since `Drop`
     /// can never run while it holds the `Arc`.
     death_handle: StdMutex<Option<JoinHandle<()>>>,
-    /// True iff structural state changed since the last successful save.
-    /// Set by `mark_dirty`; cleared by the persist task before snapshotting.
-    pub dirty: std::sync::atomic::AtomicBool,
-    /// Wake the persist task. Multiple writers OK; single waiter.
-    pub persist_notify: Arc<Notify>,
-    /// JoinHandle for the persist task; aborted in `Drop`.
-    persist_handle: StdMutex<Option<JoinHandle<()>>>,
-    /// Held by the persist loop for the duration of each `spawn_blocking` save
-    /// (serialize + fsync + rename). `stop_persist` ACQUIRES this before
-    /// aborting the loop, so it blocks until any in-flight save completes. A
-    /// `spawn_blocking` task cannot be aborted once running, so aborting the
-    /// loop alone would only detach the blocking thread and let its write land
-    /// AFTER `kill`'s `delete_session`. Waiting on the guard first guarantees
-    /// the in-flight save finishes before the delete. `begin_close` sets
-    /// `closing` before `stop_persist`, so the loop's pre-save `closing` check
-    /// stops it from starting a NEW save while teardown is underway.
-    persist_in_flight: tokio::sync::Mutex<()>,
     /// One-shot wake that repaints an expired status-line message away. Aborted
     /// and replaced each time a new message is set, and aborted on `Drop`.
     status_msg_handle: StdMutex<Option<JoinHandle<()>>>,
@@ -123,116 +106,20 @@ impl Session {
         self.status_engine_slot.lock().expect("status_engine_slot poisoned").clone()
     }
 
-    /// Build a `SessionStateV1` reflecting current in-memory state. Caller
-    /// must hold the `window_manager` lock; the snapshot is point-in-time
-    /// consistent with that lock window. Serialization happens off-lock.
-    pub fn snapshot_for_persist(
-        &self,
-        wm: &WindowManager,
-    ) -> crate::persist::SessionStateV1 {
-        use crate::persist::{
-            LayoutDirV1, LayoutStateV1, PaneStateV1, SCHEMA_VERSION, SessionStateV1, WindowStateV1,
-        };
-        let windows = wm
-            .windows()
-            .iter()
-            .map(|w| {
-                let layout_tree = w.layout();
-                let leaves = layout_tree.dfs_leaves();
-                let panes: Vec<PaneStateV1> = leaves
-                    .iter()
-                    .map(|pid| {
-                        let pane = w.pane(*pid);
-                        // `Screen.cwd` holds the raw OSC-7 URL; persist a plain
-                        // path so restore's `SpawnSpec.cwd` is a real directory.
-                        let cwd = pane
-                            .and_then(|p| p.with_screen(|s| s.cwd.clone()))
-                            .and_then(|url| crate::popup::osc7_to_path(&url));
-                        let name = pane.and_then(|p| p.name());
-                        // Capture the last N rows of `scrollback ++ main grid`
-                        // (the MAIN grid even when the pane is on the alt
-                        // screen). Brief copy under the emulator lock.
-                        let scrollback = pane.and_then(|p| {
-                            p.with_screen(|s| {
-                                crate::persist::capture_scrollback(
-                                    s,
-                                    crate::persist::SCROLLBACK_PERSIST_ROWS,
-                                )
-                            })
-                        });
-                        PaneStateV1 { cwd, name, scrollback }
-                    })
-                    .collect();
-                let layout = layout_tree
-                    .map_layout(
-                        |_pane_id, idx| LayoutStateV1::Leaf(idx),
-                        |dir, ratio, first, second| LayoutStateV1::Split {
-                            dir: match dir {
-                                plexy_glass_mux::SplitDir::Vertical => LayoutDirV1::Vertical,
-                                plexy_glass_mux::SplitDir::Horizontal => LayoutDirV1::Horizontal,
-                            },
-                            ratio,
-                            first: Box::new(first),
-                            second: Box::new(second),
-                        },
-                    )
-                    // invariant: WindowManager never holds a window with an empty layout.
-                    .unwrap_or(LayoutStateV1::Leaf(0));
-                let active_pane_id = w.active();
-                let active_pane = leaves
-                    .iter()
-                    .position(|p| *p == active_pane_id)
-                    .map(|i| i as u32)
-                    .unwrap_or(0);
-                WindowStateV1 {
-                    // Persist the STRUCTURAL name (the placeholder for an
-                    // auto-named window), not the derived display name.
-                    name: w.name.clone(),
-                    auto_named: w.auto_named,
-                    sync_input: w.sync_input,
-                    home_cwd: w.home_cwd.clone(),
-                    active_pane,
-                    panes,
-                    layout,
-                }
-            })
-            .collect();
-        SessionStateV1 {
-            schema: SCHEMA_VERSION,
-            name: self.name(),
-            created: chrono::DateTime::<chrono::Utc>::from(self.created),
-            active_window: wm.active_idx(),
-            windows,
-        }
-    }
-
     pub fn new(
         name: String,
         initial_cmd: SpawnSpec,
         first_size: PtySize,
         config: Arc<plexy_glass_config::Config>,
     ) -> Result<Arc<Self>, DaemonError> {
-        Self::new_with_preseed(name, initial_cmd, first_size, config, None)
-    }
-
-    /// Like `new`, but seeds the first pane with restored scrollback (session
-    /// restore). `preseed` is `None` for fresh sessions.
-    pub fn new_with_preseed(
-        name: String,
-        initial_cmd: SpawnSpec,
-        first_size: PtySize,
-        config: Arc<plexy_glass_config::Config>,
-        preseed: Option<Vec<plexy_glass_emulator::Row>>,
-    ) -> Result<Arc<Self>, DaemonError> {
         let notify = Arc::new(Notify::new());
         let (death_tx, death_rx) = mpsc::channel::<PaneId>(16);
-        let window_manager = WindowManager::new_with_preseed(
+        let window_manager = WindowManager::new(
             initial_cmd,
             first_size,
             Arc::clone(&notify),
             Some(death_tx.clone()),
             Arc::clone(&config),
-            preseed,
         )?;
         let initial_frame = Arc::new(VirtualScreen::blank(first_size.rows, first_size.cols));
         let (frame_tx, frame_rx_template) = watch::channel(initial_frame);
@@ -258,10 +145,6 @@ impl Session {
             status_msg_handle: StdMutex::new(None),
             silence_tick_handle: StdMutex::new(None),
             config_slot: StdMutex::new(config),
-            dirty: std::sync::atomic::AtomicBool::new(false),
-            persist_notify: Arc::new(Notify::new()),
-            persist_handle: StdMutex::new(None),
-            persist_in_flight: tokio::sync::Mutex::new(()),
             death_handle: StdMutex::new(None),
         });
         let coord_handle = tokio::spawn(render_coordinator(Arc::clone(&session), frame_tx));
@@ -284,7 +167,6 @@ impl Session {
                 let armed = m.any_silence_monitored();
                 drop(m);
                 session_for_death.notify.notify_one();
-                session_for_death.mark_dirty();
                 session_for_death.reconcile_silence_task(armed);
                 if now_empty {
                     break;
@@ -318,39 +200,16 @@ impl Session {
         *session.status_tick_handle.lock().expect("status tick handle lock poisoned") =
             Some(tick_handle);
 
-        // Spawn the persist task. Uses `Weak<Session>` so it exits naturally
-        // when the registry drops the last strong `Arc`.
-        let persist_weak = Arc::downgrade(&session);
-        let persist_task = tokio::spawn(persist_loop(persist_weak));
-        // invariant: no other thread holds persist_handle at construction time
-        *session.persist_handle.lock().expect("persist_handle lock poisoned") =
-            Some(persist_task);
-
         Ok(session)
     }
 
-    /// Mark structural state changed. The persist task picks this up,
-    /// debounces 1500ms, and writes the latest snapshot to disk.
-    pub fn mark_dirty(&self) {
-        self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-        self.persist_notify.notify_one();
-    }
-
-    /// Deterministically tear the session down. Idempotent. Stops the persist
-    /// task FIRST so it cannot re-save during teardown, aborts the
+    /// Deterministically tear the session down. Idempotent. Aborts the
     /// death-consumer (blocked on recv, pins an Arc) and status-tick task,
     /// then wakes the coordinator so it observes `closing`, emits a final
-    /// blank frame, and exits (dropping `frame_tx` so attached clients detach).
+    /// blank frame, and exits (dropping frame_tx → attached clients detach).
     /// Pane children are terminated separately via `terminate_panes`.
     pub fn begin_close(&self) {
         self.closing.store(true, Ordering::SeqCst);
-        // NB: the persist task is NOT aborted here, it must be stopped
-        // *and awaited* (see `stop_persist`) before `kill` deletes the file,
-        // because `JoinHandle::abort` is cooperative and `save_session` has no
-        // await point, so a fire-and-forget abort could let an in-flight save
-        // re-create the file after deletion. `closing` (set above) makes the
-        // task bail at its next poll; `stop_persist` guarantees it has fully
-        // stopped. Drop still aborts persist as a backstop.
         if let Some(h) = self
             .death_handle
             .lock()
@@ -376,34 +235,6 @@ impl Session {
             h.abort();
         }
         self.notify.notify_one();
-    }
-
-    /// Abort the persist task and WAIT for it to fully stop. Must be called
-    /// (and awaited) before deleting a session's saved file on `kill`: a bare
-    /// `abort()` is cooperative and cannot interrupt a synchronous
-    /// `save_session`, so without this await an in-flight save could land the
-    /// file back on disk *after* `delete_session` removed it.
-    pub async fn stop_persist(&self) {
-        // Acquire the in-flight-save guard BEFORE aborting the loop. A
-        // `spawn_blocking` save cannot be aborted once running, so aborting the
-        // loop first would only detach the blocking thread and let its write
-        // land after `delete_session`. Waiting on the guard blocks until any
-        // in-flight serialize+fsync completes; `closing` (set by `begin_close`
-        // before this) then stops the loop from starting a new one. The guard is
-        // released at the end of this scope, after the loop is dead, so no new
-        // save can sneak in.
-        let _guard = self.persist_in_flight.lock().await;
-        let handle = self
-            .persist_handle
-            .lock()
-            .expect("persist handle lock poisoned")
-            .take();
-        if let Some(h) = handle {
-            h.abort();
-            // Await the task's termination (Err = cancelled, Ok = it finished
-            // its current save first). Either way it is dead afterwards.
-            let _ = h.await;
-        }
     }
 
     /// Terminate every pane's child process. Async because it needs the
@@ -872,7 +703,6 @@ impl Session {
             manager.any_silence_monitored()
         };
         self.notify.notify_one();
-        self.mark_dirty();
         // Arm/disarm the silence tick task in response to any monitor-silence
         // change (cheap no-op for every other command).
         self.reconcile_silence_task(armed);
@@ -935,7 +765,6 @@ impl Session {
                     }
                 }
                 self.notify.notify_one();
-                self.mark_dirty();
                 return Ok(None);
             }
             PromptCommand::RenameWindow(name) => {
@@ -944,7 +773,6 @@ impl Session {
                     m.rename_active_window(name);
                 }
                 self.notify.notify_one();
-                self.mark_dirty();
                 return Ok(None);
             }
             PromptCommand::RenamePane(name) => {
@@ -953,7 +781,6 @@ impl Session {
                     m.rename_active_pane(name);
                 }
                 self.notify.notify_one();
-                self.mark_dirty();
                 return Ok(None);
             }
             // Handled at the connection layer, so this is a defensive no-op. Lockstep:
@@ -1137,9 +964,6 @@ impl Session {
             manager.has_active_message()
         };
         self.notify.notify_one();
-        // Mouse drives border drag-resize + status-bar commands; both change
-        // structural state. handle_input_bytes is unrelated.
-        self.mark_dirty();
         // Auto-dismiss any message a mouse action set, on the same ~3s timer as
         // Session-set messages (otherwise it lingers until an unrelated render).
         if had_message {
@@ -1167,11 +991,6 @@ impl Session {
         }
         drop(m);
         self.notify.notify_one();
-        // Resize may have clamped split ratios at min-size, so persist the new
-        // shape.
-        if resized {
-            self.mark_dirty();
-        }
     }
 
     /// Replace this session's active config Arc, rebuild the status engine
@@ -1362,14 +1181,6 @@ impl Drop for Session {
             handle.abort();
         }
         if let Some(handle) = self
-            .persist_handle
-            .lock()
-            .expect("persist handle lock poisoned")
-            .take()
-        {
-            handle.abort();
-        }
-        if let Some(handle) = self
             .death_handle
             .lock()
             .expect("death handle lock poisoned")
@@ -1420,80 +1231,6 @@ async fn silence_tick_loop(weak: std::sync::Weak<Session>) {
         if edge {
             session.notify.notify_one();
             session.schedule_status_expiry_wake();
-        }
-    }
-}
-
-/// Background persist task. Awaits the session's `persist_notify`, sleeps
-/// 1.5s to coalesce a burst of changes, then if `dirty` is still set,
-/// snapshots state + writes atomically. Exits when the session is dropped.
-async fn persist_loop(weak: std::sync::Weak<Session>) {
-    loop {
-        let Some(session) = weak.upgrade() else { return };
-        if session.closing.load(Ordering::SeqCst) {
-            return;
-        }
-        let notify = Arc::clone(&session.persist_notify);
-        drop(session);
-        notify.notified().await;
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        let Some(session) = weak.upgrade() else { return };
-        // Never resurrect a file after kill: bail if the session is closing.
-        if session.closing.load(Ordering::SeqCst) {
-            return;
-        }
-        if !session.dirty.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            continue;
-        }
-        let snap = {
-            let wm = session.window_manager.lock().await;
-            session.snapshot_for_persist(&wm)
-        };
-        // With persisted scrollback the serialize + fsync can move multiple MB,
-        // so run it on `spawn_blocking` rather than inline on a tokio worker.
-        // Ordering guarantee for `kill`: `begin_close` sets `closing` BEFORE
-        // `stop_persist().await` runs. `stop_persist` acquires `persist_in_flight`
-        // FIRST (blocking until any in-flight save completes), THEN aborts this
-        // loop. Because `spawn_blocking` tasks cannot be cancelled once started,
-        // aborting the loop alone would only detach the blocking thread and let its
-        // write land AFTER `delete_session`. Holding the `persist_in_flight` guard
-        // across the whole save (below) ensures `stop_persist` waits for the
-        // write to finish before the delete proceeds. The closure also re-checks
-        // `closing` before writing so a save that started after `begin_close` set
-        // the flag becomes a no-op.
-        let name = session.name();
-        let session_for_save = Arc::clone(&session);
-        // Hold `persist_in_flight` across the whole save so `stop_persist` (which
-        // acquires it before aborting the loop) cannot proceed to
-        // `delete_session` until this serialize+fsync completes.
-        let save = {
-            let _guard = session.persist_in_flight.lock().await;
-            tokio::task::spawn_blocking(move || {
-                // Re-check under the guard: a save that began after `begin_close`
-                // set `closing` becomes a no-op write skip.
-                if session_for_save.closing.load(Ordering::SeqCst) {
-                    return Ok(());
-                }
-                crate::persist::save_session(&snap)
-            })
-            .await
-        };
-        match save {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, name = %name, "session persist failed");
-                // `dirty` was already swapped to false above; without this the
-                // snapshot is silently lost until the next structural change.
-                // mark_dirty re-sets the flag AND notifies, so the next
-                // `notified().await` returns immediately (stored permit) and the
-                // 1500ms debounce sleep paces the retry, so we get a 1.5s retry
-                // cadence while the disk stays unwritable, not a busy loop.
-                session.mark_dirty();
-            }
-            Err(join_err) => {
-                tracing::warn!(error = %join_err, name = %name, "persist task join failed");
-                session.mark_dirty();
-            }
         }
     }
 }
@@ -1569,7 +1306,6 @@ async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::Snaps
 #[cfg(test)]
 mod tests {
     use super::*;
-    use restore::restore_cwd;
     use plexy_glass_protocol::SpawnSpec;
     use std::sync::atomic::Ordering;
 
@@ -2223,29 +1959,6 @@ mod tests {
         }
         assert!(s.closing.load(Ordering::SeqCst), "session did not converge to closing");
     }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn restore_from_round_trips_single_pane_session() {
-        let _g = crate::test_env::isolate();
-        let original = Session::new("rt".into(), spec(), size(), cfg()).unwrap();
-        original.mark_dirty();
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                crate::persist::load_session("rt").ok().flatten().is_some()
-            })
-            .await,
-            "persist debounce never wrote 'rt'"
-        );
-        drop(original);
-        let saved = crate::persist::load_session("rt")
-            .expect("load")
-            .expect("file");
-        let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
-        let wm = restored.window_manager.lock().await;
-        assert_eq!(wm.windows().len(), 1);
-        assert_eq!(wm.windows()[0].layout().panes().len(), 1);
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_single_pane() {
         use plexy_glass_config::{PaneNode, PaneTemplate, SessionTemplate, WindowTemplate};
@@ -2540,66 +2253,6 @@ mod tests {
         );
         s.terminate_panes().await;
     }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn restore_from_round_trips_two_pane_split() {
-        let _g = crate::test_env::isolate();
-        let original = Session::new("rt2".into(), spec(), size(), cfg()).unwrap();
-        original
-            .handle_command(plexy_glass_mux::Command::SplitV)
-            .await
-            .unwrap();
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                crate::persist::load_session("rt2").ok().flatten().is_some()
-            })
-            .await,
-            "persist debounce never wrote 'rt2'"
-        );
-        drop(original);
-        let saved = crate::persist::load_session("rt2")
-            .expect("load")
-            .expect("file");
-        let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
-        let wm = restored.window_manager.lock().await;
-        assert_eq!(wm.windows()[0].layout().panes().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn restore_from_round_trips_multiple_windows() {
-        use plexy_glass_mux::{Command, PromptCommand};
-        let _g = crate::test_env::isolate();
-        let original = Session::new("rtmw".into(), spec(), size(), cfg()).unwrap();
-        // Window 0: a 2-pane split. Window 1: renamed, sync-panes on, and active.
-        original.handle_command(Command::SplitV).await.unwrap();
-        original.handle_command(Command::NewWindow).await.unwrap(); // window 1, active
-        original
-            .handle_prompt_command(PromptCommand::RenameWindow("logs".into()))
-            .await
-            .unwrap();
-        original.handle_command(Command::ToggleSyncPanes).await.unwrap();
-        // Wait until the persisted state reflects BOTH windows (debounced save).
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                crate::persist::load_session("rtmw")
-                    .ok()
-                    .flatten()
-                    .is_some_and(|s| s.windows.len() == 2)
-            })
-            .await,
-            "persist never captured both windows"
-        );
-        drop(original);
-        let saved = crate::persist::load_session("rtmw").expect("load").expect("file");
-        let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
-        let wm = restored.window_manager.lock().await;
-        assert_eq!(wm.windows().len(), 2, "both windows restored");
-        assert_eq!(wm.windows()[0].layout().panes().len(), 2, "window 0's split restored");
-        assert_eq!(wm.windows()[1].name, "logs", "window 1 name restored");
-        assert!(wm.windows()[1].sync_input, "window 1 sync-panes restored");
-        assert_eq!(wm.active_idx(), 1, "active window (1) restored");
-    }
-
     // ── scrollback persistence (P3) ────────────────────────────────────────
 
     /// Build a row of `text` at width `cols` with an optional 133 mark applied.
@@ -2618,358 +2271,6 @@ mod tests {
     /// writing rows directly (deterministic, parser-free): a PROMPT_START row,
     /// two OUTPUT_START output rows, and a BLOCK_END row carrying exit 0. The
     /// snapshot captures `scrollback ++ main grid`, so grid rows are enough.
-    fn inject_marked_block(wm: &WindowManager) {
-        use plexy_glass_emulator::RowMark;
-        let pid = wm.active_window().active();
-        wm.active_window().pane(pid).unwrap().with_screen_mut(|scr| {
-            let cols = scr.active.cols;
-            scr.active.rows[0] = marked_row("PROMPT", cols, |m| m.set(RowMark::PROMPT_START));
-            scr.active.rows[1] = marked_row("OUTLINE_A", cols, |m| m.set(RowMark::OUTPUT_START));
-            scr.active.rows[2] = marked_row("OUTLINE_B", cols, |_| {});
-            scr.active.rows[3] = marked_row("DONE", cols, |m| {
-                m.set(RowMark::BLOCK_END);
-                m.set_exit(Some(0));
-            });
-        });
-    }
-
-    #[tokio::test]
-    async fn snapshot_captures_scrollback_with_marks() {
-        let _g = crate::test_env::isolate();
-        let s = Session::new("t-sb-snap".into(), cat_spec(), size(), cfg()).unwrap();
-        let (saved, pane_cols) = {
-            let wm = s.window_manager.lock().await;
-            inject_marked_block(&wm);
-            let pid = wm.active_window().active();
-            let cols = wm.active_window().pane(pid).unwrap().with_screen(|scr| scr.active.cols);
-            (s.snapshot_for_persist(&wm), cols)
-        };
-        let sb = saved.windows[0].panes[0]
-            .scrollback
-            .as_ref()
-            .expect("scrollback captured");
-        assert_eq!(sb.cols, pane_cols, "captured width matches the pane grid width");
-        // The output text rode into the captured rows.
-        let joined: String = sb
-            .rows
-            .iter()
-            .flat_map(|r| r.cells.iter().map(|c| c.grapheme.clone()))
-            .collect();
-        assert!(joined.contains("OUTLINE_A"), "captured rows contain output: {joined:?}");
-        // At least one row carries a 133 mark.
-        assert!(
-            sb.rows.iter().any(|r| r.mark.is_some()),
-            "at least one captured row carries an OSC-133 mark"
-        );
-        s.terminate_panes().await;
-    }
-
-    #[tokio::test]
-    async fn full_session_state_round_trips_with_scrollback() {
-        let _g = crate::test_env::isolate();
-        let s = Session::new("t-sb-rt".into(), cat_spec(), size(), cfg()).unwrap();
-        let saved = {
-            let wm = s.window_manager.lock().await;
-            inject_marked_block(&wm);
-            s.snapshot_for_persist(&wm)
-        };
-        crate::persist::save_session(&saved).expect("save");
-        let loaded = crate::persist::load_session("t-sb-rt")
-            .expect("load")
-            .expect("present");
-        assert_eq!(loaded, saved, "full SessionStateV1 round-trips through save/load");
-        s.terminate_panes().await;
-    }
-
-    #[tokio::test]
-    async fn restore_seeds_scrollback_and_marks_ride() {
-        let _g = crate::test_env::isolate();
-        let s = Session::new("t-sb-restore".into(), cat_spec(), size(), cfg()).unwrap();
-        let saved = {
-            let wm = s.window_manager.lock().await;
-            inject_marked_block(&wm);
-            s.snapshot_for_persist(&wm)
-        };
-        s.terminate_panes().await;
-        drop(s);
-
-        let restored = Session::restore_from(saved, cat_spec(), size(), cfg()).await.unwrap();
-        let wm = restored.window_manager.lock().await;
-        let pid = wm.active_window().active();
-        let pane = wm.active_window().pane(pid).unwrap();
-        let (sb_len, last_block, joined, exit) = pane.with_screen(|scr| {
-            let lcb = plexy_glass_mux::blocks::last_completed_block(scr);
-            let joined: String = scr
-                .scrollback
-                .rows()
-                .iter()
-                .flat_map(|r| r.cells.iter().map(|c| c.grapheme.as_str().to_string()))
-                .collect();
-            // closing_exit needs the prompt line; derive it from last_completed_prompt.
-            let exit = plexy_glass_mux::blocks::last_completed_prompt(scr)
-                .and_then(|pl| plexy_glass_mux::blocks::closing_exit(scr, pl));
-            (scr.scrollback.len(), lcb, joined, exit)
-        });
-        assert!(sb_len > 0, "history landed in the restored pane's scrollback");
-        assert!(joined.contains("OUTLINE_A"), "restored scrollback has the history: {joined:?}");
-        assert!(
-            last_block.is_some(),
-            "the seeded marks drive last_completed_block on the restored scrollback"
-        );
-        assert_eq!(exit, Some(0), "the D;0 exit code rode into the restored mark");
-        // Block counters stay at their fresh defaults (NOT recomputed).
-        let (blocks, last_exit) = pane.with_screen(|scr| (scr.blocks_completed, scr.last_block_exit));
-        assert_eq!(blocks, 0, "blocks_completed left at 0 (not recomputed)");
-        assert_eq!(last_exit, None, "last_block_exit left at None (not recomputed)");
-        drop(wm);
-        restored.terminate_panes().await;
-    }
-
-    #[tokio::test]
-    async fn snapshot_on_alt_screen_persists_main_grid() {
-        let _g = crate::test_env::isolate();
-        let s = Session::new("t-sb-alt".into(), cat_spec(), size(), cfg()).unwrap();
-        let saved = {
-            let wm = s.window_manager.lock().await;
-            let pid = wm.active_window().active();
-            wm.active_window().pane(pid).unwrap().with_screen_mut(|scr| {
-                // Simulate being on the alt screen: enter_alt_screen parks the
-                // MAIN grid in `screen.alt` and makes `screen.active` the ALT
-                // grid. Construct that state directly so the capture must read
-                // `screen.alt` (the main grid) and ignore `screen.active`.
-                let cols = scr.active.cols;
-                let rows = scr.active.num_rows();
-                // active = the transient alt grid; its content must NOT persist.
-                scr.active.rows[0] = marked_row("ALTTEXT_SHOULD_NOT_PERSIST", cols, |_| {});
-                // alt = the parked MAIN grid; its content MUST persist.
-                let mut main = plexy_glass_emulator::Grid::new(rows, cols);
-                main.rows[0] = marked_row("MAINTEXT", cols, |_| {});
-                scr.alt = Some(main);
-            });
-            s.snapshot_for_persist(&wm)
-        };
-        let sb = saved.windows[0].panes[0]
-            .scrollback
-            .as_ref()
-            .expect("main-grid scrollback captured even on alt");
-        let joined: String = sb
-            .rows
-            .iter()
-            .flat_map(|r| r.cells.iter().map(|c| c.grapheme.clone()))
-            .collect();
-        assert!(joined.contains("MAINTEXT"), "main-grid content persisted: {joined:?}");
-        assert!(
-            !joined.contains("ALTTEXT_SHOULD_NOT_PERSIST"),
-            "alt-screen content must NOT be persisted: {joined:?}"
-        );
-        s.terminate_panes().await;
-    }
-
-    #[tokio::test]
-    async fn restore_width_mismatch_does_not_panic() {
-        // Save at 80 cols, restore at a different size: seeded rows keep their
-        // captured width and the first resize normalizes them. Must not panic.
-        let _g = crate::test_env::isolate();
-        let s = Session::new("t-sb-width".into(), cat_spec(), size(), cfg()).unwrap();
-        let saved = {
-            let wm = s.window_manager.lock().await;
-            inject_marked_block(&wm);
-            s.snapshot_for_persist(&wm)
-        };
-        s.terminate_panes().await;
-        drop(s);
-        let wide = PtySize { rows: 30, cols: 120, pixel_width: 0, pixel_height: 0 };
-        let restored = Session::restore_from(saved, cat_spec(), wide, cfg()).await.unwrap();
-        let wm = restored.window_manager.lock().await;
-        let pid = wm.active_window().active();
-        let len = wm.active_window().pane(pid).unwrap().with_screen(|scr| scr.scrollback.len());
-        assert!(len > 0, "history seeded despite the width mismatch");
-        drop(wm);
-        restored.terminate_panes().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn restore_preserves_split_ratios() {
-        // Build a saved state by hand: two panes side by side at 0.3 / 0.7.
-        use crate::persist::{
-            LayoutDirV1, LayoutStateV1, PaneStateV1, SessionStateV1, WindowStateV1,
-        };
-        let _g = crate::test_env::isolate();
-        let saved = SessionStateV1 {
-            schema: crate::persist::SCHEMA_VERSION,
-            name: "t-ratio-restore".into(),
-            created: chrono::Utc::now(),
-            active_window: 0,
-            windows: vec![WindowStateV1 {
-                name: "w".into(),
-                auto_named: false,
-                sync_input: false,
-                home_cwd: None,
-                active_pane: 0,
-                panes: vec![
-                    PaneStateV1 { cwd: None, name: None, scrollback: None },
-                    PaneStateV1 { cwd: None, name: None, scrollback: None },
-                ],
-                layout: LayoutStateV1::Split {
-                    dir: LayoutDirV1::Vertical,
-                    ratio: 0.3,
-                    first: Box::new(LayoutStateV1::Leaf(0)),
-                    second: Box::new(LayoutStateV1::Leaf(1)),
-                },
-            }],
-        };
-        let s = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
-        let m = s.window_manager.lock().await;
-        let vp = m.viewport();
-        let win = m.active_window();
-        let leaves = win.layout().dfs_leaves();
-        let r0 = win.layout().rect_of(leaves[0], vp).unwrap();
-        // 0.3 of the usable width (NOT the 0.5 the replay used to leave):
-        // for an 80-col host, viewport is 78 wide → usable 77 → ~23 cols.
-        assert!(
-            (20..=26).contains(&r0.cols),
-            "first pane should be ~30% wide, got {r0:?} of {vp:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn restore_round_trips_window_home_cwd() {
-        let _g = crate::test_env::isolate();
-        let original = Session::new("rthome".into(), spec(), size(), cfg()).unwrap();
-        let saved = {
-            let mut wm = original.window_manager.lock().await;
-            wm.set_window_home_cwd(0, Some("/restored/base".into()));
-            // `snapshot_for_persist` is sync and takes the locked `WindowManager`.
-            original.snapshot_for_persist(&wm)
-        };
-        assert_eq!(saved.windows[0].home_cwd.as_deref(), Some("/restored/base"));
-        let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
-        let wm = restored.window_manager.lock().await;
-        assert_eq!(wm.windows()[0].home_cwd.as_deref(), Some("/restored/base"));
-    }
-
-    #[tokio::test]
-    async fn snapshot_converts_osc7_cwd_to_plain_path() {
-        // Regression: OSC 7 stores the raw `file://host/path` URL on `Screen.cwd`,
-        // and persisting that verbatim made restored panes spawn in `$HOME`
-        // (`portable-pty` silently falls back for non-directory cwds).
-        let _g = crate::test_env::isolate();
-        let s = Session::new("t-osc7-snap".into(), spec(), size(), cfg()).unwrap();
-        let saved = {
-            let wm = s.window_manager.lock().await;
-            let pid = wm.active_window().active();
-            wm.active_window().pane(pid).unwrap().with_screen_mut(|scr| {
-                scr.cwd = Some("file://localhost/tmp/somewhere".into());
-            });
-            s.snapshot_for_persist(&wm)
-        };
-        assert_eq!(
-            saved.windows[0].panes[0].cwd.as_deref(),
-            Some("/tmp/somewhere"),
-            "persisted pane cwd must be a plain path, not an OSC-7 URL"
-        );
-    }
-
-    #[test]
-    fn restore_cwd_strips_legacy_osc7_urls() {
-        // Legacy persist files (pre-fix) carry raw OSC-7 URLs; the restore
-        // seam must convert them so SpawnSpec.cwd is a real directory path.
-        assert_eq!(restore_cwd(Some("file:///tmp")).as_deref(), Some("/tmp"));
-        assert_eq!(
-            restore_cwd(Some("file://localhost/tmp/x")).as_deref(),
-            Some("/tmp/x")
-        );
-        assert_eq!(
-            restore_cwd(Some("/plain/path")).as_deref(),
-            Some("/plain/path")
-        );
-        // Malformed -> None (daemon-cwd fallback), not a bogus path.
-        assert_eq!(restore_cwd(Some("file://nohostnopath")), None);
-        assert_eq!(restore_cwd(None), None);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn restore_reanchors_session_cwd_for_new_windows() {
-        // Regression: `restore_from` never called `set_session_cwd`, so after a
-        // restore `Ctrl+a c` (NewWindow anchors to `session_cwd`) lost its
-        // anchor. Window 0's saved home base is the persisted proxy for it.
-        use crate::persist::{LayoutStateV1, PaneStateV1, SessionStateV1, WindowStateV1};
-        let _g = crate::test_env::isolate();
-        let saved = SessionStateV1 {
-            schema: crate::persist::SCHEMA_VERSION,
-            name: "t-restore-anchor".into(),
-            created: chrono::Utc::now(),
-            active_window: 0,
-            windows: vec![WindowStateV1 {
-                name: "w".into(),
-                auto_named: false,
-                sync_input: false,
-                home_cwd: Some("/tmp".into()),
-                active_pane: 0,
-                panes: vec![PaneStateV1 { cwd: None, name: None, scrollback: None }],
-                layout: LayoutStateV1::Leaf(0),
-            }],
-        };
-        let s = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
-        s.handle_command(plexy_glass_mux::Command::NewWindow).await.unwrap();
-        let wm = s.window_manager.lock().await;
-        // NewWindow stamps session_cwd onto the new window's home base; if
-        // the anchor was restored, the second window inherits it.
-        assert_eq!(
-            wm.windows()[1].home_cwd.as_deref(),
-            Some("/tmp"),
-            "restored session must re-anchor session_cwd for NewWindow"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn restore_from_round_trips_pane_name() {
-        let _g = crate::test_env::isolate();
-        let original = Session::new("rtn".into(), spec(), size(), cfg()).unwrap();
-        {
-            let wm = original.window_manager.lock().await;
-            let pid = wm.active_window().active();
-            wm.active_window().pane(pid).unwrap().set_name(Some("logs".into()));
-        }
-        original.mark_dirty();
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                crate::persist::load_session("rtn").ok().flatten().is_some()
-            })
-            .await,
-            "persist debounce never wrote 'rtn'"
-        );
-        drop(original);
-        let saved = crate::persist::load_session("rtn").expect("load").expect("file");
-        assert_eq!(saved.windows[0].panes[0].name.as_deref(), Some("logs"));
-        let restored = Session::restore_from(saved, spec(), size(), cfg()).await.unwrap();
-        let wm = restored.window_manager.lock().await;
-        let pid = wm.active_window().active();
-        assert_eq!(
-            wm.active_window().pane(pid).unwrap().name().as_deref(),
-            Some("logs"),
-            "pane name survives save + restore"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn split_command_writes_persisted_layout() {
-        let _g = crate::test_env::isolate();
-        let s = Session::new("p5-split".into(), spec(), size(), cfg()).unwrap();
-        s.handle_command(plexy_glass_mux::Command::SplitV).await.unwrap();
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                crate::persist::load_session("p5-split").ok().flatten().is_some()
-            })
-            .await,
-            "persist debounce never wrote 'p5-split'"
-        );
-        let loaded = crate::persist::load_session("p5-split")
-            .expect("load")
-            .expect("file");
-        assert_eq!(loaded.windows[0].panes.len(), 2);
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn kill_closes_split_unix_socket_to_client() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3056,92 +2357,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn begin_close_is_idempotent_and_stops_persist() {
+    async fn begin_close_is_idempotent() {
         let _g = crate::test_env::isolate();
         let s = Session::new("bc".into(), spec(), size(), cfg()).unwrap();
-        s.mark_dirty();
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                crate::persist::load_session("bc").ok().flatten().is_some()
-            })
-            .await,
-            "persist debounce never wrote 'bc'"
-        );
-        assert!(crate::persist::load_session("bc").unwrap().is_some());
-        crate::persist::delete_session("bc").unwrap();
-        // Close, then try hard to make the persist task re-save.
         s.begin_close();
         s.begin_close(); // idempotent: must not panic
-        s.mark_dirty();
-        s.persist_notify.notify_one();
-        // Negative assertion: proving absence requires a fixed wait. We sleep
-        // long enough for the debounce (1500ms) + one extra cycle to fire if
-        // begin_close failed to suppress it, then assert no file was written.
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
-        assert!(
-            crate::persist::load_session("bc").unwrap().is_none(),
-            "persist task re-saved the file after begin_close"
-        );
         s.terminate_panes().await; // exercise the path; child dies
     }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn mark_dirty_eventually_writes_file() {
-        let _g = crate::test_env::isolate();
-        let s = Session::new("dirty-test".into(), spec(), size(), cfg()).unwrap();
-        s.mark_dirty();
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                crate::persist::load_session("dirty-test").ok().flatten().is_some()
-            })
-            .await,
-            "persist debounce never wrote 'dirty-test'"
-        );
-        let loaded = crate::persist::load_session("dirty-test")
-            .expect("load")
-            .expect("file should exist");
-        assert_eq!(loaded.name, "dirty-test");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn persist_failure_resets_dirty_and_retries() {
-        let _g = crate::test_env::isolate();
-        let s = Session::new("persist-retry".into(), spec(), size(), cfg()).unwrap();
-        // Inject a write failure: occupy the sessions-dir path with a FILE so
-        // `save_session`'s `create_dir_all` fails (ENOTDIR-class error).
-        let dir = crate::persist::sessions_dir();
-        std::fs::create_dir_all(dir.parent().expect("sessions dir has a parent")).unwrap();
-        std::fs::write(&dir, b"not a directory").unwrap();
-        s.mark_dirty();
-        // Poll until the failed attempt has run and re-set dirty=true
-        // (the old code left it false, losing the snapshot).
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                s.dirty.load(std::sync::atomic::Ordering::Relaxed)
-            })
-            .await,
-            "failed persist must re-set dirty so the snapshot is retried"
-        );
-        // Heal the path. The failure handler self-notified, so the loop
-        // retries on its own and we don't need another `mark_dirty`.
-        std::fs::remove_file(&dir).unwrap();
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                crate::persist::load_session("persist-retry").ok().flatten().is_some()
-            })
-            .await,
-            "retry after heal should have persisted the session"
-        );
-        let loaded = crate::persist::load_session("persist-retry")
-            .expect("load")
-            .expect("retry after heal should have persisted the session");
-        assert_eq!(loaded.name, "persist-retry");
-        assert!(
-            !s.dirty.load(std::sync::atomic::Ordering::Relaxed),
-            "successful retry should leave dirty clear"
-        );
-    }
-
     // ---- pipe-pane (spec: 2026-06-12-pipe-pane-design.md) ----
 
     use crate::pipe::{MSG_CONSUMER_EXITED, MSG_NO_PIPE, MSG_STOPPED};
@@ -3530,43 +2752,6 @@ mod tests {
         );
         s.handle_command(plexy_glass_mux::Command::ClosePopup).await.unwrap();
         s.terminate_panes().await;
-    }
-
-    #[tokio::test]
-    async fn snapshot_for_persist_captures_single_pane_session() {
-        let _g = crate::test_env::isolate();
-        let s = Session::new("snap1".into(), spec(), size(), cfg()).unwrap();
-        let wm = s.window_manager.lock().await;
-        let snap = s.snapshot_for_persist(&wm);
-        assert_eq!(snap.name, "snap1");
-        assert_eq!(snap.schema, crate::persist::SCHEMA_VERSION);
-        assert_eq!(snap.windows.len(), 1);
-        assert_eq!(snap.windows[0].panes.len(), 1);
-        assert!(matches!(
-            snap.windows[0].layout,
-            crate::persist::LayoutStateV1::Leaf(0)
-        ));
-    }
-
-    #[tokio::test]
-    async fn snapshot_for_persist_captures_two_pane_split() {
-        let _g = crate::test_env::isolate();
-        let s = Session::new("snap2".into(), spec(), size(), cfg()).unwrap();
-        {
-            let mut wm = s.window_manager.lock().await;
-            wm.handle_command(plexy_glass_mux::Command::SplitV).unwrap();
-        }
-        let wm = s.window_manager.lock().await;
-        let snap = s.snapshot_for_persist(&wm);
-        assert_eq!(snap.windows[0].panes.len(), 2);
-        match &snap.windows[0].layout {
-            crate::persist::LayoutStateV1::Split { dir, first, second, .. } => {
-                assert_eq!(*dir, crate::persist::LayoutDirV1::Vertical);
-                assert!(matches!(**first, crate::persist::LayoutStateV1::Leaf(0)));
-                assert!(matches!(**second, crate::persist::LayoutStateV1::Leaf(1)));
-            }
-            other => panic!("expected Split, got {other:?}"),
-        }
     }
 }
 

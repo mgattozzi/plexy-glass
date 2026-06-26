@@ -28,18 +28,11 @@ D yet and is not counted.
 Note that marks are **not** recorded on the alternate screen (full-screen
 programs like editors and pagers).
 
-Marks **are** persisted across daemon restarts. A pane's scrollback (text,
-attributes, and OSC 133 block marks) is saved to the session file at the next
-structural save (a split, window/pane add/remove/rename, resize, *not* on every
-output line and *not* on detach, see
-[Persistence](configuration.md#persistence)). On restart the saved rows come
-back as the pane's **scrollback history** (the new shell starts fresh below
-them), so block navigation, the exit-status border colors, and
-`capture --last-command` all work on the restored content immediately. The most
-recent 5000 rows per pane are kept (older history is truncated), rows seeded at
-their saved width are not reflowed until the first resize, and OSC 8 hyperlinks
-are not persisted (restored text keeps its styling but loses link
-clickability).
+Marks live in the pane's scrollback for the life of the session (in memory), so
+block navigation, exit-status borders, and `capture --last-command` keep working
+as you scroll back through earlier commands. They are **not** persisted to disk:
+when the daemon stops, the session (and its marks) are gone, since we
+deliberately don't save sessions across restarts.
 
 ## Shell integration
 
@@ -304,10 +297,9 @@ threshold get a note (default **2s**). Set `duration-threshold "0"` to time
 everything. When a block is also folded, the duration appends to the fold
 summary: `▸ 412 lines ✓ · 2.3s`.
 
-The duration shows in the live/scrollback view and in block mode, and it is
-suppressed in copy mode (which renders raw text for selection). Durations are
-**runtime-only**, so a block restored from disk after a daemon restart shows no
-duration. Turn the feature off with `duration #false` in the `blocks` node.
+The duration shows in the live/scrollback view and in block mode, but not in
+copy mode, which renders raw text for selection. Turn it off with
+`duration #false` in the `blocks` node.
 
 **Requires OSC 133 shell integration**, same as all the other block features.
 
@@ -447,11 +439,11 @@ Each row shows a status glyph (`✓` exit 0, `✗` nonzero), the duration, the
 **current pane's** blocks first (newest first), then the rest of the session,
 then other sessions.
 
-The palette is built when you open it by reading every pane's live grid **and
-scrollback** (blocks restored from before a daemon restart are included, up to
-the 5000-row cap), so there is no separate history database. If a command has
-run in several places, the jump re-finds it by command text at jump time, and
-it lands correctly even if the pane has scrolled since you opened the palette.
+The palette is built fresh when you open it, by reading every pane's live grid
+**and scrollback**, so there is no separate history database to keep in sync.
+If a command has run in several places, the jump re-finds it by command text at
+jump time, so it lands correctly even if the pane has scrolled since you opened
+the palette.
 
 **Requires OSC 133 shell integration**, same as all the other block features.
 

@@ -17,8 +17,6 @@ enum Subcommands {
     },
     /// List all sessions.
     List,
-    /// List sessions saved on disk (running or not).
-    ListSaved,
     /// Kill a single session by name, or this runtime dir's daemon if no -n is
     /// given. With --all, stop every plexy-glass daemon for the current user.
     Kill {
@@ -115,9 +113,6 @@ async fn main() -> anyhow::Result<()> {
         }
         Subcommands::List => {
             plexy_glass_client::client_list().await?;
-        }
-        Subcommands::ListSaved => {
-            plexy_glass_client::client_list_saved().await?;
         }
         Subcommands::Kill { name, all } => match name {
             Some(session_name) => {

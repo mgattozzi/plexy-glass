@@ -119,9 +119,10 @@ only for ASCII.
 - **Every in-process daemon test that builds a `Session`/registry must start
   with `let _g = crate::test_env::isolate();`** (`crates/daemon/src/lib.rs`) —
   it points `XDG_STATE_HOME` at a per-test tempdir (held for the test's whole
-  body, across `.await`s) so the debounced persist loop and `attach_or_create`
-  restores never touch the user's real state dir. The single guard replaces the
-  old per-module copies and the unique-name + `delete_session` workaround.
+  body, across `.await`s) and pre-writes the one-time welcome-modal marker there,
+  so neither the daemon's logs nor that marker touch the user's real state dir
+  (and the welcome modal never fires mid-test). The single guard replaces the old
+  per-module copies.
 - **`Command::NewWindow` / splits spawn `$SHELL`, not the test's `SpawnSpec`**
   (`default_spec` deliberately runs the default shell). A unit test whose child
   must produce specific OUTPUT (e.g. echo a BEL byte back) cannot rely on the
@@ -181,8 +182,9 @@ the same way.
 
 Implemented and on `main`: the daemon + client foundation; a full VT emulator
 (grid, scrollback, reflow, wide-char/grapheme correctness); windows, panes,
-H/V splits, zoom, resize; detach/reattach with on-disk session
-persistence/restore; multi-client; copy mode with search; full mouse; bracketed
+H/V splits, zoom, resize; detach/reattach to a live (in-memory) daemon — the
+daemon is **memory-only**, sessions are NOT persisted to disk (removed
+2026-06-26, see below); multi-client; copy mode with search; full mouse; bracketed
 paste; sync-panes; a configurable status bar with live reload; **KDL v2 config**
 (`config.kdl` — a hard cutover from the old TOML; the decoder is
 `crates/config/src/kdl_config.rs`, the in-memory `Config` model is unchanged);
@@ -263,9 +265,7 @@ layouts** — five
 presets (`even-horizontal`/`even-vertical`/`main-horizontal`/`main-vertical`/
 `tiled`), `Ctrl+a Space` cycling with per-window memory, `:layout <name>` /
 `layout:<name>` verbs, the active pane takes the main slot in main-*, evenness
-via a balanced ratio tree (`crates/mux/src/preset.rs`), and ratio-faithful
-restore (saved split ratios are re-applied on restore — fixing the old 50/50
-limitation); and **CLI scripting** — `plexy-glass cmd [-n NAME] <LINE>...` runs
+via a balanced ratio tree (`crates/mux/src/preset.rs`); and **CLI scripting** — `plexy-glass cmd [-n NAME] <LINE>...` runs
 command-prompt lines headlessly reusing the prompt grammar verbatim
 (`command_prompt::parse`), `plexy-glass send [-n NAME] [--enter] <TEXT>...` injects
 bytes into the input path (popup- and sync-panes-aware),
@@ -417,7 +417,7 @@ every pane's blocks (`with_screen` → `all_prompt_lines` + `block_command_line`
 command+output capped at 4 KiB), newest-first; the connection's
 `open_history_overlay` + `build_history_entries` flatten them current-pane-first
 (then current session, then others), capped at `HISTORY_ENTRY_CAP=2000`. **No new
-persistence** (restored scrollback marks are read on the fly) and **no new
+persistence** (scrollback marks are read on the fly) and **no new
 protocol** (opens daemon-side on the attached client like choose-tree). The one
 action — Enter — produces `OverlayKeyResult::History(HistoryTarget)`, dispatched
 by `ClientCtx::dispatch_history_jump`: switch session if needed + `select_window_by_id`
@@ -599,31 +599,19 @@ wins) set ON TOP of the inherited daemon env (the spawn path overlays, the
 `env_clear` was removed — `PATH`/`TERM` survive), `SessionRegistry::build_declared`
 reused by boot + reload (newly-declared names built, live never rebuilt, 24×80),
 and `switch_session` auto-create from `config_snapshot()` — shipped 2026-06-12
-spec/plan; scrollback + mark persistence — per-pane scrollback (text +
-attrs + OSC 133 marks) persisted to the session file and restored as the pane's
-scrollback on daemon restart (the fresh shell draws below it). Persist DTOs in
-`crates/daemon/src/persist.rs` (`PaneScrollbackV1`/`RowV1`/`CellV1` with per-cell
-default-field elision + compact `serde_json::to_vec`, `ColorV1`/`UnderlineStyleV1`/
-`WrapV1`/`RowMarkV1`) with explicit live↔DTO mappers (emulator types stay
-serde-free; `hyperlink_id` dropped, links not persisted); capture via
-`capture_scrollback(screen, N=5000)` over `scrollback ++ main_grid.rows`
-(`main_grid = screen.alt.unwrap_or(&screen.active)` — MAIN grid even on alt),
-trailing-default-cell trim + blank-trailing-row drop + **trailing un-executed
-prompt trim** (a `PROMPT_START` block with no `OUTPUT_START`/`BLOCK_END` is the
-at-prompt block the restored child recreates; persisting it made phantom empty
-block-mode prompts accumulate one per restart — a `BLOCK_END` merged onto the
-prompt row is kept so the prior completed block survives); `Screen::preseed_scrollback`
-threaded THROUGH `Pane::spawn` (applied before the reader thread starts so no
-child byte races the seed) → `Window::spawn_first`/`split`/`split_at` →
-`WindowManager::new_with_preseed`/`new_window_with_spec_preseed`/
-`split_window_at_dfs_preseed`; `restore_from` forwards each saved pane's
-scrollback into the spawn path (first pane via `Session::new_with_preseed`);
-block counters left at 0/None (NOT recomputed — block nav reads `Row.mark`
-directly, recompute would misfire the monitor-command alert); width-mismatch
-seeds rows as-is (first resize normalizes); save moved onto `spawn_blocking`
-guarded by a `persist_in_flight` async mutex (`stop_persist` acquires it before
-aborting the loop so an in-flight save completes before `kill`'s
-`delete_session`) — shipped 2026-06-13 spec/plan; keyboard follow-ups —
+spec/plan; **on-disk session persistence + restore REMOVED (2026-06-26)** — the
+daemon is now memory-only: no `persist.rs`, no save loop / `mark_dirty` /
+`persist_loop`, no `restore_from`, no scrollback/mark capture+preseed plumbing
+(the `preseed`/`*_preseed` params were unthreaded back out of `Pane::spawn` /
+`Window::spawn_first|split|split_at` / `WindowManager::new|new_window_with_spec|
+split_window_at_dfs`; `Screen`/`Emulator::preseed_scrollback` deleted),
+`list-saved` CLI + `SavedSessionEntry`/`ListSavedSessions`/`SavedSessionList`
+protocol variants gone, `serde`/`serde_json` dropped from the daemon. KEPT:
+detach/reattach to a LIVE daemon (in-memory) and declared-template sessions
+(built fresh at boot via `build_from_template`). The one-time onboarding marker
+moved `persist.rs` → `first_run.rs` (`take_first_run`). The user asked for it
+removed (didn't use it, it caused bugs — incl. the phantom block-mode prompts);
+keyboard follow-ups —
 modifyOtherKeys 27-form decode (symmetric with the re-encode emitter), the
 ~30ms Esc idle-flush in the connection loop (a bare `\x1b` parks in the
 paste→mouse→key parser chain — `InputRouter::has_pending`/`flush_keys` drain it,
@@ -635,7 +623,7 @@ per-event dispatch extracted to `dispatch_input_event`) — shipped 2026-06-13
 spec/plan; tab reorder — Alt+drag a status-bar window tab to reorder (drop-to-position)
 via `WindowManager::move_window`, `TabDrag` mouse state, `EvalContext.dragging_window`
 reversed-style highlight, `mouse { drag-modifier }` config node (alt|ctrl,
-shift rejected), persists free via `mark_dirty` — shipped 2026-06-24 spec/plan;
+shift rejected) — shipped 2026-06-24 spec/plan;
 pane swap — Alt+drag a pane onto another in the same window to swap their
 positions (`Layout::swap_panes` + focus the dragged pane), a `PaneDrag { source,
 target }` mouse state mirroring `TabDrag` (start detection placed ahead of

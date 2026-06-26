@@ -127,7 +127,6 @@ mod tests {
         // The override returns early before any fallible HOME lookup, so these
         // cannot fail regardless of the test environment.
         let paths = RuntimePaths::for_current_user().unwrap();
-        let sessions = crate::persist::sessions_dir();
         // Restore BEFORE asserting so a failed assert can't leak the var into
         // sibling env-sensitive tests.
         unsafe {
@@ -139,7 +138,6 @@ mod tests {
         assert_eq!(paths.socket, PathBuf::from("/tmp/plexy-instance/run/daemon.sock"));
         assert_eq!(paths.pidfile, PathBuf::from("/tmp/plexy-instance/run/daemon.pid"));
         assert_eq!(paths.log_file, PathBuf::from("/tmp/plexy-instance/logs/daemon.log"));
-        assert_eq!(sessions, PathBuf::from("/tmp/plexy-instance/sessions"));
     }
 
     #[test]

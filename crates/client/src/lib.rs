@@ -239,28 +239,6 @@ async fn list_sessions_inline() -> Result<Vec<plexy_glass_protocol::SessionEntry
     }
 }
 
-/// List sessions persisted on disk (running or not) and print a table.
-pub async fn client_list_saved() -> Result<(), ClientError> {
-    let reply = request_reply(Connect::Spawn, ClientMsg::ListSavedSessions).await?;
-    match reply {
-        ServerMsg::SavedSessionList { entries } => {
-            if entries.is_empty() {
-                println!("(no saved sessions)");
-            } else {
-                println!("{:<20}  {:>7}  {:>5}", "NAME", "WINDOWS", "PANES");
-                for e in &entries {
-                    println!("{:<20}  {:>7}  {:>5}", e.name, e.windows, e.panes);
-                }
-            }
-            Ok(())
-        }
-        ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(std::io::Error::other(format!(
-            "unexpected reply from daemon: {other:?}"
-        )))),
-    }
-}
-
 /// Attach to a session, creating it if it doesn't exist.
 ///
 /// No name means the default session "main", deterministic regardless of what

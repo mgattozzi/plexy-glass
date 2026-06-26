@@ -11,19 +11,6 @@ use tokio::sync::Mutex;
 /// Maximum retained paste buffers (tmux-style; oldest evicted past this).
 const PASTE_BUFFER_CAP: usize = 50;
 
-/// Delay before `rename_session`'s deferred second delete of the old saved
-/// file.
-///
-/// The window it must cover is the synchronous write tail of an old-name
-/// snapshot already in flight at rename time: the persist loop's 1500ms
-/// debounce elapses *before* the name is read, so the debounce cannot
-/// extend the window (and a retry re-snapshots, picking up the new name).
-/// 3s is a generous heuristic, not a hard bound (a >3s fsync stall could
-/// still strand a stale file, accepted as negligible), and it needs no
-/// retuning if the debounce changes. The sweep is best-effort and does not
-/// survive daemon death: a stale `old.json` left behind then restores as a
-/// killable ghost session (accepted).
-const RENAME_SWEEP_DELAY: std::time::Duration = std::time::Duration::from_millis(3000);
 
 pub struct SessionRegistry {
     inner: Mutex<HashMap<String, Arc<Session>>>,
@@ -188,11 +175,10 @@ impl SessionRegistry {
         }
     }
 
-    /// Attach-or-create with restore.
+    /// Attach to an existing in-memory session if one is live, else build a
+    /// declared-template session, else `create` a fresh one.
     ///
-    /// An existing in-memory session wins; else try the saved file; else fresh
-    /// `create`. Failures on the saved-file path fall back to fresh and log at
-    /// warn.
+    /// Memory-only: there is no on-disk restore.
     pub async fn attach_or_create(
         &self,
         name: String,
@@ -223,126 +209,33 @@ impl SessionRegistry {
                 map.remove(&name);
             }
         }
-        // Config wins: a declared session name is (re)built from its template,
-        // never restored from disk. (The client `cmd` is intentionally unused
-        // here: declared panes come from the template + the daemon default
-        // shell, so a session is identical whether built at boot or on attach.)
+        // A declared session name is (re)built from its template. (The client
+        // `cmd` is intentionally unused, declared panes come from the template +
+        // the daemon default shell.)
         if let Some(template) = config.sessions.iter().find(|t| t.name == name) {
             return self.create_declared(template, Arc::clone(&config), size).await;
         }
-        // Try restore.
-        match crate::persist::load_session(&name) {
-            Ok(Some(saved)) => {
-                match Session::restore_from(saved, cmd.clone(), size, Arc::clone(&config)).await {
-                    Ok(session) => {
-                        let mut map = self.inner.lock().await;
-                        // Re-check: the registry lock was released across the
-                        // restore await, so a concurrent creator/renamer may
-                        // have taken the name. First writer wins: return the
-                        // existing session and tear the just-restored loser
-                        // down properly (a bare drop leaks pane children: the
-                        // reader thread keeps the PTY master open, and its
-                        // persist task could overwrite the winner's file).
-                        if let Some(existing) = map.get(&name)
-                            && !existing.closing.load(std::sync::atomic::Ordering::SeqCst)
-                        {
-                            let winner = Arc::clone(existing);
-                            drop(map);
-                            session.begin_close();
-                            session.stop_persist().await;
-                            session.terminate_panes().await;
-                            return Ok(winner);
-                        }
-                        map.insert(name, Arc::clone(&session));
-                        return Ok(session);
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, %name, "session restore failed; falling back to fresh");
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, %name, "saved session load failed; falling back to fresh");
-            }
-        }
+        // The daemon is memory-only, there is no on-disk restore, so build fresh.
         self.create(name, cmd, size, config).await
     }
 
-    /// Rename a live session: re-key the map and update the session's live
-    /// name under ONE map-lock hold (so a concurrent `get`/`create` can never
-    /// observe the key and the live name disagreeing), then reconcile the
-    /// on-disk persist files.
-    ///
-    /// Note that we do NOT `fs::rename` the saved file. Restore trusts the
-    /// file's INTERNAL `name` field (`restore.rs` / `attach_or_create`), so a
-    /// moved file would restore under the old name. Instead the session is
-    /// marked dirty (the persist loop snapshots the name at write time,
-    /// producing `new.json` with the right contents) and `old.json` is deleted
-    /// (tolerating missing), plus a deferred sweep (see below).
-    ///
-    /// Takes `self: &Arc<Self>` so the deferred sweep can hold a `Weak` back
-    /// to the registry and re-check liveness of the old name before deleting.
+    /// Rename a live session: re-key the map and update the session's live name
+    /// under ONE map-lock hold (so a concurrent `get`/`create` can never observe
+    /// the key and the live name disagreeing). Memory-only, nothing on disk.
     pub async fn rename_session(self: &Arc<Self>, old: &str, new: &str) -> Result<(), DaemonError> {
         validate_name(new)?;
-        let session = {
-            let mut map = self.inner.lock().await;
-            if map.contains_key(new) {
-                return Err(DaemonError::Protocol(ProtocolError::SessionAlreadyExists {
-                    name: new.to_string(),
-                }));
-            }
-            let session = map.remove(old).ok_or_else(|| {
-                DaemonError::Protocol(ProtocolError::SessionNotFound { name: old.to_string() })
-            })?;
-            // Key and live name move together, under the same lock hold.
-            session.set_name(new.to_string());
-            map.insert(new.to_string(), Arc::clone(&session));
-            session
-        };
-        // The persist loop snapshots the name at write time, so this lands
-        // `new.json` (with the new internal name) on the next debounced pass.
-        session.mark_dirty();
-        // Delete the old file. NotFound is fine, a session never marked dirty
-        // has no on-disk file.
-        if let Err(e) = crate::persist::delete_session(old) {
-            tracing::debug!(error = %e, name = %old, "delete old saved session file (non-fatal)");
+        let mut map = self.inner.lock().await;
+        if map.contains_key(new) {
+            return Err(DaemonError::Protocol(ProtocolError::SessionAlreadyExists {
+                name: new.to_string(),
+            }));
         }
-        // Deferred second delete: a snapshot taken under the OLD name may
-        // already be in flight across the rename (the persist loop read the
-        // name before we updated it) and can land AFTER the delete above,
-        // resurrecting a stale `old.json` that would restore as a ghost
-        // session on a later `attach -n old`. `kill` closes the same race by
-        // stopping the persist task before deleting (`stop_persist`); rename
-        // cannot (the session lives on and must keep persisting), so sweep
-        // once more after the in-flight snapshot's synchronous write tail has
-        // drained (see RENAME_SWEEP_DELAY for the bound and its caveats).
-        //
-        // Liveness guard: if a live, non-closing session owns `old` again by
-        // the time the sweep fires (rename-back, rename of another session to
-        // `old`, or a fresh create, all inside the sweep window), deleting
-        // would discard the CURRENT owner's freshly persisted state, so skip.
-        let old_owned = old.to_string();
-        let registry = Arc::downgrade(self);
-        tokio::spawn(async move {
-            tokio::time::sleep(RENAME_SWEEP_DELAY).await;
-            if let Some(registry) = registry.upgrade() {
-                let map = registry.inner.lock().await;
-                if map
-                    .get(&old_owned)
-                    .is_some_and(|s| !s.closing.load(std::sync::atomic::Ordering::SeqCst))
-                {
-                    tracing::debug!(
-                        name = %old_owned,
-                        "rename sweep skipped: a live session owns the name again"
-                    );
-                    return;
-                }
-            }
-            if let Err(e) = crate::persist::delete_session(&old_owned) {
-                tracing::debug!(error = %e, name = %old_owned, "rename sweep delete (non-fatal)");
-            }
-        });
+        let session = map.remove(old).ok_or_else(|| {
+            DaemonError::Protocol(ProtocolError::SessionNotFound { name: old.to_string() })
+        })?;
+        // Key and live name move together, under the same lock hold.
+        session.set_name(new.to_string());
+        map.insert(new.to_string(), session);
         Ok(())
     }
 
@@ -353,23 +246,12 @@ impl SessionRegistry {
                 DaemonError::Protocol(ProtocolError::SessionNotFound { name: name.to_string() })
             })?
         };
-        // 1. Set closing + abort the Arc-pinning tasks (death/tick), signal the
-        //    coordinator to emit a final frame and exit (tearing down attached
-        //    clients).
+        // Set closing + abort the Arc-pinning tasks (death/tick), signal the
+        // coordinator to emit a final frame and exit (tearing down attached
+        // clients), then terminate pane children, since dropping panes alone
+        // does not SIGHUP them (the reader thread holds the PTY master open).
         session.begin_close();
-        // 2. Stop the persist task AND await its termination, so no in-flight
-        //    `save_session` can re-create the file after we delete it below.
-        session.stop_persist().await;
-        // 3. Terminate pane children. Dropping panes alone does not SIGHUP
-        //    them (the reader thread holds the PTY master open).
         session.terminate_panes().await;
-        // 4. Delete the saved file. Safe now: the persist task is fully stopped
-        //    (awaited above) and guards on `closing`, so it cannot resurrect
-        //    this file. `NotFound` is fine, a session never marked dirty has no
-        //    on-disk file.
-        if let Err(e) = crate::persist::delete_session(name) {
-            tracing::debug!(error = %e, %name, "delete saved session file (non-fatal)");
-        }
         Ok(())
     }
 
@@ -548,25 +430,6 @@ mod tests {
         assert!(!fresh.closing.load(std::sync::atomic::Ordering::SeqCst));
         assert!(r.get("main").await.is_some());
     }
-
-    #[tokio::test]
-    async fn attach_or_create_falls_back_to_fresh_on_corrupt_saved_file() {
-        let _g = crate::test_env::isolate();
-        let dir = crate::persist::sessions_dir();
-        std::fs::create_dir_all(&dir).unwrap();
-        // A malformed saved file makes `load_session` return `Err` (not `Ok(None)`);
-        // `attach_or_create` must warn and fall back to a fresh create rather than
-        // propagate the error and lock the user out.
-        std::fs::write(dir.join("corrupt.json"), b"{not json").unwrap();
-        let r = Arc::new(SessionRegistry::new());
-        let s = r
-            .attach_or_create("corrupt".into(), spec(), size(), cfg())
-            .await
-            .expect("corrupt saved file must fall back to a fresh create");
-        assert_eq!(s.name(), "corrupt");
-        assert!(r.get("corrupt").await.is_some());
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn reload_config_swaps_session_config() {
         let _g = crate::test_env::isolate();
@@ -583,59 +446,6 @@ mod tests {
         assert_eq!(cfg_after.status.left.len(), expected.status.left.len());
         assert_eq!(cfg_after.status.right.len(), expected.status.right.len());
     }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn kill_with_pinned_session_keeps_file_deleted() {
-        let _g = crate::test_env::isolate();
-        let r = Arc::new(SessionRegistry::new());
-        // Hold the strong Arc across the kill to simulate an attached client /
-        // running coordinator that pins the Session past the kill (the exact
-        // condition under which the bug resurrected the file).
-        let s = r.create("pinned".into(), spec(), size(), cfg()).await.unwrap();
-        s.mark_dirty();
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                crate::persist::load_session("pinned").ok().flatten().is_some()
-            })
-            .await,
-            "persist debounce never wrote 'pinned'"
-        );
-        assert!(crate::persist::load_session("pinned").unwrap().is_some());
-
-        r.kill("pinned").await.unwrap();
-        assert!(r.get("pinned").await.is_none(), "session still in registry after kill");
-        // Try to make the (now-aborted) persist task resurrect the file.
-        s.mark_dirty();
-        s.persist_notify.notify_one();
-        // Negative assertion: proving absence requires a fixed wait. We sleep
-        // long enough for the debounce (1500ms) + one cycle, then confirm the
-        // killed session's task did not resurrect the file.
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
-        assert!(
-            crate::persist::load_session("pinned").unwrap().is_none(),
-            "file resurrected after kill while session Arc was held"
-        );
-        drop(s);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn kill_deletes_saved_file() {
-        let _g = crate::test_env::isolate();
-        let r = Arc::new(SessionRegistry::new());
-        let s = r.create("kill-me".into(), spec(), size(), cfg()).await.unwrap();
-        s.mark_dirty();
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                crate::persist::load_session("kill-me").ok().flatten().is_some()
-            })
-            .await,
-            "persist debounce never wrote 'kill-me'"
-        );
-        assert!(crate::persist::load_session("kill-me").unwrap().is_some());
-        r.kill("kill-me").await.unwrap();
-        assert!(crate::persist::load_session("kill-me").unwrap().is_none());
-    }
-
     #[tokio::test]
     async fn rename_session_rekeys_map_and_live_name() {
         let _g = crate::test_env::isolate();
@@ -647,39 +457,6 @@ mod tests {
         assert!(Arc::ptr_eq(&got, &s), "same session Arc under the new key");
         assert_eq!(s.name(), "after", "live name follows the map key");
     }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn rename_session_persists_new_and_deletes_old() {
-        let _g = crate::test_env::isolate();
-        let r = Arc::new(SessionRegistry::new());
-        let s = r.create("before".into(), spec(), size(), cfg()).await.unwrap();
-        s.mark_dirty();
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                crate::persist::load_session("before").ok().flatten().is_some()
-            })
-            .await,
-            "persist debounce never wrote 'before'"
-        );
-        r.rename_session("before", "after").await.unwrap();
-        // rename marks dirty; the debounced pass writes after.json whose
-        // INTERNAL name matches the stem (no `fs::rename`, restore trusts the
-        // field), and before.json was deleted synchronously.
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                crate::persist::load_session("after").ok().flatten().is_some()
-            })
-            .await,
-            "persist debounce never wrote 'after'"
-        );
-        let loaded = crate::persist::load_session("after").unwrap().unwrap();
-        assert_eq!(loaded.name, "after", "saved file's internal name matches its stem");
-        assert!(
-            crate::persist::load_session("before").unwrap().is_none(),
-            "old saved file must be deleted"
-        );
-    }
-
     #[tokio::test]
     async fn rename_session_live_collision_errors() {
         let _g = crate::test_env::isolate();
@@ -715,130 +492,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rename_session_missing_old_file_tolerated() {
+    async fn rename_session_rekeys_to_new_name() {
         let _g = crate::test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        // Never marked dirty → no saved file exists for "fresh".
         r.create("fresh".into(), spec(), size(), cfg()).await.unwrap();
-        assert!(crate::persist::load_session("fresh").unwrap().is_none(), "precondition");
-        r.rename_session("fresh", "moved").await.expect("missing old file is fine");
+        r.rename_session("fresh", "moved").await.expect("rename succeeds");
         assert!(r.get("moved").await.is_some());
+        assert!(r.get("fresh").await.is_none());
     }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn rename_sweep_deletes_stale_old_file() {
-        let _g = crate::test_env::isolate();
-        let r = Arc::new(SessionRegistry::new());
-        r.create("before".into(), spec(), size(), cfg()).await.unwrap();
-        r.rename_session("before", "after").await.unwrap();
-        // Simulate the in-flight-snapshot race: a snapshot taken under the OLD
-        // name lands AFTER rename's immediate delete. (The persist loop can't be
-        // stopped across a rename, the session lives on, so rename arms a
-        // deferred sweep instead; see RENAME_SWEEP_DELAY.)
-        let stale = crate::persist::SessionStateV1 {
-            schema: crate::persist::SCHEMA_VERSION,
-            name: "before".into(),
-            created: chrono::Utc::now(),
-            active_window: 0,
-            windows: vec![crate::persist::WindowStateV1 {
-                name: "w".into(),
-                auto_named: false,
-                sync_input: false,
-                home_cwd: None,
-                active_pane: 0,
-                panes: vec![crate::persist::PaneStateV1 { cwd: None, name: None, scrollback: None }],
-                layout: crate::persist::LayoutStateV1::Leaf(0),
-            }],
-        };
-        crate::persist::save_session(&stale).unwrap();
-        assert!(
-            crate::persist::load_session("before").unwrap().is_some(),
-            "precondition: the stale old-name file landed after the first delete"
-        );
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                crate::persist::load_session("before").ok().flatten().is_none()
-            })
-            .await,
-            "deferred sweep never deleted the stale old-name file"
-        );
-    }
-
-    // Liveness guard: the sweep armed by rename #1 (A→B) fires while a LIVE
-    // session owns "a" again (the immediate rename-back marked it dirty and
-    // the persist loop re-wrote a.json). The sweep must SKIP the delete.
-    // Before the guard it unconditionally removed the current session's
-    // freshly persisted file, silently losing state until the next
-    // structural change.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn rename_sweep_skips_when_a_live_session_reowns_the_name() {
-        let _g = crate::test_env::isolate();
-        let r = Arc::new(SessionRegistry::new());
-        r.create("a".into(), spec(), size(), cfg()).await.unwrap();
-        r.rename_session("a", "b").await.unwrap();
-        r.rename_session("b", "a").await.unwrap();
-        // The rename-back marked dirty; await the debounced persist of a.json.
-        assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-                crate::persist::load_session("a").ok().flatten().is_some()
-            })
-            .await,
-            "persist debounce never wrote 'a'"
-        );
-        // Negative assertion (the sweep did NOT delete): a poll cannot prove
-        // absence, so wait out the sweep timer. It was armed BEFORE this sleep
-        // started, so RENAME_SWEEP_DELAY plus a scheduling margin strictly
-        // covers it.
-        tokio::time::sleep(RENAME_SWEEP_DELAY + std::time::Duration::from_millis(700)).await;
-        let loaded = crate::persist::load_session("a")
-            .unwrap()
-            .expect("sweep must skip: a live session owns 'a' again");
-        assert_eq!(loaded.name, "a", "surviving file carries the current internal name");
-    }
-
-    // `attach_or_create` releases the registry lock across the restore await,
-    // so two concurrent attaches for the same saved name can BOTH pass the
-    // fast-path check before either inserts. The post-restore re-check makes
-    // the first inserter win and hands the loser's caller the winner (tearing
-    // the losing restore down instead of leaking its panes). In every
-    // interleaving both callers must land on the same session.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn concurrent_attach_or_create_restores_converge_on_one_session() {
-        let _g = crate::test_env::isolate();
-        // A saved file so both callers take the restore path (the window in
-        // which the registry lock is not held).
-        let saved = crate::persist::SessionStateV1 {
-            schema: crate::persist::SCHEMA_VERSION,
-            name: "shared".into(),
-            created: chrono::Utc::now(),
-            active_window: 0,
-            windows: vec![crate::persist::WindowStateV1 {
-                name: "w".into(),
-                auto_named: false,
-                sync_input: false,
-                home_cwd: None,
-                active_pane: 0,
-                panes: vec![crate::persist::PaneStateV1 { cwd: None, name: None, scrollback: None }],
-                layout: crate::persist::LayoutStateV1::Leaf(0),
-            }],
-        };
-        crate::persist::save_session(&saved).unwrap();
-        let r = Arc::new(SessionRegistry::new());
-        let (ra, rb) = (Arc::clone(&r), Arc::clone(&r));
-        let a = tokio::spawn(async move {
-            ra.attach_or_create("shared".into(), spec(), size(), cfg()).await
-        });
-        let b = tokio::spawn(async move {
-            rb.attach_or_create("shared".into(), spec(), size(), cfg()).await
-        });
-        let a = a.await.unwrap().unwrap();
-        let b = b.await.unwrap().unwrap();
-        assert!(Arc::ptr_eq(&a, &b), "both callers must land on the same session");
-        let live = r.get("shared").await.expect("registry resolves the name");
-        assert!(Arc::ptr_eq(&live, &a), "the registry holds that same winner");
-        a.terminate_panes().await;
-    }
-
     fn cfg_with_session(kdl: &str) -> Arc<plexy_glass_config::Config> {
         Arc::new(plexy_glass_config::parse_config(kdl).expect("declared-session config"))
     }
@@ -908,47 +569,6 @@ mod tests {
         }
         s.terminate_panes().await;
     }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn declared_session_wins_over_saved_disk_state() {
-        let _g = crate::test_env::isolate();
-        // A saved file for "dev" with a DIFFERENT (1-pane, name "stale") shape
-        // than the declared template, so the test distinguishes "config wins"
-        // from "no file present".
-        let saved = crate::persist::SessionStateV1 {
-            schema: crate::persist::SCHEMA_VERSION,
-            name: "dev".into(),
-            created: chrono::Utc::now(),
-            active_window: 0,
-            windows: vec![crate::persist::WindowStateV1 {
-                name: "stale".into(),
-                auto_named: false,
-                sync_input: false,
-                home_cwd: None,
-                active_pane: 0,
-                panes: vec![crate::persist::PaneStateV1 { cwd: None, name: None, scrollback: None }],
-                layout: crate::persist::LayoutStateV1::Leaf(0),
-            }],
-        };
-        crate::persist::save_session(&saved).unwrap();
-        assert!(crate::persist::load_session("dev").unwrap().is_some(), "precondition: saved file exists");
-
-        // Config declares "dev" as a 2-pane split; it must win over the file.
-        let cfg = cfg_with_session(r##"session "dev" { window "w" { split vertical { pane; pane } } }"##);
-        let r = Arc::new(SessionRegistry::new());
-        let s = r.attach_or_create("dev".into(), spec(), size(), Arc::clone(&cfg)).await.unwrap();
-        {
-            let wm = s.window_manager.lock().await;
-            assert_eq!(
-                wm.windows()[0].layout().panes().len(),
-                2,
-                "config template (2 panes) must win over the 1-pane saved file"
-            );
-            assert_eq!(wm.windows()[0].name, "w", "window name comes from the template, not the saved 'stale'");
-        }
-        s.terminate_panes().await;
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn non_declared_name_unaffected_by_routing() {
         let _g = crate::test_env::isolate();

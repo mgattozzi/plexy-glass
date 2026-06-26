@@ -58,11 +58,7 @@ struct Inner {
 }
 
 impl Pane {
-    /// Spawn a PTY-backed pane. `preseed`, when `Some`, is restored scrollback
-    /// history (session restore): the rows are pushed into the fresh emulator's
-    /// scrollback BEFORE the reader thread starts, so no child byte can advance
-    /// the emulator ahead of the seed. Interactive callers (splits, new windows,
-    /// popups) pass `None`.
+    /// Spawn a PTY-backed pane with a fresh emulator.
     pub fn spawn(
         id: PaneId,
         spec: SpawnSpec,
@@ -70,7 +66,6 @@ impl Pane {
         output_notify: Arc<Notify>,
         death_tx: Option<mpsc::Sender<PaneId>>,
         config: Arc<Config>,
-        preseed: Option<Vec<plexy_glass_emulator::Row>>,
     ) -> Result<Self, DaemonError> {
         let pty_system = portable_pty::native_pty_system();
         // openpty can transiently fail under load (the OS PTY table is briefly
@@ -155,13 +150,6 @@ impl Pane {
         let mut emu = Emulator::new(size.rows, size.cols);
         emu.screen_mut().set_term(child_term);
         emu.set_pixel_area(size.pixel_width, size.pixel_height);
-        // Apply restored scrollback BEFORE the reader thread (spawned below)
-        // can advance the emulator. A post-spawn preseed would race the child's
-        // first prompt and could land seeded history below it (scrollback push
-        // is FIFO with front-eviction). This ordering is a hard requirement.
-        if let Some(rows) = preseed {
-            emu.preseed_scrollback(rows);
-        }
         let emulator = Arc::new(Mutex::new(emu));
         let config_slot: Arc<Mutex<Arc<Config>>> = Arc::new(Mutex::new(config));
 
@@ -763,7 +751,7 @@ mod tests {
             cwd: None,
         };
         let p =
-            Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None).expect("spawn");
+            Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
         let mut exit = p.exit_rx();
         assert!(exit.borrow().is_none(), "child should still be running");
         p.kill_child();
@@ -785,7 +773,7 @@ mod tests {
             env: vec![("TERM".into(), "xterm-ghostty".into())],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None)
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg())
             .expect("spawn");
         assert_eq!(p.with_screen(|s| s.term.clone()), "xterm-ghostty");
         p.kill_child();
@@ -799,7 +787,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None)
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg())
             .expect("spawn");
 
         p.enter_copy_mode(10, 24, 0, 0);
@@ -827,7 +815,7 @@ mod tests {
         let spec = SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
         // 1600x960 over 80x24 gives 20x40 px cells (distinct from the 10x20 fallback).
         let sz = PtySize { rows: 24, cols: 80, pixel_width: 1600, pixel_height: 960 };
-        let p = Pane::spawn(PaneId(0), spec, sz, Arc::new(Notify::new()), None, cfg(), None)
+        let p = Pane::spawn(PaneId(0), spec, sz, Arc::new(Notify::new()), None, cfg())
             .expect("spawn");
         assert_eq!(p.with_screen(|s| s.cell_pixels()), (20, 40));
         p.kill_child();
@@ -836,7 +824,7 @@ mod tests {
     #[tokio::test]
     async fn resize_updates_pixel_area() {
         let spec = SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None)
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg())
             .expect("spawn");
         p.resize(PtySize { rows: 24, cols: 80, pixel_width: 800, pixel_height: 480 })
             .expect("resize");
@@ -852,7 +840,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let pane = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None)
+        let pane = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg())
             .expect("spawn");
 
         // Poll the emulator screen rather than the broadcast channel: /bin/echo
@@ -893,7 +881,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None).expect("spawn");
+        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
         let mut rx = session.subscribe_output();
 
         session
@@ -935,7 +923,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None)
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg())
             .expect("spawn");
         assert!(!p.take_activity(), "no activity before any output");
         assert!(!p.take_bell(), "no bell before any output");
@@ -965,7 +953,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None).expect("spawn");
+        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
         // Wait for the child to exit so the PTY has flushed.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
         // Give the reader thread a beat to drain.
@@ -993,7 +981,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None).expect("spawn");
+        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
 
         session
             .resize(PtySize {
@@ -1022,7 +1010,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None).expect("spawn");
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
         assert_eq!(p.scroll_offset(), 0);
     }
 
@@ -1034,7 +1022,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None).expect("spawn");
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
         p.scroll_by(-5, 100);
         assert_eq!(p.scroll_offset(), 0);
         p.scroll_by(3, 10);
@@ -1056,7 +1044,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None).expect("spawn");
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
         p.set_scroll_offset(7, 10);
         assert_eq!(p.scroll_offset(), 7);
         // Absolute, not relative: setting 3 lands on 3, not 10.
@@ -1077,7 +1065,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None).expect("spawn");
+        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -1100,7 +1088,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None).unwrap();
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).unwrap();
         assert!(!p.is_in_copy_mode());
         p.enter_copy_mode(100, 24, 99, 0);
         assert!(p.is_in_copy_mode());
@@ -1119,7 +1107,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg(), None).unwrap();
+        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).unwrap();
         p.enter_copy_mode(100, 24, 99, 0);
         p.on_size_changed(10);
         let pane_rows = p.with_copy_mode(|cm| cm.pane_rows).unwrap();
@@ -1143,7 +1131,6 @@ mod tests {
             Arc::new(Notify::new()),
             None,
             cfg(),
-            None,
         )
         .unwrap();
         // Send OSC 11 query through cat (which echoes stdin back); the emulator
@@ -1163,74 +1150,6 @@ mod tests {
             .take_color_queries();
         assert!(pending.is_empty(), "expected no leftover color queries");
         let _ = p.send_input(Bytes::from_static(&[0x04])).await;
-    }
-
-    #[tokio::test]
-    async fn spawn_with_preseed_seeds_history_and_child_draws_below() {
-        use plexy_glass_emulator::{Row, RowMark};
-        // Two restored history rows (one marked) seeded into the fresh pane.
-        let mut prompt = Row::blank(80);
-        prompt.cells[0].grapheme = "$".into();
-        prompt.mark.set(RowMark::PROMPT_START);
-        let mut out = Row::blank(80);
-        for (i, ch) in "HISTORY".chars().enumerate() {
-            out.cells[i].grapheme = ch.to_string().into();
-        }
-        let preseed = vec![prompt, out];
-
-        let spec = SpawnSpec {
-            program: "/bin/cat".into(),
-            args: vec![],
-            env: vec![],
-            cwd: None,
-        };
-        let p = Pane::spawn(
-            PaneId(0),
-            spec,
-            size(),
-            Arc::new(Notify::new()),
-            None,
-            cfg(),
-            Some(preseed),
-        )
-        .expect("spawn");
-
-        // The seeded history is in scrollback (with its mark) immediately, before
-        // any child output.
-        let (sb_len, has_prompt_mark, hist_text) = p.with_screen(|s| {
-            let rows = s.scrollback.rows();
-            (
-                rows.len(),
-                rows.front().map(|r| r.mark.contains(RowMark::PROMPT_START)).unwrap_or(false),
-                rows.get(1)
-                    .map(|r| r.cells.iter().map(|c| c.grapheme.as_str()).collect::<String>())
-                    .unwrap_or_default(),
-            )
-        });
-        assert_eq!(sb_len, 2, "both history rows seeded into scrollback");
-        assert!(has_prompt_mark, "the seeded prompt mark rode into scrollback");
-        assert!(hist_text.contains("HISTORY"), "seeded history text present: {hist_text:?}");
-
-        // cat echoes input into the LIVE grid below the history.
-        p.send_input(Bytes::from_static(b"FRESH\n")).await.unwrap();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-        let mut saw_fresh = false;
-        while tokio::time::Instant::now() < deadline {
-            let row0: String = p.with_screen(|s| {
-                s.active.rows[0].cells.iter().map(|c| c.grapheme.as_str()).collect()
-            });
-            if row0.contains("FRESH") {
-                saw_fresh = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert!(saw_fresh, "child output landed in the live grid below the history");
-        // History stays in scrollback (the child's output did not displace it).
-        assert_eq!(p.with_screen(|s| s.scrollback.len()), 2, "history still in scrollback");
-
-        p.send_input(Bytes::from_static(&[0x04])).await.unwrap(); // Ctrl-D → exit
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), p.wait()).await;
     }
 
     #[test]

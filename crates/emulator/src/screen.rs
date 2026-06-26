@@ -445,28 +445,6 @@ impl Screen {
         self.term = term;
     }
 
-    /// Seed `rows` into the scrollback deque as restored history, leaving the
-    /// active grid blank for the freshly-spawned child to draw into below them.
-    /// Rows are pushed in display order; the scrollback's live cap is respected
-    /// (`push` front-evicts, so over-cap input keeps the NEWEST `cap` rows).
-    ///
-    /// Block counters (`blocks_completed` / `last_block_exit`) are deliberately
-    /// NOT recomputed from the seeded rows: block nav / border colors / capture
-    /// read `Row.mark` directly, `run`/`ExecCommand` re-snapshots the live
-    /// counter at execution time, and a restored `blocks_completed > 0` would
-    /// otherwise fire a spurious monitor-command alert on the first drain (the
-    /// increase-from-0 case the alert does not silently absorb). They stay at
-    /// their fresh defaults (0 / None).
-    ///
-    /// Used only by session restore, via `Pane::spawn`'s preseed argument,
-    /// applied before the reader thread starts so no child byte can advance the
-    /// emulator ahead of the seed.
-    pub fn preseed_scrollback(&mut self, rows: Vec<crate::grid::Row>) {
-        for row in rows {
-            self.push_scrollback(row);
-        }
-    }
-
     /// Record the outer-terminal color scheme (true = dark) so a `\e[?996n`
     /// query answers the real preference. The daemon calls this when it relays a
     /// `\e[?997;Xn` from the client.

@@ -21,14 +21,6 @@ pub struct SessionEntry {
     pub created: SystemTime,
 }
 
-/// A session saved on disk, reported by `ListSavedSessions`. May or may not
-/// be currently running.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SavedSessionEntry {
-    pub name: String,
-    pub windows: u8,
-    pub panes: u8,
-}
 
 /// What the daemon should spawn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,7 +115,6 @@ pub enum ClientMsg {
         size: PtySize,
     },
     ListSessions,
-    ListSavedSessions,
     KillSession { name: String },
     Input(Bytes),
     Resize(PtySize),
@@ -170,7 +161,6 @@ pub enum ClientMsg {
 pub enum ServerMsg {
     Attached { session_name: String, client_id: u64 },
     SessionList { entries: Vec<SessionEntry> },
-    SavedSessionList { entries: Vec<SavedSessionEntry> },
     SessionKilled { name: String },
     Output(Bytes),
     Exited { status: ExitStatus },
@@ -255,7 +245,6 @@ mod tests {
                 size: PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
             },
             ClientMsg::ListSessions,
-            ClientMsg::ListSavedSessions,
             ClientMsg::KillSession { name: "old".into() },
             ClientMsg::Input(Bytes::from_static(b"ls\n")),
             ClientMsg::Resize(PtySize { rows: 50, cols: 200, pixel_width: 0, pixel_height: 0 }),
@@ -275,9 +264,6 @@ mod tests {
         let cases = vec![
             ServerMsg::Attached { session_name: "main".into(), client_id: 0 },
             ServerMsg::SessionList { entries: vec![] },
-            ServerMsg::SavedSessionList {
-                entries: vec![SavedSessionEntry { name: "alpha".into(), windows: 2, panes: 3 }],
-            },
             ServerMsg::SessionKilled { name: "old".into() },
             ServerMsg::Output(Bytes::from_static(b"hello")),
             ServerMsg::Exited { status: ExitStatus::Code(0) },

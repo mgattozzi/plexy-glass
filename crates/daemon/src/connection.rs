@@ -37,18 +37,6 @@ where
             send_msg(&mut writer, &ServerMsg::SessionList { entries }).await?;
             Ok(())
         }
-        ClientMsg::ListSavedSessions => {
-            let entries = crate::persist::list_saved()
-                .into_iter()
-                .map(|(name, windows, panes)| plexy_glass_protocol::SavedSessionEntry {
-                    name,
-                    windows,
-                    panes,
-                })
-                .collect();
-            send_msg(&mut writer, &ServerMsg::SavedSessionList { entries }).await?;
-            Ok(())
-        }
         ClientMsg::KillSession { name } => match registry.kill(&name).await {
             Ok(()) => send_msg(&mut writer, &ServerMsg::SessionKilled { name }).await,
             Err(DaemonError::Protocol(perr)) => {
@@ -344,7 +332,7 @@ where
     // Otherwise fall back to a status notice (config error or skipped bindings).
     let has_config_error = registry.has_config_error();
     let show_welcome =
-        !has_config_error && config.welcome && crate::persist::take_first_run();
+        !has_config_error && config.welcome && crate::first_run::take_first_run();
     if show_welcome {
         {
             let mut m = session.window_manager.lock().await;
@@ -1231,7 +1219,6 @@ impl ClientCtx<'_> {
                         let mut m = t.window_manager.lock().await;
                         m.rename_window_by_id(window, name);
                     }
-                    t.mark_dirty();
                     t.notify.notify_one();
                 } else {
                     self.session.set_status_error(format!("no session: {tgt}")).await;
@@ -1244,7 +1231,6 @@ impl ClientCtx<'_> {
                         let mut m = t.window_manager.lock().await;
                         m.rename_pane_by_id(pane, name);
                     }
-                    t.mark_dirty();
                     t.notify.notify_one();
                 } else {
                     self.session.set_status_error(format!("no session: {tgt}")).await;
@@ -1571,10 +1557,8 @@ async fn apply_overlay_result(
             ctx.session.notify.notify_one();
         }
         OverlayKeyResult::Committed => {
-            // A rename changed persistent state: redraw and schedule a
-            // debounced save.
+            // A rename changed a window/pane name: redraw.
             ctx.session.notify.notify_one();
-            ctx.session.mark_dirty();
         }
         OverlayKeyResult::SwitchSession(name) => {
             ctx.switch_session(name).await;

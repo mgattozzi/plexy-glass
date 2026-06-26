@@ -19,12 +19,12 @@ integration.
 
 - Sessions, windows, and panes with horizontal/vertical splits, pane zoom, and
   keyboard or mouse resize
-- Detach/reattach with on-disk session persistence and restore (split ratios
-  are restored faithfully, not reset; each pane's scrollback and OSC 133
-  command-block marks are restored across a daemon restart, so block nav and
-  exit-status colors light up on the restored history *if your shell emits the
-  marks*, see [shell integration](#shell-integration-recommended); see also
-  [Persistence](docs/configuration.md#persistence))
+- Detach and reattach to a running session: the daemon keeps your windows,
+  panes, and scrollback alive in memory while you're away. Note that sessions
+  are *not* persisted to disk, so when the daemon stops its sessions are gone
+  and a fresh daemon starts clean. Declare sessions in `config.kdl` to get the
+  same layout built fresh every time (see
+  [declarative sessions](docs/configuration.md#session--declarative-sessions)).
 - Multiple clients attached to the same session
 - Copy mode with search
 - Full mouse support, including click-to-focus, drag-resize on split borders,
@@ -64,8 +64,8 @@ integration.
   sessions, never rebuilding live ones) and `:switch` auto-creates a
   declared-but-not-running session
 - A visual session picker (`Ctrl+a w`) and a choose-tree
-  (session → window → pane drill-down with incremental filter `/`, collapse/expand `h`/`l`,
-  and session rename `r`, `Ctrl+a W`)
+  (session → window → pane drill-down with incremental filter `/`,
+  collapse/expand `h`/`l`, and session rename `r`, `Ctrl+a W`)
 - Pane mobility: break a pane to its own window, join it elsewhere, swap
   panes (including cross-window swap with the marked pane), and a marked pane
   for cross-window moves; focus and zoom follow the slot, mark is preserved
@@ -73,17 +73,17 @@ integration.
   per pane, with graceful fallback and clean teardown of the outer terminal
 - Colored underlines (SGR 58/59), advertised to applications
 - Command-block awareness (OSC 133, [needs shell
-  integration](#shell-integration-recommended)): navigate scrollback by prompt with
-  `Ctrl+a <` / `>`, jump prompts in copy mode with `[` / `]`, click a prompt
-  row while scrolled back to jump there, select a command's output with `o`
-  then `y`, yank it with `:copy-output`, or capture it from a script with
-  `plexy-glass capture --last-command` (plain text) or
+  integration](#shell-integration-recommended)): navigate scrollback by
+  prompt with `Ctrl+a <` / `>`, jump prompts in copy mode with `[` / `]`,
+  click a prompt row while scrolled back to jump there, select a command's
+  output with `o` then `y`, yank it with `:copy-output`, or capture it from a
+  script with `plexy-glass capture --last-command` (plain text) or
   `plexy-glass capture --last-command --json` (structured `{"output",
   "exit_code", "command_line"}`); `plexy-glass run --json` returns the same
-  structure for synchronous runs; each pane's left border (popup pane
-  borders included) is color-coded per row by block exit status (ok color `│` /
-  fail color `▌`), viewport-tracked and live-reloading with the `blocks` config
-  node
+  structure for synchronous runs; each pane's left border (popup pane borders
+  included) is color-coded per row by block exit status (ok color `│` /
+  fail color `▌`), viewport-tracked and live-reloading with the `blocks`
+  config node
 
 ## Quick start
 
@@ -116,14 +116,13 @@ attach, a one-time **welcome modal** shows the essentials: the prefix
 (`Ctrl+a`), a few key bindings, how to open help (`Ctrl+a ?`) and detach
 (`Ctrl+a d`), and how to turn it off (`welcome #false` in `config.kdl`).
 Press any key to dismiss it. Detach with `Ctrl+a d`. The session keeps
-running, and it's also saved to disk so it survives a daemon restart.
+running in the daemon (in memory) until you reattach or the daemon stops.
 
 Other subcommands:
 
 | Command | What it does |
 |---|---|
 | `plexy-glass list` | List all running sessions |
-| `plexy-glass list-saved` | List sessions saved on disk (running or not) |
 | `plexy-glass kill -n NAME` | Kill a single session by name |
 | `plexy-glass kill` | Stop this runtime dir's daemon |
 | `plexy-glass kill --all` | Stop every plexy-glass daemon for the current user |
@@ -160,9 +159,9 @@ details.
 ### Running a second, isolated instance
 
 By default every invocation by the same user shares one daemon (one socket,
-one set of saved sessions). To run a fully separate instance (say, to test a
-build without touching your daily-driver daemon), set `PLEXY_GLASS_DIR` to a
-directory of your choice:
+one set of live sessions). To run a fully separate instance, for example to
+test a build without touching your daily-driver daemon, set `PLEXY_GLASS_DIR`
+to a directory of your choice:
 
 ```sh
 PLEXY_GLASS_DIR=~/.plexy-test plexy-glass        # spawns/attaches an isolated daemon
@@ -170,14 +169,13 @@ PLEXY_GLASS_DIR=~/.plexy-test plexy-glass list   # lists only that instance's se
 PLEXY_GLASS_DIR=~/.plexy-test plexy-glass kill   # stops only that instance's daemon
 ```
 
-When set, the daemon roots its runtime files (`run/`), saved sessions
-(`sessions/`), and logs (`logs/`) under that directory, so the two instances
-never collide. We deliberately do **not** override the config location, so
-both instances read the same `config.kdl`. Because the variable is inherited
-by the auto-spawned daemon, every subcommand run with it set targets the same
-isolated instance. Note that `plexy-glass kill --all` is still a UID-wide
-sweep across *all* instances, so use the scoped `kill` above to leave your
-daily driver alone.
+When set, the daemon roots its runtime files (`run/`) and logs (`logs/`) under
+that directory, so the two instances never collide. Note that it deliberately
+does *not* override the config location, both instances read the same
+`config.kdl`. Because the variable is inherited by the auto-spawned daemon,
+every subcommand run with it set targets the same isolated instance.
+(`plexy-glass kill --all` remains a UID-wide sweep across *all* instances, so
+use the scoped `kill` above to leave your daily driver alone.)
 
 ### Scripting
 

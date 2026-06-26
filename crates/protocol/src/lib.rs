@@ -10,5 +10,5 @@ pub use errors::{CodecError, ProtocolError};
 pub use handshake::{client_handshake, client_handshake_with, server_handshake, HandshakeError};
 pub use messages::{
     ClientHello, ClientMsg, ColorScheme, ExitStatus, GraphicsCaps, NegotiatedKbd, PROTOCOL_VERSION,
-    PtySize, SavedSessionEntry, ServerHello, ServerMsg, SessionEntry, SpawnSpec,
+    PtySize, ServerHello, ServerMsg, SessionEntry, SpawnSpec,
 };

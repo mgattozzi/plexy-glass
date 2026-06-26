@@ -55,7 +55,7 @@ pub(crate) mod test_env {
         }
         // Pre-mark "first run seen" so the one-time welcome modal never opens in
         // attach-based tests (it would intercept overlay/screen assertions).
-        // Mirrors a returning user; matches `persist::first_run_marker()` under
+        // Mirrors a returning user; matches `first_run::first_run_marker()` under
         // this XDG_STATE_HOME. The welcome path is covered by its own unit tests.
         let plexy_state = tmp.path().join("plexy-glass");
         let _ = std::fs::create_dir_all(&plexy_state);
@@ -109,13 +109,13 @@ pub mod args;
 pub mod connection;
 pub mod declared;
 pub mod error;
+pub mod first_run;
 pub mod input_router;
 pub mod listener;
 pub mod osc_actions;
 pub mod pane;
 pub mod paste_buffers;
 pub mod paths;
-pub mod persist;
 pub mod pipe;
 pub mod popup;
 pub mod registry;
