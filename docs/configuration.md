@@ -884,16 +884,16 @@ reload (`Ctrl+a R` / `plexy-glass reload`) takes effect immediately.
 welcome #true   // default; #false skips the one-time welcome modal
 ```
 
-On a user's **first ever attach**, plexy-glass shows a one-time **welcome
-modal**, a centered box with the prefix, a few essential keys, how to open full
-help (`Ctrl+a ?`) and detach (`Ctrl+a d`), and where `config.kdl` lives. Press
-any key to dismiss it. It appears once (gated by a `first-run` marker in the
-state dir, next to saved sessions) and never again.
+When `welcome #true` (the default), plexy-glass shows a **welcome modal** on the
+first attach to the daemon: a centered box with the prefix, a few essential
+keys, how to open full help (`Ctrl+a ?`) and detach (`Ctrl+a d`), and where
+`config.kdl` lives. Press any key to dismiss it. It shows **once per daemon
+run** (an in-memory flag, not an on-disk marker, since the memory-only daemon
+keeps no session state on disk), so a fresh daemon shows it once again.
 
-Set `welcome #false` to skip it entirely (the modal itself tells you this). A
-broken config takes precedence (you see the config-error notice instead, and the
-welcome is deferred to the next clean attach), so a first-run user never misses
-both.
+Set `welcome #false` to turn it off for good (the modal itself tells you
+this). Note that a broken config takes precedence: you see the config-error
+notice instead, and the welcome is deferred to the next clean attach.
 
 `session` nodes declare sessions that the daemon builds fresh at boot (and on
 first attach to a declared name). The template is the only source of truth:

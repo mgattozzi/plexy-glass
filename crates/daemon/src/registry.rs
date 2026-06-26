@@ -24,6 +24,10 @@ pub struct SessionRegistry {
     /// isn't invisible; cleared by a clean reload. A plain sync mutex, since
     /// accesses are brief and await-free.
     config_error: std::sync::Mutex<Option<String>>,
+    /// True until the one-time welcome modal has been shown once this daemon
+    /// lifetime. Gated additionally by `config.welcome` (the user's on/off knob);
+    /// in-memory only, so a fresh daemon shows it once again. No on-disk marker.
+    welcome_pending: std::sync::atomic::AtomicBool,
 }
 
 impl SessionRegistry {
@@ -32,7 +36,17 @@ impl SessionRegistry {
             inner: Mutex::new(HashMap::new()),
             paste_buffers: Mutex::new(PasteBufferStore::new(PASTE_BUFFER_CAP)),
             config_error: std::sync::Mutex::new(None),
+            welcome_pending: std::sync::atomic::AtomicBool::new(true),
         }
+    }
+
+    /// Consume the one-time welcome slot: returns `true` exactly once per
+    /// daemon lifetime (the first caller), `false` thereafter.
+    ///
+    /// The attach path gates this behind `config.welcome` so a disabled
+    /// welcome never consumes it.
+    pub fn take_welcome(&self) -> bool {
+        self.welcome_pending.swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Record (or clear) the config-load error state. Best-effort on a poisoned
@@ -350,6 +364,14 @@ mod tests {
         assert!(r.has_config_error());
         r.set_config_error(None);
         assert!(!r.has_config_error(), "a clean reload clears it");
+    }
+
+    #[test]
+    fn take_welcome_is_true_exactly_once_per_daemon() {
+        let r = SessionRegistry::new();
+        assert!(r.take_welcome(), "first attach to a fresh daemon shows the welcome");
+        assert!(!r.take_welcome(), "shown once — subsequent attaches do not");
+        assert!(!r.take_welcome(), "stays false for this daemon lifetime");
     }
 
     #[tokio::test]

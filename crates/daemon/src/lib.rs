@@ -52,14 +52,11 @@ pub(crate) mod test_env {
         unsafe {
             std::env::set_var("XDG_STATE_HOME", tmp.path());
             std::env::set_var("SHELL", "/bin/sh");
+            // Suppress the one-time welcome modal so it can't intercept
+            // overlay/screen assertions in attach-based tests (every test wants
+            // it off; the var is test-only and never set in production).
+            std::env::set_var("PLEXY_GLASS_NO_WELCOME", "1");
         }
-        // Pre-mark "first run seen" so the one-time welcome modal never opens in
-        // attach-based tests (it would intercept overlay/screen assertions).
-        // Mirrors a returning user; matches `first_run::first_run_marker()` under
-        // this XDG_STATE_HOME. The welcome path is covered by its own unit tests.
-        let plexy_state = tmp.path().join("plexy-glass");
-        let _ = std::fs::create_dir_all(&plexy_state);
-        let _ = std::fs::write(plexy_state.join("first-run"), b"test\n");
         EnvGuard { _lock: lock, old_xdg, old_shell, _tmp: tmp }
     }
 
@@ -109,7 +106,6 @@ pub mod args;
 pub mod connection;
 pub mod declared;
 pub mod error;
-pub mod first_run;
 pub mod input_router;
 pub mod listener;
 pub mod osc_actions;

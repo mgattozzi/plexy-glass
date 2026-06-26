@@ -65,14 +65,6 @@ fn isolate_dirs(tmp: &tempfile::TempDir) -> TestEnv {
     std::fs::create_dir_all(&xdg).unwrap();
     let state = tmp.path().join("state");
     std::fs::create_dir_all(&state).unwrap();
-    // Pre-mark "first run seen" so the one-time onboarding hint never fires in
-    // e2e tests, since it would otherwise occupy the message row and fragment the
-    // byte-level status-message assertions via the diff renderer. (Onboarding is
-    // covered by unit tests; here we behave like a returning user.) Matches the
-    // daemon's `first_run_marker()` path under this XDG_STATE_HOME.
-    let plexy_state = state.join("plexy-glass");
-    std::fs::create_dir_all(&plexy_state).unwrap();
-    std::fs::write(plexy_state.join("first-run"), b"test\n").unwrap();
     let home = tmp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let xdg_config = tmp.path().join("xdg-config");
@@ -85,6 +77,9 @@ fn isolate_dirs(tmp: &tempfile::TempDir) -> TestEnv {
             ("TMPDIR".into(), tmp.path().to_string_lossy().into_owned()),
             // Keep the child shell deterministic.
             ("SHELL".into(), "/bin/sh".into()),
+            // Suppress the one-time welcome modal so it can't occupy the message
+            // row and fragment byte-level status assertions (test-only knob).
+            ("PLEXY_GLASS_NO_WELCOME".into(), "1".into()),
             // Force Kitty graphics caps on: the harness PTY can't answer the
             // graphics probe, so without this the client would report no support
             // and the daemon would emit no image bytes. Only affects tests that

@@ -111,12 +111,12 @@ plexy-glass attach -n work    # attach to (or create) the session "work"
 ```
 
 Running `plexy-glass` with no subcommand is the same as `plexy-glass attach`.
-The daemon is spawned automatically on first attach. The very first time you
-attach, a one-time **welcome modal** shows the essentials: the prefix
+The daemon is spawned automatically on first attach. The first time you attach
+to a fresh daemon, a **welcome modal** shows the essentials: the prefix
 (`Ctrl+a`), a few key bindings, how to open help (`Ctrl+a ?`) and detach
-(`Ctrl+a d`), and how to turn it off (`welcome #false` in `config.kdl`).
-Press any key to dismiss it. Detach with `Ctrl+a d`. The session keeps
-running in the daemon (in memory) until you reattach or the daemon stops.
+(`Ctrl+a d`), and how to turn it off (`welcome #false` in `config.kdl`). Press
+any key to dismiss it. Detach with `Ctrl+a d` and the session keeps running in
+the daemon (in memory) until you reattach or the daemon stops.
 
 Other subcommands:
 

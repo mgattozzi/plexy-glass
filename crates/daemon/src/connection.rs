@@ -325,14 +325,17 @@ where
     let (km, keymap_skips) = plexy_glass_keys::build_keymap_with_skips(&config.keymap);
     let mut keymap = km;
 
-    // First ever attach (welcome enabled, no config error preempting it) → open
-    // the one-time welcome modal; `take_first_run` writes the marker so it shows
-    // once. The `&&` short-circuit means a config error or `welcome #false`
-    // leaves the marker unwritten, so the modal is merely deferred, not lost.
-    // Otherwise fall back to a status notice (config error or skipped bindings).
+    // Show the one-time welcome modal on the first attach to this daemon, gated
+    // by the `welcome` config knob (the user's on/off switch; `welcome #false`
+    // turns it off). `take_welcome` flips an in-memory daemon-lifetime flag, no
+    // on-disk marker. A config error preempts it (the modal is deferred until a
+    // clean config). The `&&` short-circuit means a disabled/preempted welcome
+    // never consumes the slot. Tests set `PLEXY_GLASS_NO_WELCOME` to suppress it.
     let has_config_error = registry.has_config_error();
-    let show_welcome =
-        !has_config_error && config.welcome && crate::first_run::take_first_run();
+    let show_welcome = !has_config_error
+        && config.welcome
+        && std::env::var_os("PLEXY_GLASS_NO_WELCOME").is_none()
+        && registry.take_welcome();
     if show_welcome {
         {
             let mut m = session.window_manager.lock().await;

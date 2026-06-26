@@ -119,10 +119,10 @@ only for ASCII.
 - **Every in-process daemon test that builds a `Session`/registry must start
   with `let _g = crate::test_env::isolate();`** (`crates/daemon/src/lib.rs`) —
   it points `XDG_STATE_HOME` at a per-test tempdir (held for the test's whole
-  body, across `.await`s) and pre-writes the one-time welcome-modal marker there,
-  so neither the daemon's logs nor that marker touch the user's real state dir
-  (and the welcome modal never fires mid-test). The single guard replaces the old
-  per-module copies.
+  body, across `.await`s) and sets `PLEXY_GLASS_NO_WELCOME=1` so the welcome modal
+  never fires mid-test (it would intercept overlay/screen assertions), while the
+  daemon's logs stay out of the user's real state dir. The single guard replaces
+  the old per-module copies. (`tests/e2e.rs`'s `isolate_dirs` sets the same env.)
 - **`Command::NewWindow` / splits spawn `$SHELL`, not the test's `SpawnSpec`**
   (`default_spec` deliberately runs the default shell). A unit test whose child
   must produce specific OUTPUT (e.g. echo a BEL byte back) cannot rely on the
@@ -502,15 +502,19 @@ plus a palette color (`info`/`ok`/`warn`/`alert`); the transient bar is themed
 `osc_actions::copied_message` on all four yank sites + reload/mark/hint;
 `KillWindow` flashes `✓ killed window N (name)` (pane kills stay silent —
 routine + nameless); `Session::handle_command`/`handle_mouse` schedule the TTL
-wake so WM-set messages auto-dismiss. **Onboarding** — a once-ever **welcome
-modal** on first attach (`Overlay::Welcome`/`paint_welcome`, nushell-banner
-style: prefix + essential keys + help/detach + config path + how to disable;
-any key dismisses), gated by the `persist::take_first_run` marker and a
-top-level `welcome #true|#false` config node (default true); help-overlay
-orientation header; mode widget composes `SYNC·PFX`/`Z·PFX`/`COPY·PFX` instead
-of masking the prefix cue. (An earlier transient hint + always-visible ` ? `
-status-bar breadcrumb were replaced by the modal per user feedback — the chip
-did nothing on click and added clutter.) **Config fails
+wake so WM-set messages auto-dismiss. **Onboarding** — a **welcome modal** on
+the first attach to the daemon (`Overlay::Welcome`/`paint_welcome`, nushell-banner
+style: prefix + essential keys + help/detach + config path + how to disable; any
+key dismisses), gated by the top-level `welcome #true|#false` config node
+(default true) plus an **in-memory once-per-daemon flag** (`SessionRegistry::
+take_welcome`) — no on-disk marker (the daemon is memory-only); a fresh daemon
+shows it once again, `welcome #false` turns it off for good. (Tests set
+`PLEXY_GLASS_NO_WELCOME=1` to suppress it.) help-overlay orientation header; mode
+widget composes `SYNC·PFX`/`Z·PFX`/`COPY·PFX` instead of masking the prefix cue.
+(An earlier transient hint + always-visible ` ? ` status-bar breadcrumb, and an
+on-disk `first-run` marker, were replaced by the modal + the in-memory flag per
+user feedback — the chip did nothing on click, and the user wanted the bool to
+gate it, not a file.) **Config fails
 loudly** — KDL errors report `line:col` + message via the previously-discarded
 `e.diagnostics` (+ a `#true/#false` hint when empty); `build_keymap_with_skips`
 reports dropped bindings; `SessionRegistry.config_error` surfaces a boot error
@@ -608,10 +612,11 @@ split_window_at_dfs`; `Screen`/`Emulator::preseed_scrollback` deleted),
 `list-saved` CLI + `SavedSessionEntry`/`ListSavedSessions`/`SavedSessionList`
 protocol variants gone, `serde`/`serde_json` dropped from the daemon. KEPT:
 detach/reattach to a LIVE daemon (in-memory) and declared-template sessions
-(built fresh at boot via `build_from_template`). The one-time onboarding marker
-moved `persist.rs` → `first_run.rs` (`take_first_run`). The user asked for it
-removed (didn't use it, it caused bugs — incl. the phantom block-mode prompts);
-keyboard follow-ups —
+(built fresh at boot via `build_from_template`). The welcome-modal onboarding
+gate moved off disk entirely → an in-memory `SessionRegistry::take_welcome` flag
+(see Onboarding above); there is now NO `first-run` marker. The user asked
+persistence removed (didn't use it, it caused bugs — incl. the phantom
+block-mode prompts); keyboard follow-ups —
 modifyOtherKeys 27-form decode (symmetric with the re-encode emitter), the
 ~30ms Esc idle-flush in the connection loop (a bare `\x1b` parks in the
 paste→mouse→key parser chain — `InputRouter::has_pending`/`flush_keys` drain it,
