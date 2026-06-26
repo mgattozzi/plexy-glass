@@ -109,6 +109,20 @@ color* (the terminal default). The `fg` and `bg` entries (and `cursor`, falling
 back to `accent`) also answer OSC 10/11/12 color queries from applications
 running inside panes.
 
+Beyond the status bar, several palette keys drive the rest of the chrome, so
+the whole UI moves together when you retheme (override these):
+
+- **Pane border rings**: the focused pane uses `highlight`, a marked pane uses
+  `warn`, and a pane-swap drag uses `info` (source) / `ok` (target).
+- **Overlay boxes** (help, session picker, choose-tree, history, buffers): the
+  border is `accent`, the title `highlight`, the footer `muted`, and the
+  interior `bg_bar`.
+- The default status bar puts the **active window tab** on `highlight` so it
+  stands apart from the `accent` session pill and the `bg_bar` inactive tabs.
+
+(The crisp powerline look with segment-shaped separators is opt-in via
+`glyphs "nerd"` with a Nerd Font, see [`glyphs`](#glyphs).)
+
 ## Status-line messages
 
 Transient feedback (copying, reloading, switching sessions, errors, and the

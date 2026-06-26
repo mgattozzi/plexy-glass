@@ -17,6 +17,30 @@ pub(crate) const SOURCE_DRAG_COLOR: u8 = 14; // bright cyan
 /// Border color of the pane under the cursor (target) during a pane-swap drag.
 pub(crate) const TARGET_DRAG_COLOR: u8 = 10; // bright green
 
+/// Palette-resolved colors for the pane border rings (active focus, marked pane,
+/// and the two pane-swap drag roles). Resolved from config by the coordinator so
+/// the rings match the theme instead of clashing fixed ANSI indices.
+#[derive(Clone, Copy)]
+pub struct RingColors {
+    pub active: Color,
+    pub marked: Color,
+    pub drag_source: Color,
+    pub drag_target: Color,
+}
+
+impl RingColors {
+    /// The historical fixed ANSI ring colors (bright blue / magenta / cyan /
+    /// green). Fallback + test default; production drives these from the palette.
+    pub const fn ansi_default() -> Self {
+        Self {
+            active: Color::Indexed(12),
+            marked: Color::Indexed(13),
+            drag_source: Color::Indexed(SOURCE_DRAG_COLOR),
+            drag_target: Color::Indexed(TARGET_DRAG_COLOR),
+        }
+    }
+}
+
 /// Colors used to paint block exit-status segments on a pane's left border, plus
 /// the per-frame policy for the other block annotations (duration + sticky
 /// header). Carried together because all three are gated by `blocks.enabled` and
@@ -90,6 +114,7 @@ pub fn draw(
     band: Rect,
     screen: &mut VirtualScreen,
     blocks: Option<&BlockBorderColors>,
+    rings: RingColors,
 ) {
     let rects: Vec<Rect> = frames.iter().map(|f| f.rect).collect();
     let active_rect = frames.iter().find(|f| f.active).map(|f| f.rect);
@@ -125,17 +150,17 @@ pub fn draw(
                 && touches(r, c, sr)
             {
                 cell.attrs = Attrs::BOLD;
-                cell.fg = Color::Indexed(SOURCE_DRAG_COLOR); // bright cyan
+                cell.fg = rings.drag_source;
             } else if let Some(tr) = target_rect
                 && touches(r, c, tr)
             {
                 cell.attrs = Attrs::BOLD;
-                cell.fg = Color::Indexed(TARGET_DRAG_COLOR); // bright green
+                cell.fg = rings.drag_target;
             } else if let Some(mr) = marked_rect
                 && touches(r, c, mr)
             {
                 cell.attrs = Attrs::BOLD;
-                cell.fg = Color::Indexed(13); // bright magenta
+                cell.fg = rings.marked;
             } else if let Some(colors) = blocks
                 && let Some(status) = left_segment_status(r, c, frames)
             {
@@ -166,7 +191,7 @@ pub fn draw(
                 && touches(r, c, ar)
             {
                 cell.attrs = Attrs::BOLD;
-                cell.fg = Color::Indexed(12); // bright blue
+                cell.fg = rings.active;
             }
             screen.put(r, c, cell);
         }
@@ -184,8 +209,8 @@ pub fn draw(
         // Start two cells in; clip to the pane width.
         let start = f.rect.col.saturating_add(1);
         let max_col = f.rect.right_edge_col();
-        let active = active_rect == Some(f.rect);
-        paint_title(screen, title_row, start, max_col, title, active);
+        let active_color = (active_rect == Some(f.rect)).then_some(rings.active);
+        paint_title(screen, title_row, start, max_col, title, active_color);
     }
 }
 
@@ -296,7 +321,7 @@ fn paint_title(
     start: u16,
     max_col: u16,
     title: &str,
-    active: bool,
+    active_color: Option<Color>,
 ) {
     // " name " reads cleanly against the border line.
     let text = format!(" {title} ");
@@ -310,9 +335,9 @@ fn paint_title(
             break; // don't split a wide grapheme across the edge
         }
         let mut cell = Cell { grapheme: SmolStr::new(g), ..Cell::default() };
-        if active {
+        if let Some(color) = active_color {
             cell.attrs = Attrs::BOLD;
-            cell.fg = Color::Indexed(12);
+            cell.fg = color;
         }
         screen.put(row, c, cell);
         if w == 2 {
@@ -392,7 +417,7 @@ mod tests {
         let pane = Rect::new(1, 1, 4, 5);
         let sel = SelectedBlock { rows: (0, 3), cap_top: true, cap_bottom: true, color: sel_color() };
         let mut screen = VirtualScreen::blank(6, 7);
-        draw(&[frame_with_selected(pane, Some(sel))], band, &mut screen, None);
+        draw(&[frame_with_selected(pane, Some(sel))], band, &mut screen, None, RingColors::ansi_default());
         assert_eq!(screen.cell(1, 0).unwrap().grapheme.as_str(), "\u{250f}", "top cap ┏");
         assert_eq!(screen.cell(2, 0).unwrap().grapheme.as_str(), "\u{2503}", "middle ┃");
         assert_eq!(screen.cell(4, 0).unwrap().grapheme.as_str(), "\u{2517}", "bottom cap ┗");
@@ -406,7 +431,7 @@ mod tests {
         let pane = Rect::new(1, 1, 4, 5);
         let sel = SelectedBlock { rows: (0, 3), cap_top: false, cap_bottom: true, color: sel_color() };
         let mut screen = VirtualScreen::blank(6, 7);
-        draw(&[frame_with_selected(pane, Some(sel))], band, &mut screen, None);
+        draw(&[frame_with_selected(pane, Some(sel))], band, &mut screen, None, RingColors::ansi_default());
         assert_eq!(screen.cell(1, 0).unwrap().grapheme.as_str(), "\u{2503}", "no cap → ┃");
         assert_eq!(screen.cell(4, 0).unwrap().grapheme.as_str(), "\u{2517}", "bottom cap ┗");
     }
@@ -428,7 +453,7 @@ mod tests {
             selected_block: Some(sel),
         };
         let mut screen = VirtualScreen::blank(5, 7);
-        draw(&[f], band, &mut screen, Some(&colors));
+        draw(&[f], band, &mut screen, Some(&colors), RingColors::ansi_default());
         // Mid row: selection color + ┃, NOT the fail color / ▌.
         let cell = screen.cell(2, 0).unwrap();
         assert_eq!(cell.fg, sel_color(), "selection beats fail color");
@@ -450,7 +475,7 @@ mod tests {
         let band = Rect::new(0, 0, 5, 7);
         let pane = Rect::new(1, 1, 3, 5);
         let mut screen = VirtualScreen::blank(5, 7);
-        draw(&[frame(pane, false, None)], band, &mut screen, None);
+        draw(&[frame(pane, false, None)], band, &mut screen, None, RingColors::ansi_default());
         assert_eq!(screen.cell(0, 0).unwrap().grapheme.as_str(), "\u{250c}"); // ┌
         assert_eq!(screen.cell(0, 6).unwrap().grapheme.as_str(), "\u{2510}"); // ┐
         assert_eq!(screen.cell(4, 0).unwrap().grapheme.as_str(), "\u{2514}"); // └
@@ -466,7 +491,7 @@ mod tests {
         let left = Rect::new(1, 1, 3, 3); // cols 1..=3
         let right = Rect::new(1, 5, 3, 3); // cols 5..=7, gap at col 4
         let mut screen = VirtualScreen::blank(5, 9);
-        draw(&[frame(left, false, None), frame(right, false, None)], band, &mut screen, None);
+        draw(&[frame(left, false, None), frame(right, false, None)], band, &mut screen, None, RingColors::ansi_default());
         // Top of the separator meets the top frame as a ┬.
         assert_eq!(screen.cell(0, 4).unwrap().grapheme.as_str(), "\u{252c}");
         // Middle of the separator is a vertical line.
@@ -480,7 +505,7 @@ mod tests {
         let band = Rect::new(0, 0, 5, 12);
         let pane = Rect::new(1, 1, 3, 10);
         let mut screen = VirtualScreen::blank(5, 12);
-        draw(&[frame(pane, false, Some("ed"))], band, &mut screen, None);
+        draw(&[frame(pane, false, Some("ed"))], band, &mut screen, None, RingColors::ansi_default());
         // Title " ed " starts two cells in (col 2): space, e, d, space.
         assert_eq!(screen.cell(0, 3).unwrap().grapheme.as_str(), "e");
         assert_eq!(screen.cell(0, 4).unwrap().grapheme.as_str(), "d");
@@ -491,7 +516,7 @@ mod tests {
         let band = Rect::new(0, 0, 5, 12);
         let pane = Rect::new(1, 1, 3, 10);
         let mut screen = VirtualScreen::blank(5, 12);
-        draw(&[frame(pane, false, Some("好"))], band, &mut screen, None);
+        draw(&[frame(pane, false, Some("好"))], band, &mut screen, None, RingColors::ansi_default());
         // Title " 好 ": the wide grapheme occupies its cell plus a wide spacer.
         assert_eq!(screen.cell(0, 3).unwrap().grapheme.as_str(), "好");
         assert!(screen.cell(0, 4).unwrap().is_wide_spacer());
@@ -502,7 +527,7 @@ mod tests {
         let band = Rect::new(0, 0, 5, 7);
         let pane = Rect::new(1, 1, 3, 5);
         let mut screen = VirtualScreen::blank(5, 7);
-        draw(&[frame(pane, false, Some("a very long title"))], band, &mut screen, None);
+        draw(&[frame(pane, false, Some("a very long title"))], band, &mut screen, None, RingColors::ansi_default());
         // The title clips before the right border, so the corner glyph survives.
         assert_eq!(screen.cell(0, 6).unwrap().grapheme.as_str(), "\u{2510}"); // ┐
     }
@@ -513,7 +538,7 @@ mod tests {
         let band = Rect::new(0, 0, 5, 7);
         let pane = Rect::new(1, 1, 3, 5);
         let mut screen = VirtualScreen::blank(5, 7);
-        draw(&[frame(pane, true, None)], band, &mut screen, None);
+        draw(&[frame(pane, true, None)], band, &mut screen, None, RingColors::ansi_default());
         // The active pane's frame is bold all the way around, corners included.
         for (r, c) in [(0u16, 0u16), (0, 6), (4, 0), (4, 6)] {
             assert!(
@@ -530,7 +555,7 @@ mod tests {
         let band = Rect::new(0, 0, 5, 7);
         let pane = Rect::new(1, 1, 3, 5);
         let mut screen = VirtualScreen::blank(5, 7);
-        draw(&[marked_frame(pane, false, None)], band, &mut screen, None);
+        draw(&[marked_frame(pane, false, None)], band, &mut screen, None, RingColors::ansi_default());
         // Corners are still correct box glyphs...
         assert_eq!(screen.cell(0, 0).unwrap().grapheme.as_str(), "\u{250c}");
         assert_eq!(screen.cell(4, 6).unwrap().grapheme.as_str(), "\u{2518}");
@@ -543,11 +568,31 @@ mod tests {
     }
 
     #[test]
+    fn ring_colors_come_from_the_supplied_palette_not_hardcoded_ansi() {
+        use plexy_glass_emulator::Color;
+        let band = Rect::new(0, 0, 5, 7);
+        let pane = Rect::new(1, 1, 3, 5);
+        let mut screen = VirtualScreen::blank(5, 7);
+        // A bespoke (non-ANSI) ring palette, what the coordinator passes after
+        // resolving `highlight`/`warn`/etc. from config.
+        let rings = RingColors {
+            active: Color::Rgb(1, 2, 3),
+            marked: Color::Rgb(4, 5, 6),
+            drag_source: Color::Rgb(7, 8, 9),
+            drag_target: Color::Rgb(10, 11, 12),
+        };
+        draw(&[frame(pane, true, None)], band, &mut screen, None, rings);
+        // The active ring uses the supplied RGB, not the old Color::Indexed(12).
+        assert_eq!(screen.cell(0, 0).unwrap().fg, Color::Rgb(1, 2, 3));
+        assert_ne!(screen.cell(0, 0).unwrap().fg, Color::Indexed(12));
+    }
+
+    #[test]
     fn untitled_pane_keeps_a_plain_top_border() {
         let band = Rect::new(0, 0, 5, 7);
         let pane = Rect::new(1, 1, 3, 5);
         let mut screen = VirtualScreen::blank(5, 7);
-        draw(&[frame(pane, false, None)], band, &mut screen, None);
+        draw(&[frame(pane, false, None)], band, &mut screen, None, RingColors::ansi_default());
         assert_eq!(screen.cell(0, 3).unwrap().grapheme.as_str(), "\u{2500}");
     }
 
@@ -564,7 +609,7 @@ mod tests {
         let colors = test_colors();
         let mut screen = VirtualScreen::blank(5, 7);
         let f = frame_with_blocks(pane, false, false, block_rows);
-        draw(&[f], band, &mut screen, Some(&colors));
+        draw(&[f], band, &mut screen, Some(&colors), RingColors::ansi_default());
         // Row 2 (mid-pane), col 0: ok color + heavy bar ▌.
         let cell = screen.cell(2, 0).unwrap();
         assert_eq!(cell.fg, colors.ok, "ok segment: fg = ok color");
@@ -580,7 +625,7 @@ mod tests {
         let colors = test_colors();
         let mut screen = VirtualScreen::blank(5, 7);
         let f = frame_with_blocks(pane, false, false, block_rows);
-        draw(&[f], band, &mut screen, Some(&colors));
+        draw(&[f], band, &mut screen, Some(&colors), RingColors::ansi_default());
         // Mid-pane left-segment cell: fail fg + ▌ glyph.
         let cell = screen.cell(2, 0).unwrap();
         assert_eq!(cell.fg, colors.fail, "failed segment: fg = fail color");
@@ -608,7 +653,7 @@ mod tests {
             Some(BlockLineStatus::Failed),
         ]);
         let mut screen = VirtualScreen::blank(5, 10);
-        draw(&[f_left, f_right], band, &mut screen, Some(&colors));
+        draw(&[f_left, f_right], band, &mut screen, Some(&colors), RingColors::ansi_default());
         // Check the ┤ at mid-height of the right pane's left segment.
         let cell = screen.cell(2, 4).unwrap();
         assert_eq!(
@@ -633,11 +678,11 @@ mod tests {
         let block_rows = vec![None; 3];
         let f1 = frame_with_blocks(pane, false, false, block_rows);
         let mut s1 = VirtualScreen::blank(5, 7);
-        draw(&[f1], band, &mut s1, Some(&colors));
+        draw(&[f1], band, &mut s1, Some(&colors), RingColors::ansi_default());
         // Frame with None (feature disabled).
         let f2 = frame(pane, false, None);
         let mut s2 = VirtualScreen::blank(5, 7);
-        draw(&[f2], band, &mut s2, None);
+        draw(&[f2], band, &mut s2, None, RingColors::ansi_default());
         // Both screens must be cell-identical (full Cell equality, not just grapheme+fg).
         for r in 0..5u16 {
             for c in 0..7u16 {
@@ -657,7 +702,7 @@ mod tests {
         let block_rows = vec![Some(BlockLineStatus::Failed); 3];
         let f = frame_with_blocks(pane, false, true, block_rows);
         let mut screen = VirtualScreen::blank(5, 7);
-        draw(&[f], band, &mut screen, Some(&colors));
+        draw(&[f], band, &mut screen, Some(&colors), RingColors::ansi_default());
         // Left-segment cells (col 0, rows 1..=3) must be magenta (marked), not fail color.
         for r in 1..=3u16 {
             let cell = screen.cell(r, 0).unwrap();
@@ -690,7 +735,7 @@ mod tests {
         ];
         let f = frame_with_blocks(pane, true, false, block_rows);
         let mut screen = VirtualScreen::blank(5, 7);
-        draw(&[f], band, &mut screen, Some(&colors));
+        draw(&[f], band, &mut screen, Some(&colors), RingColors::ansi_default());
         // Row 1 (block_rows[0] = Failed): fail color, not blue.
         let failed_cell = screen.cell(1, 0).unwrap();
         assert_eq!(
@@ -728,7 +773,7 @@ mod tests {
             vec![Some(BlockLineStatus::Failed); 3],
         );
         let mut screen = VirtualScreen::blank(5, 9);
-        draw(&[f_left, f_right], band, &mut screen, Some(&colors));
+        draw(&[f_left, f_right], band, &mut screen, Some(&colors), RingColors::ansi_default());
         // The separator (col 4, rows 1..=3) is in right pane's left segment.
         // It should show fail color / ▌, not left pane's active blue.
         for r in 1..=3u16 {
@@ -780,7 +825,7 @@ mod tests {
             vec![Some(BlockLineStatus::Failed); 3],
         );
         let mut screen = VirtualScreen::blank(5, 9);
-        draw(&[f_left, f_right], band, &mut screen, Some(&colors));
+        draw(&[f_left, f_right], band, &mut screen, Some(&colors), RingColors::ansi_default());
         // The separator (col 4, rows 1..=3) is the marked ring: magenta + │.
         for r in 1..=3u16 {
             let cell = screen.cell(r, 4).unwrap();
@@ -810,7 +855,7 @@ mod tests {
         let block_rows = vec![Some(BlockLineStatus::Failed); 3];
         let f = frame_with_blocks(pane, false, false, block_rows);
         let mut screen = VirtualScreen::blank(5, 7);
-        draw(&[f], band, &mut screen, Some(&colors));
+        draw(&[f], band, &mut screen, Some(&colors), RingColors::ansi_default());
         // Right border (col 6): NOT fail colored.
         for r in 1..=3u16 {
             let cell = screen.cell(r, 6).unwrap();
@@ -859,7 +904,7 @@ mod tests {
             },
         ];
         let mut screen = VirtualScreen::blank(5, 12);
-        draw(&frames, band, &mut screen, None);
+        draw(&frames, band, &mut screen, None, RingColors::ansi_default());
         // A border cell of the source pane uses the source color; the target the target color.
         let src_cell = screen.cell(0, 0).expect("src border cell");
         let tgt_cell = screen.cell(0, 11).expect("tgt border cell");
@@ -881,7 +926,7 @@ mod tests {
         let f = frame_with_blocks(pane, false, false, block_rows);
         // Screen has 5 rows; band is 4; band.bottom_edge_row() = 3.
         let mut screen = VirtualScreen::blank(5, 7);
-        draw(&[f], band, &mut screen, Some(&colors));
+        draw(&[f], band, &mut screen, Some(&colors), RingColors::ansi_default());
         // Row 4 (outside the band) must be untouched (blank default).
         for c in 0..7u16 {
             let cell = screen.cell(4, c).unwrap();

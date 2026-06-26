@@ -85,9 +85,13 @@ pub fn built_in_default() -> Config {
                 },
             ],
             middle: vec![WidgetSpec::WindowList {
+                // Active tab in `highlight` so it pops against both the `accent`
+                // session pill on its left and the `bg_bar` inactive tabs. The
+                // most-glanced-at "which window" cue needs a clear boundary.
                 active_style: StyleConfig {
-                    fg: Some("fg".into()),
-                    bg: Some("accent".into()),
+                    fg: Some("bg".into()),
+                    bg: Some("highlight".into()),
+                    bold: true,
                     ..Default::default()
                 },
                 inactive_style: StyleConfig {

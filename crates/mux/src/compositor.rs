@@ -203,6 +203,35 @@ pub struct MessageView<'a> {
     pub bg: plexy_glass_emulator::Color,
 }
 
+/// Palette-resolved chrome colors (pane border rings and overlay-box styling),
+/// pre-resolved by the coordinator (like [`BlockBorderColors`]) so the
+/// compositor stays palette-free. The overlay-box selection row stays `REVERSE`
+/// (a deliberate, theme-agnostic selection cue).
+#[derive(Clone, Copy)]
+pub struct ChromeColors {
+    pub rings: crate::borders::RingColors,
+    pub overlay_border: plexy_glass_emulator::Color,
+    pub overlay_title: plexy_glass_emulator::Color,
+    pub overlay_footer: plexy_glass_emulator::Color,
+    pub overlay_bg: plexy_glass_emulator::Color,
+}
+
+impl ChromeColors {
+    /// Terminal-default chrome: the historical ANSI border rings and an
+    /// uncolored overlay box. Fallback + test default (so tests render exactly as
+    /// before); production drives every color from the palette.
+    pub const fn ansi_default() -> Self {
+        use plexy_glass_emulator::Color;
+        Self {
+            rings: crate::borders::RingColors::ansi_default(),
+            overlay_border: Color::Default,
+            overlay_title: Color::Default,
+            overlay_footer: Color::Default,
+            overlay_bg: Color::Default,
+        }
+    }
+}
+
 // One optional layer per frame element (status/selection/overlay/message/
 // popup/blocks); a params struct would just rename the same positions.
 #[allow(clippy::too_many_arguments)] // optional frame layers; a params struct would just rename them
@@ -220,6 +249,8 @@ pub fn compose(
     // Color of the block-mode selection bracket (always available, the
     // bracket works even when `blocks` coloring is disabled).
     block_select_color: plexy_glass_emulator::Color,
+    // Palette-resolved pane-border-ring + overlay-box colors.
+    chrome: ChromeColors,
 ) -> VirtualScreen {
     let (host_rows, host_cols) = host_size;
     let host_rows = host_rows.max(1);
@@ -493,7 +524,7 @@ pub fn compose(
             }
         })
         .collect();
-    borders::draw(&frames, band, &mut screen, blocks);
+    borders::draw(&frames, band, &mut screen, blocks, chrome.rings);
 
     // Command-row annotations: a dim, right-aligned note on each visible command
     // row, composing the fold summary ("▸ N lines ✓/✗", folded blocks only) with
@@ -871,7 +902,7 @@ pub fn compose(
     // origin; full-screen modal overlays ignore it.
     if let Some(ov) = overlay {
         let active_rect = panes.iter().find(|v| v.is_active).map(|v| v.rect);
-        paint_overlay(&mut screen, ov, pane_row_offset, pane_area_rows, host_cols, active_rect);
+        paint_overlay(&mut screen, ov, pane_row_offset, pane_area_rows, host_cols, active_rect, chrome);
     }
 
     screen
@@ -988,6 +1019,7 @@ fn paint_overlay(
     pane_area_rows: u16,
     cols: u16,
     active_rect: Option<Rect>,
+    chrome: ChromeColors,
 ) {
     match overlay {
         OverlayView::RenamePrompt { label, buf } => {
@@ -1008,27 +1040,27 @@ fn paint_overlay(
             screen.cursor_visible = false; // the block glyph is the cursor
         }
         OverlayView::Help { lines, scroll } => {
-            paint_help_box(screen, lines, *scroll, pane_row_offset, pane_area_rows, cols);
+            paint_help_box(screen, lines, *scroll, pane_row_offset, pane_area_rows, cols, chrome);
             // Suppress the underlying pane cursor while the box is up, matching
             // the rename/command overlays (otherwise it shows behind the box).
             screen.cursor_visible = false;
         }
         OverlayView::SessionPicker { entries, filter, selected } => {
             paint_session_picker(
-                screen, entries, filter, *selected, pane_row_offset, pane_area_rows, cols,
+                screen, entries, filter, *selected, pane_row_offset, pane_area_rows, cols, chrome,
             );
             screen.cursor_visible = false;
         }
         OverlayView::Tree { state } => {
-            paint_tree(screen, state, pane_row_offset, pane_area_rows, cols);
+            paint_tree(screen, state, pane_row_offset, pane_area_rows, cols, chrome);
             screen.cursor_visible = false;
         }
         OverlayView::Buffer { state } => {
-            paint_buffers(screen, state, pane_row_offset, pane_area_rows, cols);
+            paint_buffers(screen, state, pane_row_offset, pane_area_rows, cols, chrome);
             screen.cursor_visible = false;
         }
         OverlayView::History { state } => {
-            paint_history(screen, state, pane_row_offset, pane_area_rows, cols);
+            paint_history(screen, state, pane_row_offset, pane_area_rows, cols, chrome);
             screen.cursor_visible = false;
         }
         OverlayView::Hint { state, colors } => {
@@ -1062,6 +1094,9 @@ fn paint_overlay(
 /// a centered `title` on the top border and `footer` on the bottom border. All
 /// four overlay boxes share this exact framing; only their interior content
 /// differs. Painted with empty attrs (no reverse), matching every caller.
+// ponytail: box geometry (rect) + title/footer + theme; a struct would just
+// rename the same transient call-site args.
+#[allow(clippy::too_many_arguments)]
 fn draw_box(
     screen: &mut VirtualScreen,
     row0: u16,
@@ -1070,19 +1105,29 @@ fn draw_box(
     box_w: u16,
     title: &str,
     footer: &str,
+    chrome: ChromeColors,
 ) {
-    let attrs = plexy_glass_emulator::Attrs::empty();
+    let plain = plexy_glass_emulator::Attrs::empty();
+    let bold = plexy_glass_emulator::Attrs::BOLD;
+    let bg = chrome.overlay_bg;
     let dw = |s: &str| display_width(s) as usize;
+    let mut buf = [0u8; 4];
     for r in 0..box_h {
         for c in 0..box_w {
-            put_char(screen, row0 + r, col0 + c, border_glyph(r, c, box_h, box_w), attrs);
+            let g = border_glyph(r, c, box_h, box_w);
+            // Border perimeter in the accent color; interior fills with the box
+            // background (both `Default` under `ansi_default`, so tests are
+            // unchanged).
+            let fg = if g == ' ' { bg } else { chrome.overlay_border };
+            put_colored(screen, row0 + r, col0 + c, g.encode_utf8(&mut buf), fg, bg, plain, col0 + box_w);
         }
     }
-    // Title centered on the top border, footer centered on the bottom border.
+    // Title centered on the top border (bold/highlight), footer on the bottom
+    // border (dim/muted).
     let tcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(title)) / 2) as u16;
-    put_str(screen, row0, tcol, title, attrs, col0 + box_w - 1);
+    put_colored(screen, row0, tcol, title, chrome.overlay_title, bg, bold, col0 + box_w - 1);
     let fcol = col0 + 1 + ((box_w.saturating_sub(2) as usize).saturating_sub(dw(footer)) / 2) as u16;
-    put_str(screen, row0 + box_h - 1, fcol, footer, attrs, col0 + box_w - 1);
+    put_colored(screen, row0 + box_h - 1, fcol, footer, chrome.overlay_footer, bg, plain, col0 + box_w - 1);
 }
 
 /// Paint a scrollable list of `rows` into a box interior, the `sel` row drawn
@@ -1126,6 +1171,7 @@ fn paint_help_box(
     pane_row_offset: u16,
     pane_area_rows: u16,
     cols: u16,
+    chrome: ChromeColors,
 ) {
     let title = " Keybindings ";
     let footer = " j/k scroll \u{b7} esc close ";
@@ -1159,7 +1205,7 @@ fn paint_help_box(
     let col0 = (cols.saturating_sub(box_w)) / 2;
     let attrs = plexy_glass_emulator::Attrs::empty();
 
-    draw_box(screen, row0, col0, box_h, box_w, title, footer);
+    draw_box(screen, row0, col0, box_h, box_w, title, footer, chrome);
 
     // Content rows. Pad the key column to `key_w` *display* columns (keys are
     // ASCII today, but pad by width so a wide glyph would still align).
@@ -1174,6 +1220,9 @@ fn paint_help_box(
 /// Draw the centered session-picker box: a filter line plus the filtered
 /// session rows (current session marked `*`, selected row REVERSE), scrolled to
 /// keep the selection visible.
+// ponytail: filter/selection state + box geometry + theme; a struct would just
+// rename the same transient call-site args.
+#[allow(clippy::too_many_arguments)]
 fn paint_session_picker(
     screen: &mut VirtualScreen,
     entries: &[crate::overlay::PickerEntry],
@@ -1182,6 +1231,7 @@ fn paint_session_picker(
     pane_row_offset: u16,
     pane_area_rows: u16,
     cols: u16,
+    chrome: ChromeColors,
 ) {
     let title = " Sessions ";
     let footer = " \u{2191}/\u{2193} select \u{b7} enter switch \u{b7} esc cancel ";
@@ -1228,7 +1278,7 @@ fn paint_session_picker(
     let col0 = (cols.saturating_sub(box_w)) / 2;
     let plain = plexy_glass_emulator::Attrs::empty();
 
-    draw_box(screen, row0, col0, box_h, box_w, title, footer);
+    draw_box(screen, row0, col0, box_h, box_w, title, footer, chrome);
 
     let inner_left = col0 + 1;
     let inner_right = col0 + box_w - 1; // exclusive max_col for put_str
@@ -1254,6 +1304,7 @@ fn paint_history(
     pane_row_offset: u16,
     pane_area_rows: u16,
     cols: u16,
+    chrome: ChromeColors,
 ) {
     let title = " History ";
     let footer = " \u{2191}/\u{2193} select \u{b7} enter jump \u{b7} esc cancel ";
@@ -1305,7 +1356,7 @@ fn paint_history(
     let col0 = (cols.saturating_sub(box_w)) / 2;
     let plain = plexy_glass_emulator::Attrs::empty();
 
-    draw_box(screen, row0, col0, box_h, box_w, title, footer);
+    draw_box(screen, row0, col0, box_h, box_w, title, footer, chrome);
     let inner_left = col0 + 1;
     let inner_right = col0 + box_w - 1;
 
@@ -1433,6 +1484,7 @@ fn paint_tree(
     pane_row_offset: u16,
     pane_area_rows: u16,
     cols: u16,
+    chrome: ChromeColors,
 ) {
     use crate::tree::{TreeKind, TreeMode};
     let title = " Tree ";
@@ -1499,7 +1551,7 @@ fn paint_tree(
     let row0 = pane_row_offset + (pane_area_rows.saturating_sub(box_h)) / 2;
     let col0 = (cols.saturating_sub(box_w)) / 2;
 
-    draw_box(screen, row0, col0, box_h, box_w, title, &footer);
+    draw_box(screen, row0, col0, box_h, box_w, title, &footer, chrome);
 
     let inner_left = col0 + 1;
     let inner_right = col0 + box_w - 1; // exclusive max_col for put_str
@@ -1520,6 +1572,7 @@ fn paint_buffers(
     pane_row_offset: u16,
     pane_area_rows: u16,
     cols: u16,
+    chrome: ChromeColors,
 ) {
     let title = " Paste buffers ";
     let footer = " \u{2191}/\u{2193} move \u{b7} enter paste \u{b7} d delete \u{b7} esc close ";
@@ -1555,7 +1608,7 @@ fn paint_buffers(
     let col0 = (cols.saturating_sub(box_w)) / 2;
     let plain = plexy_glass_emulator::Attrs::empty();
 
-    draw_box(screen, row0, col0, box_h, box_w, title, footer);
+    draw_box(screen, row0, col0, box_h, box_w, title, footer, chrome);
 
     let inner_left = col0 + 1;
     let inner_right = col0 + box_w - 1;
@@ -1912,7 +1965,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
         assert_eq!(vs.cursor, Some((0, 2)));
     }
@@ -1973,7 +2026,7 @@ mod tests {
             None,
             Some(&pv),
             None,
-        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         // Corners of the border frame.
         assert_eq!(vs.cell(2, 10).unwrap().grapheme.as_str(), "┌");
         assert_eq!(vs.cell(9, 31).unwrap().grapheme.as_str(), "┘");
@@ -2024,7 +2077,7 @@ mod tests {
             None,
             Some(&pv),
             None,
-        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         // Top status row occupies physical row 0; the popup's logical row 2
         // paints at physical row 3 (pane_row_offset = 1).
         assert_eq!(vs.cell(3, 10).unwrap().grapheme.as_str(), "┌");
@@ -2056,7 +2109,7 @@ mod tests {
         };
         let mut sel = Selection::start(PaneId(0), 0, 0);
         sel.extend(0, 4, Rect::new(0, 0, 4, 6));
-        let vs = compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel), None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (4, 6), None, StatusPlacement::Bottom, Some(&sel), None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -2100,7 +2153,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "L");
         assert_eq!(vs.cell(0, 4).unwrap().grapheme.as_str(), "R");
         // Border column.
@@ -2152,7 +2205,7 @@ mod tests {
             match_fg: plexy_glass_emulator::Color::Default,
         };
         let ov = OverlayView::Hint { state: &state, colors };
-        let vs = compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[lv, rv], (4, 7), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         assert_eq!(
             vs.cell(0, 4).unwrap().grapheme.as_str(),
             first,
@@ -2190,7 +2243,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (2, 4), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         // Row 0 should be the last scrollback row (BBBB), not CCCC.
         let r0: String = (0..4)
             .map(|c| vs.cell(0, c).unwrap().grapheme.as_str().to_string())
@@ -2225,7 +2278,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         assert_eq!(vs.cursor, Some((3, 7)));
     }
 
@@ -2255,7 +2308,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         for c in 0..=4 {
             let cell = vs.cell(0, c).unwrap();
             assert!(
@@ -2297,7 +2350,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         for c in 1..=3 {
             assert!(vs.cell(0, c).unwrap().attrs.contains(Attrs::HIGHLIGHT), "col {c} highlighted");
         }
@@ -2338,7 +2391,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         // The out-of-viewport match must not paint any HIGHLIGHT in the band.
         for r in 0..4 {
             for c in 0..20 {
@@ -2382,7 +2435,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         // Prompt bar on the pane's bottom row (rect.row + rect.rows - 1 = 3).
         let row: Vec<String> = (0..4)
             .map(|c| vs.cell(3, c).unwrap().grapheme.to_string())
@@ -2442,7 +2495,7 @@ mod tests {
             drag_role: PaneDragRole::None,
         };
         let status = status_with_left("中B");
-        let vs = compose(&[view], (3, 8), Some(&status), StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (3, 8), Some(&status), StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "中");
         assert!(vs.cell(2, 1).unwrap().grapheme.is_empty(), "wide spacer after 中");
         assert_eq!(vs.cell(2, 2).unwrap().grapheme.as_str(), "B");
@@ -2467,7 +2520,7 @@ mod tests {
             drag_role: PaneDragRole::None,
         };
         let status = status_with_left("AB");
-        let vs = compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (3, 4), Some(&status), StatusPlacement::Top, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "A", "status at row 0");
         assert_eq!(vs.cell(0, 1).unwrap().grapheme.as_str(), "B");
         assert_eq!(vs.cell(1, 0).unwrap().grapheme.as_str(), "X", "pane shifted to row 1");
@@ -2491,7 +2544,7 @@ mod tests {
             drag_role: PaneDragRole::None,
         };
         let status = status_with_left("AB");
-        let vs = compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (3, 4), Some(&status), StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "X", "pane stays at row 0");
         assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "A", "status at last row");
     }
@@ -2514,7 +2567,7 @@ mod tests {
             drag_role: PaneDragRole::None,
         };
         let ov = OverlayView::RenamePrompt { label: "rename window", buf: "hi" };
-        let vs = compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         // Bottom row (3) is a REVERSE prompt bar.
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "prompt bar is REVERSE");
         // Text " rename window \u{25b8} hi", with 'r' at col 1.
@@ -2539,7 +2592,7 @@ mod tests {
             drag_role: PaneDragRole::None,
         };
         let ov = OverlayView::Command { buf: "spl" };
-        let vs = compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (4, 20), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "command bar is REVERSE");
         // Text " :spl": ':' at col 1, 's' at col 2.
         assert_eq!(vs.cell(3, 1).unwrap().grapheme.as_str(), ":");
@@ -2575,7 +2628,7 @@ mod tests {
             Some(MessageView { text: "no session: foo", glyph: "✗", fg, bg }),
             None,
             None,
-        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         // Bottom row (3): " ✗ <text>", themed, NOT the old REVERSE bar.
         assert!(!vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE), "no longer REVERSE");
         let glyph_cell = vs.cell(3, 1).unwrap();
@@ -2622,7 +2675,7 @@ mod tests {
             }),
             None,
             None,
-        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         // The overlay owns the bottom row: 'r' of "rename window" is at col 1,
         // proving the message did not overwrite it.
         assert!(vs.cell(3, 0).unwrap().attrs.contains(Attrs::REVERSE));
@@ -2647,7 +2700,7 @@ mod tests {
         };
         let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
-        let vs = compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         let mut found_corner = false;
         let mut found_text = false;
         for r in 0..10 {
@@ -2667,6 +2720,45 @@ mod tests {
         // The help overlay must suppress the underlying pane cursor (the pane
         // is live with a visible cursor), matching rename/command overlays.
         assert!(!vs.cursor_visible, "help overlay hides the pane cursor");
+    }
+
+    #[test]
+    fn overlay_box_border_uses_the_chrome_palette() {
+        use plexy_glass_emulator::Color;
+        let mut e = Emulator::new(10, 40);
+        pane(&mut e, b"x ");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 10, 40),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: None,
+            title: None,
+            marked: false,
+            drag_role: PaneDragRole::None,
+        };
+        let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
+        let ov = OverlayView::Help { lines: &lines, scroll: 0 };
+        let border = Color::Rgb(0x12, 0x34, 0x56);
+        let chrome = ChromeColors { overlay_border: border, ..ChromeColors::ansi_default() };
+        let vs = compose(
+            &[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None,
+            plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), chrome,
+        );
+        // Find a box-drawing border cell and confirm it carries the chrome color.
+        let mut themed_border = false;
+        for r in 0..10u16 {
+            for c in 0..40u16 {
+                let cell = vs.cell(r, c).unwrap();
+                if cell.grapheme.as_str() == "\u{250c}" {
+                    assert_eq!(cell.fg, border, "box corner uses the chrome border color");
+                    themed_border = true;
+                }
+            }
+        }
+        assert!(themed_border, "overlay box border was painted");
     }
 
     fn picker_view(name: &str, label: &str, current: bool) -> crate::overlay::PickerEntry {
@@ -2695,7 +2787,7 @@ mod tests {
             picker_view("work", "work - 2 win", false),
         ];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "", selected: 1 };
-        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
 
         let mut found_corner = false;
         let mut found_marker = false;
@@ -2736,7 +2828,7 @@ mod tests {
         // A CJK session name must be sized and placed as one cell + a spacer.
         let entries = vec![picker_view("中文", "中文", false)];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "", selected: 0 };
-        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         let mut found = false;
         for r in 0..10 {
             for c in 0..49 {
@@ -2771,7 +2863,7 @@ mod tests {
         };
         let entries = vec![picker_view("main", "main", true)];
         let ov = OverlayView::SessionPicker { entries: &entries, filter: "zzz", selected: 0 };
-        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         let mut text = String::new();
         for r in 0..10 {
             for c in 0..50 {
@@ -2804,7 +2896,7 @@ mod tests {
         let ov = OverlayView::Help { lines: &lines, scroll: 0 };
         let status = status_with_left("S");
         let vs =
-            compose(&[view], (4, 40), Some(&status), StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+            compose(&[view], (4, 40), Some(&status), StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         let mut found_corner = false;
         for r in 0..4 {
             for c in 0..40 {
@@ -2864,7 +2956,7 @@ mod tests {
             ..Default::default()
         };
         let ov = OverlayView::Tree { state: &state };
-        let vs = compose(&[view], (12, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (12, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
 
         let mut found_corner = false;
         let mut found_marker = false;
@@ -2946,7 +3038,7 @@ mod tests {
             filter: String::new(),
         };
         let ov = OverlayView::History { state: &state };
-        let vs = compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
 
         let mut found_corner = false;
         let mut selected_reverse = false;
@@ -3002,7 +3094,7 @@ mod tests {
             selected: 1,
         };
         let ov = OverlayView::Buffer { state: &state };
-        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         let mut text = String::new();
         let mut selected_reverse = false;
         for r in 0..10 {
@@ -3038,7 +3130,7 @@ mod tests {
         };
         let state = crate::buffer::BufferPickerState { entries: vec![], selected: 0 };
         let ov = OverlayView::Buffer { state: &state };
-        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         let mut text = String::new();
         for r in 0..10 {
             for c in 0..50 {
@@ -3066,7 +3158,7 @@ mod tests {
             marked: true,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (3, 8), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (3, 8), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         let mut magenta = false;
         for r in 0..3 {
             for c in 0..8 {
@@ -3101,7 +3193,7 @@ mod tests {
             ..Default::default()
         };
         let ov = OverlayView::Tree { state: &state };
-        let vs = compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (12, 60), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         let mut text = String::new();
         for r in 0..12 {
             for c in 0..60 {
@@ -3128,7 +3220,7 @@ mod tests {
             drag_role: PaneDragRole::None,
         };
         let ov = OverlayView::Tree { state };
-        let vs = compose(&[view], (rows, cols), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (rows, cols), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         let mut text = String::new();
         for r in 0..rows {
             for c in 0..cols {
@@ -3234,6 +3326,7 @@ mod tests {
             None, None, None, None,
             None, // blocks disabled
             plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61),
+            ChromeColors::ansi_default(),
         );
         // No ▌ anywhere and no fail-color cell.
         for r in 0..3u16 {
@@ -3271,8 +3364,8 @@ mod tests {
             drag_role: PaneDragRole::None,
         };
         let colors = block_colors();
-        let vs_some = compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
-        let vs_none = compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs_some = compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
+        let vs_none = compose(&[view_fn()], (4, 6), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         for r in 0..4u16 {
             for c in 0..6u16 {
                 let c1 = vs_some.cell(r, c).unwrap().clone();
@@ -3331,7 +3424,7 @@ mod tests {
             None,
             None,
             Some(&colors),
-        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         // Left-segment column = pane.rect.col - 1 = 0. Pane rows 1..=3 map to
         // block rows 0..2. All should be Failed (fail color / ▌).
         for r in 1..=3u16 {
@@ -3366,7 +3459,7 @@ mod tests {
             None,
             None,
             Some(&colors),
-        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         for r in 1..=3u16 {
             let cell = vs_live.cell(r, 0).unwrap();
             assert_ne!(
@@ -3414,7 +3507,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (10, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
+        let vs = compose(&[view], (10, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL, ChromeColors::ansi_default());
         // Left segment col = rect.col - 1 = 0. Block rows 0..=2 → host rows 1..=3.
         assert_eq!(vs.cell(1, 0).unwrap().grapheme.as_str(), "\u{250f}", "top cap ┏");
         assert_eq!(vs.cell(2, 0).unwrap().grapheme.as_str(), "\u{2503}", "middle ┃");
@@ -3455,7 +3548,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
+        let vs = compose(&[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL, ChromeColors::ansi_default());
         // Topmost visible bracket cell (host row 1) is ┃, not ┏.
         assert_eq!(vs.cell(1, 0).unwrap().grapheme.as_str(), "\u{2503}", "no top cap → ┃");
         assert_ne!(vs.cell(1, 0).unwrap().grapheme.as_str(), "\u{250f}");
@@ -3487,7 +3580,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (8, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
+        let vs = compose(&[view], (8, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL, ChromeColors::ansi_default());
         // No bracket glyph anywhere on the pane's left border column.
         for r in 0..8u16 {
             let g = vs.cell(r, 0).unwrap().grapheme.as_str().to_string();
@@ -3538,7 +3631,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (10, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
+        let vs = compose(&[view], (10, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL, ChromeColors::ansi_default());
         // Block 1 command row = host row 1; "alpha" begins after "$ " at content
         // col 2 → host col 1 + 2 = 3. It must be HIGHLIGHT, not DIM.
         assert!(vs.cell(1, 3).unwrap().attrs.contains(Attrs::HIGHLIGHT), "match highlighted");
@@ -3580,7 +3673,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (8, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
+        let vs = compose(&[view], (8, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL, ChromeColors::ansi_default());
         for r in 0..8u16 {
             for c in 0..20u16 {
                 let a = vs.cell(r, c).unwrap().attrs;
@@ -3629,7 +3722,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (10, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL);
+        let vs = compose(&[view], (10, 20), None, StatusPlacement::Bottom, None, None, None, None, None, SEL, ChromeColors::ansi_default());
         // Bottom content row of the pane = rect.row + rect.rows - 1 = 8. Read the
         // full host width, since the bar ("filter: alpha (1/2)", 19 cols) starts
         // at col 1 and runs past the pane's content columns.
@@ -3682,7 +3775,7 @@ mod tests {
             None,
             None,
             Some(&colors),
-        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         // Logical pane rows 1..=3 paint physically at rows 2..=4 (offset 1).
         for r in 2..=4u16 {
             let cell = vs.cell(r, 0).unwrap();
@@ -3752,7 +3845,7 @@ mod tests {
             None,
             None,
             Some(&colors),
-        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         // Lines 0..2 visible → block 1 (Failed) → left-segment cells colored.
         for r in 1..=3u16 {
             let cell = vs.cell(r, 0).unwrap();
@@ -3809,7 +3902,7 @@ mod tests {
             None,
             Some(&pv),
             blocks,
-        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61))
+        plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default())
     }
 
     /// Popup with a failed block → left border rows colored fail + ▌ glyph.
@@ -3984,7 +4077,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let vs = compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61));
+        let vs = compose(&[view], (10, 40), None, StatusPlacement::Bottom, None, None, None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         assert_eq!(vs.placements.len(), 1, "compose resolved one visible placement");
         let p = &vs.placements[0];
         assert_eq!(p.image_id, host_image_id(3, 5), "raw id 5 folded with pane 3");
@@ -4063,7 +4156,7 @@ mod tests {
         let screen = screen_with_tall_image(2);
         assert_eq!(screen.placements[0].rows, 4, "4-row footprint captured");
         let view = scrolled_view(&screen, Rect::new(0, 0, 2, 40), 3);
-        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert_eq!(vs.placements.len(), 1);
         let p = &vs.placements[0];
         assert_eq!((p.rows, p.cols), (2, 3), "clipped to pane bottom");
@@ -4075,7 +4168,7 @@ mod tests {
         let screen = screen_with_tall_image(8);
         // Pane only 2 cols wide → image clipped to its left 2 cols.
         let view = plain_view(&screen, Rect::new(0, 0, 8, 2));
-        let vs = compose(&[view], (8, 2), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (8, 2), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert_eq!(vs.placements.len(), 1);
         let p = &vs.placements[0];
         assert_eq!((p.rows, p.cols), (4, 2), "full height, clipped width");
@@ -4095,7 +4188,7 @@ mod tests {
         // Viewing at the bottom (scroll_offset 0): the image's line is above the
         // viewport top → no visible placement.
         let view = plain_view(&screen, Rect::new(0, 0, 3, 40));
-        let vs = compose(&[view], (4, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (4, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert!(vs.placements.is_empty(), "scrolled-off image is dropped");
     }
 
@@ -4104,7 +4197,7 @@ mod tests {
         let screen = screen_with_tall_image(8);
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
         let ov = OverlayView::RenamePrompt { label: "rename", buf: "x" };
-        let vs = compose(&[view], (9, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (9, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert!(vs.placements.is_empty(), "modal overlay owns the screen — no images");
     }
 
@@ -4116,7 +4209,7 @@ mod tests {
         let mut pe = Emulator::new(4, 20);
         pe.advance(b"popup");
         let pv = PopupView { rect: Rect::new(2, 2, 4, 20), screen: pe.screen(), title: "p" };
-        let vs = compose(&[view], (9, 40), None, StatusPlacement::Bottom, None, None, None, Some(&pv), None, TEST_COLOR);
+        let vs = compose(&[view], (9, 40), None, StatusPlacement::Bottom, None, None, None, Some(&pv), None, TEST_COLOR, ChromeColors::ansi_default());
         assert!(vs.placements.is_empty(), "popup suppresses underlying images");
     }
 
@@ -4132,7 +4225,7 @@ mod tests {
             total_lines: 4,
         };
         let view = PaneView { copy_mode: Some(&cm), ..plain_view(&screen, Rect::new(0, 0, 4, 40)) };
-        let vs = compose(&[view], (5, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (5, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert_eq!(vs.placements.len(), 1, "image follows the copy-mode viewport");
     }
 
@@ -4141,7 +4234,7 @@ mod tests {
         let screen = screen_with_tall_image(4);
         let bm = crate::BlockMode { selected: 0, viewport_top: 0, pane_rows: 4, total_lines: 4, filter: None };
         let view = PaneView { block_mode: Some(&bm), ..plain_view(&screen, Rect::new(0, 0, 4, 40)) };
-        let vs = compose(&[view], (5, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (5, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert_eq!(vs.placements.len(), 1, "image follows the block-mode viewport");
     }
 
@@ -4154,19 +4247,19 @@ mod tests {
         // On the main grid: one visible placement.
         let s_main = e.screen().clone();
         let v1 = plain_view(&s_main, Rect::new(0, 0, 8, 40));
-        let vs1 = compose(&[v1], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs1 = compose(&[v1], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert_eq!(vs1.placements.len(), 1);
         // Enter alt-screen: image suppressed.
         e.advance(b"\x1b[?1049h");
         let s_alt = e.screen().clone();
         let v2 = plain_view(&s_alt, Rect::new(0, 0, 8, 40));
-        let vs2 = compose(&[v2], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs2 = compose(&[v2], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert!(vs2.placements.is_empty(), "no images while on alt-screen");
         // Leave alt-screen: the main-grid placement resolves again.
         e.advance(b"\x1b[?1049l");
         let s_back = e.screen().clone();
         let v3 = plain_view(&s_back, Rect::new(0, 0, 8, 40));
-        let vs3 = compose(&[v3], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs3 = compose(&[v3], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert_eq!(vs3.placements.len(), 1, "image restored after leaving alt-screen");
     }
 
@@ -4178,7 +4271,7 @@ mod tests {
         // the live view shows the lower 3 rows, cropped at the top.
         let screen = screen_with_tall_image(4);
         let view = plain_view(&screen, Rect::new(0, 0, 4, 40));
-        let vs = compose(&[view], (5, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (5, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert_eq!(vs.placements.len(), 1);
         let p = &vs.placements[0];
         assert_eq!(p.host_row, 0, "visible part starts at the pane top");
@@ -4195,7 +4288,7 @@ mod tests {
         // AND below.
         let screen = screen_with_tall_image(1);
         let view = scrolled_view(&screen, Rect::new(0, 0, 1, 40), 2);
-        let vs = compose(&[view], (2, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (2, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert_eq!(vs.placements.len(), 1);
         let p = &vs.placements[0];
         assert_eq!(p.rows, 1, "one visible row");
@@ -4209,7 +4302,7 @@ mod tests {
         let screen = screen_with_tall_image(2);
         let status = status_with_left("S");
         let view = scrolled_view(&screen, Rect::new(0, 0, 2, 40), 3);
-        let vs = compose(&[view], (3, 40), Some(&status), StatusPlacement::Top, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (3, 40), Some(&status), StatusPlacement::Top, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert_eq!(vs.placements.len(), 1);
         let p = &vs.placements[0];
         assert_eq!(p.host_row, 1, "shifted down by the top status row");
@@ -4266,7 +4359,7 @@ mod tests {
         let screen = duration_block_screen("$ slow", 0, 3000);
         let colors = block_colors_with(Some(2000), false);
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
-        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR, ChromeColors::ansi_default());
         let row0 = composed_row(&vs, 0);
         assert!(row0.starts_with("$ slow"), "command kept: {row0:?}");
         assert!(row0.contains("3.0s"), "duration painted: {row0:?}");
@@ -4291,7 +4384,7 @@ mod tests {
         d.mark.set_duration(Some(3000));
         let colors = block_colors_with(Some(2000), false);
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
-        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR, ChromeColors::ansi_default());
         assert!(!composed_row(&vs, 0).contains("3.0s"), "not on the prompt-start row: {:?}", composed_row(&vs, 0));
         assert!(composed_row(&vs, 1).contains("3.0s"), "on the command (133;B) row: {:?}", composed_row(&vs, 1));
     }
@@ -4301,7 +4394,7 @@ mod tests {
         let screen = duration_block_screen("$ quick", 0, 500);
         let colors = block_colors_with(Some(2000), false);
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
-        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR, ChromeColors::ansi_default());
         assert_eq!(composed_row(&vs, 0), "$ quick", "below-threshold → no annotation");
     }
 
@@ -4310,7 +4403,7 @@ mod tests {
         let screen = duration_block_screen("$ quick", 0, 500);
         let colors = block_colors_with(Some(0), false);
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
-        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR, ChromeColors::ansi_default());
         assert!(composed_row(&vs, 0).contains("500ms"), "threshold 0 shows everything");
     }
 
@@ -4327,7 +4420,7 @@ mod tests {
         }
         let colors = block_colors_with(Some(2000), false);
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
-        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR, ChromeColors::ansi_default());
         let row0 = composed_row(&vs, 0);
         assert!(row0.contains("2 lines"), "fold summary: {row0:?}");
         assert!(row0.contains("3.0s"), "duration appended: {row0:?}");
@@ -4347,7 +4440,7 @@ mod tests {
         };
         let view = PaneView { copy_mode: Some(&cm), ..plain_view(&screen, Rect::new(0, 0, 8, 40)) };
         let colors = block_colors_with(Some(2000), false);
-        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR, ChromeColors::ansi_default());
         assert!(!frame_has(&vs, "3.0s"), "duration suppressed in copy mode");
     }
 
@@ -4371,7 +4464,7 @@ mod tests {
         let screen = tall_block_screen();
         let colors = block_colors_with(None, true);
         let view = scrolled_view(&screen, Rect::new(0, 0, 3, 40), 1);
-        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR, ChromeColors::ansi_default());
         let row0 = composed_row(&vs, 0);
         assert!(row0.contains("cargo build"), "header pins the command: {row0:?}");
         assert!(row_has_attr(&vs, 0, Attrs::DIM), "header is dimmed (blends with theme)");
@@ -4388,7 +4481,7 @@ mod tests {
         let screen = tall_block_screen();
         let colors = block_colors_with(None, true);
         let view = plain_view(&screen, Rect::new(0, 0, 3, 40)); // scroll_offset 0
-        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR, ChromeColors::ansi_default());
         let row0 = composed_row(&vs, 0);
         assert!(!row0.contains("cargo build"), "no header at the live bottom: {row0:?}");
         assert_eq!(row0, "l3", "real top-of-viewport content");
@@ -4401,7 +4494,7 @@ mod tests {
         let screen = tall_block_screen();
         let colors = block_colors_with(None, true);
         let view = scrolled_view(&screen, Rect::new(0, 0, 3, 40), 3);
-        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR, ChromeColors::ansi_default());
         let row0 = composed_row(&vs, 0);
         assert!(row0.starts_with("$ cargo build"), "real command row: {row0:?}");
         assert!(!row_has_attr(&vs, 0, Attrs::DIM), "no pinned header");
@@ -4412,7 +4505,7 @@ mod tests {
         let screen = tall_block_screen();
         let colors = block_colors_with(None, false);
         let view = scrolled_view(&screen, Rect::new(0, 0, 3, 40), 1);
-        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR, ChromeColors::ansi_default());
         let row0 = composed_row(&vs, 0);
         assert!(!row0.contains("cargo build"), "no header when disabled: {row0:?}");
         assert_eq!(row0, "l2", "real top-of-viewport content");
@@ -4428,7 +4521,7 @@ mod tests {
         screen.active.rows[last].mark.set_duration(Some(4000));
         let colors = block_colors_with(Some(2000), true);
         let view = scrolled_view(&screen, Rect::new(0, 0, 3, 40), 1);
-        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let vs = compose(&[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR, ChromeColors::ansi_default());
         let row0 = composed_row(&vs, 0);
         assert!(row0.contains("cargo build"), "header command: {row0:?}");
         assert!(row0.contains("4.0s"), "header carries duration: {row0:?}");
@@ -4452,7 +4545,7 @@ mod tests {
         screen.active.rows[last].mark.set_duration(Some(3000));
         let colors = block_colors_with(Some(2000), true);
         let view = scrolled_view(&screen, Rect::new(0, 0, 3, 24), 1);
-        let vs = compose(&[view], (3, 60), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR);
+        let vs = compose(&[view], (3, 60), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors), TEST_COLOR, ChromeColors::ansi_default());
         let row0 = composed_row(&vs, 0);
         assert!(row0.contains("workspace"), "command tail preserved (not clobbered): {row0:?}");
         assert!(!row0.contains("3.0s"), "duration omitted when it would overlap: {row0:?}");
@@ -4470,7 +4563,7 @@ mod tests {
         let mut screen = e.screen().clone();
         crate::blocks::set_block_folded(&mut screen, 0, true); // fold "$ one"'s output
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
-        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         // Command row kept (with a right-aligned fold summary); out1/out2
         // collapsed → the next prompt follows directly.
         assert!(composed_row(&vs, 0).starts_with("$ one"), "command row stays");
@@ -4488,12 +4581,12 @@ mod tests {
         let mut screen = e.screen().clone();
         // Before folding: the image resolves to one placement.
         let v0 = plain_view(&screen, Rect::new(0, 0, 8, 40));
-        let vs0 = compose(&[v0], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs0 = compose(&[v0], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert_eq!(vs0.placements.len(), 1, "image visible before folding");
         // Fold the image's block → the image hides.
         crate::blocks::set_block_folded(&mut screen, 0, true);
         let v1 = plain_view(&screen, Rect::new(0, 0, 8, 40));
-        let vs1 = compose(&[v1], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs1 = compose(&[v1], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert!(vs1.placements.is_empty(), "image inside a folded block is hidden");
     }
 
@@ -4509,7 +4602,7 @@ mod tests {
         let mut screen = e.screen().clone();
         crate::blocks::set_block_folded(&mut screen, 0, true);
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
-        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         let row0 = composed_row(&vs, 0);
         assert!(row0.starts_with("$ one"), "command row kept: {row0:?}");
         assert!(row0.contains('▸'), "fold marker present: {row0:?}");
@@ -4536,7 +4629,7 @@ mod tests {
         let screen = two_block_fold_screen();
         let bm = crate::BlockMode { selected: 0, viewport_top: 0, pane_rows: 8, total_lines: 8, filter: None };
         let view = PaneView { block_mode: Some(&bm), ..plain_view(&screen, Rect::new(0, 0, 8, 40)) };
-        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert!(composed_row(&vs, 0).starts_with("$ one"), "command row kept");
         assert_eq!(composed_row(&vs, 1), "$ two", "output collapsed in block mode too");
     }
@@ -4545,7 +4638,7 @@ mod tests {
     fn folded_command_row_is_dimmed() {
         let screen = two_block_fold_screen();
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
-        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert!(vs.cell(0, 0).unwrap().attrs.contains(Attrs::DIM), "folded command dimmed");
         assert!(!vs.cell(1, 0).unwrap().attrs.contains(Attrs::DIM), "unfolded next prompt not dimmed");
     }
@@ -4563,7 +4656,7 @@ mod tests {
         let mut screen = e.screen().clone();
         crate::blocks::set_block_folded(&mut screen, 0, true);
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
-        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         let row0 = composed_row(&vs, 0);
         assert!(!row0.contains('▸'), "summary omitted when the command fills the row: {row0:?}");
         assert!(row0.contains(&long), "command text not overwritten: {row0:?}");
@@ -4579,12 +4672,14 @@ mod tests {
         let vs0 = compose(
             &[plain_view(&screen, Rect::new(0, 0, 8, 40))],
             (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR,
+            ChromeColors::ansi_default(),
         );
         let mut folded = screen.clone();
         crate::blocks::set_block_folded(&mut folded, 0, true);
         let vs1 = compose(
             &[plain_view(&folded, Rect::new(0, 0, 8, 40))],
             (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR,
+            ChromeColors::ansi_default(),
         );
         let (r0, r1) = (vs0.cursor.unwrap().0, vs1.cursor.unwrap().0);
         assert_eq!(r1, r0 - 2, "folding 2 output rows above the cursor shifts it up by 2");
@@ -4600,14 +4695,14 @@ mod tests {
 
         // Surfaces with no overlay.
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
-        let vs = compose(&[view], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[view], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert_eq!(vs.virtual_placements.len(), 1);
         assert_eq!(vs.virtual_placements[0].image_id, 9, "raw id kept (no host fold)");
 
         // Suppressed under a modal overlay.
         let view2 = plain_view(&screen, Rect::new(0, 0, 8, 40));
         let ov = OverlayView::RenamePrompt { label: "r", buf: "x" };
-        let vs2 = compose(&[view2], (9, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, TEST_COLOR);
+        let vs2 = compose(&[view2], (9, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert!(vs2.virtual_placements.is_empty(), "overlay suppresses virtual placements");
 
         // Suppressed under a popup.
@@ -4615,14 +4710,14 @@ mod tests {
         pe.advance(b"p");
         let pv = PopupView { rect: Rect::new(2, 2, 4, 20), screen: pe.screen(), title: "p" };
         let view3 = plain_view(&screen, Rect::new(0, 0, 8, 40));
-        let vs3 = compose(&[view3], (9, 40), None, StatusPlacement::Bottom, None, None, None, Some(&pv), None, TEST_COLOR);
+        let vs3 = compose(&[view3], (9, 40), None, StatusPlacement::Bottom, None, None, None, Some(&pv), None, TEST_COLOR, ChromeColors::ansi_default());
         assert!(vs3.virtual_placements.is_empty(), "popup suppresses virtual placements");
 
         // Suppressed on alt-screen.
         e.advance(b"\x1b[?1049h");
         let alt = e.screen().clone();
         let view4 = plain_view(&alt, Rect::new(0, 0, 8, 40));
-        let vs4 = compose(&[view4], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs4 = compose(&[view4], (9, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert!(vs4.virtual_placements.is_empty(), "alt-screen suppresses virtual placements");
     }
 
@@ -4632,7 +4727,7 @@ mod tests {
         let s1 = screen_with_tall_image(8);
         let v0 = PaneView { id: PaneId(1), ..plain_view(&s0, Rect::new(0, 0, 8, 20)) };
         let v1 = PaneView { id: PaneId(2), ..plain_view(&s1, Rect::new(0, 21, 8, 19)) };
-        let vs = compose(&[v0, v1], (9, 41), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR);
+        let vs = compose(&[v0, v1], (9, 41), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert_eq!(vs.placements.len(), 2, "one placement per pane");
         assert_ne!(vs.placements[0].key, vs.placements[1].key, "distinct keys");
         assert_ne!(vs.placements[0].image_id, vs.placements[1].image_id, "distinct host ids");

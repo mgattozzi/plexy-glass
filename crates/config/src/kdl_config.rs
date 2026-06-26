@@ -1099,7 +1099,7 @@ status {
         text value=" ? " { style fg="bg" bg="info" bold=#true }
     }
     middle {
-        window-list { active-style fg="fg" bg="accent"; inactive-style fg="muted" bg="bg_bar" }
+        window-list { active-style fg="bg" bg="highlight" bold=#true; inactive-style fg="muted" bg="bg_bar" }
     }
     right {
         cpu-load { style fg="fg" bg="selection" }

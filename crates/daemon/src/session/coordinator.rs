@@ -312,6 +312,7 @@ pub(super) async fn render_coordinator(
             // so that live-reload updates apply for free on the next compose call.
             let block_colors = block_border_colors(&session.config_snapshot());
             let block_select = block_select_color(&session.config_snapshot());
+            let chrome = chrome_colors(&session.config_snapshot());
 
             // Resolve the transient message's glyph + colors from the current
             // config (severity → palette color + tier glyph), mirroring how the
@@ -338,6 +339,7 @@ pub(super) async fn render_coordinator(
                 popup_view.as_ref(),
                 block_colors.as_ref(),
                 block_select,
+                chrome,
             )
         };
         // The WM lock is released; if the drain set an alert message, schedule
@@ -619,6 +621,30 @@ pub(super) fn hint_colors(cfg: &plexy_glass_config::Config) -> plexy_glass_mux::
         label_fg: resolve(&cfg.hints.label_fg, (29, 28, 25)),
         label_bg: resolve(&cfg.hints.label_bg, (196, 178, 138)),
         match_fg: resolve(&cfg.hints.match_fg, (135, 169, 135)),
+    }
+}
+
+/// Resolve the palette-driven chrome colors (pane border rings + overlay box
+/// styling) from config, so the rings and overlay boxes match the theme instead
+/// of clashing fixed ANSI indices. Mirrors [`block_border_colors`]: each name
+/// resolves via `resolve_color`, falling back to the built-in palette default.
+pub(super) fn chrome_colors(cfg: &plexy_glass_config::Config) -> plexy_glass_mux::ChromeColors {
+    let resolve = |name: &str, def: (u8, u8, u8)| {
+        let rgb = plexy_glass_status::resolve_color(name, &cfg.palette)
+            .unwrap_or(plexy_glass_status::Rgb { r: def.0, g: def.1, b: def.2 });
+        plexy_glass_emulator::Color::Rgb(rgb.r, rgb.g, rgb.b)
+    };
+    plexy_glass_mux::ChromeColors {
+        rings: plexy_glass_mux::RingColors {
+            active: resolve("highlight", (0xb6, 0x92, 0x7b)),
+            marked: resolve("warn", (0xc4, 0xb2, 0x8a)),
+            drag_source: resolve("info", (0x94, 0x9f, 0xb5)),
+            drag_target: resolve("ok", DEFAULT_OK_RGB),
+        },
+        overlay_border: resolve("accent", (0x73, 0x7c, 0x73)),
+        overlay_title: resolve("highlight", (0xb6, 0x92, 0x7b)),
+        overlay_footer: resolve("muted", (0xb6, 0x92, 0x7b)),
+        overlay_bg: resolve("bg_bar", (0x28, 0x27, 0x27)),
     }
 }
 

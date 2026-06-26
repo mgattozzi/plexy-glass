@@ -35,12 +35,12 @@ pub use blocks::{
     block_text, first_prompt_line, last_completed_block, last_prompt_line, next_prompt_line,
     prev_prompt_line, prompt_at_or_above, viewport_block_status,
 };
-pub use borders::BlockBorderColors;
+pub use borders::{BlockBorderColors, RingColors};
 pub use buffer::{BufferAction, BufferEntry, BufferOutcome, BufferPickerState, handle_buffers};
 pub use command_prompt::{Completion, FocusTarget, ParseError, PromptCommand, SwapTarget};
 pub use compositor::{
-    HintColors, MessageView, OverlayView, PaneDragRole, PaneView, PopupView, StatusPlacement,
-    popup_rect,
+    ChromeColors, HintColors, MessageView, OverlayView, PaneDragRole, PaneView, PopupView,
+    StatusPlacement, popup_rect,
 };
 pub use copy_mode::{CopyMode, CopyModeAction, MatchSpan, SearchState};
 pub use diff::{DiffRenderer, GraphicsCaps};
