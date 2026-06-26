@@ -1126,16 +1126,25 @@ impl Session {
     }
 
     pub async fn handle_mouse(
-        &self,
+        self: &Arc<Self>,
         event: plexy_glass_mux::MouseEvent,
     ) -> Result<(), DaemonError> {
-        let mut manager = self.window_manager.lock().await;
-        manager.handle_mouse(event).await?;
-        drop(manager);
+        let had_message = {
+            let mut manager = self.window_manager.lock().await;
+            manager.handle_mouse(event).await?;
+            // A mouse copy/drag-yank sets a transient message via the WM's sync
+            // path, which can't schedule the TTL wake; note it to schedule below.
+            manager.has_active_message()
+        };
         self.notify.notify_one();
         // Mouse drives border drag-resize + status-bar commands; both change
         // structural state. handle_input_bytes is unrelated.
         self.mark_dirty();
+        // Auto-dismiss any message a mouse action set, on the same ~3s timer as
+        // Session-set messages (otherwise it lingers until an unrelated render).
+        if had_message {
+            self.schedule_status_expiry_wake();
+        }
         Ok(())
     }
 

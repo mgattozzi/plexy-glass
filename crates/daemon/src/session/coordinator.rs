@@ -868,6 +868,35 @@ mod tests {
 
     /// Default config resolves "ok" and "alert" from the built-in palette.
     #[test]
+    fn chrome_colors_map_each_role_to_the_right_palette_key() {
+        use plexy_glass_emulator::Color::Rgb;
+        // Pins each role → palette RGB from the built-in kanagawa-dragon palette,
+        // so a swapped key (active↔marked, source↔target, border/title/bg) is
+        // caught here (the painting tests build colors from literals and can't).
+        let c = chrome_colors(&built_in_default());
+        assert_eq!(c.rings.active, Rgb(0xb6, 0x92, 0x7b), "active ring = highlight");
+        assert_eq!(c.rings.marked, Rgb(0xc4, 0xb2, 0x8a), "marked ring = warn");
+        assert_eq!(c.rings.drag_source, Rgb(0x94, 0x9f, 0xb5), "drag source = info");
+        assert_eq!(c.rings.drag_target, Rgb(0x87, 0xa9, 0x87), "drag target = ok");
+        assert_eq!(c.overlay_border, Rgb(0x73, 0x7c, 0x73), "overlay border = accent");
+        assert_eq!(c.overlay_title, Rgb(0xb6, 0x92, 0x7b), "overlay title = highlight");
+        assert_eq!(c.overlay_footer, Rgb(0xb6, 0x92, 0x7b), "overlay footer = muted");
+        assert_eq!(c.overlay_bg, Rgb(0x28, 0x27, 0x27), "overlay bg = bg_bar");
+    }
+
+    #[test]
+    fn message_colors_map_severity_to_the_right_palette_key() {
+        use crate::window_manager::Severity;
+        use plexy_glass_emulator::Color::Rgb;
+        let cfg = built_in_default();
+        let bg = Rgb(0x28, 0x27, 0x27); // bg_bar for every severity
+        assert_eq!(message_colors(&cfg, Severity::Info), (Rgb(0x94, 0x9f, 0xb5), bg));
+        assert_eq!(message_colors(&cfg, Severity::Success), (Rgb(0x87, 0xa9, 0x87), bg));
+        assert_eq!(message_colors(&cfg, Severity::Warn), (Rgb(0xc4, 0xb2, 0x8a), bg));
+        assert_eq!(message_colors(&cfg, Severity::Error), (Rgb(0xc4, 0x74, 0x6e), bg));
+    }
+
+    #[test]
     fn block_border_colors_defaults_resolve_correctly() {
         let cfg = built_in_default();
         let colors = block_border_colors(&cfg).expect("expected Some with default config");

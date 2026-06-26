@@ -1853,10 +1853,14 @@ async fn mark_pane_confirms_set_and_clear() {
 async fn kill_window_flashes_named_window() {
     let mut m = mk_mgr();
     m.handle_command(Command::NewWindow).unwrap(); // 2 windows, active index 1 (window 2)
-    let _ = m.take_active_message(); // discard any incidental message
+    m.status_message = None; // clear any incidental message
+    // Capture the name the way production does, so we assert the *named* half too
+    // (not just the "killed window 2" prefix, which would pass on empty parens).
+    let auto_rename = m.config.auto_rename;
+    let name = m.active_window().display_name(auto_rename);
     m.handle_command(Command::KillWindow).unwrap();
     let msg = m.take_active_message().expect("kill-window flashes a message");
-    assert!(msg.starts_with("killed window 2"), "got {msg:?}");
+    assert_eq!(msg, format!("killed window 2 ({name})"), "names the killed window");
     assert_eq!(m.active_severity(), Severity::Success);
 }
 

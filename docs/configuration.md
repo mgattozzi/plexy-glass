@@ -141,9 +141,10 @@ The glyph is the primary, color-independent cue (success vs error reads even on
 a monochrome terminal) and degrades to a plain letter on `glyphs "ascii"`. The
 bar background is the `bg_bar` palette color. Examples you'll see: `✓ copied 3
 lines` / `✓ copied "…"` on any yank or hint-mode copy, `✓ config reloaded`,
-`✓ marked pane` / `mark cleared`, and `✓ killed window 2 (api)`. Recolor any of
-these by overriding the `info` / `ok` / `warn` / `alert` / `bg_bar` entries in
-[`palette`](#palette).
+`✓ marked pane` / `ℹ mark cleared`, and `✓ killed window 2 (api)` (the leading
+glyph is always present, so `i mark cleared` on the `ascii` tier). Recolor any
+of these by overriding the `info` / `ok` / `warn` / `alert` / `bg_bar` entries
+in [`palette`](#palette).
 
 The built-in palette (Kanagawa Dragon):
 

@@ -22,7 +22,8 @@ integration.
 - Detach/reattach with on-disk session persistence and restore (split ratios
   are restored faithfully, not reset; each pane's scrollback and OSC 133
   command-block marks are restored across a daemon restart, so block nav and
-  exit-status colors light up on the restored history; see
+  exit-status colors light up on the restored history *if your shell emits the
+  marks*, see [shell integration](#shell-integration-recommended); see also
   [Persistence](docs/configuration.md#persistence))
 - Multiple clients attached to the same session
 - Copy mode with search
@@ -71,7 +72,8 @@ integration.
 - Keyboard-protocol negotiation: Kitty keyboard protocol and modifyOtherKeys,
   per pane, with graceful fallback and clean teardown of the outer terminal
 - Colored underlines (SGR 58/59), advertised to applications
-- Command-block awareness (OSC 133): navigate scrollback by prompt with
+- Command-block awareness (OSC 133, [needs shell
+  integration](#shell-integration-recommended)): navigate scrollback by prompt with
   `Ctrl+a <` / `>`, jump prompts in copy mode with `[` / `]`, click a prompt
   row while scrolled back to jump there, select a command's output with `o`
   then `y`, yank it with `:copy-output`, or capture it from a script with

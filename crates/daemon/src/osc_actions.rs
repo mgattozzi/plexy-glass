@@ -27,8 +27,10 @@ pub(crate) fn copied_message(text: &str) -> String {
 }
 
 /// Shell out to the system default URL opener. macOS: `open`. Linux:
-/// `xdg-open`. Failure is logged at warn level and swallowed; the user
-/// should see no panic / popup if the opener is missing.
+/// `xdg-open`. Returns `Err` when the opener binary can't be spawned (e.g. a
+/// headless box with no `xdg-open`), so the caller can surface an honest "no
+/// system opener" message instead of a silent no-op. Note that a successful
+/// spawn only means the opener launched, it does not guarantee the URL opened.
 pub async fn open_url(url: &str) -> Result<(), DaemonError> {
     #[cfg(target_os = "macos")]
     let program = "open";
@@ -46,15 +48,17 @@ pub async fn open_url(url: &str) -> Result<(), DaemonError> {
         Ok(_child) => Ok(()),
         Err(e) => {
             tracing::warn!(error = %e, %url, "failed to invoke URL opener");
-            Ok(())
+            Err(DaemonError::Io(e))
         }
     }
 }
 
 /// Write `payload` bytes to the system clipboard. Tries platform-appropriate
-/// CLIs in order; first available wins. When no tool is found, a warning is
-/// logged on every call; a tool that runs but fails is ignored silently.
-pub async fn write_clipboard(payload: &[u8]) -> Result<(), DaemonError> {
+/// CLIs in order; first available wins. Returns `true` only when a tool actually
+/// completed the write, `false` when none is present or the write timed out, so
+/// the caller can honestly distinguish "copied" from "couldn't reach the
+/// clipboard" (the content is still pushed to the in-app paste buffer either way).
+pub async fn write_clipboard(payload: &[u8]) -> bool {
     let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
         &[("pbcopy", &[])]
     } else {
@@ -89,16 +93,16 @@ pub async fn write_clipboard(payload: &[u8]) -> Result<(), DaemonError> {
             let _ = child.wait().await;
         };
         match tokio::time::timeout(std::time::Duration::from_secs(2), write_and_wait).await {
-            Ok(()) => return Ok(()),
+            Ok(()) => return true,
             Err(_) => {
                 tracing::warn!(program, "clipboard write timed out");
-                return Ok(()); // child killed on drop; don't multiply the stall
+                return false; // child killed on drop; don't multiply the stall
             }
         }
     }
 
     tracing::warn!("no clipboard tool found (pbcopy/wl-copy/xclip/xsel)");
-    Ok(())
+    false
 }
 
 /// Read the current system clipboard contents. Tries platform-appropriate
@@ -212,15 +216,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_url_returns_ok_even_when_opener_is_missing() {
+    async fn open_url_errors_when_no_opener_on_path() {
+        // Stub PATH to an empty dir so `open`/`xdg-open` can't be spawned; the
+        // caller relies on this Err to show "couldn't open (no system opener)".
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::env::var("PATH").unwrap_or_default();
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::set_var("PATH", dir.path()) };
         let r = open_url("about:blank").await;
-        assert!(r.is_ok());
+        unsafe { std::env::set_var("PATH", old) };
+        assert!(r.is_err(), "no opener on PATH must surface as Err, not a silent Ok");
     }
 
     #[tokio::test]
-    async fn write_clipboard_does_not_error_even_when_tool_missing() {
-        let r = write_clipboard(b"hello").await;
-        assert!(r.is_ok());
+    async fn write_clipboard_reports_false_when_no_tool() {
+        // Empty PATH → no pbcopy/wl-copy/xclip/xsel → the write can't happen, and
+        // the caller must learn that (so it warns instead of claiming "copied").
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::env::var("PATH").unwrap_or_default();
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::set_var("PATH", dir.path()) };
+        let wrote = write_clipboard(b"hello").await;
+        unsafe { std::env::set_var("PATH", old) };
+        assert!(!wrote, "no clipboard tool must report false");
     }
 
     #[tokio::test]
@@ -253,9 +271,9 @@ mod tests {
         unsafe { std::env::set_var("PATH", &new_path) };
 
         let start = std::time::Instant::now();
-        let r = write_clipboard(b"hello").await;
+        let wrote = write_clipboard(b"hello").await;
         let elapsed = start.elapsed();
-        assert!(r.is_ok());
+        assert!(!wrote, "a hung helper times out and reports false");
         assert!(
             elapsed < std::time::Duration::from_secs(5),
             "write_clipboard must be bounded by the timeout, took {elapsed:?}"

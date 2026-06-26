@@ -337,29 +337,15 @@ where
     let (km, keymap_skips) = plexy_glass_keys::build_keymap_with_skips(&config.keymap);
     let mut keymap = km;
 
-    // Attach-time notice, most urgent first: a broken config (running defaults)
-    // beats the first-attach onboarding hint, which beats a dropped-binding
-    // warning. Each makes an otherwise-silent condition visible.
-    if registry.has_config_error() {
-        session
-            .set_status_error(
-                "config error — running defaults; run plexy-glass reload for details".into(),
-            )
-            .await;
-    } else if crate::persist::take_first_run() {
-        let prefix = &config.keymap.prefix;
-        session
-            .set_status_info(format!(
-                "Prefix is {prefix} · {prefix} ? for help · {prefix} d to detach"
-            ))
-            .await;
-    } else if !keymap_skips.is_empty() {
-        session
-            .set_status_warn(format!(
-                "{} keymap binding(s) skipped — see plexy-glass reload",
-                keymap_skips.len()
-            ))
-            .await;
+    // Attach-time notice (config error > first-run hint > dropped-binding warn).
+    // `take_first_run` has a side effect (writes the marker), so only consume it
+    // when no config error preempts the hint, matching the ladder's precedence.
+    let has_config_error = registry.has_config_error();
+    let first_run = !has_config_error && crate::persist::take_first_run();
+    if let Some((severity, text)) =
+        attach_notice(has_config_error, first_run, keymap_skips.len(), &config.keymap.prefix)
+    {
+        session.set_status_message(text, severity).await;
     }
 
     // Esc-disambiguation window: a lone `\x1b` (or a partial CSI) parks in the
@@ -1345,10 +1331,18 @@ impl ClientCtx<'_> {
         match pick.action {
             plexy_glass_mux::HintAction::Copy => {
                 // Mirror the copy-mode yank path: system clipboard + paste buffer.
-                let _ = crate::osc_actions::write_clipboard(pick.text.as_bytes()).await;
+                let wrote = crate::osc_actions::write_clipboard(pick.text.as_bytes()).await;
                 let msg = crate::osc_actions::copied_message(&pick.text);
                 self.registry.push_paste_buffer(pick.text.into_bytes()).await;
-                self.session.set_status_ok(msg).await;
+                // Be honest: only claim "copied" if the OS clipboard write landed;
+                // otherwise the content is still in the paste buffer, so point there.
+                if wrote {
+                    self.session.set_status_ok(msg).await;
+                } else {
+                    self.session
+                        .set_status_warn("clipboard unavailable — paste with Ctrl+a ]".into())
+                        .await;
+                }
             }
             plexy_glass_mux::HintAction::Open => {
                 // Await the opener (not fire-and-forget) so a missing system
@@ -1439,6 +1433,51 @@ impl ConnVerb {
     }
 }
 
+/// The attach-time status notice, most urgent first: a broken config (running
+/// defaults) beats the first-run onboarding hint, which beats a dropped-binding
+/// warning. Pure so the precedence ladder is unit-testable; the caller supplies
+/// `first_run` (already consumed via the marker) and the resolved prefix.
+fn attach_notice(
+    has_config_error: bool,
+    first_run: bool,
+    skip_count: usize,
+    prefix: &str,
+) -> Option<(crate::window_manager::Severity, String)> {
+    use crate::window_manager::Severity;
+    if has_config_error {
+        Some((
+            Severity::Error,
+            "config error — running defaults; run plexy-glass reload for details".to_string(),
+        ))
+    } else if first_run {
+        Some((
+            Severity::Info,
+            format!("Prefix is {prefix} · {prefix} ? for help · {prefix} d to detach"),
+        ))
+    } else if skip_count > 0 {
+        Some((
+            Severity::Warn,
+            format!("{skip_count} keymap binding(s) skipped — see plexy-glass reload"),
+        ))
+    } else {
+        None
+    }
+}
+
+/// The status notice after a `reload`: the error wins; otherwise a clean reload
+/// reports success, noting any dropped bindings. Pure, for unit-testing.
+fn reload_notice(error: Option<&str>, skip_count: usize) -> (crate::window_manager::Severity, String) {
+    use crate::window_manager::Severity;
+    match error {
+        Some(e) => (Severity::Error, format!("reload failed: {e}")),
+        None if skip_count > 0 => (
+            Severity::Warn,
+            format!("config reloaded · {skip_count} binding(s) skipped"),
+        ),
+        None => (Severity::Success, "config reloaded".to_string()),
+    }
+}
+
 /// Execute a connection-layer verb. Returns `true` for `Detach`, which the
 /// caller (who owns the input loop) must translate into its own `break`.
 async fn run_connection_verb(
@@ -1458,18 +1497,9 @@ async fn run_connection_verb(
             let new_cfg = ctx.session.config_snapshot();
             let (km, skips) = plexy_glass_keys::build_keymap_with_skips(&new_cfg.keymap);
             *keymap = km;
-            match result {
-                Err(e) => ctx.session.set_status_error(format!("reload failed: {e}")).await,
-                Ok(()) if !skips.is_empty() => {
-                    ctx.session
-                        .set_status_warn(format!(
-                            "config reloaded · {} binding(s) skipped",
-                            skips.len()
-                        ))
-                        .await
-                }
-                Ok(()) => ctx.session.set_status_ok("config reloaded".into()).await,
-            }
+            let err_text = result.as_ref().err().map(|e| e.to_string());
+            let (severity, text) = reload_notice(err_text.as_deref(), skips.len());
+            ctx.session.set_status_message(text, severity).await;
             ctx.session.notify.notify_one();
         }
         ConnVerb::Switch(name) => {
@@ -2122,6 +2152,39 @@ mod tests {
         let inner = b"hello world";
         let wrapped = wrap_paste(inner);
         assert_eq!(wrapped.as_slice(), b"\x1b[200~hello world\x1b[201~");
+    }
+
+    #[test]
+    fn attach_notice_follows_the_precedence_ladder() {
+        use crate::window_manager::Severity;
+        // Config error wins over everything, including a first run with skips.
+        let (sev, text) = attach_notice(true, true, 3, "Ctrl+a").unwrap();
+        assert_eq!(sev, Severity::Error);
+        assert!(text.starts_with("config error"), "got {text:?}");
+        // No config error → first-run hint wins over a skip warning, prefix substituted.
+        let (sev, text) = attach_notice(false, true, 3, "Ctrl+b").unwrap();
+        assert_eq!(sev, Severity::Info);
+        assert_eq!(text, "Prefix is Ctrl+b · Ctrl+b ? for help · Ctrl+b d to detach");
+        // No error, not first run, but bindings were skipped → warn.
+        let (sev, text) = attach_notice(false, false, 2, "Ctrl+a").unwrap();
+        assert_eq!(sev, Severity::Warn);
+        assert_eq!(text, "2 keymap binding(s) skipped — see plexy-glass reload");
+        // Returning user, clean config → no notice.
+        assert!(attach_notice(false, false, 0, "Ctrl+a").is_none());
+    }
+
+    #[test]
+    fn reload_notice_reports_error_skips_or_clean_success() {
+        use crate::window_manager::Severity;
+        let (sev, text) = reload_notice(Some("line 7:3: boom"), 0);
+        assert_eq!(sev, Severity::Error);
+        assert_eq!(text, "reload failed: line 7:3: boom");
+        let (sev, text) = reload_notice(None, 2);
+        assert_eq!(sev, Severity::Warn);
+        assert_eq!(text, "config reloaded · 2 binding(s) skipped");
+        let (sev, text) = reload_notice(None, 0);
+        assert_eq!(sev, Severity::Success);
+        assert_eq!(text, "config reloaded");
     }
 
     #[test]

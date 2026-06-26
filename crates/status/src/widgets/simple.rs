@@ -395,6 +395,14 @@ mod tests {
         };
         let out = w.evaluate(&ctx).await;
         assert_eq!(out.segments[0].text.as_str(), " Z·PFX ");
+        // Copy mode + prefix composes too (the independent COPY arm).
+        let ctx = EvalContext {
+            copy_mode_active: true,
+            prefix_active: true,
+            ..ctx_empty()
+        };
+        let out = w.evaluate(&ctx).await;
+        assert_eq!(out.segments[0].text.as_str(), " COPY·PFX ");
         // Sync alone (no prefix) is unchanged.
         let ctx = EvalContext {
             sync_active: true,

@@ -303,6 +303,14 @@ impl WindowManager {
             .unwrap_or(Severity::Info)
     }
 
+    /// Whether any transient message is currently set (a peek; does not clear).
+    /// `Session::handle_mouse` uses it to schedule the TTL-expiry wake for a
+    /// message a mouse action set under the WM lock (the sync set path can't
+    /// schedule it itself).
+    pub fn has_active_message(&self) -> bool {
+        self.status_message.is_some()
+    }
+
     /// Read-only access to the in-flight selection, if any. Used by the
     /// compositor to draw highlight cells.
     pub fn selection(&self) -> Option<&Selection> {
