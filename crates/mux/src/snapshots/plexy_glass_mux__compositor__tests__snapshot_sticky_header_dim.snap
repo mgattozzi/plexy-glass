@@ -1,0 +1,9 @@
+---
+source: crates/mux/src/compositor.rs
+expression: "dump_frame(&vs, true)"
+---
+cargo build
+l3
+l4
+--- attrs (R)everse (H)ighlight (D)im (B)old (U)nderline ---
+DDDDDDDDDDD

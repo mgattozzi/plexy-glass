@@ -1,0 +1,10 @@
+---
+source: crates/mux/src/compositor.rs
+expression: "dump_frame(&vs, false)"
+---
+▌$ ok
+▌done
+▌$ bad
+▌boom
+▌
+▌

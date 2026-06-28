@@ -5028,4 +5028,99 @@ mod tests {
         );
         insta::assert_snapshot!(dump_frame(&vs, false));
     }
+
+    // ── attribute-aware snapshots (dump_frame(.., true)) ────────────────────
+
+    /// Copy-mode selection: the selected "hello" span (cols 0-4, row 0) should
+    /// carry R (REVERSE) marks in the attribute grid.
+    #[test]
+    fn snapshot_copy_mode_selection() {
+        let mut e = Emulator::new(5, 20);
+        pane(&mut e, b"hello world ");
+        let screen = e.screen().clone();
+        let cm = crate::CopyMode {
+            cursor: (0, 4),
+            anchor: Some((0, 0)),
+            search: crate::SearchState::default(),
+            viewport_top: 0,
+            pane_rows: 5,
+            total_lines: 5,
+        };
+        let view = PaneView { copy_mode: Some(&cm), ..plain_view(&screen, Rect::new(0, 0, 5, 20)) };
+        let vs = compose(
+            &[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None,
+            TEST_COLOR, ChromeColors::ansi_default(),
+        );
+        // attrs=true: the selected span 'hello' on row 0 shows R marks.
+        insta::assert_snapshot!(dump_frame(&vs, true));
+    }
+
+    /// Copy-mode search highlight: the 'ell' match (cols 1-3, row 0) should
+    /// carry H (HIGHLIGHT) marks in the attribute grid.
+    #[test]
+    fn snapshot_copy_mode_search_highlight() {
+        let mut e = Emulator::new(5, 20);
+        pane(&mut e, b"hello world ");
+        let screen = e.screen().clone();
+        let cm = crate::CopyMode {
+            cursor: (0, 0),
+            anchor: None,
+            search: crate::SearchState {
+                query: "ell".into(),
+                matches: vec![crate::MatchSpan { line_idx: 0, col_start: 1, col_end: 3 }],
+                current: 0,
+                prompt_active: false,
+                prompt_buf: String::new(),
+            },
+            viewport_top: 0,
+            pane_rows: 5,
+            total_lines: 5,
+        };
+        let view = PaneView { copy_mode: Some(&cm), ..plain_view(&screen, Rect::new(0, 0, 5, 20)) };
+        let vs = compose(
+            &[view], (5, 20), None, StatusPlacement::Bottom, None, None, None, None, None,
+            TEST_COLOR, ChromeColors::ansi_default(),
+        );
+        // attrs=true: the 'ell' match (cols 1-3) on row 0 shows H marks.
+        insta::assert_snapshot!(dump_frame(&vs, true));
+    }
+
+    /// Sticky-header: when scrolled back one line the command is pinned as a
+    /// dim (not reverse) header on row 0. The attribute grid should show D marks.
+    #[test]
+    fn snapshot_sticky_header_dim() {
+        let screen = tall_block_screen();
+        let colors = block_colors_with(None, true);
+        let view = scrolled_view(&screen, Rect::new(0, 0, 3, 40), 1);
+        let vs = compose(
+            &[view], (3, 40), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors),
+            TEST_COLOR, ChromeColors::ansi_default(),
+        );
+        // attrs=true: row 0 shows the pinned command text with D (dim) marks, not R.
+        insta::assert_snapshot!(dump_frame(&vs, true));
+    }
+
+    /// Block-status border: the left border column (col 0) should show │ for ok
+    /// blocks and ▌ for failed blocks. The pane starts at col 1 so col 0 is the
+    /// border band.
+    #[test]
+    fn snapshot_block_status_border() {
+        use plexy_glass_emulator::Emulator as RawEmulator;
+        // One ok block (exit 0) then one failed block (exit 1).
+        let mut e = RawEmulator::new(6, 29);
+        e.advance(
+            b"\x1b]133;A\x07$ ok\r\n\x1b]133;C\x07done\r\n\x1b]133;D;0\x07\
+              \x1b]133;A\x07$ bad\r\n\x1b]133;C\x07boom\r\n\x1b]133;D;1\x07",
+        );
+        e.advance(b"\x1b[m");
+        let screen = e.screen().clone();
+        let colors = block_colors();
+        // Pane at col 1 so the left border occupies col 0.
+        let view = plain_view(&screen, Rect::new(0, 1, 6, 29));
+        let vs = compose(
+            &[view], (6, 30), None, StatusPlacement::Bottom, None, None, None, None, Some(&colors),
+            TEST_COLOR, ChromeColors::ansi_default(),
+        );
+        insta::assert_snapshot!(dump_frame(&vs, false));
+    }
 }

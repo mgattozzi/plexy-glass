@@ -1129,6 +1129,17 @@ mod tests {
         assert!(!s.contains("\x1b_G"), "no Kitty bytes for a non-graphics client: {s:?}");
     }
 
+    /// Snapshot the placeholder box rendered by a non-graphics client.
+    /// The golden captures the box-drawing glyphs and dimension label.
+    /// The raw output is escape-sequence heavy, so `escape_debug` keeps it
+    /// readable.
+    #[test]
+    fn snapshot_placeholder_box() {
+        let mut d = DiffRenderer::new();
+        let out = render_str(&mut d, &frame_with(vec![boxed_vp(3, 10)]));
+        insta::assert_snapshot!(out.escape_debug().to_string());
+    }
+
     #[test]
     fn kitty_client_draws_no_placeholder_box() {
         let mut d = kitty_renderer();
