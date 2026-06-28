@@ -76,3 +76,5 @@ bitflags = "2.11.1"
 hegeltest = "0.23.1"
 # Coverage-guided + property fuzzing (Hypothesis-style). Dev-only.
 bolero = "0.13.4"
+# Snapshot testing of composed frames (dev-only).
+insta = "1.48.0"

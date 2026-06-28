@@ -4426,6 +4426,44 @@ mod tests {
             .to_string()
     }
 
+    /// Full-frame snapshot dump. Plain mode is one line per row of cell graphemes
+    /// (wide-spacer cells have an empty grapheme, so a wide char renders once, same
+    /// as `composed_row`/`screen_text`). With `attrs`, a second grid is appended
+    /// marking per-cell character attributes: (R)everse, (H)ighlight, (D)im, (B)old,
+    /// (U)nderline, `.` none, so attribute-only differences (copy-mode selection,
+    /// search highlight, the dim sticky header) are visible in the snapshot, which a
+    /// plain-text dump would render identically to its baseline.
+    fn dump_frame(vs: &VirtualScreen, attrs: bool) -> String {
+        let mut text: Vec<String> = (0..vs.rows).map(|r| composed_row(vs, r)).collect();
+        if !attrs {
+            while text.last().is_some_and(|l| l.is_empty()) {
+                text.pop();
+            }
+            return text.join("\n");
+        }
+        let marks: Vec<String> = (0..vs.rows)
+            .map(|r| {
+                (0..vs.cols)
+                    .map(|c| match vs.cell(r, c) {
+                        Some(cell) if cell.attrs.contains(plexy_glass_emulator::Attrs::REVERSE) => 'R',
+                        Some(cell) if cell.attrs.contains(plexy_glass_emulator::Attrs::HIGHLIGHT) => 'H',
+                        Some(cell) if cell.attrs.contains(plexy_glass_emulator::Attrs::DIM) => 'D',
+                        Some(cell) if cell.attrs.contains(plexy_glass_emulator::Attrs::BOLD) => 'B',
+                        Some(cell) if cell.attrs.contains(plexy_glass_emulator::Attrs::UNDERLINE) => 'U',
+                        _ => '.',
+                    })
+                    .collect::<String>()
+                    .trim_end_matches('.')
+                    .to_string()
+            })
+            .collect();
+        format!(
+            "{}\n--- attrs (R)everse (H)ighlight (D)im (B)old (U)nderline ---\n{}",
+            text.join("\n"),
+            marks.join("\n"),
+        )
+    }
+
     // ── Command duration + sticky header tests ───────────────────────────────
 
     fn block_colors_with(
@@ -4840,5 +4878,75 @@ mod tests {
         assert_ne!(vs.placements[0].key, vs.placements[1].key, "distinct keys");
         assert_ne!(vs.placements[0].image_id, vs.placements[1].image_id, "distinct host ids");
         assert_eq!(vs.placements[1].host_col, 21, "second pane's column offset");
+    }
+
+    // ── Foundational snapshot tests (insta) ──────────────────────────────────
+
+    #[test]
+    fn snapshot_single_pane_wide_char() {
+        // 'hello 世 ', which exercises a wide grapheme + its spacer in the dump.
+        let mut e = Emulator::new(3, 12);
+        pane(&mut e, "hello 世 ".as_bytes());
+        let screen = e.screen().clone();
+        let view = plain_view(&screen, Rect::new(0, 0, 3, 12));
+        let vs = compose(
+            &[view], (3, 12), None, StatusPlacement::Bottom, None, None, None, None, None,
+            TEST_COLOR, ChromeColors::ansi_default(),
+        );
+        insta::assert_snapshot!(dump_frame(&vs, false));
+    }
+
+    #[test]
+    fn snapshot_two_pane_split_border() {
+        let mut left = Emulator::new(3, 4);
+        let mut right = Emulator::new(3, 4);
+        pane(&mut left, "L世 ".as_bytes());
+        pane(&mut right, b"R ");
+        let lv = PaneView {
+            id: PaneId(0),
+            is_active: false,
+            ..plain_view(left.screen(), Rect::new(0, 0, 3, 4))
+        };
+        let rv = PaneView {
+            id: PaneId(1),
+            ..plain_view(right.screen(), Rect::new(0, 5, 3, 4))
+        };
+        let vs = compose(
+            &[lv, rv], (3, 9), None, StatusPlacement::Bottom, None, None, None, None, None,
+            TEST_COLOR, ChromeColors::ansi_default(),
+        );
+        insta::assert_snapshot!(dump_frame(&vs, false));
+    }
+
+    #[test]
+    fn snapshot_status_bar_bottom() {
+        // Emulator is 3 rows to match the pane rect; the status bar takes the
+        // fourth host row.  top_visible = 0 so "body" lands at host row 0.
+        let mut e = Emulator::new(3, 16);
+        pane(&mut e, b"body ");
+        let screen = e.screen().clone();
+        let status = status_with_left("plexy");
+        let view = plain_view(&screen, Rect::new(0, 0, 3, 16));
+        let vs = compose(
+            &[view], (4, 16), Some(&status), StatusPlacement::Bottom, None, None, None, None, None,
+            TEST_COLOR, ChromeColors::ansi_default(),
+        );
+        insta::assert_snapshot!(dump_frame(&vs, false));
+    }
+
+    #[test]
+    fn snapshot_status_bar_top() {
+        // Emulator is 3 rows to match the pane rect; pane rect starts at
+        // logical row 1 so a border row appears between status and content.
+        let mut e = Emulator::new(3, 16);
+        pane(&mut e, b"body ");
+        let screen = e.screen().clone();
+        let status = status_with_left("plexy");
+        let view = plain_view(&screen, Rect::new(1, 0, 3, 16));
+        let vs = compose(
+            &[view], (4, 16), Some(&status), StatusPlacement::Top, None, None, None, None, None,
+            TEST_COLOR, ChromeColors::ansi_default(),
+        );
+        insta::assert_snapshot!(dump_frame(&vs, false));
     }
 }

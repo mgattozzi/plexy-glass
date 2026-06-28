@@ -63,6 +63,30 @@ Deep, coverage-guided runs use **nightly** + `cargo-bolero`:
 The generated `corpus/` is gitignored, and crash inputs are committed as
 regression seeds.
 
+## Snapshot testing (insta)
+
+The compositor is snapshot-tested with **insta**. Tests compose a scenario
+through `compose(...)` and assert a deterministic text dump of the resulting
+`VirtualScreen` (`dump_frame` in the compositor test module, a plain grapheme
+grid, or, with attributes, a second grid marking
+reverse/highlight/dim/bold/underline so attribute-only renders like copy-mode
+selection are captured). Goldens live under `crates/mux/src/snapshots/` and are
+validated in compare mode by the normal suite:
+
+    cargo nextest run --workspace        # fails if a composed frame drifts
+
+Regenerating / reviewing goldens needs `cargo-insta` (a dev CLI, not required to
+run the suite):
+
+    cargo install cargo-insta
+    cargo insta test -p plexy-glass-mux       # runs tests, writes *.snap.new on drift
+    cargo insta review                        # interactively accept/reject pending
+    cargo insta accept                        # accept all pending without review
+
+Pending `*.snap.new` files are gitignored; accepted `.snap` goldens are
+committed. When a snapshot legitimately changes, review the diff before
+accepting, because an accepted wrong golden locks in a bug.
+
 ## Baseline
 
 Measured 2026-06-28 with `cargo llvm-cov nextest --workspace`. The workspace

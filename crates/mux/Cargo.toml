@@ -14,3 +14,4 @@ regex = { workspace = true }
 [dev-dependencies]
 hegeltest = { workspace = true }
 bolero = { workspace = true }
+insta = { workspace = true }
