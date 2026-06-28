@@ -65,8 +65,8 @@ scope. If a step is wrong, fix the plan first, then proceed.
   coordinate transforms, encoders/decoders, parsers, projections — gets
   **property tests** alongside example-based ones, using the **hegel** crate
   (`hegeltest` on crates.io, imported as `hegel`). It's a **dev-dependency only**
-  (`{ workspace = true }`); its MSRV (1.86) does NOT raise the shipped crates'
-  declared `rust-version = "1.85"`, but the test suite needs a 1.86+ toolchain.
+  (`{ workspace = true }`) and never compiled into the shipped binaries. The
+  project pins **no MSRV** — build and test with current **stable Rust**.
   Write them as integration tests at `crates/<crate>/tests/prop_<topic>.rs`:
   `use hegel::{TestCase, generators as gs};` then
   `#[hegel::test(test_cases = N)] fn prop(tc: TestCase) { let x = tc.draw(gs::integers::<T>().min_value(a).max_value(b)); … assert!(…) }`
@@ -550,7 +550,7 @@ rings active=`highlight`/marked=`warn`/drag=`info`/`ok`; overlay boxes
 border=`accent`/title=`highlight`/footer=`muted`/interior=`bg_bar`) threaded via
 `compose` (test default `ChromeColors`/`RingColors::ansi_default` replicates the
 old look so render tests were unchanged); active window tab on `highlight`.
-**Release gate** — dual `MIT OR Apache-2.0` LICENSE + Cargo metadata + MSRV 1.85;
+**Release gate** — dual `MIT OR Apache-2.0` LICENSE + Cargo metadata (no MSRV pin — stable Rust);
 copy-paste Quick start (clone → `cargo install` → attach); documented log path.
 User docs: README + `docs/configuration.md` (Status-line messages, chrome
 palette keys, loud config errors) + `docs/command-blocks.md` (shell-integration

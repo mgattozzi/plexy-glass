@@ -89,7 +89,8 @@ integration.
 
 ## Quick start
 
-Requires Rust 1.85+ (edition 2024), so `rustup update` if you're behind.
+Requires a current **stable** Rust (edition 2024), so `rustup update` if
+you're behind.
 
 ```sh
 git clone https://github.com/mgattozzi/plexy-glass

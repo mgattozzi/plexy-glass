@@ -1051,7 +1051,6 @@ dependencies = [
 name = "plexy-glass-keys"
 version = "0.1.0"
 dependencies = [
- "hegeltest",
  "plexy-glass-config",
  "plexy-glass-mux",
  "smol_str",

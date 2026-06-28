@@ -5,7 +5,6 @@ members = ["crates/protocol", "crates/daemon", "crates/client", "crates/config",
 name = "plexy-glass"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 description = "A terminal multiplexer that treats the modern terminal — inline images, shell integration, keyboard protocols, hyperlinks/clipboard — as first-class rather than stripping it."
 repository = "https://github.com/mgattozzi/plexy-glass"
