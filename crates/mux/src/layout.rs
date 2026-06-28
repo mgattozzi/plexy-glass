@@ -430,8 +430,16 @@ fn adjust_split_recurse(
         let new_first = (first_cells as i32 + delta as i32)
             .max(MIN_PANE_CELLS as i32)
             .min((total_usable - MIN_PANE_CELLS) as i32) as u16;
-        let applied = new_first as i32 - first_cells as i32;
-        *ratio = (new_first as f32 / total_usable as f32).clamp(0.1, 0.9);
+        let clamped = (new_first as f32 / total_usable as f32).clamp(0.1, 0.9);
+        *ratio = clamped;
+        // Report the delta against the ACTUAL painted first-pane width (which
+        // `subdivide` re-derives from the ratio), not the cell-space `new_first`:
+        // when the [0.1,0.9] ratio clamp and the `MIN_PANE_CELLS` clamp disagree
+        // (at the extremes), the painted border lands at the ratio width, so a
+        // cell-space `applied` would desync the drag anchor from the border.
+        let actual_first = ((total_usable as f32 * clamped).round() as u16)
+            .clamp(1, total_usable.saturating_sub(1).max(1));
+        let applied = actual_first as i32 - first_cells as i32;
         return applied as i16;
     }
     let from_first = adjust_split_recurse(first, a, adjacent_pane, side, delta);
@@ -963,6 +971,26 @@ mod tests {
         // First pane started at ~10 cols and can shrink to 4, so delta no smaller than -6.
         assert!(applied >= -6, "should clamp at MIN_PANE_CELLS; got {applied}");
         assert!(applied < 0, "should still apply something");
+    }
+
+    #[test]
+    fn adjust_split_applied_matches_painted_width_at_ratio_clamp() {
+        // total_usable = 100, so the 0.9 ratio clamp (→ 90 cells) bites BEFORE the
+        // MIN_PANE_CELLS clamp (→ 96). The returned `applied` must match the
+        // actual painted border movement (driven by the ratio), not the cell-space
+        // new_first, or the drag anchor desyncs from the border.
+        let mut t = LayoutTree::single(PaneId(0));
+        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After)
+            .unwrap();
+        let vp = Rect::new(0, 0, 10, 101);
+        let before = t.rect_of(PaneId(0), vp).unwrap();
+        let applied = t.adjust_split(PaneId(0), BorderSide::Right, 1000, vp);
+        let after = t.rect_of(PaneId(0), vp).unwrap();
+        assert_eq!(
+            applied,
+            after.cols as i16 - before.cols as i16,
+            "applied delta must equal the painted border movement",
+        );
     }
 
     #[test]
