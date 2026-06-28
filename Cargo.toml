@@ -65,3 +65,5 @@ bitflags = "2.11.1"
 # Property-based testing (Hypothesis-derived; dev-only). Imported as
 # `hegel`.
 hegeltest = "0.23.1"
+# Coverage-guided + property fuzzing (Hypothesis-style). Dev-only.
+bolero = "0.13.4"
