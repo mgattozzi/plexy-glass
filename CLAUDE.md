@@ -61,6 +61,26 @@ scope. If a step is wrong, fix the plan first, then proceed.
   `nextest run <name>`) are fine for fast iteration, but they are **not** the
   completion gate; always finish with the full run. nextest does **not** run
   doc-tests; if you add any, also run `cargo test --workspace --doc`.
+- **Property-based testing.** Invariant-rich, pure logic — width/layout math,
+  coordinate transforms, encoders/decoders, parsers, projections — gets
+  **property tests** alongside example-based ones, using the **hegel** crate
+  (`hegeltest` on crates.io, imported as `hegel`). It's a **dev-dependency only**
+  (`{ workspace = true }`); its MSRV (1.86) does NOT raise the shipped crates'
+  declared `rust-version = "1.85"`, but the test suite needs a 1.86+ toolchain.
+  Write them as integration tests at `crates/<crate>/tests/prop_<topic>.rs`:
+  `use hegel::{TestCase, generators as gs};` then
+  `#[hegel::test(test_cases = N)] fn prop(tc: TestCase) { let x = tc.draw(gs::integers::<T>().min_value(a).max_value(b)); … assert!(…) }`
+  (`tc.draw` takes `&self`, so helpers take `&TestCase` and the param is NOT
+  `mut`; generators include `integers`, `floats`, `text`, `booleans`,
+  `vecs(inner).max_size(n)`, `tuples!`; hegel shrinks counterexamples — annotate
+  with `tc.note(…)`). Assert **real invariants** — round-trips (`decode∘encode == id`),
+  inverses (`rect_of` ↔ `pane_at_coord`), bounds (`truncate` width ≤ budget),
+  idempotence, ordering, unions — never just restate the implementation, and
+  don't assert properties of a dependency (e.g. `unicode-width` is
+  context-sensitive). **When a property fails, decide whether the CODE is wrong
+  or the PROPERTY is mis-specified — never weaken a property just to make it
+  pass.** Examples to copy: `prop_mouse` (SGR wire round-trip), `prop_width`,
+  `prop_layout` (geometry), `prop_grid` (RowMark), `prop_selection`.
 - No `unwrap`/`expect` in non-test code except for invariants that cannot
   fail (each documented with a one-line `// invariant:` comment).
 - No `#[allow]` annotations without a one-line justification comment.

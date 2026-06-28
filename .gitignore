@@ -2,3 +2,7 @@
 
 # subagent-driven-development scratch (briefs, reports, diffs, ledger)
 .superpowers/
+
+# hegel property-testing local example database (per-machine cache, like
+# Hypothesis's .hypothesis dir — not a curated regression corpus).
+.hegel/

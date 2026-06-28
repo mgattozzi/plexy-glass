@@ -10,3 +10,6 @@ bitflags = { workspace = true }
 thiserror = { workspace = true }
 smol_str = { workspace = true }
 regex = { workspace = true }
+
+[dev-dependencies]
+hegeltest = { workspace = true }

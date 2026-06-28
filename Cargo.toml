@@ -63,3 +63,6 @@ regex = "1.12.4"
 unicode-width = "0.2.2"
 unicode-segmentation = "1.13.2"
 bitflags = "2.11.1"
+# Property-based testing (Hypothesis-derived; dev-only). Imported as
+# `hegel`.
+hegeltest = "0.23.1"
