@@ -1163,6 +1163,7 @@ dependencies = [
 name = "plexy-glass-keys"
 version = "0.1.0"
 dependencies = [
+ "bolero",
  "plexy-glass-config",
  "plexy-glass-mux",
  "smol_str",
@@ -1175,6 +1176,7 @@ name = "plexy-glass-mux"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.11.1",
+ "bolero",
  "hegeltest",
  "plexy-glass-emulator",
  "plexy-glass-status",

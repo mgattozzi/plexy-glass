@@ -11,3 +11,6 @@ plexy-glass-config = { path = "../config" }
 smol_str = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+bolero = { workspace = true }
