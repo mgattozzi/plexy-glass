@@ -1,0 +1,14 @@
+---
+source: crates/mux/src/compositor.rs
+expression: "dump_frame(&vs, false)"
+---
+background
+
+          ┌─────── cat ────────┐
+          │hi                  │
+          │                    │
+          │                    │
+          │                    │
+          │                    │
+          │                    │
+          └────────────────────┘

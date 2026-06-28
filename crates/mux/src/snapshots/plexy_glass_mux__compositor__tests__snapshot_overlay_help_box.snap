@@ -1,0 +1,11 @@
+---
+source: crates/mux/src/compositor.rs
+expression: "dump_frame(&vs, false)"
+---
+body
+
+      ┌────── Keybindings ───────┐
+      │Ctrl+a c  New window      │
+      │Ctrl+a |  Split right     │
+      │                          │
+      └─ j/k scroll · esc close ─┘

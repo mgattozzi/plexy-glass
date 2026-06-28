@@ -4949,4 +4949,83 @@ mod tests {
         );
         insta::assert_snapshot!(dump_frame(&vs, false));
     }
+
+    #[test]
+    fn snapshot_block_mode_folds_collapsed() {
+        let screen = two_block_fold_screen();
+        let bm = crate::BlockMode {
+            selected: 0,
+            viewport_top: 0,
+            pane_rows: 8,
+            total_lines: 8,
+            filter: None,
+        };
+        let view = PaneView { block_mode: Some(&bm), ..plain_view(&screen, Rect::new(0, 0, 8, 40)) };
+        let vs = compose(
+            &[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None,
+            TEST_COLOR, ChromeColors::ansi_default(),
+        );
+        insta::assert_snapshot!(dump_frame(&vs, false));
+    }
+
+    #[test]
+    fn snapshot_live_view_folded_block() {
+        let screen = two_block_fold_screen();
+        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let vs = compose(
+            &[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None,
+            TEST_COLOR, ChromeColors::ansi_default(),
+        );
+        insta::assert_snapshot!(dump_frame(&vs, false));
+    }
+
+    #[test]
+    fn snapshot_overlay_help_box() {
+        let mut e = Emulator::new(10, 40);
+        pane(&mut e, b"body ");
+        let screen = e.screen().clone();
+        let view = plain_view(&screen, Rect::new(0, 0, 10, 40));
+        let lines = vec![
+            ("Ctrl+a c".to_string(), "New window".to_string()),
+            ("Ctrl+a |".to_string(), "Split right".to_string()),
+        ];
+        let ov = OverlayView::Help { lines: &lines, scroll: 0 };
+        let vs = compose(
+            &[view], (10, 40), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None,
+            TEST_COLOR, ChromeColors::ansi_default(),
+        );
+        insta::assert_snapshot!(dump_frame(&vs, false));
+    }
+
+    #[test]
+    fn snapshot_overlay_command_prompt() {
+        let mut e = Emulator::new(6, 30);
+        pane(&mut e, b"body ");
+        let screen = e.screen().clone();
+        let view = plain_view(&screen, Rect::new(0, 0, 6, 30));
+        let ov = OverlayView::Command { buf: "split-window" };
+        let vs = compose(
+            &[view], (6, 30), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None,
+            TEST_COLOR, ChromeColors::ansi_default(),
+        );
+        insta::assert_snapshot!(dump_frame(&vs, false));
+    }
+
+    #[test]
+    fn snapshot_popup_box() {
+        let mut bg = Emulator::new(10, 40);
+        pane(&mut bg, b"background ");
+        let bg_screen = bg.screen().clone();
+        let view = plain_view(&bg_screen, Rect::new(0, 0, 10, 40));
+
+        let mut pe = Emulator::new(6, 20);
+        pane(&mut pe, b"hi ");
+        let pv = PopupView { rect: Rect::new(2, 10, 8, 22), screen: pe.screen(), title: "cat" };
+
+        let vs = compose(
+            &[view], (10, 40), None, StatusPlacement::Bottom, None, None, None, Some(&pv), None,
+            TEST_COLOR, ChromeColors::ansi_default(),
+        );
+        insta::assert_snapshot!(dump_frame(&vs, false));
+    }
 }

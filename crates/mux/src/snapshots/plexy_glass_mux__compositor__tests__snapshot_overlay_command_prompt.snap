@@ -1,0 +1,10 @@
+---
+source: crates/mux/src/compositor.rs
+expression: "dump_frame(&vs, false)"
+---
+body
+
+
+
+
+ :split-window█
