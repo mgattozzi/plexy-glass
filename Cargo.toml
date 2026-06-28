@@ -1,10 +1,14 @@
 [workspace]
 members = ["crates/protocol", "crates/daemon", "crates/client", "crates/config", "crates/emulator", "crates/keys", "crates/mux", "crates/status"]
 
+# Profile for the nightly `cargo bolero … -e libfuzzer` deep runs only;
+# inert for normal builds/tests. Inherits `dev` to keep
+# debug-assertions + overflow-checks on, then opts for fuzz throughput
+# (opt-level 3) and readable crash backtraces.
 [profile.fuzz]
 inherits = "dev"
-opt-level = 1
-debug = false
+opt-level = 3
+debug = true
 
 [package]
 name = "plexy-glass"
