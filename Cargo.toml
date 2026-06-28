@@ -1,6 +1,11 @@
 [workspace]
 members = ["crates/protocol", "crates/daemon", "crates/client", "crates/config", "crates/emulator", "crates/keys", "crates/mux", "crates/status"]
 
+[profile.fuzz]
+inherits = "dev"
+opt-level = 1
+debug = false
+
 [package]
 name = "plexy-glass"
 version = "0.1.0"

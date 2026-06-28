@@ -40,6 +40,29 @@ that a process killed with SIGKILL flushes nothing.
 
 Captured: the client/daemon integration paths exercised by e2e show up in the report.
 
+## Fuzzing (bolero)
+
+The byte-stream parsers are fuzzed with **bolero**. The targets are normal
+`#[test]`s, so they run in the suite (`cargo nextest run --workspace`) in
+bolero's DefaultEngine mode: it replays the committed corpus + crash inputs and
+does bounded random generation. Found crashes are committed, so they stay
+guarded forever.
+
+Targets:
+- `parser_advance` (`crates/emulator/tests/fuzz_emulator.rs`): `Emulator::advance`
+- `mouse_consume` (`crates/mux/tests/fuzz_mouse.rs`): `MouseParser::consume`
+- `key_consume` (`crates/keys/tests/fuzz_keys.rs`): `KeyParser::consume`
+
+Deep, coverage-guided runs use **nightly** + `cargo-bolero`:
+
+    rustup toolchain install nightly --component rust-src llvm-tools-preview
+    cargo install cargo-bolero
+    cargo +nightly bolero list
+    cargo +nightly bolero test parser_advance -p plexy-glass-emulator -e libfuzzer -T 60sec
+
+The generated `corpus/` is gitignored, and crash inputs are committed as
+regression seeds.
+
 ## Baseline
 
 Measured 2026-06-28 with `cargo llvm-cov nextest --workspace`. The workspace
