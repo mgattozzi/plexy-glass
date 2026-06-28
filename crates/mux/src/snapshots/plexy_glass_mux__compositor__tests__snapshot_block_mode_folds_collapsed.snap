@@ -1,7 +1,14 @@
 ---
 source: crates/mux/src/compositor.rs
-expression: "dump_frame(&vs, false)"
+expression: "dump_frame(&vs, true)"
 ---
 $ one                        ▸ 2 lines ✓
 $ two
 out3
+
+
+
+
+
+--- attrs (R)everse (H)ighlight (D)im (B)old (U)nderline ---
+D.DDD........................DDDDDDDDDDD

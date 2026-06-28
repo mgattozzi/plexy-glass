@@ -4432,7 +4432,11 @@ mod tests {
     /// marking per-cell character attributes: (R)everse, (H)ighlight, (D)im, (B)old,
     /// (U)nderline, `.` none, so attribute-only differences (copy-mode selection,
     /// search highlight, the dim sticky header) are visible in the snapshot, which a
-    /// plain-text dump would render identically to its baseline.
+    /// plain-text dump would render identically to its baseline. In `attrs` mode the
+    /// text section keeps its full row height (so the two grids stay column-aligned),
+    /// and a multi-attribute cell shows a single mark by priority R > H > D > B > U.
+    /// Note that `dump_frame` has no color channel, so color-only distinctions (e.g.
+    /// the block-status border's ok/fail colors) are not captured here.
     fn dump_frame(vs: &VirtualScreen, attrs: bool) -> String {
         let mut text: Vec<String> = (0..vs.rows).map(|r| composed_row(vs, r)).collect();
         if !attrs {
@@ -4965,7 +4969,13 @@ mod tests {
             &[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None,
             TEST_COLOR, ChromeColors::ansi_default(),
         );
-        insta::assert_snapshot!(dump_frame(&vs, false));
+        // attrs=true captures the DIM on the folded command row + `▸ N lines`
+        // summary. That dimming is fold-driven (not block-mode-specific; the
+        // live-view fold dims identically); block mode's own distinction is the
+        // selected-block bracket, a color `dump_frame` has no channel for. The
+        // attrs grid still makes this golden non-identical to the plain live-view
+        // fold and guards the fold-dim integration.
+        insta::assert_snapshot!(dump_frame(&vs, true));
     }
 
     #[test]
@@ -5100,9 +5110,12 @@ mod tests {
         insta::assert_snapshot!(dump_frame(&vs, true));
     }
 
-    /// Block-status border: the left border column (col 0) should show │ for ok
-    /// blocks and ▌ for failed blocks. The pane starts at col 1 so col 0 is the
-    /// border band.
+    /// Block-status border: the left border column (col 0) shows the half-block
+    /// `▌` on every block row. Both ok and failed blocks use `▌`, and the ok/fail
+    /// distinction is carried by COLOR (`colors.ok`/`colors.fail`), which a text
+    /// dump cannot capture (that color split is unit-tested in `borders.rs`). This
+    /// snapshot guards the integration-level "border band is drawn on block rows."
+    /// The pane starts at col 1 so col 0 is the border band.
     #[test]
     fn snapshot_block_status_border() {
         use plexy_glass_emulator::Emulator as RawEmulator;
