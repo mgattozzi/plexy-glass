@@ -354,14 +354,20 @@ pub fn compose(
             }
             let local_row = (line - viewport_lo) as u16;
             let host_r = pane_row_offset + view.rect.row + local_row;
-            let row_start = if line == start.0 { start.1 } else { 0 };
-            let row_end = if line == end.0 {
-                end.1
-            } else {
-                view.rect.cols.saturating_sub(1)
-            };
+            // Clamp to the pane's own columns: `cm.cursor`/`anchor` cols are captured
+            // against the grid width that was live when the user navigated, so a
+            // column-shrinking resize while copy mode stays open can leave a col
+            // past the pane rect. `cell_mut` is only bounds-safe against the whole
+            // host screen, so without this the REVERSE would bleed onto the pane
+            // border / a neighbour (mirrors the search-highlight + content paths).
+            let last = view.rect.cols.saturating_sub(1);
+            let row_start = if line == start.0 { start.1 } else { 0 }.min(last);
+            let row_end = if line == end.0 { end.1 } else { last }.min(last);
             for c in row_start..=row_end {
                 let host_c = view.rect.col + c;
+                if host_c >= host_cols {
+                    break;
+                }
                 if let Some(cell) = screen.cell_mut(host_r, host_c) {
                     cell.attrs |= plexy_glass_emulator::Attrs::REVERSE;
                 }
@@ -412,12 +418,16 @@ pub fn compose(
         if filter.query.is_empty() || view.screen.alt.is_some() {
             continue;
         }
-        let viewport_lo = bm.viewport_top;
+        // Map each DISPLAY row to its unified line through the SAME fold
+        // projection the content copy used. Block mode renders folds, so the old
+        // `viewport_top + r` (a unified base plus a visible-row offset) landed on
+        // the wrong rows whenever a block above the viewport was folded.
+        let ctx = &fold_ctx[&view.id];
 
-        // Dim: any viewport row whose governing block is not a match (including
+        // Dim: any display row whose governing block is not a match (including
         // rows with no governing prompt) gets DIM on its content cells.
         for r in 0..view.rect.rows {
-            let line = viewport_lo + u32::from(r);
+            let Some(line) = ctx.line_at(r) else { continue };
             let is_match = crate::blocks::prompt_at_or_above(view.screen, line)
                 .is_some_and(|p| filter.matches.contains(&p));
             if is_match {
@@ -432,23 +442,22 @@ pub fn compose(
             }
         }
 
-        // Highlight: every occurrence of the query within visible rows. Any row
-        // containing the query belongs to a matching (bright) block by
-        // definition, so no membership check is needed here.
-        let viewport_hi = viewport_lo + u32::from(view.rect.rows);
-        for (line, col_start, col_end) in
-            filter_match_spans(view.screen, &filter.query, viewport_lo, viewport_hi)
-        {
-            let local_row = (line - viewport_lo) as u16;
-            let host_r = pane_row_offset + view.rect.row + local_row;
-            let last_col = col_end.min(view.rect.cols.saturating_sub(1));
-            for c in col_start..=last_col {
-                let host_c = view.rect.col + c;
-                if host_c >= host_cols {
-                    break;
-                }
-                if let Some(cell) = screen.cell_mut(host_r, host_c) {
-                    cell.attrs |= plexy_glass_emulator::Attrs::HIGHLIGHT;
+        // Highlight: query occurrences on each visible display row's unified line.
+        for r in 0..view.rect.rows {
+            let Some(line) = ctx.line_at(r) else { continue };
+            let host_r = pane_row_offset + view.rect.row + r;
+            for (_, col_start, col_end) in
+                filter_match_spans(view.screen, &filter.query, line, line + 1)
+            {
+                let last_col = col_end.min(view.rect.cols.saturating_sub(1));
+                for c in col_start..=last_col {
+                    let host_c = view.rect.col + c;
+                    if host_c >= host_cols {
+                        break;
+                    }
+                    if let Some(cell) = screen.cell_mut(host_r, host_c) {
+                        cell.attrs |= plexy_glass_emulator::Attrs::HIGHLIGHT;
+                    }
                 }
             }
         }
