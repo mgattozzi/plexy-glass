@@ -1253,7 +1253,7 @@ async fn wheel_event_routes_to_active_pane_without_panic() {
     let pane = m.active_window().layout().panes()[0];
     let before = m.active_window().pane(pane).unwrap().scroll_offset();
     m.handle_mouse(MouseEvent {
-        kind: MouseKind::Wheel { delta: 3 },
+        kind: MouseKind::Wheel { delta: 3, horizontal: false },
         button: MouseButton::None,
         modifiers: plexy_glass_mux::MouseModifiers::default(),
         row: 2,

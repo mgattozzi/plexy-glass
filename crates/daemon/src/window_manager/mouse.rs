@@ -518,7 +518,10 @@ impl WindowManager {
             MouseKind::Press if event.button == MouseButton::Middle => {
                 self.handle_middle_press(pane_id).await?;
             }
-            MouseKind::Wheel { delta } => {
+            // Only a vertical wheel scrolls scrollback; a horizontal wheel on a
+            // non-mouse-mode pane is ignored (mouse-mode panes get it forwarded
+            // verbatim via Rule 5 / encode_for_child).
+            MouseKind::Wheel { delta, horizontal: false } => {
                 self.handle_wheel(pane_id, delta);
             }
             _ => {}

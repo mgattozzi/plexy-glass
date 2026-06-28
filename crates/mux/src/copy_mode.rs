@@ -92,7 +92,9 @@ impl CopyMode {
                 CopyModeAction::Render
             }
             (MouseKind::Release, MouseButton::Left) => CopyModeAction::Render,
-            (MouseKind::Wheel { delta }, _) => {
+            // Vertical wheel only scrolls copy mode; a horizontal wheel falls
+            // through to the no-op arm rather than scrolling the wrong axis.
+            (MouseKind::Wheel { delta, horizontal: false }, _) => {
                 if delta > 0 {
                     self.viewport_top = self.viewport_top.saturating_sub(delta as u32);
                 } else {

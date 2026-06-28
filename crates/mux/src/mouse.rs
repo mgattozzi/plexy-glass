@@ -20,8 +20,12 @@ pub enum MouseKind {
     Press,
     Release,
     Move,
-    /// Positive `delta` = wheel up, negative = wheel down.
-    Wheel { delta: i16 },
+    /// A wheel notch. For a vertical wheel (`horizontal == false`) positive
+    /// `delta` = up, negative = down; for a horizontal wheel positive = left,
+    /// negative = right. The axis is kept distinct so a horizontal scroll isn't
+    /// mistaken for a vertical one when scrolling scrollback or forwarding to a
+    /// mouse-reporting child.
+    Wheel { delta: i16, horizontal: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,9 +232,11 @@ impl MouseParser {
             }
         };
         let kind = if wheel {
-            // bit 0 of `buttons` distinguishes up (0) from down (1)
+            // Wheel codes 64=up, 65=down, 66=left, 67=right. Bit 1 of `buttons`
+            // selects the axis (horizontal), bit 0 the direction (up/left = 0).
+            let horizontal = buttons & 2 != 0;
             let delta = if buttons & 1 == 0 { 3 } else { -3 };
-            MouseKind::Wheel { delta }
+            MouseKind::Wheel { delta, horizontal }
         } else if motion {
             MouseKind::Move
         } else if is_press {
@@ -276,8 +282,10 @@ pub fn encode_for_child(event: MouseEvent, mode: MouseEncoding) -> Vec<u8> {
         MouseKind::Move => {
             button_code |= 32;
         }
-        MouseKind::Wheel { delta } => {
-            button_code = 64;
+        MouseKind::Wheel { delta, horizontal } => {
+            // OR (not assign) so the modifier bits set above survive; base 64 =
+            // vertical wheel, 66 = horizontal; bit 0 flips up→down / left→right.
+            button_code |= if horizontal { 66 } else { 64 };
             if delta < 0 {
                 button_code |= 1;
             }
@@ -364,8 +372,8 @@ mod tests {
         // 64 = wheel up, 65 = wheel down.
         let up = finalize(b"\x1b[<64;5;5M");
         let down = finalize(b"\x1b[<65;5;5M");
-        match up.kind { MouseKind::Wheel { delta } => assert!(delta > 0), _ => panic!() }
-        match down.kind { MouseKind::Wheel { delta } => assert!(delta < 0), _ => panic!() }
+        match up.kind { MouseKind::Wheel { delta, .. } => assert!(delta > 0), _ => panic!() }
+        match down.kind { MouseKind::Wheel { delta, .. } => assert!(delta < 0), _ => panic!() }
     }
 
     #[test]
@@ -453,16 +461,46 @@ mod tests {
 
     #[test]
     fn encode_sgr_wheel_up() {
-        let wheel = ev(MouseKind::Wheel { delta: 3 }, MouseButton::None, 0, 0);
+        let wheel = ev(MouseKind::Wheel { delta: 3, horizontal: false }, MouseButton::None, 0, 0);
         // wheel up = button code 64; coords 1-indexed.
         assert_eq!(encode_for_child(wheel, MouseEncoding::Sgr), b"\x1b[<64;1;1M");
     }
 
     #[test]
     fn encode_sgr_wheel_down() {
-        let wheel = ev(MouseKind::Wheel { delta: -3 }, MouseButton::None, 0, 0);
+        let wheel = ev(MouseKind::Wheel { delta: -3, horizontal: false }, MouseButton::None, 0, 0);
         // wheel down = 65.
         assert_eq!(encode_for_child(wheel, MouseEncoding::Sgr), b"\x1b[<65;1;1M");
+    }
+
+    #[test]
+    fn wheel_encoding_preserves_modifiers() {
+        // ctrl+wheel-up: 64 (wheel) | 16 (ctrl) = 80. Regression: the Wheel arm
+        // used to ASSIGN 64, wiping the modifier bits.
+        let ev = MouseEvent {
+            kind: MouseKind::Wheel { delta: 3, horizontal: false },
+            button: MouseButton::None,
+            modifiers: MouseModifiers { ctrl: true, ..Default::default() },
+            row: 0,
+            col: 0,
+        };
+        assert_eq!(encode_for_child(ev, MouseEncoding::Sgr), b"\x1b[<80;1;1M");
+    }
+
+    #[test]
+    fn horizontal_wheel_round_trips_distinctly() {
+        // Decode 66/67 as horizontal (not vertical), and re-encode back.
+        let left = drive(b"\x1b[<66;10;5M");
+        match left.last() {
+            Some(MouseParseAction::Event(e)) => {
+                assert_eq!(e.kind, MouseKind::Wheel { delta: 3, horizontal: true })
+            }
+            other => panic!("expected horizontal wheel, got {other:?}"),
+        }
+        let l = ev(MouseKind::Wheel { delta: 3, horizontal: true }, MouseButton::None, 4, 9);
+        assert_eq!(encode_for_child(l, MouseEncoding::Sgr), b"\x1b[<66;10;5M");
+        let r = ev(MouseKind::Wheel { delta: -3, horizontal: true }, MouseButton::None, 4, 9);
+        assert_eq!(encode_for_child(r, MouseEncoding::Sgr), b"\x1b[<67;10;5M");
     }
 
     #[test]
@@ -511,7 +549,7 @@ mod tests {
     #[test]
     fn encode_legacy_wheel_up() {
         // Wheel up legacy: code 64 -> +32 = 96 ('`'); coords 1,1 -> 33 ('!').
-        let wheel = ev(MouseKind::Wheel { delta: 3 }, MouseButton::None, 0, 0);
+        let wheel = ev(MouseKind::Wheel { delta: 3, horizontal: false }, MouseButton::None, 0, 0);
         assert_eq!(encode_for_child(wheel, MouseEncoding::ButtonEvent), b"\x1b[M`\x21\x21");
     }
 
