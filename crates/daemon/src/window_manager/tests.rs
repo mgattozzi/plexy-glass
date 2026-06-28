@@ -382,6 +382,71 @@ async fn double_click_on_a_two_char_word_still_copies() {
     );
 }
 
+/// A mouse-reporting child (editor, pager, Claude Code's click-to-move) must
+/// receive clicks in ITS OWN coordinate space, not the viewport's. Regression:
+/// `forward_mouse_to_pane` used to encode the raw viewport event, so a click in
+/// a split/offset pane reported a cell offset by the pane's position and the
+/// child's click-to-move missed.
+#[tokio::test]
+async fn forwarded_mouse_uses_pane_local_coords() {
+    use bytes::Bytes;
+    use plexy_glass_emulator::Modes;
+    use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
+
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/cat"); // splits echo what they receive
+    m.handle_command(Command::SplitV).unwrap();
+    let active = m.active_window().active(); // right pane, offset from origin
+    let pane = m.active_window().pane(active).cloned().unwrap();
+    // The child enabled `?1000` + `?1006` (a TUI); Rule 5 will forward the click.
+    pane.with_screen_mut(|s| {
+        s.modes.insert(Modes::MOUSE_BTN);
+        s.modes.insert(Modes::MOUSE_SGR);
+    });
+    let rect = m.active_window().layout().rect_of(active, m.viewport()).unwrap();
+    assert!(rect.col > 1, "right pane should be offset from the viewport origin");
+
+    let mut rx = pane.subscribe_output();
+    m.handle_mouse(MouseEvent {
+        kind: MouseKind::Press,
+        button: MouseButton::Left,
+        modifiers: MouseModifiers::default(),
+        row: rect.row + 3,
+        col: rect.col + 5,
+    })
+    .await
+    .unwrap();
+
+    let mut out = Vec::new();
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match tokio::time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await
+        {
+            Ok(Ok(c)) => out.extend_from_slice(&c),
+            Ok(Err(_)) => break,
+            Err(_) if !out.is_empty() => break,
+            Err(_) => {}
+        }
+    }
+    // Pane-local (row 3, col 5) → SGR `ESC[<0;6;4M` (col+1;row+1). The raw
+    // viewport coords (col ≈ rect.col+6) would not contain this.
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains(";6;4M"), "child must get pane-local SGR coords ;6;4M, got {s:?}");
+    let _ = pane.send_input(Bytes::from_static(&[0x04])).await;
+}
+
 #[tokio::test]
 async fn next_window_cycles() {
     let notify = Arc::new(Notify::new());

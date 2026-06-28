@@ -461,9 +461,25 @@ impl WindowManager {
         pane_id: PaneId,
         event: MouseEvent,
     ) -> Result<(), DaemonError> {
+        // The event is in viewport (layout) coordinates, but the child's grid is
+        // its own, starting at the pane rect origin, not the viewport's.
+        // Translate before encoding (the popup path and `handle_left_press` do
+        // the same) so a click in a split or frame-inset pane reports the right
+        // cell to the child: without this, a mouse-reporting TUI (editor, pager,
+        // Claude Code's click-to-move-cursor, …) targets a column/row offset by
+        // the pane's position and the click misses.
+        let viewport = self.viewport();
+        let rect = self
+            .active_window()
+            .layout()
+            .rect_of(pane_id, viewport)
+            .unwrap_or(viewport);
         if let Some(pane) = self.active_window().pane(pane_id).cloned() {
+            let mut local = event;
+            local.row = event.row.saturating_sub(rect.row);
+            local.col = event.col.saturating_sub(rect.col);
             let encoding = pane.with_screen(|s| mouse_encoding_for(s.modes));
-            let bytes = encode_for_child(event, encoding);
+            let bytes = encode_for_child(local, encoding);
             let _ = pane.send_input(bytes::Bytes::from(bytes)).await;
         }
         Ok(())
