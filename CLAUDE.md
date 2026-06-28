@@ -81,6 +81,10 @@ scope. If a step is wrong, fix the plan first, then proceed.
   or the PROPERTY is mis-specified — never weaken a property just to make it
   pass.** Examples to copy: `prop_mouse` (SGR wire round-trip), `prop_width`,
   `prop_layout` (geometry), `prop_grid` (RowMark), `prop_selection`.
+- **Coverage.** `cargo llvm-cov nextest --workspace --summary-only` measures
+  coverage (install: `rustup component add llvm-tools-preview && cargo install
+  cargo-llvm-cov`). It is **measured, not gated** — no threshold yet. See
+  `docs/testing.md` for the baseline and the lowest-covered modules.
 - No `unwrap`/`expect` in non-test code except for invariants that cannot
   fail (each documented with a one-line `// invariant:` comment).
 - No `#[allow]` annotations without a one-line justification comment.
