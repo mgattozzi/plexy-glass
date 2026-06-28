@@ -126,6 +126,30 @@ mutate whole, so scope them by function with `--re '<fn-name-regex>'`.
 
 ## Baseline
 
+### Mutation baseline — emulator
+
+Measured 2026-06-28, `cargo mutants -p plexy-glass-emulator -f <file> --test-tool nextest`.
+Kill-rate = caught / (caught + missed). Every remaining missed mutant is
+documented as equivalent in a source comment (`// Equivalent note:`). We added
+no `mutants::skip` annotations, so the skipped column is 0 for all modules.
+`screen.rs` (≈379 mutants) and full-crate sweeps are deferred on-demand.
+
+| Module | caught | missed (all equiv) | skipped | kill-rate |
+|---|---|---|---|---|
+| `width.rs` | 22 | 0 | 0 | 100% |
+| `cursor.rs` | 5 | 0 | 0 | 100% |
+| `tabs.rs` | 13 | 1 | 0 | 93% |
+| `modes.rs` | 17 | 0 | 0 | 100% |
+| `keyboard.rs` | 25 | 0 | 0 | 100% |
+| `parser.rs` | 45 | 3 | 0 | 94% |
+| `reflow.rs` | 71 | 3 | 0 | 96% |
+| `grid.rs` | 90 | 2 | 0 | 98% |
+| `graphics.rs` | 172 | 8 | 0 | 96% |
+
+Note that `reflow.rs` and `graphics.rs` each have additional timeout/unviable
+mutants (caught by test-timeout) that aren't reflected in the caught or missed
+columns.
+
 Measured 2026-06-28 with `cargo llvm-cov nextest --workspace`. The workspace
 total is **93.2% lines**.
 

@@ -119,11 +119,18 @@ pub fn reflow(
 
             // Avoid splitting a wide char across the line edge.
             if cw == 2 && col_in_row + 2 > new_cols && col_in_row > 0 {
+                // Equivalent note: `> 0` vs `< 0` on the last sub-expression is
+                // unmeasurable: `col_in_row < 0` is always false for usize.
                 while col_in_row < new_cols {
+                    // Equivalent note: `< new_cols` vs `> new_cols`. `> new_cols` is always
+                    // false here (we enter when col_in_row < new_cols).
                     row_cells.push(Cell::default());
                     col_in_row += 1;
                 }
             }
+            // Equivalent note: `cw > 0` vs `cw >= 0`. `cw >= 0` is always true for
+            // u16, but in the `cw == 0` case `col_in_row + 0 > new_cols` is always
+            // false (col never exceeds nc), so the flush body never fires regardless.
             if cw > 0 && col_in_row + cw > new_cols && col_in_row > 0 {
                 // Flush row
                 push_row(&mut new_rows_buf, row_cells, first_row_of_line, line_idx, new_cols, line_mark);
@@ -659,5 +666,220 @@ mod tests {
             Some(6),
             "other row's col wins when both carry PROMPT_END"
         );
+    }
+
+    // ── Targeted mutation-killer tests ──────────────────────────────────────
+
+    /// Line 58: cursor_logical_col_in_line = col_offset + cursor_col (not *).
+    /// With `+` mutated to `*` the cursor lands at col 0 instead of col 2.
+    #[test]
+    fn cursor_mid_soft_line_offset_uses_addition() {
+        let mut active = Grid {
+            cols: 2,
+            rows: vec![
+                fill_row(&["a", "b"], WrapOrigin::Hard),
+                fill_row(&["c", "d"], WrapOrigin::SoftFrom(0)),
+            ],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor { row: 1, col: 0, ..Cursor::default() };
+        reflow(&mut active, &mut sb, &mut c, 2, 4);
+        assert_eq!(c.row, 0);
+        assert_eq!(c.col, 2, "logical col = col_offset(2) + cursor_col(0) = 2, not 2*0=0");
+    }
+
+    /// Lines 101:31/58: empty-line cursor tracking must fire on the right logical
+    /// line. With `==` mutated to `!=` the cursor is not tracked; with `&&` to
+    /// `||` it fires for the wrong (later) empty line. Both mutations produce
+    /// row 2, not row 1.
+    #[test]
+    fn cursor_on_empty_logical_line_follows_reflow() {
+        let mut active = Grid {
+            cols: 3,
+            rows: vec![
+                fill_row(&["a", "b", "c"], WrapOrigin::Hard),
+                fill_row(&["d", "e", "f"], WrapOrigin::SoftFrom(0)),
+                fill_row(&[" ", " ", " "], WrapOrigin::Hard), // cursor row (empty after trim)
+                fill_row(&[" ", " ", " "], WrapOrigin::Hard),
+            ],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor { row: 2, col: 0, ..Cursor::default() };
+        reflow(&mut active, &mut sb, &mut c, 4, 6);
+        assert_eq!(c.row, 1, "empty logical line must follow join of 'abcdef' to row 1");
+        assert_eq!(c.col, 0);
+    }
+
+    /// Lines 121:42: `col_in_row + 2 > new_cols` must use `>`, not `>=` / `<` / `==`.
+    /// When col+2 == new_cols the wide char fits exactly, so padding must NOT fire.
+    #[test]
+    fn exact_fit_wide_char_stays_on_current_row() {
+        // "a好": col 0='a', cols 1–2='好'+spacer in 3-col.  1+2=3 == nc=3: fits exactly.
+        let mut active = Grid {
+            cols: 3,
+            rows: vec![Row {
+                cells: vec![cell("a"), cell("好"), Cell::wide_spacer()],
+                wrap_origin: WrapOrigin::Hard,
+                mark: RowMark::default(),
+            }],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor::default();
+        reflow(&mut active, &mut sb, &mut c, 2, 3);
+        assert_eq!(row_text(&active.rows[0]), "a好",
+            "col+2==nc means fits exactly; >= mutation wrongly wraps it to the next row");
+    }
+
+    /// Line 121:42: `col_in_row + 2 > new_cols`. The `<` mutation fires when the
+    /// wide char FITS (col+2 < nc), spuriously padding and pushing it to the
+    /// next row.
+    #[test]
+    fn fitting_wide_char_not_spuriously_wrapped() {
+        // "a好" in nc=4: '好' at col=1, 1+2=3 < 4 (fits with room to spare).
+        // The `< ` mutation sees 3<4=true and pads/wraps; original 3>4=false skips.
+        let mut active = Grid {
+            cols: 4,
+            rows: vec![Row {
+                cells: vec![cell("a"), cell("好"), Cell::wide_spacer(), Cell::default()],
+                wrap_origin: WrapOrigin::Hard,
+                mark: RowMark::default(),
+            }],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor::default();
+        reflow(&mut active, &mut sb, &mut c, 2, 4);
+        assert_eq!(row_text(&active.rows[0]), "a好",
+            "col+2=3 < nc=4 so wide char fits; < mutation wrongly pads and wraps");
+    }
+
+    /// Line 121:38: overflow check uses addition `col + 2`, not multiplication.
+    /// At col=3, nc=5: 3+2=5 (no overflow) but 3*2=6 (overflow), so the mutation
+    /// wraps.
+    #[test]
+    fn wide_char_overflow_check_uses_addition() {
+        let mut active = Grid {
+            cols: 5,
+            rows: vec![Row {
+                cells: vec![cell("a"), cell("b"), cell("c"), cell("好"), Cell::wide_spacer()],
+                wrap_origin: WrapOrigin::Hard,
+                mark: RowMark::default(),
+            }],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor::default();
+        reflow(&mut active, &mut sb, &mut c, 2, 5);
+        assert_eq!(row_text(&active.rows[0]), "abc好",
+            "3+2=5 (no overflow); * mutation gives 3*2=6>5 and spuriously wraps");
+    }
+
+    /// Lines 121:67 and 127:67: `col_in_row > 0` must be strict.
+    /// With `>= 0` (always true) a wide char at col 0 triggers a spurious blank row.
+    #[test]
+    fn wide_char_at_col0_no_spurious_blank_row() {
+        let mut active = Grid {
+            cols: 2,
+            rows: vec![Row {
+                cells: vec![cell("好"), Cell::wide_spacer()],
+                wrap_origin: WrapOrigin::Hard,
+                mark: RowMark::default(),
+            }],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor::default();
+        reflow(&mut active, &mut sb, &mut c, 4, 1);
+        assert_eq!(active.rows[0].cells[0].grapheme.as_str(), "好",
+            ">= mutation inserts a spurious blank row 0 before the wide char");
+    }
+
+    /// Line 122:34: pad loop is `while col < new_cols`, not `<=`.
+    /// `<=` pushes one extra blank, making the row new_cols+1 wide.
+    #[test]
+    fn wide_char_pad_loop_does_not_overshoot() {
+        // "ab好" in 5-col → nc=3: '好' at col=2 overflows (2+2=4>3), pad fires once.
+        let mut active = Grid {
+            cols: 5,
+            rows: vec![Row {
+                cells: vec![cell("a"), cell("b"), cell("好"), Cell::wide_spacer(), Cell::default()],
+                wrap_origin: WrapOrigin::Hard,
+                mark: RowMark::default(),
+            }],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor::default();
+        reflow(&mut active, &mut sb, &mut c, 3, 3);
+        for (i, row) in active.rows.iter().enumerate() {
+            assert_eq!(row.cells.len(), 3,
+                "row {i} must have exactly 3 cells; <= mutation adds an extra blank");
+        }
+    }
+
+    /// Line 152: the spacer is counted by `col_in_row += 1`, not `-=` or `*=`.
+    /// With `-=` the column reverts after each spacer, collapsing two wide chars
+    /// onto the same columns, so the row ends up with 4 cells for nc=2.
+    #[test]
+    fn wide_char_spacer_col_counted() {
+        let mut active = Grid {
+            cols: 4,
+            rows: vec![Row {
+                cells: vec![cell("好"), Cell::wide_spacer(), cell("好"), Cell::wide_spacer()],
+                wrap_origin: WrapOrigin::Hard,
+                mark: RowMark::default(),
+            }],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor { row: 0, col: 2, ..Cursor::default() };
+        reflow(&mut active, &mut sb, &mut c, 3, 2);
+        assert_eq!(active.cols, 2);
+        for (i, row) in active.rows.iter().enumerate() {
+            assert_eq!(row.cells.len(), 2, "row {i} must have exactly 2 cells");
+        }
+        assert_eq!(row_text(&active.rows[0]), "好");
+        assert_eq!(row_text(&active.rows[1]), "好");
+        assert_eq!(c.row, 1, "cursor at col=2 of 4-col row must follow second '好' to row 1");
+        assert_eq!(c.col, 0);
+    }
+
+    /// Lines 157/158/160: combining mark (cw=0) merges into the cell before it.
+    /// Without the merge ('< 0' never fires) col is not decremented and 'b' wraps.
+    /// Mutations at 157/160 that compute a wrong index cause an OOB panic.
+    #[test]
+    fn combining_mark_merges_into_prev_cell() {
+        // ["a", "\u{0301}"(cw=0), "b"] in 3-col, reflow to nc=2.
+        let mut active = Grid {
+            cols: 3,
+            rows: vec![Row {
+                cells: vec![cell("a"), cell("\u{0301}"), cell("b")],
+                wrap_origin: WrapOrigin::Hard,
+                mark: RowMark::default(),
+            }],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor::default();
+        reflow(&mut active, &mut sb, &mut c, 2, 2);
+        assert_eq!(row_text(&active.rows[0]), "a\u{0301}b",
+            "combining mark merges into 'a'; without merge 'b' col overflows to next row");
+    }
+
+    /// Line 158:25 `>= 0` mutation: when the combining mark is the FIRST cell in
+    /// row_cells (last == 0), `>= 0` is true and `row_cells[last-1]` underflows
+    /// and panics. The original `> 0` is false and correctly skips the merge
+    /// body.
+    #[test]
+    fn lone_combining_mark_first_cell_does_not_panic() {
+        let mut active = Grid {
+            cols: 1,
+            rows: vec![Row {
+                cells: vec![cell("\u{0301}")],
+                wrap_origin: WrapOrigin::Hard,
+                mark: RowMark::default(),
+            }],
+        };
+        let mut sb = Scrollback::with_cap(100);
+        let mut c = Cursor::default();
+        reflow(&mut active, &mut sb, &mut c, 2, 1);
+        assert_eq!(active.cols, 1);
+        for (i, row) in active.rows.iter().enumerate() {
+            assert_eq!(row.cells.len(), 1, "row {i} must have 1 cell");
+        }
     }
 }

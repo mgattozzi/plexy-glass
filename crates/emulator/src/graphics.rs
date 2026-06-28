@@ -290,6 +290,11 @@ pub fn sixel_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
             }
             b'#' | b'"' => {
                 // Skip the parameter run (digits + `;`).
+                // Equivalent note: deleting this arm or mutating the while loop condition
+                // (lines 291-296) leaves digits (0x30-0x39) and `;` (0x3b) to be handled
+                // by `_ => {}` one by one, and all are below the data range 0x3f..=0x7e, so
+                // they count as nothing. The arm just skips them faster; net x/bands
+                // count is identical, so all mutations here are equivalent.
                 i += 1;
                 while i < payload.len() && (payload[i].is_ascii_digit() || payload[i] == b';') {
                     i += 1;
@@ -305,6 +310,12 @@ pub fn sixel_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
         }
         i += 1;
     }
+    // Equivalent note: `saw_data && max_x > 0` vs mutations of `&&→||` or `>→>=`:
+    // • `max_x > 0` is always true when `saw_data` is true (x is incremented before
+    //   max_x is updated, so max_x ≥ 1 whenever a data byte or repeat was seen).
+    // • `saw_data || max_x > 0` ≡ `saw_data` because max_x > 0 implies saw_data.
+    // • `max_x >= 0` is always true for u32; same as dropping the second condition.
+    // Both mutations produce the same predicate as `saw_data`.
     if saw_data && max_x > 0 {
         Some((max_x, bands.saturating_mul(6)))
     } else {
@@ -350,6 +361,10 @@ pub fn iterm_dimensions(args: &str, b64: &str) -> Option<(u32, u32)> {
 /// marker (`FFC0`…`FFCF`, excluding the non-frame `C4`/`C8`/`CC`). `None` if not
 /// found in `bytes`.
 pub fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    // Equivalent note: `bytes.len() < 4` vs `bytes.len() <= 4` (`< → <=` mutation):
+    // a 4-byte input with valid SOI still returns None because the while loop requires
+    // `i + 8 < bytes.len()` = `2 + 8 < 4` = false, so the loop never runs. Both forms
+    // return None for len=4, and the two conditions are observationally equivalent.
     if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
         return None; // not a JPEG (no SOI)
     }
@@ -498,6 +513,489 @@ mod tests {
         jpg.extend_from_slice(&[0x03; 10]); // pad so i+9 < len during the scan
         assert_eq!(jpeg_dimensions(&jpg), Some((30, 40)));
         assert_eq!(jpeg_dimensions(b"not a jpeg"), None);
+    }
+
+    // --- helper ---
+    fn make_img(id: u32, size: usize) -> Image {
+        Image {
+            id,
+            format: ImageFormat::Png,
+            pixel_w: 1,
+            pixel_h: 1,
+            data_b64: vec![0u8; size].into(),
+            iterm_args: None,
+            protocol: ImageProtocol::Kitty,
+            generation: 1,
+        }
+    }
+
+    // --- ImageFormat::from_kitty_f ---
+
+    #[test]
+    fn from_kitty_f_all_arms() {
+        // kills: replace-whole-fn-with-None, delete arm 100, delete arm 24, delete arm 32
+        assert_eq!(ImageFormat::from_kitty_f(100), Some(ImageFormat::Png));
+        assert_eq!(ImageFormat::from_kitty_f(24), Some(ImageFormat::Rgb));
+        assert_eq!(ImageFormat::from_kitty_f(32), Some(ImageFormat::Rgba));
+        assert_eq!(ImageFormat::from_kitty_f(0), None);
+        assert_eq!(ImageFormat::from_kitty_f(25), None);
+        assert_eq!(ImageFormat::from_kitty_f(99), None);
+        assert_eq!(ImageFormat::from_kitty_f(101), None);
+        assert_eq!(ImageFormat::from_kitty_f(33), None);
+    }
+
+    #[test]
+    fn kitty_f_correct_values() {
+        // kills: replace-return-with-0, replace-return-with-1
+        assert_eq!(ImageFormat::Png.kitty_f(), 100);
+        assert_eq!(ImageFormat::Rgb.kitty_f(), 24);
+        assert_eq!(ImageFormat::Rgba.kitty_f(), 32);
+        // all three are distinct and non-zero/non-one
+        assert_ne!(ImageFormat::Png.kitty_f(), 0);
+        assert_ne!(ImageFormat::Rgb.kitty_f(), 1);
+        assert_ne!(ImageFormat::Rgba.kitty_f(), 0);
+        assert_ne!(ImageFormat::Rgba.kitty_f(), 1);
+        // roundtrip
+        for &f in &[100u32, 24, 32] {
+            assert_eq!(ImageFormat::from_kitty_f(f).unwrap().kitty_f(), f);
+        }
+    }
+
+    // --- ImageStore::len / is_empty ---
+
+    #[test]
+    fn store_len_is_empty() {
+        // kills: len→1, is_empty→true
+        let mut store = ImageStore::default();
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+        store.insert(make_img(1, 10));
+        assert!(!store.is_empty());
+        assert_eq!(store.len(), 1);
+        store.insert(make_img(2, 10));
+        assert!(!store.is_empty());
+        assert_eq!(store.len(), 2);
+    }
+
+    // --- ImageStore::CAP_BYTES and eviction-loop mutations ---
+
+    #[test]
+    fn store_tiny_images_no_eviction() {
+        // 200 bytes total << 64 MiB real cap.
+        // kills: CAP_BYTES cap=0 and cap=64 mutations (would evict),
+        //        `&& → ||` mutation (evicts whenever len > 1 regardless of bytes).
+        let mut store = ImageStore::default();
+        let ev1 = store.insert(make_img(1, 100));
+        let ev2 = store.insert(make_img(2, 100));
+        assert!(ev1.is_empty());
+        assert!(ev2.is_empty());
+        assert_eq!(store.len(), 2);
+        assert!(store.contains(1));
+        assert!(store.contains(2));
+    }
+
+    #[test]
+    fn store_medium_images_no_eviction() {
+        // 2 × 600 KiB = 1.2 MiB total.  Real cap = 64 MiB → no eviction.
+        // kills: CAP_BYTES `64*1024+1024` (≈66 KiB) and `64+1024*1024` (≈1 MiB) mutations.
+        let mut store = ImageStore::default();
+        let ev1 = store.insert(make_img(1, 600 * 1024));
+        let ev2 = store.insert(make_img(2, 600 * 1024));
+        assert!(ev1.is_empty(), "600 KiB × 2 fits in the real 64 MiB cap");
+        assert!(ev2.is_empty());
+        assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn store_reinsertion_preserves_lru_order() {
+        // Re-insert id=1 (after ids 1 and 2 are present) → id=1 moves to LRU back.
+        // Then a large image forces eviction of the now-oldest id=2, not id=1.
+        //
+        // Mutation `retain(i == id)` corrupts order to [1,1,3]; evicts id=1 instead.
+        //
+        // Uses ~100 MiB (needed to cross the 64 MiB cap; mirrors existing eviction test).
+        let mb25: Arc<[u8]> = vec![0u8; 25 * 1024 * 1024].into();
+        let mut store = ImageStore::default();
+        store.insert(Image {
+            id: 1,
+            format: ImageFormat::Png,
+            pixel_w: 1,
+            pixel_h: 1,
+            data_b64: mb25.clone(),
+            iterm_args: None,
+            protocol: ImageProtocol::Kitty,
+            generation: 1,
+        });
+        store.insert(Image {
+            id: 2,
+            format: ImageFormat::Png,
+            pixel_w: 1,
+            pixel_h: 1,
+            data_b64: mb25.clone(),
+            iterm_args: None,
+            protocol: ImageProtocol::Kitty,
+            generation: 1,
+        });
+        // re-insert id=1 → moves it to the back of the LRU; id=2 is now oldest
+        store.insert(Image {
+            id: 1,
+            format: ImageFormat::Png,
+            pixel_w: 1,
+            pixel_h: 1,
+            data_b64: mb25.clone(),
+            iterm_args: None,
+            protocol: ImageProtocol::Kitty,
+            generation: 2,
+        });
+        // insert id=3 → total ≈ 75 MiB > 64 MiB; id=2 (oldest) must be evicted
+        let evicted = store.insert(Image {
+            id: 3,
+            format: ImageFormat::Png,
+            pixel_w: 1,
+            pixel_h: 1,
+            data_b64: mb25.clone(),
+            iterm_args: None,
+            protocol: ImageProtocol::Kitty,
+            generation: 1,
+        });
+        assert_eq!(evicted, vec![2], "id=2 is oldest after re-insert of id=1");
+        assert!(store.contains(1));
+        assert!(!store.contains(2));
+        assert!(store.contains(3));
+    }
+
+    #[test]
+    fn store_exactly_at_cap_no_eviction() {
+        // Two 32 MiB images → total = 64 MiB = CAP_BYTES exactly.
+        // kills: `> → >=` at line 136:26. With `>=`, `bytes >= cap` fires and
+        // evicts id=1, leaving only id=2. Original `>` → false → no eviction.
+        let mb32: Arc<[u8]> = vec![0u8; 32 * 1024 * 1024].into();
+        let mut store = ImageStore::default();
+        let ev1 = store.insert(Image {
+            id: 1, format: ImageFormat::Png, pixel_w: 1, pixel_h: 1,
+            data_b64: mb32.clone(), iterm_args: None,
+            protocol: ImageProtocol::Kitty, generation: 1,
+        });
+        let ev2 = store.insert(Image {
+            id: 2, format: ImageFormat::Png, pixel_w: 1, pixel_h: 1,
+            data_b64: mb32.clone(), iterm_args: None,
+            protocol: ImageProtocol::Kitty, generation: 1,
+        });
+        assert!(ev1.is_empty(), "first insert: no eviction");
+        assert!(ev2.is_empty(), "total == cap exactly: no eviction with `>`; mutation `>=` evicts");
+        assert_eq!(store.len(), 2);
+        assert!(store.contains(1));
+        assert!(store.contains(2));
+    }
+
+    #[test]
+    fn store_single_oversized_image_never_evicted() {
+        // One image slightly over cap: the `len > 1` guard prevents self-eviction.
+        // kills: `> → >=` at line 136:64.
+        // With mutation `len >= 1`: bytes > cap AND len=1 >= 1 → evicts the sole image.
+        let mb65: Arc<[u8]> = vec![0u8; 65 * 1024 * 1024].into();
+        let mut store = ImageStore::default();
+        let evicted = store.insert(Image {
+            id: 1, format: ImageFormat::Png, pixel_w: 1, pixel_h: 1,
+            data_b64: mb65, iterm_args: None,
+            protocol: ImageProtocol::Kitty, generation: 1,
+        });
+        assert!(evicted.is_empty(), "sole image must survive even if it exceeds cap");
+        assert_eq!(store.len(), 1);
+        assert!(store.contains(1));
+    }
+
+    #[test]
+    fn store_eviction_keeps_last_image() {
+        // Two 40 MiB images: after evicting the first, bytes drops below cap, so
+        // exactly 1 image survives. Verifies the eviction loop terminates correctly.
+        let mb40: Arc<[u8]> = vec![0u8; 40 * 1024 * 1024].into();
+        let mut store = ImageStore::default();
+        store.insert(Image {
+            id: 1,
+            format: ImageFormat::Png,
+            pixel_w: 1,
+            pixel_h: 1,
+            data_b64: mb40.clone(),
+            iterm_args: None,
+            protocol: ImageProtocol::Kitty,
+            generation: 1,
+        });
+        let evicted = store.insert(Image {
+            id: 2,
+            format: ImageFormat::Png,
+            pixel_w: 1,
+            pixel_h: 1,
+            data_b64: mb40.clone(),
+            iterm_args: None,
+            protocol: ImageProtocol::Kitty,
+            generation: 1,
+        });
+        // After the eviction loop: id=1 gone, id=2 remains (40 MiB < 64 MiB cap).
+        assert_eq!(evicted, vec![1]);
+        assert_eq!(store.len(), 1, "exactly one image survives");
+        assert!(store.contains(2), "the surviving image is id=2");
+    }
+
+    // --- parse_command: d= key ---
+
+    #[test]
+    fn parse_command_delete_target_key() {
+        // kills: delete match arm b"d" → delete_target never set
+        let cmd = parse_command(b"\x1b_Ga=d,d=a,i=5\x1b\\").unwrap();
+        assert_eq!(cmd.action, b'd');
+        assert_eq!(cmd.delete_target, Some(b'a'));
+        assert_eq!(cmd.id, Some(5));
+
+        let cmd2 = parse_command(b"\x1b_Ga=d,d=z\x1b\\").unwrap();
+        assert_eq!(cmd2.delete_target, Some(b'z'));
+
+        // without the d= key → None
+        let cmd3 = parse_command(b"\x1b_Ga=d,i=1\x1b\\").unwrap();
+        assert_eq!(cmd3.delete_target, None);
+    }
+
+    // --- sixel_dimensions ---
+
+    #[test]
+    fn sixel_raster_attr_with_leading_bytes() {
+        // `"` is not the first byte → raster path must find the correct position.
+        // kills: `== vs !=` mutation on line 230 (with `!=`, position() finds
+        // the first *non-*`"` byte instead, giving a wrong parse start).
+        assert_eq!(
+            sixel_dimensions(b"#0;2;0;100;100\"1;1;640;480q"),
+            Some((640, 480))
+        );
+        assert_eq!(
+            sixel_dimensions(b"#0;2;0;0;0#1;2;100;0;0\"1;1;320;240!"),
+            Some((320, 240))
+        );
+    }
+
+    #[test]
+    fn sixel_raster_attr_extra_values_no_panic() {
+        // Five semicolons in the raster attribute; only the first four values matter.
+        // kills: `idx < 4` → `idx <= 4` mutations (line 248): with `<=`, the
+        // code would try nums[4] on an out-of-bounds index and panic.
+        assert_eq!(sixel_dimensions(b"\"1;1;640;480;999q"), Some((640, 480)));
+        assert_eq!(sixel_dimensions(b"\"1;1;640;480;x"), Some((640, 480)));
+
+        // A trailing `;` after the 4th value (triggers the b';' branch at idx==4).
+        // kills: `idx < 4` → `idx <= 4` mutation (line 242): with `<=`, the
+        // b';' branch fires for idx==4 and writes nums[4] → OOB panic.
+        assert_eq!(sixel_dimensions(b"\"1;1;640;480;999;x"), Some((640, 480)));
+    }
+
+    #[test]
+    fn sixel_raster_zero_dimensions_none() {
+        // kills: `> vs >=` (nums[2] >= 0 is always true for u32) and
+        //        `&& vs ||` (would return Some when only one dim is nonzero).
+        //
+        // Use `\x00` as the raster-attr terminator: it triggers the `_` branch
+        // (flushing nums[3]) and is outside the data-byte range 0x3f..=0x7e,
+        // so the fallback scan also finds no data and returns None.
+        assert_eq!(sixel_dimensions(b"\"1;1;0;480\x00"), None); // width=0
+        assert_eq!(sixel_dimensions(b"\"1;1;640;0\x00"), None); // height=0
+        assert_eq!(sixel_dimensions(b"\"1;1;0;0\x00"), None);   // both=0
+        // Both nonzero: the raster path succeeds directly (no fallback).
+        assert_eq!(sixel_dimensions(b"\"1;1;1;1\x00"), Some((1, 1)));
+    }
+
+    #[test]
+    fn sixel_carriage_return_resets_column() {
+        // kills: delete match arm `b'$'`
+        // Without the `$` arm, x would keep growing instead of resetting.
+        assert_eq!(sixel_dimensions(b"~~~$~~"), Some((3, 6))); // max=3, not 5
+        assert_eq!(sixel_dimensions(b"~~~~~$~"), Some((5, 6))); // max=5, not 6
+        assert_eq!(sixel_dimensions(b"~~~$~~~~~$~~"), Some((5, 6))); // max=5, not 10
+    }
+
+    #[test]
+    fn sixel_new_band_increments_height() {
+        // `-` starts a new 6-pixel band, so this verifies the bands counter is used.
+        assert_eq!(sixel_dimensions(b"~-~"), Some((1, 12)));  // 2 bands × 6 = 12
+        assert_eq!(sixel_dimensions(b"~-~-~"), Some((1, 18))); // 3 bands
+    }
+
+    #[test]
+    fn sixel_data_byte_range_boundary() {
+        // kills: boundary mutations on the `0x3f..=0x7e` match arm (line 299).
+        assert_eq!(sixel_dimensions(b"?"), Some((1, 6)));    // 0x3f: inclusive lower bound
+        assert_eq!(sixel_dimensions(b"~"), Some((1, 6)));    // 0x7e: inclusive upper bound
+        assert_eq!(sixel_dimensions(b"\x3e"), None);          // 0x3e: just below → not data
+        assert_eq!(sixel_dimensions(b"\x7f"), None);          // 0x7f: just above → not data
+    }
+
+    #[test]
+    fn sixel_repeat_at_end_no_data_byte() {
+        // `!N` with no trailing data byte: tests the inner digit-loop boundary
+        // (`while i < len`) and the outer `if i < len && range.contains` guard.
+        // kills: `< vs <=` on line 274 (inner loop OOB) and line 278 (outer guard OOB).
+        assert_eq!(sixel_dimensions(b"!3"), None);    // repeat with no data byte
+        assert_eq!(sixel_dimensions(b"!99"), None);   // multi-digit, no data byte
+        assert_eq!(sixel_dimensions(b"!3~"), Some((3, 6))); // normal repeat still works
+    }
+
+    #[test]
+    fn sixel_repeat_out_of_range_byte_ignored() {
+        // `!3` followed by a byte outside 0x3f..=0x7e: must not advance x.
+        // kills: `|| vs &&` mutation on line 278 (`i < len || contains(...)` would
+        // treat the out-of-range byte as a valid data byte when i is in bounds).
+        assert_eq!(sixel_dimensions(b"!3\x7f"), None); // 0x7f: just above range
+        assert_eq!(sixel_dimensions(b"!3\x3e"), None); // 0x3e: just below range
+        assert_eq!(sixel_dimensions(b"!3\x3f"), Some((3, 6))); // 0x3f: lowest valid
+    }
+
+    // --- jpeg_dimensions ---
+
+    #[test]
+    fn jpeg_initial_check_short_and_bad_soi() {
+        // kills mutations on the initial `bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8`
+        assert_eq!(jpeg_dimensions(&[]), None);
+        assert_eq!(jpeg_dimensions(&[0xFF]), None);
+        assert_eq!(jpeg_dimensions(&[0xFF, 0xD8]), None);
+        assert_eq!(jpeg_dimensions(&[0xFF, 0xD8, 0xFF]), None);
+        // wrong first SOI byte
+        assert_eq!(jpeg_dimensions(&[0x00, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x28, 0x00, 0x1E, 0x00, 0x00, 0x00]), None);
+        // wrong second SOI byte
+        assert_eq!(jpeg_dimensions(&[0xFF, 0x00, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x28, 0x00, 0x1E, 0x00, 0x00, 0x00]), None);
+    }
+
+    #[test]
+    fn jpeg_loop_skips_rst_markers_before_sof() {
+        // RST markers (0xD0..=0xD7) are standalone 2-byte markers, so the loop
+        // must skip them and reach the SOF. This also makes `while i + 8 < len`
+        // fire for multiple iterations.
+        let mut jpg = vec![
+            0xFF, 0xD8, // SOI
+            0xFF, 0xD0, // RST0 (standalone)
+            0xFF, 0xD1, // RST1 (standalone)
+            0xFF, 0xC0, // SOF0
+            0x00, 0x11, // segment length = 17
+            0x08,       // precision
+            0x00, 0x64, // height = 100
+            0x00, 0x50, // width = 80
+        ];
+        jpg.extend_from_slice(&[0x03u8; 10]); // padding so i+8 < len at the SOF
+        assert_eq!(jpeg_dimensions(&jpg), Some((80, 100)));
+    }
+
+    #[test]
+    fn jpeg_skips_length_prefixed_app_segment() {
+        // APP0 (0xFFE0) is length-prefixed, so the parser has to skip its payload to
+        // reach SOF. Exercises the `i += (2 + len).max(1)` path.
+        let mut jpg = vec![
+            0xFF, 0xD8, // SOI
+            0xFF, 0xE0, // APP0
+            0x00, 0x10, // length = 16 (includes the 2-byte length field)
+        ];
+        jpg.extend_from_slice(&[0x00u8; 14]); // 14 bytes of APP0 payload
+        // SOF0
+        jpg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0xF0, 0x00, 0xA0]);
+        jpg.extend_from_slice(&[0x03u8; 10]);
+        // height = 0x00F0 = 240, width = 0x00A0 = 160
+        assert_eq!(jpeg_dimensions(&jpg), Some((160, 240)));
+    }
+
+    #[test]
+    fn jpeg_truncated_at_sof_boundary() {
+        // 10-byte input: `i + 8 < 10` = false → skip loop → None.
+        // kills: 357:17 `< → <=`: `i + 8 <= 10` = true → bytes[10] OOB.
+        let data: &[u8] = &[0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x28, 0x00];
+        assert_eq!(jpeg_dimensions(data), None);
+    }
+
+    #[test]
+    fn jpeg_garbage_byte_before_sof() {
+        // Non-0xFF byte at position 2 must be skipped via `i += 1` (line 359).
+        // kills: 359:15 `-=` (backward advance → wrong result → None instead of Some)
+        //        359:15 `*=` (no advance → infinite loop → timeout → caught)
+        let mut jpg = vec![
+            0xFF, 0xD8, // SOI
+            0x00,       // garbage (not 0xFF): i=2 → `i += 1` → i=3
+            0xFF, 0xC0, // SOF0 at i=3
+            0x00, 0x11, // segment length = 17
+            0x08,       // precision
+            0x00, 0x64, // height = 100
+            0x00, 0x50, // width = 80
+        ];
+        jpg.extend_from_slice(&[0x03u8; 10]); // padding: i+8 < len at SOF
+        assert_eq!(jpeg_dimensions(&jpg), Some((80, 100)));
+    }
+
+    #[test]
+    fn jpeg_fill_byte_before_marker() {
+        // 0xFF fill byte (consecutive 0xFF) must be skipped by `i += 1` (line 365).
+        // kills: 364:27 `|| → &&` (condition false → fill not skipped → wrong parse)
+        //        365:15 `-=` (backward advance → infinite loop / wrong result)
+        //        365:15 `*=` (no advance → infinite loop → timeout → caught)
+        let mut jpg = vec![
+            0xFF, 0xD8, // SOI
+            0xFF, 0xFF, // fill byte: bytes[2]=0xFF, marker=0xFF → `i += 1`
+            0xFF, 0xC0, // SOF0
+            0x00, 0x11, // segment length = 17
+            0x08,       // precision
+            0x00, 0x64, // height = 100
+            0x00, 0x50, // width = 80
+        ];
+        jpg.extend_from_slice(&[0x03u8; 10]);
+        assert_eq!(jpeg_dimensions(&jpg), Some((80, 100)));
+    }
+
+    #[test]
+    fn jpeg_two_app_segments_at_different_offsets() {
+        // Two APP segments so the length-prefixed path is reached with i=10 (not i=2).
+        // At i=10: bytes[i+2]=bytes[12] ≠ bytes[i*2]=bytes[20];
+        //          bytes[i+3]=bytes[13] ≠ bytes[i*3]=bytes[30].
+        //
+        // kills: 381:47 `+ → *`, which reads bytes[20]=0xFF as high byte of length
+        //   → length=0xFF08=65288 → huge skip → miss SOF → None instead of Some.
+        // kills: 381:61 `+ → *`, which reads bytes[30]=0xBB=187 as low byte of length
+        //   → length=0x00BB=187 → skip=189 bytes >> total → miss SOF → None.
+        //
+        // bytes[30] is the 2nd byte of padding, set to 0xBB so the `i*3` mutation
+        // picks a large value that causes a definitive skip past the SOF.
+        let mut jpg = vec![
+            0xFF, 0xD8, // SOI (i=2)
+            // APP0 at i=2: marker=0xE0, length-field=6 (4-byte payload). Skip 8 → i=10.
+            0xFF, 0xE0, 0x00, 0x06, 0xAA, 0x11, 0xCC, 0xDD,
+            // APP1 at i=10: marker=0xE1, length-field=8 (6-byte payload). Skip 10 → i=20.
+            0xFF, 0xE1, 0x00, 0x08, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+            // SOF0 at i=20: height=0x00F0=240, width=0x00A0=160.
+            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0xF0, 0x00, 0xA0,
+        ];
+        // bytes[29]=0x03, bytes[30]=0xBB (large → `i*3` mutation computes wrong length).
+        jpg.extend_from_slice(&[0x03u8, 0xBBu8, 0x11u8, 0x00u8, 0x02u8,
+                                 0x11u8, 0x01u8, 0x03u8, 0x11u8, 0x01u8]);
+        assert_eq!(jpeg_dimensions(&jpg), Some((160, 240)));
+    }
+
+    // --- png_dimensions ---
+
+    #[test]
+    fn png_dimensions_length_boundary() {
+        // Exactly 24 bytes, the minimum valid PNG size.
+        let mut png: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // sig
+        png.extend_from_slice(&13u32.to_be_bytes()); // IHDR chunk length
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&100u32.to_be_bytes()); // width
+        png.extend_from_slice(&200u32.to_be_bytes()); // height
+        assert_eq!(png.len(), 24);
+        assert_eq!(png_dimensions(&png), Some((100, 200)));
+
+        // 23 bytes → too short → None
+        assert_eq!(png_dimensions(&png[..23]), None);
+
+        // 25 bytes (one extra) still works.
+        // kills the `< vs >` mutation: `> 24` would make len=25 return None.
+        let mut longer = png.clone();
+        longer.push(0x00);
+        assert_eq!(png_dimensions(&longer), Some((100, 200)));
+
+        // Wrong signature at the right length.
+        let mut bad_sig = png.clone();
+        bad_sig[0] = 0x00;
+        assert_eq!(png_dimensions(&bad_sig), None);
     }
 
     #[test]

@@ -131,4 +131,54 @@ mod tests {
         assert_eq!(m.decrqm_state(2031), 1);
         assert_eq!(m.decrqm_state(1002), 1);
     }
+
+    /// Exercise every `decrqm_state` match arm the prior tests didn't cover.
+    /// Each `ps` value must return 1 when the flag is set and 2 when it is clear.
+    #[test]
+    fn decrqm_state_all_arms() {
+        // ps=1 → APP_CURSOR_KEYS
+        let m = Modes::APP_CURSOR_KEYS;
+        assert_eq!(m.decrqm_state(1), 1, "ps=1 set → 1");
+        assert_eq!(Modes::empty().decrqm_state(1), 2, "ps=1 clear → 2");
+
+        // ps=6 → ORIGIN
+        let m = Modes::ORIGIN;
+        assert_eq!(m.decrqm_state(6), 1, "ps=6 set → 1");
+        assert_eq!(Modes::empty().decrqm_state(6), 2, "ps=6 clear → 2");
+
+        // ps=7 → AUTOWRAP (on by default)
+        let m = Modes::AUTOWRAP;
+        assert_eq!(m.decrqm_state(7), 1, "ps=7 set → 1");
+        assert_eq!(Modes::empty().decrqm_state(7), 2, "ps=7 clear → 2");
+
+        // ps=25 → CURSOR_VISIBLE (on by default)
+        let m = Modes::CURSOR_VISIBLE;
+        assert_eq!(m.decrqm_state(25), 1, "ps=25 set → 1");
+        assert_eq!(Modes::empty().decrqm_state(25), 2, "ps=25 clear → 2");
+
+        // ps=9 → MOUSE_X10
+        let m = Modes::MOUSE_X10;
+        assert_eq!(m.decrqm_state(9), 1, "ps=9 set → 1");
+        assert_eq!(Modes::empty().decrqm_state(9), 2, "ps=9 clear → 2");
+
+        // ps=1000 → MOUSE_BTN
+        let m = Modes::MOUSE_BTN;
+        assert_eq!(m.decrqm_state(1000), 1, "ps=1000 set → 1");
+        assert_eq!(Modes::empty().decrqm_state(1000), 2, "ps=1000 clear → 2");
+
+        // ps=1003 → MOUSE_ANY
+        let m = Modes::MOUSE_ANY;
+        assert_eq!(m.decrqm_state(1003), 1, "ps=1003 set → 1");
+        assert_eq!(Modes::empty().decrqm_state(1003), 2, "ps=1003 clear → 2");
+
+        // ps=1006 → MOUSE_SGR
+        let m = Modes::MOUSE_SGR;
+        assert_eq!(m.decrqm_state(1006), 1, "ps=1006 set → 1");
+        assert_eq!(Modes::empty().decrqm_state(1006), 2, "ps=1006 clear → 2");
+
+        // ps=1049 → ALT_SCREEN
+        let m = Modes::ALT_SCREEN;
+        assert_eq!(m.decrqm_state(1049), 1, "ps=1049 set → 1");
+        assert_eq!(Modes::empty().decrqm_state(1049), 2, "ps=1049 clear → 2");
+    }
 }

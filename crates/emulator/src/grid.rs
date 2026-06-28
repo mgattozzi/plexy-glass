@@ -263,6 +263,9 @@ impl Grid {
     pub fn clear_rect(&mut self, start_row: u16, start_col: u16, end_row: u16, end_col: u16) {
         let end_row = end_row.min(self.num_rows().saturating_sub(1));
         let end_col = end_col.min(self.cols.saturating_sub(1));
+        // Equivalent note: `|| vs &&`. With `&&`, a rect where only one pair
+        // is out-of-order still proceeds to the loop, but Rust inclusive ranges
+        // with start > end iterate 0 times, so the grid is unchanged either way.
         if start_row > end_row || start_col > end_col {
             return;
         }
@@ -305,6 +308,10 @@ impl Grid {
         if top > bottom {
             return;
         }
+        // Equivalent note: `bottom - top + 1` vs `bottom + top + 1` (the `- vs +`
+        // mutation). The larger cap only fires when top > 0, and the extra
+        // iterations just swap blank padding rows for blank rows, so the
+        // observable grid state matches the capped original.
         let region = bottom - top + 1;
         let n = (n as usize).min(region);
         for _ in 0..n {
@@ -594,5 +601,174 @@ mod tests {
         g.scroll_down(0, 2, 1);
         assert!(g.get_cell(0, 0).unwrap().is_blank());
         assert!(g.get_cell(2, 0).unwrap().is_blank());
+    }
+
+    // ---- RowMark::is_empty ----
+
+    #[test]
+    fn non_empty_mark_is_not_empty() {
+        let mut m = RowMark::default();
+        assert!(m.is_empty(), "default must be empty");
+        m.set(RowMark::PROMPT_START);
+        assert!(!m.is_empty(), "a marked RowMark must not report is_empty");
+    }
+
+    #[test]
+    fn mark_with_only_exit_is_not_empty() {
+        let mut m = RowMark::default();
+        m.set(RowMark::BLOCK_END);
+        m.set_exit(Some(0));
+        assert!(!m.is_empty(), "mark with exit code must not be empty");
+    }
+
+    // ---- RowMark::merge duration preservation ----
+
+    #[test]
+    fn merge_duration_preserved_when_other_has_none() {
+        // Self has a duration; other has NO duration.
+        // The `HAS_DURATION` check in merge must use `&`, not `|`:
+        // with `|`, the condition would be always true and would overwrite
+        // self's duration with other's 0.
+        let mut base = RowMark::default();
+        base.set_duration(Some(999));
+        let other = RowMark::default(); // no duration
+        base.merge(other);
+        assert_eq!(
+            base.duration_ms(),
+            Some(999),
+            "self's duration must survive merge when other has no duration"
+        );
+    }
+
+    // ---- clear_rect single-row/col ----
+
+    #[test]
+    fn clear_rect_single_row_clears() {
+        let mut g = Grid::new(3, 3);
+        for r in 0..3u16 {
+            for c in 0..3u16 {
+                g.put_cell(r, c, x_cell());
+            }
+        }
+        // Single-row clear (start_row == end_row); the `> → >=` mutation would
+        // return early from the guard and skip this clear.
+        g.clear_rect(1, 0, 1, 2);
+        for c in 0..3u16 {
+            assert!(g.get_cell(1, c).unwrap().is_blank(), "row 1 col {c} must be blank");
+        }
+        assert_eq!(g.get_cell(0, 0).unwrap(), &x_cell(), "row 0 must be unchanged");
+        assert_eq!(g.get_cell(2, 0).unwrap(), &x_cell(), "row 2 must be unchanged");
+    }
+
+    #[test]
+    fn clear_rect_single_col_clears() {
+        let mut g = Grid::new(3, 3);
+        for r in 0..3u16 {
+            for c in 0..3u16 {
+                g.put_cell(r, c, x_cell());
+            }
+        }
+        // Single-col clear; tests the start_col == end_col case.
+        g.clear_rect(0, 1, 2, 1);
+        for r in 0..3u16 {
+            assert!(g.get_cell(r, 1).unwrap().is_blank(), "col 1 row {r} must be blank");
+        }
+        assert_eq!(g.get_cell(0, 0).unwrap(), &x_cell(), "col 0 must be unchanged");
+        assert_eq!(g.get_cell(0, 2).unwrap(), &x_cell(), "col 2 must be unchanged");
+    }
+
+    // ---- scroll_up subregion / single-row / full-region ----
+
+    #[test]
+    fn scroll_up_single_row_blanks_it() {
+        // top == bottom: a single-row region. The `> → >=` mutation returns early
+        // (1 >= 1), leaving the row non-blank.
+        let mut g = Grid::new(3, 1);
+        g.put_cell(0, 0, x_cell());
+        g.put_cell(1, 0, x_cell());
+        g.put_cell(2, 0, x_cell());
+        g.scroll_up(1, 1, 1, None);
+        assert!(g.get_cell(1, 0).unwrap().is_blank(), "single-row scroll must blank row 1");
+        assert_eq!(g.get_cell(0, 0).unwrap(), &x_cell(), "row 0 must be unchanged");
+        assert_eq!(g.get_cell(2, 0).unwrap(), &x_cell(), "row 2 must be unchanged");
+    }
+
+    #[test]
+    fn scroll_up_subregion_with_nonzero_top() {
+        // top=1, bottom=2 (inside a 4-row grid). Tests that the `region` calculation
+        // uses subtraction: `bottom - top + 1 = 2`. The `- → +` mutation gives
+        // `bottom + top + 1 = 4`; because `n_input=3 > actual_region=2`, the original
+        // caps n to 2 (pop 2 rows), but the mutation allows n=3 (pop 3 rows).
+        let mut g = Grid::new(4, 1);
+        for r in 0..4u16 {
+            g.put_cell(r, 0, x_cell());
+        }
+        // n=3 > actual region size (2), so n is capped to 2 in the original.
+        // The mutation region=4 does NOT cap n, giving popped.len()=3 instead of 2.
+        let mut popped = Vec::new();
+        g.scroll_up(1, 2, 3, Some(&mut popped));
+        assert_eq!(g.get_cell(0, 0).unwrap(), &x_cell(), "row 0 unchanged");
+        assert!(g.get_cell(1, 0).unwrap().is_blank(), "row 1 blanked");
+        assert!(g.get_cell(2, 0).unwrap().is_blank(), "row 2 blanked");
+        assert_eq!(g.get_cell(3, 0).unwrap(), &x_cell(), "row 3 unchanged");
+        assert_eq!(popped.len(), 2, "exactly 2 rows popped: n capped to region=bottom-top+1=2, not bottom+top+1=4");
+    }
+
+    #[test]
+    fn scroll_up_full_region_all_blank() {
+        // Scroll all rows in the region by n == region size.
+        // The `+ → *` mutation gives region = bottom - top (missing +1), so the last
+        // row would NOT be scrolled.
+        let mut g = Grid::new(3, 1);
+        for r in 0..3u16 {
+            g.put_cell(r, 0, x_cell());
+        }
+        g.scroll_up(0, 2, 3, None); // n = 3 = region size
+        for r in 0..3u16 {
+            assert!(g.get_cell(r, 0).unwrap().is_blank(), "row {r} must be blank after full scroll");
+        }
+    }
+
+    // ---- scroll_down subregion / single-row / full-region ----
+
+    #[test]
+    fn scroll_down_single_row_blanks_it() {
+        let mut g = Grid::new(3, 1);
+        for r in 0..3u16 {
+            g.put_cell(r, 0, x_cell());
+        }
+        g.scroll_down(1, 1, 1);
+        assert!(g.get_cell(1, 0).unwrap().is_blank(), "single-row scroll_down must blank row 1");
+        assert_eq!(g.get_cell(0, 0).unwrap(), &x_cell(), "row 0 unchanged");
+        assert_eq!(g.get_cell(2, 0).unwrap(), &x_cell(), "row 2 unchanged");
+    }
+
+    #[test]
+    fn scroll_down_full_region_all_blank() {
+        // Scroll all rows down by n == region size. The `+ → -` mutation gives
+        // region = bottom - top - 1 (for region=3: gives 1), so only 1 row scrolls.
+        // The `+ → *` mutation: region = bottom - top * 1 = bottom - top = 2 (off-by-one).
+        let mut g = Grid::new(3, 1);
+        for r in 0..3u16 {
+            g.put_cell(r, 0, x_cell());
+        }
+        g.scroll_down(0, 2, 3); // n = 3 = region size
+        for r in 0..3u16 {
+            assert!(g.get_cell(r, 0).unwrap().is_blank(), "row {r} must be blank after full scroll_down");
+        }
+    }
+
+    #[test]
+    fn scroll_down_subregion_with_nonzero_top() {
+        let mut g = Grid::new(4, 1);
+        for r in 0..4u16 {
+            g.put_cell(r, 0, x_cell());
+        }
+        // Scroll region [1,2] down by 2 (the full region). Both become blank.
+        g.scroll_down(1, 2, 2);
+        assert_eq!(g.get_cell(0, 0).unwrap(), &x_cell(), "row 0 unchanged");
+        assert!(g.get_cell(1, 0).unwrap().is_blank(), "row 1 blanked");
+        assert!(g.get_cell(2, 0).unwrap().is_blank(), "row 2 blanked");
+        assert_eq!(g.get_cell(3, 0).unwrap(), &x_cell(), "row 3 unchanged");
     }
 }

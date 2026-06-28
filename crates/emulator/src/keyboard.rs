@@ -145,4 +145,105 @@ mod tests {
         k.set_modify_other_keys(9);
         assert_eq!(k.modify_other_keys(), 0, "out-of-range level is ignored");
     }
+
+    // ---- KittyStack via KeyboardState ----
+
+    #[test]
+    fn kitty_set_mode1_sets_exactly() {
+        let mut k = KeyboardState::default();
+        k.kitty_set(false, 0b0011, 1);
+        assert_eq!(k.kitty_flags(false), 0b0011);
+        k.kitty_set(false, 0b1100, 1);
+        assert_eq!(k.kitty_flags(false), 0b1100, "mode=1 replaces, not ORs");
+    }
+
+    #[test]
+    fn kitty_set_mode2_ors_in_flags() {
+        let mut k = KeyboardState::default();
+        k.kitty_set(false, 0b0001, 1); // start with bit 0
+        k.kitty_set(false, 0b0110, 2); // OR in bits 1+2
+        assert_eq!(k.kitty_flags(false), 0b0111, "mode=2 should OR flags in");
+    }
+
+    #[test]
+    fn kitty_set_mode3_clears_bits() {
+        let mut k = KeyboardState::default();
+        k.kitty_set(false, 0b0111, 1); // set bits 0,1,2
+        k.kitty_set(false, 0b0010, 3); // clear bit 1
+        assert_eq!(k.kitty_flags(false), 0b0101, "mode=3 should clear listed bits");
+    }
+
+    #[test]
+    fn kitty_push_pop_round_trip() {
+        let mut k = KeyboardState::default();
+        k.kitty_set(false, 0b0001, 1);
+        k.kitty_push(false, 0b0010);
+        assert_eq!(k.kitty_flags(false), 0b0010);
+        k.kitty_pop(false, 1);
+        assert_eq!(k.kitty_flags(false), 0b0001, "pop restores previous value");
+    }
+
+    #[test]
+    fn kitty_push_evicts_oldest_at_cap() {
+        // Push `KITTY_STACK_CAP` + 1 entries (the first push saves `current` to the
+        // stack). Once the cap is exceeded the oldest entry is evicted.
+        let mut k = KeyboardState::default();
+        // Set initial current to sentinel 0x01.
+        k.kitty_set(false, 0x01, 1);
+        // Push `KITTY_STACK_CAP` entries, so the stack holds exactly `KITTY_STACK_CAP`
+        // items with 0x01 as the oldest.
+        for i in 2..=(KITTY_STACK_CAP as u8 + 1) {
+            k.kitty_push(false, i);
+        }
+        // One more push tips the stack past the cap, so 0x01 (the oldest) is evicted.
+        k.kitty_push(false, 0xFF);
+        // Pop everything. If eviction worked, the very last pop resets to 0 (empty
+        // stack), because 0x01 was evicted and is no longer present.
+        for _ in 0..KITTY_STACK_CAP {
+            k.kitty_pop(false, 1);
+        }
+        // Stack is empty now; one more pop should set current to 0.
+        k.kitty_pop(false, 1);
+        assert_eq!(
+            k.kitty_flags(false),
+            0,
+            "stack was fully drained; 0x01 (oldest) should have been evicted"
+        );
+    }
+
+    #[test]
+    fn kitty_main_and_alt_are_independent() {
+        let mut k = KeyboardState::default();
+        k.kitty_set(false, 0xAA, 1);
+        k.kitty_set(true, 0x55, 1);
+        assert_eq!(k.kitty_flags(false), 0xAA);
+        assert_eq!(k.kitty_flags(true), 0x55);
+    }
+
+    #[test]
+    fn kitty_push_no_eviction_at_exactly_cap() {
+        // Fill the stack to exactly `KITTY_STACK_CAP`; the sentinel must survive.
+        // With `> CAP` only len=CAP+1 evicts, so at exactly CAP no eviction happens.
+        // Mutations `== CAP` or `>= CAP` evict one step early and lose the sentinel.
+        let mut k = KeyboardState::default();
+        k.kitty_set(false, 0xAA, 1); // sentinel is saved as first stack entry
+        for i in 0..KITTY_STACK_CAP {
+            k.kitty_push(false, i as u8);
+        }
+        // Pop all `KITTY_STACK_CAP` entries; the sentinel 0xAA must come back last.
+        for _ in 0..KITTY_STACK_CAP {
+            k.kitty_pop(false, 1);
+        }
+        assert_eq!(k.kitty_flags(false), 0xAA, "sentinel must survive: no eviction at exactly cap");
+    }
+
+    #[test]
+    fn kitty_reset_clears_all() {
+        let mut k = KeyboardState::default();
+        k.kitty_set(false, 0xFF, 1);
+        k.kitty_push(false, 0x0F);
+        k.reset();
+        assert_eq!(k.kitty_flags(false), 0);
+        assert_eq!(k.modify_other_keys(), 0);
+    }
 }

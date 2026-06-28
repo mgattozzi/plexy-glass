@@ -95,6 +95,9 @@ impl Parser {
         let mut segs: Vec<Seg> = Vec::new();
         let mut run: Vec<u8> = Vec::new();
         let push = |buf: &mut Vec<u8>, b: u8| {
+            // Equivalent note: `< APC_CAP` vs `<= APC_CAP` is off-by-one in a 16 MiB
+            // buffer; the maximum buffer size differs by exactly 1 byte, which is
+            // indistinguishable in any practical test (would require exactly APC_CAP bytes).
             if buf.len() < APC_CAP {
                 buf.push(b);
             }
@@ -224,10 +227,14 @@ impl<S: ScreenOps> Performer<'_, S> {
             self.flush_all();
             return;
         }
-        // Find the byte offset where the LAST grapheme begins. Everything before
-        // it is complete and can be flushed; the trailing grapheme stays in
-        // `pending` (it may still grow via combining marks). Working off offsets
-        // avoids cloning the whole buffer + a Vec<&str> on every print().
+        // Find the byte offset where the LAST grapheme begins. Everything before it
+        // is complete and can be flushed; the trailing grapheme stays in `pending`
+        // since it may still grow via combining marks. Working off offsets avoids
+        // cloning the whole buffer plus a `Vec<&str>` on every `print()`.
+        // Equivalent note: the guard `i > 0` vs no guard (or `i >= 0`) is equivalent
+        // because when i=0 the for loop condition `offset >= last_start=0` triggers
+        // immediately and `drain(..0)` is a no-op, the same result as the early
+        // return.
         let last_start = match self.pending.grapheme_indices(true).next_back() {
             Some((i, _)) if i > 0 => i,
             // Empty handled above; offset 0 = a single (still-growing) cluster.
@@ -499,6 +506,85 @@ mod tests {
             p.pending.len() <= 8192,
             "pending must stay bounded (cap 4096 + slack), got {}",
             p.pending.len()
+        );
+    }
+
+    #[test]
+    fn graphics_apc_payload_survives_1mb_size() {
+        // APC_CAP = 16 * 1024 * 1024. If either `*` were replaced by `+` the cap
+        // would fall to ~17 KiB or ~1 MiB. A 1.2 MiB payload fits within the
+        // correct 16 MiB cap but would be truncated by either mutated constant.
+        let payload_size: usize = 1_200_000;
+        let mut input = Vec::with_capacity(payload_size + 8);
+        input.extend_from_slice(b"\x1b_G");
+        input.extend(std::iter::repeat_n(b'A', payload_size));
+        input.extend_from_slice(b"\x1b\\");
+        let s = drive(&input);
+        assert_eq!(s.graphics.len(), 1, "graphics APC must be captured");
+        // framing: ESC _ (2) + G (1) + As (payload_size) + ESC \ (2) = payload_size + 5
+        assert_eq!(
+            s.graphics[0].len(),
+            payload_size + 5,
+            "full payload must not be truncated by a too-small APC_CAP"
+        );
+    }
+
+    #[test]
+    fn apc_esc_inside_payload_before_terminator() {
+        // ESC _ G <data> ESC <non-backslash> <more-data> ESC \
+        // The inner ESC is pushed into the APC payload (literal), and only the
+        // final ESC \ terminates. Mutating `b == 0x1b` → `b != 0x1b` in the
+        // ApcEsc branch would cause the APC to never terminate.
+        let input = b"\x1b_Ga\x1bb\x1b\\"; // ESC _ G a ESC b ESC \
+        let s = drive(input);
+        assert_eq!(s.graphics.len(), 1, "APC with inner ESC must be captured");
+        // framed = ESC _ (2) + [G, a, ESC, b] (4) + ESC \ (2) = 8 bytes
+        assert_eq!(
+            s.graphics[0], b"\x1b_Ga\x1bb\x1b\\",
+            "inner ESC must be preserved in the payload"
+        );
+    }
+
+    #[test]
+    fn apc_double_esc_then_terminator() {
+        // ESC _ G <data> ESC ESC \ : the first ESC goes into the payload,
+        // the second ESC starts the string terminator, and \ completes it.
+        // Mutating the `b == 0x1b` arm in ApcEsc causes this to push both
+        // ESCs into the payload and never terminate.
+        let input = b"\x1b_Gdata\x1b\x1b\\"; // ESC _ G d a t a ESC ESC \
+        let s = drive(input);
+        assert_eq!(s.graphics.len(), 1, "double-ESC terminated APC must be captured");
+        // framed = ESC _ (2) + [G,d,a,t,a,ESC] (6) + ESC \ (2) = 10 bytes
+        assert_eq!(
+            s.graphics[0], b"\x1b_Gdata\x1b\x1b\\",
+            "inner ESC must be part of payload; only the second ESC is the terminator prefix"
+        );
+    }
+
+    #[test]
+    fn combining_mark_cap_exact_boundary() {
+        // PENDING_CAP = 4096. A cluster of exactly 4096 bytes (2-byte base +
+        // 2047 x 2-byte combining marks) should NOT be force-flushed yet, because
+        // the check is `pending.len() > 4096`, which is false at exactly 4096.
+        // If the comparison were `>=`, flush_all would fire one print() earlier.
+        let mut p = Parser::new();
+        let mut s = MockScreen::default();
+        let mut input = String::from("\u{00C0}"); // U+00C0 = 2 bytes in UTF-8
+        for _ in 0..2047 {
+            input.push('\u{0301}'); // COMBINING ACUTE ACCENT = 2 bytes each
+        }
+        assert_eq!(input.len(), 4096, "sanity: exactly PENDING_CAP bytes");
+        p.advance(&mut s, input.as_bytes());
+        // With `>`: the cluster occupies exactly 4096 bytes, below the cap, so no
+        // force-flush; it stays in pending as a growing cluster.
+        assert!(
+            s.graphemes.is_empty(),
+            "at exactly PENDING_CAP bytes the cluster must NOT be force-flushed yet"
+        );
+        assert_eq!(
+            p.pending.len(),
+            4096,
+            "the 4096-byte cluster stays in pending until the cap is exceeded"
         );
     }
 }

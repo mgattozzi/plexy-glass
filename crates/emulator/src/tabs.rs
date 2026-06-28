@@ -47,6 +47,8 @@ impl TabStops {
     pub fn resize(&mut self, cols: u16) {
         let old_len = self.stops.len();
         self.stops.resize(cols as usize, false);
+        // Note that `> old_len` vs `>= old_len` makes no observable difference here:
+        // when `cols == old_len` the loop range `old_len..old_len` is empty either way.
         if cols as usize > old_len {
             for i in old_len..(cols as usize) {
                 if i % Self::DEFAULT_INTERVAL as usize == 0 {
@@ -101,5 +103,30 @@ mod tests {
         let mut t = TabStops::new(40);
         t.resize(10);
         assert_eq!(t.next(8), None);
+    }
+
+    #[test]
+    fn clear_all_removes_every_stop() {
+        let mut t = TabStops::new(32);
+        // Verify there are stops to begin with.
+        assert!(t.next(0).is_some(), "should have a tab stop after col 0");
+        t.clear_all();
+        // After `clear_all`, `next()` should return `None` for every column.
+        for col in 0u16..31 {
+            assert_eq!(
+                t.next(col),
+                None,
+                "expected no tab stop after col {col} after clear_all"
+            );
+        }
+    }
+
+    #[test]
+    fn clear_all_then_set_works() {
+        let mut t = TabStops::new(32);
+        t.clear_all();
+        t.set(5);
+        assert_eq!(t.next(0), Some(5));
+        assert_eq!(t.next(5), None);
     }
 }

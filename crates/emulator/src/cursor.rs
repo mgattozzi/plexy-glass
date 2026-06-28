@@ -125,6 +125,36 @@ mod tests {
     }
 
     #[test]
+    fn left_decrements_col() {
+        let mut c = Cursor {
+            col: 10,
+            ..Cursor::default()
+        };
+        c.left(3);
+        assert_eq!(c.col, 7);
+    }
+
+    #[test]
+    fn left_saturates_at_zero() {
+        let mut c = Cursor {
+            col: 2,
+            ..Cursor::default()
+        };
+        c.left(5);
+        assert_eq!(c.col, 0);
+    }
+
+    #[test]
+    fn right_increments_col() {
+        let mut c = Cursor {
+            col: 5,
+            ..Cursor::default()
+        };
+        c.right(3, 80);
+        assert_eq!(c.col, 8);
+    }
+
+    #[test]
     fn motion_clears_pending_wrap() {
         let mut c = Cursor {
             pending_wrap: true,
@@ -132,5 +162,17 @@ mod tests {
         };
         c.right(1, 80);
         assert!(!c.pending_wrap);
+    }
+
+    #[test]
+    fn left_clears_pending_wrap() {
+        let mut c = Cursor {
+            col: 5,
+            pending_wrap: true,
+            ..Cursor::default()
+        };
+        c.left(1);
+        assert!(!c.pending_wrap);
+        assert_eq!(c.col, 4);
     }
 }
