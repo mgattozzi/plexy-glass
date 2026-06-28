@@ -248,13 +248,16 @@ color-coded per visible row by the command block the row belongs to:
 
 | Border | Meaning |
 |---|---|
-| Colored `│` in the ok color (default: `#87a987`) | Row belongs to a block that exited with code 0 |
-| Colored `▌` in the fail color (default: `#c4746e`) | Row belongs to a block that exited with a nonzero code |
+| Half-block `▌` in the ok color (default: `#87a987`) | Row belongs to a block that exited with code 0 |
+| Half-block `▌` in the fail color (default: `#c4746e`) | Row belongs to a block that exited with a nonzero code |
 | Plain `│` | Row before the first prompt, a running block (no exit code yet), or a block end (`133;D`) that arrived without an exit code |
 
-The entire block (prompt row through the row before the next prompt) takes the
-same status, so a glance at the border shows which commands succeeded and which
-failed, even after scrolling back.
+A block row's `│` is drawn as the solid half-block `▌` whether it passed or
+failed, and **color** (ok vs fail) is what distinguishes them, so a passing
+block reads as a solid bar, not a faint line. The entire block (prompt row
+through the row before the next prompt) takes the same status, so a glance at
+the border shows which commands succeeded and which failed, even after
+scrolling back.
 
 **Viewport-tracked**: the coloring always matches what is on screen, whether
 you are at the live view, scrolled back with the mouse wheel, or in copy mode.
