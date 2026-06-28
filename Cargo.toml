@@ -78,3 +78,7 @@ hegeltest = "0.23.1"
 bolero = "0.13.4"
 # Snapshot testing of composed frames (dev-only).
 insta = "1.48.0"
+# `#[mutants::skip]` attribute for annotating equivalent mutants
+# (dev-only; compiles to nothing). Used via
+# `#[cfg_attr(test, mutants::skip)]`.
+mutants = "0.0.4"

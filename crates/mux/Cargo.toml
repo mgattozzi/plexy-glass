@@ -15,3 +15,4 @@ regex = { workspace = true }
 hegeltest = { workspace = true }
 bolero = { workspace = true }
 insta = { workspace = true }
+mutants = { workspace = true }

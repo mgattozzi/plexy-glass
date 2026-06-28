@@ -14,3 +14,7 @@
 # insta pending snapshots (review with `cargo insta review`; accepted goldens
 # are committed under crates/*/src/snapshots/).
 *.snap.new
+
+# cargo-mutants results output (written into the source tree at run time).
+mutants.out/
+mutants.out.old/

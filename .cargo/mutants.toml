@@ -1,0 +1,19 @@
+# cargo-mutants configuration.
+#   cargo mutants -p plexy-glass-emulator -f reflow.rs   # scope one crate + file
+#   cargo mutants -p plexy-glass-mux                      # whole crate (slow)
+# Uses this project's real test runner. cargo-mutants runs an unmutated baseline
+# first and requires it to pass, then mutates a scratch COPY of the tree (the
+# working tree is untouched) and re-runs the suite per mutant.
+test_tool = "nextest"
+
+# Pure data / re-export modules have nothing meaningful to mutate (they only
+# yield equivalent mutants), so we skip them. The logic-bearing modules are
+# deliberately left in.
+exclude_globs = [
+    "crates/emulator/src/lib.rs",
+    "crates/mux/src/lib.rs",
+    "crates/mux/src/status.rs",
+    "crates/mux/src/pane_id.rs",
+    "crates/mux/src/direction.rs",
+    "crates/mux/src/virtual_screen.rs",
+]

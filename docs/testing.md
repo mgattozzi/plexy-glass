@@ -87,6 +87,43 @@ Pending `*.snap.new` files are gitignored; accepted `.snap` goldens are
 committed. When a snapshot legitimately changes, review the diff before
 accepting, because an accepted wrong golden locks in a bug.
 
+## Mutation testing (cargo-mutants)
+
+`cargo-mutants` measures **test quality**: it changes the code one mutation at
+a time and checks whether a test catches it. A *missed* mutant is a coverage
+gap, behavior a test should have pinned but didn't. It is **measured on
+demand, not a gate** (it is slow), and scoped to the pure-logic crates
+`emulator` and `mux`.
+
+Setup (one-time):
+
+    cargo install --locked cargo-mutants
+
+Run (one cargo invocation at a time, since it takes the project build):
+
+    cargo mutants -p plexy-glass-emulator -f reflow.rs   # one crate + file
+    cargo mutants -p plexy-glass-mux                      # whole crate (slow)
+    cargo mutants -p plexy-glass-emulator --list          # preview mutants, don't run
+
+It uses nextest (`.cargo/mutants.toml`), runs an unmutated **baseline first**
+(the suite must be green), then mutates a **scratch copy** of the tree, so
+your checkout is untouched. Results land in `mutants.out/` (gitignored):
+`missed.txt`, `caught.txt`, `timeout.txt`, `unviable.txt`, and `outcomes.json`
+(summary counts). There is no built-in score; compute kill-rate as
+`caught / (caught + missed)`.
+
+Triaging a surviving (missed) mutant:
+- **Real gap** → add the smallest test that fails on the mutant and passes on the
+  real code (a unit test, or a `hegel` property test for invariant-rich modules);
+  re-run that file to confirm the mutant is now caught.
+- **Equivalent / untestable** → annotate the item with
+  `#[cfg_attr(test, mutants::skip)] // reason: …`. The `cfg_attr(test, …)` keeps
+  `mutants` a dev-dependency (it compiles out of release builds). Never skip a
+  mutant just to raise the number.
+
+Large modules (`emulator/src/screen.rs`, `mux/src/compositor.rs`) are slow to
+mutate whole, so scope them by function with `--re '<fn-name-regex>'`.
+
 ## Baseline
 
 Measured 2026-06-28 with `cargo llvm-cov nextest --workspace`. The workspace
