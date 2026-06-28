@@ -66,6 +66,7 @@ impl WindowManager {
                     first_pane,
                     spec,
                     viewport,
+                    super::host_cell_px(self.host_size),
                     Arc::clone(&self.notify),
                     self.death_tx.clone(),
                     Arc::clone(&self.config),
@@ -129,7 +130,7 @@ impl WindowManager {
                         pane.name().unwrap_or_else(|| format!("shell{}", self.next_window_id));
                     let id = WindowId(self.next_window_id);
                     self.next_window_id += 1;
-                    let mut w = Window::from_pane(id, name, pane);
+                    let mut w = Window::from_pane(id, name, pane, super::host_cell_px(self.host_size));
                     w.resize(viewport)?;
                     self.windows.push(w);
                     self.last_active_window = Some(self.active);

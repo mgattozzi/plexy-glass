@@ -387,6 +387,23 @@ async fn double_click_on_a_two_char_word_still_copies() {
 /// `forward_mouse_to_pane` used to encode the raw viewport event, so a click in
 /// a split/offset pane reported a cell offset by the pane's position and the
 /// child's click-to-move missed.
+/// A pane's PTY must carry the host's real cell size (pixels per cell), so a
+/// child scales inline graphics and answers CSI 14/16/18t correctly, not the
+/// emulator's 10×20 fallback. Regression: the host pixel dims were dropped at
+/// the PtySize→Rect→PtySize boundary, leaving every pane at the fallback.
+#[tokio::test]
+async fn panes_inherit_real_host_cell_size_pixels() {
+    let notify = Arc::new(Notify::new());
+    // Host cell = 720/80 × 432/24 = 9×18 (distinct from the 10×20 fallback).
+    let host = PtySize { rows: 24, cols: 80, pixel_width: 720, pixel_height: 432 };
+    let mut m = WindowManager::new(spec(), host, notify, None, cfg()).unwrap();
+    let pane = m.active_window().pane(PaneId(0)).cloned().unwrap();
+    assert_eq!(pane.with_screen(|s| s.cell_pixels()), (9, 18), "construction must relay host cell size");
+    m.on_host_resize(PtySize { rows: 24, cols: 80, pixel_width: 800, pixel_height: 480 })
+        .unwrap();
+    assert_eq!(pane.with_screen(|s| s.cell_pixels()), (10, 20), "host resize must update the cell size");
+}
+
 /// Copy-mode mouse must use pane-local coordinates (CopyMode::handle_mouse
 /// treats them as such). Regression: handle_copy_mode_mouse forwarded the raw
 /// viewport event, so a click in an offset pane set the copy cursor off by the

@@ -190,6 +190,7 @@ impl WindowManager {
             PaneId(0),
             first_spec.clone(),
             viewport,
+            host_cell_px(host_size),
             Arc::clone(&notify),
             death_tx.clone(),
             Arc::clone(&config),
@@ -535,6 +536,7 @@ impl WindowManager {
             first_pane,
             spec,
             viewport,
+            host_cell_px(self.host_size),
             Arc::clone(&self.notify),
             self.death_tx.clone(),
             Arc::clone(&self.config),
@@ -916,7 +918,9 @@ impl WindowManager {
     pub fn on_host_resize(&mut self, new_size: PtySize) -> Result<(), DaemonError> {
         self.host_size = new_size;
         let viewport = host_viewport(new_size);
+        let cell = host_cell_px(new_size);
         for w in self.windows.iter_mut() {
+            w.set_cell_px(cell);
             w.resize(viewport)?;
         }
         if let Some(p) = &self.popup {
@@ -991,6 +995,16 @@ impl WindowManager {
         self.windows.is_empty()
     }
 }
+/// Host cell size in pixels (`width, height`), or `(0, 0)` when the terminal
+/// reports no pixel dimensions (the emulator then uses its 10×20 fallback).
+/// Threaded into each pane's PTY so children scale inline graphics to the real
+/// cell box and `CSI 14/16/18t` reports are accurate.
+pub(super) fn host_cell_px(host: PtySize) -> (u16, u16) {
+    let w = host.pixel_width.checked_div(host.cols).unwrap_or(0);
+    let h = host.pixel_height.checked_div(host.rows).unwrap_or(0);
+    (w, h)
+}
+
 fn host_viewport(host: PtySize) -> Rect {
     // The pane band reserves one row for the status bar; full pane frames then
     // inset the layout region by one cell on every side (top/bottom/left/right)

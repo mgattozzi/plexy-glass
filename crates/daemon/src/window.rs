@@ -39,6 +39,12 @@ pub struct Window {
     /// `String::new()`); cleared the moment the name is pinned by a manual
     /// rename or a declared/restored real name. Persisted (`auto_named` DTO).
     pub auto_named: bool,
+    /// Cell size in pixels (`width, height`) of the host terminal, or `(0, 0)`
+    /// when the host reports no pixel size. Scaled by each pane's cell box so a
+    /// child sees the REAL cell size (`CSI 14/16/18t`, inline-image footprints)
+    /// instead of the emulator's 10×20 fallback. Set at construction and
+    /// refreshed by `set_cell_px` on host resize.
+    cell_px: (u16, u16),
     /// When true, input sent to the active pane is also broadcast to all other
     /// panes in this window (sync-panes mode). Defaults to false; toggled by
     /// `Command::ToggleSyncPanes`.
@@ -99,7 +105,27 @@ pub struct Window {
     silence_fired: bool,
 }
 
+/// Per-pane PTY size: the host's cell pixels (`(0, 0)` when unknown) scaled by
+/// the pane's own cell box, so the child sees the REAL cell size (`CSI 14/16/18t`
+/// reports and inline-image footprints) rather than the emulator's fallback.
+fn pane_pty_size(rect: Rect, cell_px: (u16, u16)) -> PtySize {
+    let rows = rect.rows.max(1);
+    let cols = rect.cols.max(1);
+    PtySize {
+        rows,
+        cols,
+        pixel_width: cell_px.0.saturating_mul(cols),
+        pixel_height: cell_px.1.saturating_mul(rows),
+    }
+}
+
 impl Window {
+    /// Refresh the host cell size (pixels per cell). Called on host resize; the
+    /// next `resize` propagates it to every pane's PTY.
+    pub fn set_cell_px(&mut self, cell_px: (u16, u16)) {
+        self.cell_px = cell_px;
+    }
+
     // Window construction needs the full set of plumbing arguments; bundling
     // them into a struct would obscure the call sites and complicate borrows.
     #[allow(clippy::too_many_arguments)]
@@ -109,16 +135,12 @@ impl Window {
         first_pane_id: PaneId,
         spec: SpawnSpec,
         rect: Rect,
+        cell_px: (u16, u16),
         output_notify: std::sync::Arc<tokio::sync::Notify>,
         death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
         config: std::sync::Arc<plexy_glass_config::Config>,
     ) -> Result<Self, DaemonError> {
-        let size = PtySize {
-            rows: rect.rows,
-            cols: rect.cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        };
+        let size = pane_pty_size(rect, cell_px);
         let pane = Pane::spawn(first_pane_id, spec, size, output_notify, death_tx, config)?;
         let mut panes = HashMap::new();
         panes.insert(first_pane_id, pane);
@@ -128,6 +150,7 @@ impl Window {
             panes,
             LayoutTree::single(first_pane_id),
             first_pane_id,
+            cell_px,
         ))
     }
 
@@ -139,9 +162,11 @@ impl Window {
         panes: HashMap<PaneId, Pane>,
         layout: LayoutTree,
         active: PaneId,
+        cell_px: (u16, u16),
     ) -> Self {
         Self {
             id,
+            cell_px,
             auto_named: name.is_empty(),
             name,
             sync_input: false,
@@ -324,12 +349,7 @@ impl Window {
             .layout
             .rect_of(new_pane_id, viewport)
             .ok_or_else(|| DaemonError::Io(std::io::Error::other("new pane rect missing")))?;
-        let size = PtySize {
-            rows: rect.rows,
-            cols: rect.cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        };
+        let size = pane_pty_size(rect, self.cell_px);
         let pane = match Pane::spawn(new_pane_id, spec, size, output_notify, death_tx, config) {
             Ok(p) => p,
             Err(e) => {
@@ -495,11 +515,11 @@ impl Window {
     }
 
     /// Build a new window whose single pane is an existing `pane` (break-pane).
-    pub fn from_pane(id: WindowId, name: String, pane: Pane) -> Self {
+    pub fn from_pane(id: WindowId, name: String, pane: Pane, cell_px: (u16, u16)) -> Self {
         let pid = pane.id();
         let mut panes = HashMap::new();
         panes.insert(pid, pane);
-        Self::assemble(id, name, panes, LayoutTree::single(pid), pid)
+        Self::assemble(id, name, panes, LayoutTree::single(pid), pid, cell_px)
     }
 
     /// Toggle monitor-activity; returns the new state.
@@ -808,13 +828,8 @@ impl Window {
                     None => continue,
                 }
             };
-            let new_rows = rect.rows.max(1);
-            let size = PtySize {
-                rows: new_rows,
-                cols: rect.cols.max(1),
-                pixel_width: 0,
-                pixel_height: 0,
-            };
+            let size = pane_pty_size(rect, self.cell_px);
+            let new_rows = size.rows;
             pane.resize(size)?;
             pane.on_size_changed(new_rows);
         }
@@ -868,6 +883,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
+            (0, 0),
             notify(),
             None,
             cfg(),
@@ -895,6 +911,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
+            (0, 0),
             notify(),
             None,
             cfg(),
@@ -924,6 +941,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
+            (0, 0),
             notify(),
             None,
             cfg(),
@@ -942,6 +960,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
+            (0, 0),
             notify(),
             None,
             cfg(),
@@ -963,6 +982,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
+            (0, 0),
             notify(),
             None,
             cfg(),
@@ -984,6 +1004,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
+            (0, 0),
             notify(),
             None,
             cfg(),
@@ -1012,6 +1033,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
+            (0, 0),
             notify(),
             None,
             cfg(),
@@ -1036,6 +1058,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
+            (0, 0),
             notify(),
             None,
             cfg(),
@@ -1082,6 +1105,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
+            (0, 0),
             notify(),
             None,
             cfg(),
@@ -1113,6 +1137,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
+            (0, 0),
             notify(),
             None,
             cfg(),
@@ -1134,6 +1159,7 @@ mod tests {
             PaneId(2),
             shell_spec(),
             viewport,
+            (0, 0),
             notify(),
             None,
             cfg(),
@@ -1149,7 +1175,7 @@ mod tests {
     async fn from_pane_builds_single_pane_window() {
         let mut src = two_pane_window();
         let moved = src.detach_pane(PaneId(1)).expect("present");
-        let w = Window::from_pane(WindowId(5), "broken".into(), moved);
+        let w = Window::from_pane(WindowId(5), "broken".into(), moved, (0, 0));
         assert_eq!(w.id, WindowId(5));
         assert_eq!(w.name, "broken");
         assert_eq!(w.active(), PaneId(1));
@@ -1166,6 +1192,7 @@ mod tests {
             id,
             shell_spec(),
             viewport,
+            (0, 0),
             notify(),
             None,
             cfg(),
@@ -1248,6 +1275,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
+            (0, 0),
             notify(),
             None,
             cfg(),
