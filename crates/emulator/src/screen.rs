@@ -571,14 +571,28 @@ impl Screen {
     /// Move to the next row. If the cursor is at the bottom of the scroll
     /// region, scroll up (pushing the top row into scrollback when on the
     /// active screen, or discarding when on the alt screen).
+    /// Resolve a 0-based row argument from CUP/HVP/VPA into an absolute grid
+    /// row, honoring DEC origin mode (DECOM, `?6`): when set the argument is
+    /// relative to the scroll-region top and confined to `[top, bottom]`;
+    /// otherwise it is an absolute grid row clamped to the grid.
+    fn absolute_row(&self, row_arg: u16) -> u16 {
+        if self.modes.contains(crate::modes::Modes::ORIGIN) {
+            let (top, bottom) = self.scroll_region;
+            top.saturating_add(row_arg).min(bottom)
+        } else {
+            row_arg.min(self.rows().saturating_sub(1))
+        }
+    }
+
     pub fn advance_to_next_row(&mut self, soft_wrap: bool) {
         let (top, bottom) = self.scroll_region;
-        if self.cursor.row >= bottom {
-            // Need to scroll. Only the physical top line of the screen (region
-            // top at row 0) feeds scrollback. A partial scroll region (DECSTBM
-            // top>0) scrolls an interior region; rows leaving the top of THAT
-            // region are discarded, matching xterm/tmux/wezterm/VTE, not pushed
-            // into scrollback (which would corrupt history/block marks).
+        if self.cursor.row == bottom {
+            // At the bottom margin: scroll the region up by one. Only the
+            // physical top line of the screen (region top at row 0) feeds
+            // scrollback. A partial scroll region (DECSTBM top>0) scrolls an
+            // interior region, and rows leaving the top of THAT region are
+            // discarded (matching xterm/tmux/wezterm/VTE), not pushed into
+            // scrollback, which would corrupt history/block marks.
             let mut popped: Vec<crate::grid::Row> = Vec::new();
             let target = if self.alt.is_none() && top == 0 {
                 Some(&mut popped)
@@ -591,6 +605,11 @@ impl Screen {
             }
             // Stay at the bottom; new content goes there.
             self.cursor.row = bottom;
+        } else if self.cursor.row > bottom {
+            // Below the scroll region: a line feed moves the cursor down toward
+            // the grid bottom WITHOUT scrolling the region (per xterm, the cursor
+            // is outside the region, so the region's content is untouched).
+            self.cursor.row = (self.cursor.row + 1).min(self.rows().saturating_sub(1));
         } else {
             self.cursor.row += 1;
         }
@@ -649,12 +668,25 @@ impl Screen {
         match final_byte {
             'A' => {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
-                self.cursor.up(n);
+                // CUU stops at the top scroll margin when the cursor is at or
+                // below it (xterm), and at grid row 0 when above the region.
+                let (top, _) = self.scroll_region;
+                let floor = if self.cursor.row >= top { top } else { 0 };
+                self.cursor.row = self.cursor.row.saturating_sub(n).max(floor);
+                self.cursor.pending_wrap = false;
             }
             'B' => {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
-                let max = self.rows();
-                self.cursor.down(n, max);
+                // CUD stops at the bottom scroll margin when at or above it, and
+                // at the last grid row when below the region.
+                let (_, bottom) = self.scroll_region;
+                let ceil = if self.cursor.row <= bottom {
+                    bottom
+                } else {
+                    self.rows().saturating_sub(1)
+                };
+                self.cursor.row = self.cursor.row.saturating_add(n).min(ceil);
+                self.cursor.pending_wrap = false;
             }
             'C' => {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
@@ -671,15 +703,16 @@ impl Screen {
                 self.cursor.pending_wrap = false;
             }
             'H' | 'f' => {
-                let row = first.unwrap_or(1).saturating_sub(1);
+                let row_arg = first.unwrap_or(1).saturating_sub(1);
                 let col = nth(params, 1).unwrap_or(1).saturating_sub(1);
-                let max_rows = self.rows();
                 let max_cols = self.cols();
-                self.cursor.move_to(row, col, max_rows, max_cols);
+                self.cursor.row = self.absolute_row(row_arg);
+                self.cursor.col = col.min(max_cols.saturating_sub(1));
+                self.cursor.pending_wrap = false;
             }
             'd' => {
-                let row = first.unwrap_or(1).saturating_sub(1);
-                self.cursor.row = row.min(self.rows().saturating_sub(1));
+                let row_arg = first.unwrap_or(1).saturating_sub(1);
+                self.cursor.row = self.absolute_row(row_arg);
                 self.cursor.pending_wrap = false;
             }
             'J' => {
@@ -739,9 +772,16 @@ impl Screen {
                 } else {
                     self.scroll_region = (0, self.rows().saturating_sub(1));
                 }
+                // DECSTBM homes the cursor: to the region top in origin mode,
+                // else the absolute top-left.
                 let max_rows = self.rows();
                 let max_cols = self.cols();
-                self.cursor.move_to(0, 0, max_rows, max_cols);
+                let home_row = if self.modes.contains(crate::modes::Modes::ORIGIN) {
+                    self.scroll_region.0
+                } else {
+                    0
+                };
+                self.cursor.move_to(home_row, 0, max_rows, max_cols);
             }
             'S' => {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
@@ -1043,6 +1083,19 @@ impl Screen {
         use crate::modes::Modes;
         let flag = match code {
             1 => Modes::APP_CURSOR_KEYS,
+            6 => {
+                // DECOM (origin mode). Changing it homes the cursor: to the
+                // scroll-region top when set, the absolute top-left when reset.
+                if on {
+                    self.modes.insert(Modes::ORIGIN);
+                } else {
+                    self.modes.remove(Modes::ORIGIN);
+                }
+                let home_row = if on { self.scroll_region.0 } else { 0 };
+                let (max_rows, max_cols) = (self.rows(), self.cols());
+                self.cursor.move_to(home_row, 0, max_rows, max_cols);
+                return;
+            }
             7 => Modes::AUTOWRAP,
             25 => Modes::CURSOR_VISIBLE,
             1049 => {
@@ -1983,6 +2036,41 @@ mod tests {
         p.advance(&mut s, input);
         p.flush(&mut s);
         s
+    }
+
+    #[test]
+    fn cuu_stops_at_top_scroll_margin() {
+        // Region rows 3..7 (top=2). Cursor at row 5, CUU 10 stops at the margin.
+        let s = parse(b"\x1b[3;7r\x1b[6;1H\x1b[10A");
+        assert_eq!(s.cursor.row, 2, "CUU must stop at the top margin, not grid 0");
+    }
+
+    #[test]
+    fn cud_stops_at_bottom_scroll_margin() {
+        // Region rows 3..7 (bottom=6). Cursor at row 3, CUD 10 stops at the margin.
+        let s = parse(b"\x1b[3;7r\x1b[4;1H\x1b[10B");
+        assert_eq!(s.cursor.row, 6, "CUD must stop at the bottom margin, not the grid edge");
+    }
+
+    #[test]
+    fn line_feed_below_bottom_margin_moves_down_without_scrolling() {
+        // Region rows 1..3 (bottom=2). Place the cursor at row 4 (below it); a LF
+        // must move it DOWN to row 5, not snap it up to the bottom margin.
+        let s = parse(b"\x1b[1;3r\x1b[5;1H\n");
+        assert_eq!(s.cursor.row, 5, "LF below the region must move down, not snap to the margin");
+    }
+
+    #[test]
+    fn decom_makes_cup_region_relative_and_homes() {
+        // Region rows 5..8 (top=4). DECSET ?6h homes to the region top...
+        let s = parse(b"\x1b[5;8r\x1b[?6h");
+        assert_eq!(s.cursor.row, 4, "DECOM set homes the cursor to the region top");
+        // ...and CUP rows become relative to the region top.
+        let s = parse(b"\x1b[5;8r\x1b[?6h\x1b[3;1H");
+        assert_eq!(s.cursor.row, 6, "CUP row 3 in origin mode = top(4) + 2");
+        // Reset returns to absolute addressing.
+        let s = parse(b"\x1b[5;8r\x1b[?6h\x1b[?6l\x1b[3;1H");
+        assert_eq!(s.cursor.row, 2, "CUP row 3 with origin reset = absolute grid row 2");
     }
 
     #[test]

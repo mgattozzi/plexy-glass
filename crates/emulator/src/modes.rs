@@ -52,6 +52,7 @@ impl Modes {
     pub fn decrqm_state(self, ps: u16) -> u8 {
         let flag = match ps {
             1 => Self::APP_CURSOR_KEYS,
+            6 => Self::ORIGIN,
             7 => Self::AUTOWRAP,
             25 => Self::CURSOR_VISIBLE,
             9 => Self::MOUSE_X10,
