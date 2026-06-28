@@ -152,16 +152,41 @@ pub fn word_at(
             .get(c as usize)
             .is_some_and(|cell| is_word_char(cell.grapheme.as_str()))
     };
+    let is_spacer = |c: u16| {
+        content
+            .cells
+            .get(c as usize)
+            .is_some_and(|cell| cell.is_wide_spacer())
+    };
+    // A wide (CJK/emoji) grapheme occupies its cell plus a wide-spacer in the
+    // next column. A click on that spacer (the glyph's right half) targets the
+    // owning grapheme, and the outward walk must STEP OVER spacers, since
+    // treating a spacer as a non-word cell would truncate the word at the
+    // first wide glyph.
+    let col = if col > 0 && is_spacer(col) { col - 1 } else { col };
     if !is_word(col) {
         return None;
     }
     let mut start = col;
-    while start > 0 && is_word(start - 1) {
-        start -= 1;
+    while start > 0 {
+        // The cell left of `start` may be a spacer; its grapheme is one further.
+        let candidate = start - 1;
+        let grapheme = if candidate > 0 && is_spacer(candidate) { candidate - 1 } else { candidate };
+        if is_word(grapheme) {
+            start = grapheme;
+        } else {
+            break;
+        }
     }
-    let mut end = col;
-    while end + 1 < cols && is_word(end + 1) {
-        end += 1;
+    // Include the click grapheme's own trailing spacer, then walk right.
+    let mut end = if col + 1 < cols && is_spacer(col + 1) { col + 1 } else { col };
+    while end + 1 < cols {
+        let candidate = end + 1;
+        if is_word(candidate) {
+            end = if candidate + 1 < cols && is_spacer(candidate + 1) { candidate + 1 } else { candidate };
+        } else {
+            break;
+        }
     }
     Some(Selection {
         source_pane,
@@ -229,7 +254,15 @@ pub fn extract_text(
             .then(|| proj.to_unified(visible_idx))
             .and_then(|u| crate::blocks::row_at(screen, u));
         if let Some(row) = row {
-            let row_start = if r == start.0 { start.1 } else { 0 };
+            let mut row_start = if r == start.0 { start.1 } else { 0 };
+            // If a drag anchor landed on a wide grapheme's spacer half, back up
+            // to the owning grapheme cell so the leading glyph isn't dropped.
+            if r == start.0
+                && row_start > 0
+                && row.cells.get(row_start as usize).is_some_and(|c| c.is_wide_spacer())
+            {
+                row_start -= 1;
+            }
             let row_end = if r == end.0 { end.1 } else { cols.saturating_sub(1) };
             let mut last_significant = row_start;
             for c in row_start..=row_end {
@@ -287,6 +320,31 @@ mod tests {
         let mut s = Selection::start(PaneId(0), 1, 2);
         s.extend(3, 5, Rect::new(0, 0, 10, 10));
         assert_eq!(s.head, (3, 5));
+    }
+
+    #[test]
+    fn word_at_spans_wide_graphemes() {
+        use plexy_glass_emulator::Emulator;
+        let mut emu = Emulator::new(5, 20);
+        emu.advance("ab中cd ".as_bytes()); // trailing space flushes the last grapheme
+        let s = emu.screen();
+        // Double-click 'a' (col 0): the word must not truncate at 中's spacer.
+        let sel = word_at(PaneId(0), s, 5, 0, 0, 0).expect("word");
+        assert_eq!(extract_text(&sel, s, 5, 0), "ab中cd");
+        // Clicking the spacer half of 中 (col 3) targets the same word.
+        let sel2 = word_at(PaneId(0), s, 5, 0, 0, 3).expect("word from spacer");
+        assert_eq!(extract_text(&sel2, s, 5, 0), "ab中cd");
+    }
+
+    #[test]
+    fn extract_text_keeps_a_leading_wide_grapheme_from_a_spacer_anchor() {
+        use plexy_glass_emulator::Emulator;
+        let mut emu = Emulator::new(5, 20);
+        emu.advance("中文ab ".as_bytes());
+        let s = emu.screen();
+        // Drag anchor on 中's spacer (col 1) → head at 'b' (col 5): 中 must survive.
+        let sel = Selection { source_pane: PaneId(0), anchor: (0, 1), head: (0, 5) };
+        assert_eq!(extract_text(&sel, s, 5, 0), "中文ab");
     }
 
     #[test]

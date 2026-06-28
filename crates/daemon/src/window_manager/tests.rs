@@ -387,6 +387,45 @@ async fn double_click_on_a_two_char_word_still_copies() {
 /// `forward_mouse_to_pane` used to encode the raw viewport event, so a click in
 /// a split/offset pane reported a cell offset by the pane's position and the
 /// child's click-to-move missed.
+/// Copy-mode mouse must use pane-local coordinates (CopyMode::handle_mouse
+/// treats them as such). Regression: handle_copy_mode_mouse forwarded the raw
+/// viewport event, so a click in an offset pane set the copy cursor off by the
+/// pane rect origin (~40 columns in a right split, past the pane's width).
+#[tokio::test]
+async fn copy_mode_mouse_uses_pane_local_coords() {
+    use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
+
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh");
+    m.handle_command(Command::SplitV).unwrap();
+    let active = m.active_window().active(); // right pane, offset from origin
+    let pane = m.active_window().pane(active).cloned().unwrap();
+    let rect = m.active_window().layout().rect_of(active, m.viewport()).unwrap();
+    assert!(rect.col > 1, "right pane should be offset from the viewport origin");
+    pane.enter_copy_mode(100, rect.rows, 0, 0);
+
+    m.handle_mouse(MouseEvent {
+        kind: MouseKind::Press,
+        button: MouseButton::Left,
+        modifiers: MouseModifiers::default(),
+        row: rect.row + 2,
+        col: rect.col + 5,
+    })
+    .await
+    .unwrap();
+
+    let col = pane.with_copy_mode(|cm| cm.cursor.1).unwrap();
+    assert_eq!(col, 5, "copy-mode cursor col must be pane-local (5), not viewport ({})", rect.col + 5);
+}
+
 #[tokio::test]
 async fn forwarded_mouse_uses_pane_local_coords() {
     use bytes::Bytes;

@@ -382,12 +382,26 @@ impl WindowManager {
         event: MouseEvent,
     ) -> Result<(), DaemonError> {
         let click_count = self.classify_click_count(pane_id, &event);
+        // CopyMode::handle_mouse treats the event as pane-local 0-based, so the
+        // viewport-space event must be translated to the pane rect origin first,
+        // same class as forward_mouse_to_pane / handle_left_press. Without it,
+        // a copy-mode click in any pane (origin >= (1,1), more when split) lands
+        // off by the rect origin.
+        let viewport = self.viewport();
+        let rect = self
+            .active_window()
+            .layout()
+            .rect_of(pane_id, viewport)
+            .unwrap_or(viewport);
+        let mut local = event;
+        local.row = event.row.saturating_sub(rect.row);
+        local.col = event.col.saturating_sub(rect.col);
         let Some(pane) = self.active_window().pane(pane_id).cloned() else {
             return Ok(());
         };
         // The handler mutates copy-mode state; we need both with_screen + with_copy_mode_mut.
         let action: Option<plexy_glass_mux::CopyModeAction> = pane.with_screen(|screen| {
-            pane.with_copy_mode_mut(|cm| cm.handle_mouse(&event, click_count, screen))
+            pane.with_copy_mode_mut(|cm| cm.handle_mouse(&local, click_count, screen))
         });
         if let Some(action) = action {
             use plexy_glass_mux::CopyModeAction;
@@ -630,7 +644,16 @@ impl WindowManager {
             let off = p.scroll_offset();
             p.with_screen(|s| {
                 plexy_glass_mux::viewport_content_row(s, s.active.num_rows(), off, local_row)
-                    .and_then(|row| row.cells.get(local_col as usize))
+                    .and_then(|row| {
+                        // A click on a wide grapheme's spacer half (the glyph's
+                        // right cell) must read the hyperlink off the owning
+                        // grapheme cell, which holds the id.
+                        let mut c = local_col as usize;
+                        if c > 0 && row.cells.get(c).is_some_and(|cell| cell.is_wide_spacer()) {
+                            c -= 1;
+                        }
+                        row.cells.get(c)
+                    })
                     .and_then(|cell| cell.hyperlink_id)
                     .and_then(|id| s.hyperlinks.get(id).map(str::to_owned))
             })
