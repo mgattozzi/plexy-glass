@@ -165,3 +165,75 @@ fn conformance_decom() {
         Case { name: "decom_clamps_to_region_bottom", input: b"\x1b[2;4r\x1b[?6h\x1b[99;1H", cursor: Some((3, 0)), ..BASE },
     ]);
 }
+
+#[test]
+fn conformance_tabs() {
+    check(&[
+        // Default stops every 8 cols (1-based 9,17,…). On 24-wide: col0 →HT→ 8 →HT→ 16.
+        Case { name: "ht_default_stops", input: b"\t\t", cursor: Some((0, 16)), ..BASE },
+        // HT at/after the last stop stops at the LAST column (24-wide → col 23).
+        Case { name: "ht_stops_at_last_col", input: b"\t\t\t\t", cursor: Some((0, 23)), ..BASE },
+        // HTS sets a stop at the cursor column; a later HT from home lands on it.
+        Case { name: "hts_sets_stop", input: b"\x1b[1;4H\x1bH\x1b[1;1H\t", cursor: Some((0, 3)), ..BASE },
+        // TBC 3 clears ALL stops → HT runs to the last column.
+        Case { name: "tbc_clear_all", input: b"\x1b[3g\t", cursor: Some((0, 23)), ..BASE },
+        // TBC 0 clears the stop at the cursor col → next HT skips it.
+        // Stand on col 8 (the first default stop), clear it, home, HT → col 16.
+        Case { name: "tbc_clear_at_cursor", input: b"\t\x1b[0g\x1b[1;1H\t", cursor: Some((0, 16)), ..BASE },
+    ]);
+}
+
+#[test]
+fn conformance_wide_char_wrap() {
+    // 4-col line, autowrap on (default). Fill cols 0..2 with "abc" (cursor at col
+    // 3), then a wide char "好" cannot fit at col 3 → pad col 3 blank, wrap, place
+    // 好 at row1 col0 (+ spacer col1). cursor ends row1 col2.
+    check(&[Case {
+        name: "wide_char_wraps_whole_not_split",
+        rows: 2,
+        cols: 4,
+        input: "abc好".as_bytes(),
+        cursor: Some((1, 2)),
+        cells: &[
+            (0, 0, Expect::Text("a")),
+            (0, 3, Expect::Blank),       // pad cell, 好 did not split here
+            (1, 0, Expect::Text("好")),
+            (1, 1, Expect::Spacer),
+        ],
+        ..BASE
+    }]);
+    // A wide char that fits exactly at the last two columns does NOT wrap.
+    check(&[Case {
+        name: "wide_char_exact_fit_no_wrap",
+        rows: 2,
+        cols: 4,
+        input: "ab好".as_bytes(),
+        cursor: Some((0, 3)),  // pending-wrap latched at the right edge; row unchanged
+        cells: &[(0, 2, Expect::Text("好")), (0, 3, Expect::Spacer)],
+        ..BASE
+    }]);
+}
+
+#[test]
+fn conformance_ed_el() {
+    check(&[
+        // EL 0 (cursor→eol): "0123456789" on a 10-wide line, cursor col4 → "0123" + blanks.
+        Case { name: "el_0_to_eol", rows: 2, cols: 10, input: b"0123456789\x1b[1;5H\x1b[0K",
+            cursor: Some((0, 4)), rows_text: &[(0, "0123      ")], ..BASE },
+        // EL 1 (sol→cursor inclusive): cursor col4 → cols 0..4 blank, "56789" kept.
+        Case { name: "el_1_to_cursor", rows: 2, cols: 10, input: b"0123456789\x1b[1;5H\x1b[1K",
+            cursor: Some((0, 4)), rows_text: &[(0, "     56789")], ..BASE },
+        // EL 2 (whole line).
+        Case { name: "el_2_whole_line", rows: 2, cols: 10, input: b"0123456789\x1b[1;5H\x1b[2K",
+            cursor: Some((0, 4)), rows_text: &[(0, "          ")], ..BASE },
+        // ED 0 (cursor→end of screen): clears rest of line + lines below.
+        Case { name: "ed_0_to_end", rows: 2, cols: 4, input: b"AAAA\r\nBBBB\x1b[1;3H\x1b[0J",
+            cursor: Some((0, 2)), rows_text: &[(0, "AA  "), (1, "    ")], ..BASE },
+        // ED 1 (start→cursor inclusive): clears lines above + line start..cursor.
+        Case { name: "ed_1_to_cursor", rows: 2, cols: 4, input: b"AAAA\r\nBBBB\x1b[2;3H\x1b[1J",
+            cursor: Some((1, 2)), rows_text: &[(0, "    "), (1, "   B")], ..BASE },
+        // ED 2 (whole screen); cursor unchanged.
+        Case { name: "ed_2_whole_screen", rows: 2, cols: 4, input: b"AAAA\r\nBBBB\x1b[2;2H\x1b[2J",
+            cursor: Some((1, 1)), rows_text: &[(0, "    "), (1, "    ")], ..BASE },
+    ]);
+}
