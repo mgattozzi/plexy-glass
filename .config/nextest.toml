@@ -59,3 +59,9 @@ leak-timeout = "500ms"
 [[profile.default.overrides]]
 filter = 'package(plexy-glass-daemon)'
 test-group = 'pty'
+
+# Under Miri (cargo +nightly miri nextest), tests run about 40x slower, so
+# give them a generous per-test ceiling and terminate a pathological run
+# rather than hang.
+[profile.default-miri]
+slow-timeout = { period = "120s", terminate-after = 3 }

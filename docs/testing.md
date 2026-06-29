@@ -153,6 +153,81 @@ case is mis-specified against the VT spec) fix the case and cite the spec.
 Never weaken a case to make it pass. The corpus is expandable: add `Case`
 rows to the relevant `#[test]`.
 
+## Miri (undefined-behavior check)
+
+We run the pure-logic crates under **Miri** on demand to detect undefined
+behavior. Note that those crates contain **no hand-written `unsafe`**, so
+Miri here is a *soundness sanity check* (the safe code's std/library usage is
+UB-free, and the `unsafe` inside dependencies stays sound on our inputs), not
+an unsafe audit. Nightly-only, on demand, and **not a gate** (the stable
+`cargo nextest run --workspace` remains the gate).
+
+One-time setup:
+
+    rustup +nightly component add miri
+    cargo +nightly miri setup
+
+Run a pure crate under Miri (nextest auto-selects its `default-miri` profile):
+
+    # emulator: exclude prop_/fuzz_ binaries + 5 intractable large-buffer tests
+    cargo +nightly miri nextest run -p plexy-glass-emulator \
+      -E 'not (binary(/^(prop_|fuzz_)/) | test(combining_mark_cap_exact_boundary) | test(combining_mark_flood_is_bounded) | test(dcs_payload_is_capped_at_dcs_cap) | test(graphics_apc_payload_survives_1mb_size) | test(osc_52_oversized_payload_dropped))'
+
+    # keys: exclude prop_/fuzz_ binaries
+    cargo +nightly miri nextest run -p plexy-glass-keys \
+      -E 'not binary(/^(prop_|fuzz_)/)'
+
+    # mux: snapshot_ tests use fork() (unsupported on Miri/macOS);
+    #      hint regex NFA state-machine intractable under Miri
+    MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri nextest run -p plexy-glass-mux \
+      -E 'not (binary(/^(prop_|fuzz_)/) | test(snapshot_) | test(hint::tests::scans_) | test(hint::tests::url_))'
+
+    # config: reads KDL files and env vars at test time
+    MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri nextest run -p plexy-glass-config \
+      -E 'not binary(/^(prop_|fuzz_)/)'
+
+    # protocol: run only the sync serialization tests;
+    #           async/tokio tests use kqueue, unsupported on Miri/macOS
+    cargo +nightly miri nextest run -p plexy-glass-protocol -E 'test(messages::)'
+
+The highest-value pass is arbitrary bytes through the parsers under Miri
+(`BOLERO_RANDOM_ITERATIONS=50` caps each run to 50 deterministic inputs):
+
+    MIRIFLAGS=-Zmiri-disable-isolation BOLERO_RANDOM_ITERATIONS=50 \
+      cargo +nightly miri nextest run -p plexy-glass-emulator --test fuzz_emulator
+    MIRIFLAGS=-Zmiri-disable-isolation BOLERO_RANDOM_ITERATIONS=50 \
+      cargo +nightly miri nextest run -p plexy-glass-mux --test fuzz_mouse
+    MIRIFLAGS=-Zmiri-disable-isolation BOLERO_RANDOM_ITERATIONS=50 \
+      cargo +nightly miri nextest run -p plexy-glass-keys --test fuzz_keys
+
+**Excluded from Miri** (unsupported operations, not bugs):
+
+- `async`/`#[tokio::test]` tests (mio kqueue/epoll): the `plexy-glass-protocol`
+  codec and handshake tests; only the 15 sync `messages::` serialization tests
+  are in scope.
+- `plexy-glass-daemon` + `e2e` PTY/subprocess tests: Miri can't emulate PTY
+  allocation or process spawning.
+- `snapshot_*` compositor tests in `plexy-glass-mux`: insta calls `fork()`
+  internally to capture test output, and Miri cannot emulate `fork()` on macOS.
+- `hint::tests::scans_*` and `hint::tests::url_*`: the regex NFA has too many
+  Miri-tracked transitions per character; runs exceeded 2 min each.
+- Large-buffer emulator tests: 5 tests feed multi-MB byte streams through the
+  VTE parser, and at Miri's ~40x slowdown they are intractable. They are
+  covered by the normal `cargo nextest run --workspace` gate and the fuzz scan
+  above.
+- `prop_*` binaries: `hegeltest-c-0.23.1` (hegel's C FFI layer) triggers a
+  Stacked Borrows violation under Miri. The violation originates entirely in
+  the C library's pointer aliasing, a known C-FFI / Miri limitation, **not a
+  bug in our code**. The property tests remain in the normal test gate.
+
+A Miri "Undefined Behavior" report is a real soundness bug to fix. An
+"unsupported operation" is a syscall Miri cannot emulate, so exclude that test
+rather than treating it as a bug.
+
+**Baseline:** 2026-06-29. Miri reports **no UB** across the pure crates and
+the parser scan (UB-clean), with `prop_*`/async/PTY/large-buffer tests
+excluded as noted.
+
 ## Baseline
 
 ### Mutation baseline — emulator

@@ -88,6 +88,13 @@ scope. If a step is wrong, fix the plan first, then proceed.
   coverage (install: `rustup component add llvm-tools-preview && cargo install
   cargo-llvm-cov`). It is **measured, not gated** — no threshold yet. See
   `docs/testing.md` for the baseline and the lowest-covered modules.
+- **Miri.** `cargo +nightly miri nextest run -p <pure-crate>` runs the pure-logic
+  crates under Miri for UB detection (setup: `rustup +nightly component add miri &&
+  cargo +nightly miri setup`). On demand, **not gated**; nightly-only. The pure
+  crates have no hand-written `unsafe`, so it's a soundness/dependency check — see
+  `docs/testing.md` for the per-crate commands + exclusions (async/PTY/snapshot/
+  large-buffer tests and `prop_*` binaries are excluded; see the Miri section for
+  exact filtersets).
 - No `unwrap`/`expect` in non-test code except for invariants that cannot
   fail (each documented with a one-line `// invariant:` comment).
 - No `#[allow]` annotations without a one-line justification comment.
