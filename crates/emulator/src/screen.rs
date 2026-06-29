@@ -506,6 +506,9 @@ impl Screen {
         if w == 2 && self.cursor.col + 1 >= self.cols() {
             if self.modes.contains(Modes::AUTOWRAP) {
                 if self.cursor.col < self.cols() {
+                    // The pad blank can land on a wide grapheme's spacer at the last
+                    // column, so clean up the orphaned grapheme to its left.
+                    self.clear_wide_straddle(self.cursor.col, self.cursor.col);
                     self.put_cell_at_cursor(Cell::default());
                 }
                 self.advance_to_next_row(true);
@@ -516,6 +519,10 @@ impl Screen {
                 self.cursor.col = self.cols().saturating_sub(2);
             }
         }
+
+        // Overwriting one half of an existing wide grapheme destroys the whole
+        // char (xterm/VTE): blank the orphaned half so the row stays well-formed.
+        self.clear_wide_straddle(self.cursor.col, self.cursor.col + u16::from(w == 2));
 
         let cell = Cell {
             grapheme: cluster.into(),
@@ -542,6 +549,28 @@ impl Screen {
 
     fn put_cell_at_cursor(&mut self, cell: Cell) {
         self.active.put_cell(self.cursor.row, self.cursor.col, cell);
+    }
+
+    /// A grapheme about to be written into cols `[start, end]` can straddle an
+    /// existing wide grapheme, and overwriting one half orphans the other. Blank
+    /// the orphaned half on each boundary so the row stays well-formed (a width-2
+    /// grapheme is always followed by its spacer; a spacer always follows one).
+    /// Mirrors the erase path's `normalize_wide_pairs`, but O(1) for the hot
+    /// print path: only the two straddled boundary cells can ever be orphaned.
+    fn clear_wide_straddle(&mut self, start: u16, end: u16) {
+        let row = self.cursor.row;
+        // Left edge lands on a spacer, so its grapheme to the left is orphaned.
+        if start > 0 && self.active.get_cell(row, start).is_some_and(|c| c.is_wide_spacer()) {
+            self.active.put_cell(row, start - 1, Cell::default());
+        }
+        // Right edge lands on a wide grapheme → its spacer to the right is orphaned.
+        if self
+            .active
+            .get_cell(row, end)
+            .is_some_and(|c| crate::width::display_width(c.grapheme.as_str()) == 2)
+        {
+            self.active.put_cell(row, end + 1, Cell::default());
+        }
     }
 
     fn attach_zero_width(&mut self, cluster: &str) {
@@ -2017,6 +2046,28 @@ mod tests {
         assert_eq!(c0.grapheme.as_str(), "好");
         assert!(c1.is_wide_spacer());
         assert_eq!(s.cursor.col, 2);
+    }
+
+    #[test]
+    fn overwrite_spacer_half_of_wide_char_clears_grapheme() {
+        // "好x" → 好@0-1, x@2. CUP to col 1 (the spacer), write 'a'. Overwriting
+        // half a wide char destroys the whole char (xterm/VTE semantics), so 好's
+        // orphaned grapheme cell at col 0 is blanked too.
+        let s = drive("好x\x1b[1;2Ha".as_bytes());
+        assert!(s.active.get_cell(0, 0).unwrap().is_blank(), "好's grapheme half not cleared");
+        assert_eq!(s.active.get_cell(0, 1).unwrap().grapheme.as_str(), "a");
+        assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "x");
+    }
+
+    #[test]
+    fn overwrite_grapheme_half_of_wide_char_clears_spacer() {
+        // "好x" → 好@0-1, x@2. CUP to col 0 (the grapheme), write 'a'. The now-
+        // orphaned spacer at col 1 is blanked (not left dangling).
+        let s = drive("好x\x1b[1;1Ha".as_bytes());
+        assert_eq!(s.active.get_cell(0, 0).unwrap().grapheme.as_str(), "a");
+        let c1 = s.active.get_cell(0, 1).unwrap();
+        assert!(c1.is_blank() && !c1.is_wide_spacer(), "orphaned spacer not cleared");
+        assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "x");
     }
 
     #[test]

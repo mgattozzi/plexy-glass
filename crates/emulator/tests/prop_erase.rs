@@ -8,6 +8,11 @@
 //! This guards the `clear_rect` wide-pair normalization that ED/EL/ECH route
 //! through; without it, an erase whose boundary splits a wide grapheme would
 //! orphan the other half.
+//!
+//! The companion `write_leaves_no_orphan_wide_pairs` asserts the same invariant
+//! for the *print* path: overwriting one half of a wide cell (cursor-addressed)
+//! must destroy the whole char, never leave a dangling spacer / half-wide
+//! grapheme. Guards `clear_wide_straddle`.
 
 use hegel::TestCase;
 use hegel::generators as gs;
@@ -71,6 +76,39 @@ fn erase_leaves_no_orphan_wide_pairs(tc: TestCase) {
     e.advance(b"\x1b[m"); // flush any pending grapheme into the grid
 
     tc.note(&format!("cols={cols} rows={rows} fill={fill:?} cur=({r},{c}) op={op:?}"));
+
+    let screen = e.screen();
+    for (ri, row) in screen.active.rows.iter().enumerate() {
+        if let Err(why) = well_formed(&row.cells) {
+            panic!("row {ri}: {why}");
+        }
+    }
+}
+
+#[hegel::test(test_cases = 600)]
+fn write_leaves_no_orphan_wide_pairs(tc: TestCase) {
+    let cols = tc.draw(gs::integers::<u16>().min_value(2).max_value(12));
+    let rows = tc.draw(gs::integers::<u16>().min_value(1).max_value(4));
+    let mut e = Emulator::new(rows, cols);
+
+    // A run of cursor-address-then-write steps. Each write can land on a wide
+    // grapheme or its spacer (overwriting half a wide cell) and can itself be
+    // narrow or wide, the exact straddle that must blank the orphaned half.
+    let steps = tc.draw(gs::integers::<u16>().min_value(1).max_value(20));
+    let mut log = String::new();
+    for _ in 0..steps {
+        let r = tc.draw(gs::integers::<u16>().min_value(1).max_value(rows));
+        let c = tc.draw(gs::integers::<u16>().min_value(1).max_value(cols));
+        // c == cols deliberately reachable so a wide write at the last column
+        // exercises the no-fit autowrap/pad path.
+        let g = if tc.draw(gs::booleans()) { "好" } else { "a" };
+        let step = format!("\x1b[{r};{c}H{g}");
+        e.advance(step.as_bytes());
+        log.push_str(&step);
+    }
+    e.advance(b"\x1b[m"); // flush any pending trailing grapheme
+
+    tc.note(&format!("cols={cols} rows={rows} steps={steps} log={log:?}"));
 
     let screen = e.screen();
     for (ri, row) in screen.active.rows.iter().enumerate() {
