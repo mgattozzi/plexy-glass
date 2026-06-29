@@ -135,6 +135,24 @@ Triaging a surviving (missed) mutant:
 Large modules (`emulator/src/screen.rs`, `mux/src/compositor.rs`) are slow to
 mutate whole, so scope them by function with `--re '<fn-name-regex>'`.
 
+## VT conformance corpus
+
+`crates/emulator/tests/vt_conformance.rs` is a curated, table-driven corpus
+that feeds escape-sequence bytes and asserts the resulting grid/cursor/mode
+state against **spec-correct** expected values (DEC VT510 manual, xterm
+ctlseqs, esctest), focused on the areas that have historically bitten
+emulators: DECSTBM scroll regions, DECOM origin mode, cursor movement at
+margins, tab stops, wide-char wrap, the ED/EL/ICH/DCH/IL/DL/ECH
+erase/insert/delete ops. It drives the public `Parser` + `Screen` directly
+and flushes byte-exactly. Run it with the suite, or alone:
+
+    cargo nextest run -p plexy-glass-emulator --test vt_conformance
+
+A failing case is a real conformance bug, so fix the emulator, or (if the
+case is mis-specified against the VT spec) fix the case and cite the spec.
+Never weaken a case to make it pass. The corpus is expandable: add `Case`
+rows to the relevant `#[test]`.
+
 ## Baseline
 
 ### Mutation baseline — emulator
