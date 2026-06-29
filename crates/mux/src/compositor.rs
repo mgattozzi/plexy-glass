@@ -1767,9 +1767,9 @@ fn paint_popup(
                 }
                 crate::blocks::BlockLineStatus::Failed => {
                     cell.fg = colors.fail;
-                    // Replace a plain vertical │ with the half-block ▌.
+                    // Replace a plain vertical │ with the half-block ▐.
                     if cell.grapheme.as_str() == "\u{2502}" {
-                        cell.grapheme = smol_str::SmolStr::new_static("\u{258c}");
+                        cell.grapheme = smol_str::SmolStr::new_static("\u{2590}");
                     }
                 }
             }
@@ -3399,7 +3399,7 @@ mod tests {
 
     /// `blocks: None` suppresses all block painting even when block marks exist.
     /// Build a screen WITH a completed failed block, compose with `blocks: None`
-    /// → output must contain no `▌` and no fail-color cell.
+    /// → output must contain no `▐` and no fail-color cell.
     #[test]
     fn compose_blocks_none_no_block_rows() {
         use plexy_glass_emulator::Emulator as RawEmulator;
@@ -3436,13 +3436,13 @@ mod tests {
             plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61),
             ChromeColors::ansi_default(),
         );
-        // No ▌ anywhere and no fail-color cell.
+        // No ▐ anywhere and no fail-color cell.
         for r in 0..3u16 {
             for c in 0..20u16 {
                 let cell = vs.cell(r, c).unwrap();
                 assert_ne!(
-                    cell.grapheme.as_str(), "\u{258c}",
-                    "no ▌ with blocks=None at ({r},{c})"
+                    cell.grapheme.as_str(), "\u{2590}",
+                    "no ▐ with blocks=None at ({r},{c})"
                 );
                 assert_ne!(
                     cell.fg, fail_color,
@@ -3534,7 +3534,7 @@ mod tests {
             Some(&colors),
         plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         // Left-segment column = pane.rect.col - 1 = 0. Pane rows 1..=3 map to
-        // block rows 0..2. All should be Failed (fail color / ▌).
+        // block rows 0..2. All should be Failed (fail color / ▐).
         for r in 1..=3u16 {
             let cell = vs_scrolled.cell(r, 0).unwrap();
             assert_eq!(
@@ -4013,7 +4013,7 @@ mod tests {
         plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default())
     }
 
-    /// Popup with a failed block → left border rows colored fail + ▌ glyph.
+    /// Popup with a failed block → left border rows colored fail + ▐ glyph.
     ///
     /// Popup screen: 6 rows × 20 cols; one completed failed block.
     ///   row 0: A "$ fail"
@@ -4024,7 +4024,7 @@ mod tests {
     /// Interior rows 0..5 → absolute lines 0..5 in the popup screen.
     /// Block 1 (lines 0..1) is closed with D;1 on line 2 (D+A shared) → Failed.
     /// The left border cells at host (rect.row+1+r, rect.col) = (3+r, 10)
-    /// for r in 0..1 should be fail-colored with ▌.
+    /// for r in 0..1 should be fail-colored with ▐.
     #[test]
     fn popup_failed_block_left_border_colored() {
         let screen = popup_screen_from(
@@ -4041,14 +4041,14 @@ mod tests {
         // Row 2 (host row 5) is the shared D+A row (block 2 prompt, running) → None.
         let fail_row_0 = vs.cell(3, 10).unwrap();
         assert_eq!(fail_row_0.fg, colors.fail, "popup left border row 3: fail color");
-        assert_eq!(fail_row_0.grapheme.as_str(), "\u{258c}", "popup left border row 3: │ → ▌");
+        assert_eq!(fail_row_0.grapheme.as_str(), "\u{2590}", "popup left border row 3: │ → ▐");
         let fail_row_1 = vs.cell(4, 10).unwrap();
         assert_eq!(fail_row_1.fg, colors.fail, "popup left border row 4: fail color");
-        assert_eq!(fail_row_1.grapheme.as_str(), "\u{258c}", "popup left border row 4: │ → ▌");
-        // Row 5 (shared D+A, block 2 running) → plain border (no fail color, no ▌).
+        assert_eq!(fail_row_1.grapheme.as_str(), "\u{2590}", "popup left border row 4: │ → ▐");
+        // Row 5 (shared D+A, block 2 running) → plain border (no fail color, no ▐).
         let plain_row_2 = vs.cell(5, 10).unwrap();
         assert_ne!(plain_row_2.fg, colors.fail, "popup left border row 5: not fail (running block)");
-        assert_ne!(plain_row_2.grapheme.as_str(), "\u{258c}", "popup left border row 5: no ▌");
+        assert_ne!(plain_row_2.grapheme.as_str(), "\u{2590}", "popup left border row 5: no ▐");
     }
 
     /// Popup with an ok block → left border rows colored ok, glyph stays │.
@@ -4113,7 +4113,7 @@ mod tests {
         );
         let colors = block_colors();
         let vs = compose_with_popup(&screen, None);
-        // No cell on the popup's left border should have fail color or ▌.
+        // No cell on the popup's left border should have fail color or ▐.
         for r in 2..=9u16 {
             let cell = vs.cell(r, 10).unwrap();
             assert_ne!(
@@ -4121,8 +4121,8 @@ mod tests {
                 "blocks=None row {r}: no fail color on popup border"
             );
             assert_ne!(
-                cell.grapheme.as_str(), "\u{258c}",
-                "blocks=None row {r}: no ▌ on popup border"
+                cell.grapheme.as_str(), "\u{2590}",
+                "blocks=None row {r}: no ▐ on popup border"
             );
         }
     }
@@ -4153,8 +4153,8 @@ mod tests {
                 "alt-screen popup left border row {r}: no fail color"
             );
             assert_ne!(
-                cell.grapheme.as_str(), "\u{258c}",
-                "alt-screen popup left border row {r}: no ▌"
+                cell.grapheme.as_str(), "\u{2590}",
+                "alt-screen popup left border row {r}: no ▐"
             );
         }
     }
@@ -5111,7 +5111,7 @@ mod tests {
     }
 
     /// Block-status border: the left border column (col 0) shows the half-block
-    /// `▌` on every block row. Both ok and failed blocks use `▌`, and the ok/fail
+    /// `▐` on every block row. Both ok and failed blocks use `▐`, and the ok/fail
     /// distinction is carried by COLOR (`colors.ok`/`colors.fail`), which a text
     /// dump cannot capture (that color split is unit-tested in `borders.rs`). This
     /// snapshot guards the integration-level "border band is drawn on block rows."

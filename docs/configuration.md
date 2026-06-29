@@ -560,39 +560,37 @@ blocks {
 }
 ```
 
-- `enabled` is `#true` (default) or `#false`, and it is the master switch for
-  every block annotation: when `#false`, no block-status border coloring is
-  performed (the left border is always plain), and the command duration and
-  sticky command header are off too. All other `blocks` properties are still
-  decoded normally, so `enabled #false` is the way to opt out of the whole
-  feature without deleting the rest of the node.
-- `ok-color` is the foreground color for border rows belonging to a block
-  that exited with code 0. It takes a palette name (e.g. `"ok"`, `"accent"`)
-  or a `#rrggbb` hex literal (e.g. `"#87a987"`). Default: `"ok"` (the
-  built-in palette entry `#87a987`).
-- `fail-color` is the foreground color for rows belonging to a block that
-  exited with a nonzero code, and it also triggers the `│` → `▌` glyph on
-  plain vertical segments. Same value forms as `ok-color`. Default: `"alert"`
-  (the built-in palette entry `#c4746e`).
-- `select-color` is the color of the block-mode selection bracket (`┏┃┗`)
-  drawn around the selected command block (see
-  [docs/command-blocks.md, Block mode](command-blocks.md#block-mode)). Same
+- `enabled`: `#true` (default) or `#false`. The master switch for every block
+  annotation: when `#false`, no block-status border coloring happens (the left
+  border is always plain) and the command duration and sticky command header
+  are off too. All other `blocks` properties still decode normally, so
+  `enabled #false` is the way to opt out of the whole feature without ripping
+  out the rest of the node.
+- `ok-color`: the foreground color for border rows belonging to a block that
+  exited with code 0. Takes a palette name (e.g. `"ok"`, `"accent"`) or a
+  `#rrggbb` hex literal (e.g. `"#87a987"`). Default: `"ok"` (the built-in
+  palette entry `#87a987`).
+- `fail-color`: the foreground color for rows belonging to a block that exited
+  with a nonzero code. Same value forms as `ok-color`. Default: `"alert"` (the
+  built-in palette entry `#c4746e`).
+- `select-color`: the color of the block-mode selection bracket (`┏┃┗`) drawn
+  around the selected command block (see
+  [Block mode](command-blocks.md#block-mode) in docs/command-blocks.md). Same
   value forms as `ok-color`. Default: `"#dca561"`. Note that this one is
   independent of `enabled`: the bracket is part of block-mode navigation, so
-  it is drawn even when block-status border coloring is turned off.
-- `sticky-header` is `#true` (default) or `#false`. While the pane is
-  scrolled back, it pins the block's command line (dimmed, so it blends with
-  the theme) on the pane's top row when that block's output fills the top of
-  the viewport. Live view only, and it never appears at the live bottom.
-  Gated by `enabled`.
-- `duration` is `#true` (default) or `#false`. It shows each completed
-  block's wall-clock duration (`C`→`D`) as a dim, right-aligned note on the
-  command row (and on the sticky header). Runtime-only, not persisted across
+  it's drawn even when block-status border coloring is turned off.
+- `sticky-header`: `#true` (default) or `#false`. While the pane is scrolled
+  back, pins a block's command line (dimmed, so it blends with the theme) on
+  the pane's top row when that block's output fills the top of the viewport.
+  Live view only; it never appears at the live bottom. Gated by `enabled`.
+- `duration`: `#true` (default) or `#false`. Shows each completed block's
+  wall-clock duration (`C`→`D`) as a dim, right-aligned note on the command
+  row (and on the sticky header). Runtime-only, so it's not persisted across a
   restart. Gated by `enabled`.
-- `duration-threshold` is the minimum duration to display, as `"<int>ms"`,
+- `duration-threshold`: the minimum duration worth displaying, as `"<int>ms"`,
   `"<float>s"`, or `"0"` (e.g. `"500ms"`, `"1.5s"`, `"2s"`). Default `"2s"`.
-  `"0"` shows every completed block, faster commands are hidden otherwise.
-  Note that an unparseable value is a hard config error.
+  `"0"` shows every completed block; anything faster than the threshold is
+  hidden otherwise. An unparseable value is a hard config error.
 
 A bad color value (unknown palette name or malformed hex) falls back to the
 built-in default for that field, so it never disables the feature and is not

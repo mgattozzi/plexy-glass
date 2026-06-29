@@ -337,9 +337,11 @@ binding verb yanks the last completed block's output; `plexy-glass capture
 --last-command` (protocol v7, `CaptureLastCommand` message) prints the
 scrollback-inclusive block output from a script; **block exit-status border** —
 each pane's left border is color-coded per visible row by the block's exit
-status: a block row's `│` becomes a half-block `▌` for BOTH exit 0 and nonzero
-(color carries pass/fail — ok-color `▌` for exit 0, fail-color `▌` for nonzero;
-the glyph is identical, only the color differs), plain `│` for unmarked rows /
+status: a block row's `│` becomes the right half-block `▐` for BOTH exit 0 and
+nonzero (color carries pass/fail — ok-color `▐` for exit 0, fail-color `▐` for
+nonzero; the glyph is identical, only the color differs; `▐` hugs the inner edge
+toward the pane it describes so it never bleeds into a left neighbour), plain `│`
+for unmarked rows /
 running blocks; the whole block (prompt row through the row
 before the next prompt) takes the status; coloring is viewport-tracked (live,
 wheel scrollback, copy mode); alt-screen panes revert to plain while active;

@@ -49,7 +49,7 @@ pub struct BlockBorderColors {
     /// Foreground color for a successfully completed block row (exit code 0).
     pub ok: Color,
     /// Foreground color for a failed block row (nonzero exit code). Also
-    /// triggers a `│` → `▌` glyph replacement on plain vertical segments.
+    /// triggers a `│` → `▐` glyph replacement on plain vertical segments.
     pub fail: Color,
     /// Minimum duration (millis) to show the inline/header duration annotation;
     /// `None` disables the duration feature.
@@ -106,8 +106,8 @@ pub struct PaneFrame<'a> {
 ///
 /// Precedence per cell (highest wins):
 ///   0. Selected-block bracket (block mode: color + `┏`/`┃`/`┗` glyph)
-///   1. Marked ring (color + glyph; no `▌` ever on a marked ring)
-///   2. Block status (ok/fail fg; fail replaces `│` → `▌` when plain vertical)
+///   1. Marked ring (color + glyph; no `▐` ever on a marked ring)
+///   2. Block status (ok/fail fg; fail replaces `│` → `▐` when plain vertical)
 ///   3. Active ring (bright blue)
 pub fn draw(
     frames: &[PaneFrame<'_>],
@@ -175,21 +175,21 @@ pub fn draw(
                     BlockLineStatus::Ok => {
                         cell.fg = colors.ok;
                         // Parity with Failed: a plain vertical `│` becomes the
-                        // half-block `▌` so a passing block reads as a solid
+                        // half-block `▐` so a passing block reads as a solid
                         // bar, not a faint line. Color carries pass/fail.
                         if glyph == "\u{2502}" {
-                            // │ → ▌
-                            cell.grapheme = SmolStr::new_static("\u{258c}");
+                            // │ → ▐
+                            cell.grapheme = SmolStr::new_static("\u{2590}");
                         }
                     }
                     BlockLineStatus::Failed => {
                         cell.fg = colors.fail;
-                        // Replace a plain vertical `│` with the half-block `▌`.
+                        // Replace a plain vertical `│` with the half-block `▐`.
                         // A `┤` keeps its glyph (it's the only other glyph possible on the
                         // left segment, since its east neighbour is always pane content).
                         if glyph == "\u{2502}" {
-                            // │ → ▌
-                            cell.grapheme = SmolStr::new_static("\u{258c}");
+                            // │ → ▐
+                            cell.grapheme = SmolStr::new_static("\u{2590}");
                         }
                     }
                 }
@@ -460,10 +460,10 @@ mod tests {
         };
         let mut screen = VirtualScreen::blank(5, 7);
         draw(&[f], band, &mut screen, Some(&colors), RingColors::ansi_default());
-        // Mid row: selection color + ┃, NOT the fail color / ▌.
+        // Mid row: selection color + ┃, NOT the fail color / ▐.
         let cell = screen.cell(2, 0).unwrap();
         assert_eq!(cell.fg, sel_color(), "selection beats fail color");
-        assert_eq!(cell.grapheme.as_str(), "\u{2503}", "selection glyph, not ▌");
+        assert_eq!(cell.grapheme.as_str(), "\u{2503}", "selection glyph, not ▐");
     }
 
     fn test_colors() -> BlockBorderColors {
@@ -695,7 +695,7 @@ mod tests {
 
     // ── Block exit-status border segment tests ────────────────────────────────────
 
-    /// Ok status row: left-segment cell gets ok fg AND the heavy `▌` (parity with fail).
+    /// Ok status row: left-segment cell gets ok fg AND the heavy `▐` (parity with fail).
     #[test]
     fn block_ok_segment_fg_and_glyph() {
         // Band 5x7; pane inset at (1,1) sized 3x5.
@@ -707,13 +707,13 @@ mod tests {
         let mut screen = VirtualScreen::blank(5, 7);
         let f = frame_with_blocks(pane, false, false, block_rows);
         draw(&[f], band, &mut screen, Some(&colors), RingColors::ansi_default());
-        // Row 2 (mid-pane), col 0: ok color + heavy bar ▌.
+        // Row 2 (mid-pane), col 0: ok color + heavy bar ▐.
         let cell = screen.cell(2, 0).unwrap();
         assert_eq!(cell.fg, colors.ok, "ok segment: fg = ok color");
-        assert_eq!(cell.grapheme.as_str(), "\u{258c}", "ok segment: heavy bar (▌)");
+        assert_eq!(cell.grapheme.as_str(), "\u{2590}", "ok segment: heavy bar (▐)");
     }
 
-    /// Failed status row: left-segment `│` becomes `▌` with fail fg.
+    /// Failed status row: left-segment `│` becomes `▐` with fail fg.
     #[test]
     fn block_failed_segment_replaces_pipe_with_half_block() {
         let band = Rect::new(0, 0, 5, 7);
@@ -723,10 +723,10 @@ mod tests {
         let mut screen = VirtualScreen::blank(5, 7);
         let f = frame_with_blocks(pane, false, false, block_rows);
         draw(&[f], band, &mut screen, Some(&colors), RingColors::ansi_default());
-        // Mid-pane left-segment cell: fail fg + ▌ glyph.
+        // Mid-pane left-segment cell: fail fg + ▐ glyph.
         let cell = screen.cell(2, 0).unwrap();
         assert_eq!(cell.fg, colors.fail, "failed segment: fg = fail color");
-        assert_eq!(cell.grapheme.as_str(), "\u{258c}", "failed segment: │ → ▌");
+        assert_eq!(cell.grapheme.as_str(), "\u{2590}", "failed segment: │ → ▐");
     }
 
     /// A `┤` at the exact left-segment position: glyph kept, fail color applied.
@@ -735,7 +735,7 @@ mod tests {
     /// (1,5,3,4) with all-Failed rows. The right pane's left segment is col 4.
     /// A gap (col 3) between the two panes' content areas gives col 4 a western
     /// border neighbour, so the mid-height cell at (2,4) receives connectivity
-    /// (N=T, S=T, W=T, E=F) → ┤ rather than │. The `│` → `▌` substitution must
+    /// (N=T, S=T, W=T, E=F) → ┤ rather than │. The `│` → `▐` substitution must
     /// not fire on ┤.
     #[test]
     fn block_failed_tee_at_left_segment_col_keeps_glyph() {
@@ -759,9 +759,9 @@ mod tests {
             "expected ┤ at (2,4); got {}",
             cell.grapheme.as_str()
         );
-        // ┤ takes the fail color but keeps its glyph (no ▌ replacement).
+        // ┤ takes the fail color but keeps its glyph (no ▐ replacement).
         assert_eq!(cell.fg, colors.fail, "┤ cell: fail fg");
-        assert_ne!(cell.grapheme.as_str(), "\u{258c}", "┤ must not become ▌");
+        assert_ne!(cell.grapheme.as_str(), "\u{2590}", "┤ must not become ▐");
     }
 
     /// None rows: frame drawn with `Some(colors)` and all-None block_rows is
@@ -790,7 +790,7 @@ mod tests {
         }
     }
 
-    /// Marked pane: ring color + glyph win over Failed (no ▌ on a marked ring).
+    /// Marked pane: ring color + glyph win over Failed (no ▐ on a marked ring).
     #[test]
     fn marked_pane_beats_failed_block_status() {
         let band = Rect::new(0, 0, 5, 7);
@@ -809,11 +809,11 @@ mod tests {
                 "marked ring at ({r},0) must beat fail status (got {:?})",
                 cell.fg
             );
-            // No ▌ on a marked ring.
+            // No ▐ on a marked ring.
             assert_ne!(
                 cell.grapheme.as_str(),
-                "\u{258c}",
-                "marked ring at ({r},0) must not have ▌"
+                "\u{2590}",
+                "marked ring at ({r},0) must not have ▐"
             );
         }
     }
@@ -839,7 +839,7 @@ mod tests {
             failed_cell.fg, colors.fail,
             "failed row beats active blue"
         );
-        assert_eq!(failed_cell.grapheme.as_str(), "\u{258c}", "failed row: │ → ▌");
+        assert_eq!(failed_cell.grapheme.as_str(), "\u{2590}", "failed row: │ → ▐");
         // Rows 2..=3 (block_rows[1..2] = None): active blue.
         for r in 2..=3u16 {
             let cell = screen.cell(r, 0).unwrap();
@@ -852,7 +852,7 @@ mod tests {
     }
 
     /// Shared separator: two side-by-side panes, LEFT active, RIGHT has a failed
-    /// block row → that shared cell shows fail color/▌; left pane's other ring
+    /// block row → that shared cell shows fail color/▐; left pane's other ring
     /// cells stay blue.
     #[test]
     fn shared_separator_right_status_beats_left_active_ring() {
@@ -872,7 +872,7 @@ mod tests {
         let mut screen = VirtualScreen::blank(5, 9);
         draw(&[f_left, f_right], band, &mut screen, Some(&colors), RingColors::ansi_default());
         // The separator (col 4, rows 1..=3) is in right pane's left segment.
-        // It should show fail color / ▌, not left pane's active blue.
+        // It should show fail color / ▐, not left pane's active blue.
         for r in 1..=3u16 {
             let cell = screen.cell(r, 4).unwrap();
             assert_eq!(
@@ -881,8 +881,8 @@ mod tests {
             );
             assert_eq!(
                 cell.grapheme.as_str(),
-                "\u{258c}",
-                "shared separator at ({r},4): │ → ▌"
+                "\u{2590}",
+                "shared separator at ({r},4): │ → ▐"
             );
         }
         // Left pane's other ring cells (top, bottom, right side) stay blue.
@@ -905,7 +905,7 @@ mod tests {
     /// Marked LEFT pane + Failed RIGHT pane: the shared separator (right pane's
     /// left segment) is also on the marked ring of the LEFT pane. Marked takes
     /// precedence over block status → cell keeps magenta (Indexed 13) and the
-    /// `│` glyph (no `▌`).
+    /// `│` glyph (no `▐`).
     #[test]
     fn marked_left_pane_beats_failed_right_on_shared_separator() {
         // Band 5x9; left (1,1,3,3) marked, right (1,5,3,3) inactive with Failed.
@@ -934,7 +934,7 @@ mod tests {
             assert_eq!(
                 cell.grapheme.as_str(),
                 "\u{2502}",
-                "shared separator at ({r},4): marked ring must keep │, not ▌"
+                "shared separator at ({r},4): marked ring must keep │, not ▐"
             );
         }
     }
@@ -962,8 +962,8 @@ mod tests {
             );
             assert_ne!(
                 cell.grapheme.as_str(),
-                "\u{258c}",
-                "right border col 6 row {r} must not have ▌"
+                "\u{2590}",
+                "right border col 6 row {r} must not have ▐"
             );
         }
         // Left segment (col 0) IS fail colored.

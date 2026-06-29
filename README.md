@@ -20,11 +20,10 @@ integration.
 - Sessions, windows, and panes with horizontal/vertical splits, pane zoom, and
   keyboard or mouse resize
 - Detach and reattach to a running session: the daemon keeps your windows,
-  panes, and scrollback alive in memory while you're away. Note that sessions
-  are *not* persisted to disk, so when the daemon stops its sessions are gone
+  panes, and scrollback alive in memory while you're away. (Note that sessions
+  are *not* persisted to disk: when the daemon stops, its sessions are gone,
   and a fresh daemon starts clean. Declare sessions in `config.kdl` to get the
-  same layout built fresh every time (see
-  [declarative sessions](docs/configuration.md#session--declarative-sessions)).
+  same layout built fresh every time, see [declarative sessions](docs/configuration.md#session--declarative-sessions).)
 - Multiple clients attached to the same session
 - Copy mode with search
 - Full mouse support, including click-to-focus, **click on the shell prompt to
@@ -45,9 +44,9 @@ integration.
   with `Ctrl+a ]` or a named one with `:paste bufferN`, pick one with
   `Ctrl+a =`, and bridge text/files with `:set-buffer`, `:save-buffer`, and
   `:load-buffer` (scriptable via `plexy-glass cmd`)
-- Per-window monitoring: activity (`#`), bell (`!`), silence (`~`,
+- Per-window monitoring for activity (`#`), bell (`!`), silence (`~`,
   `:monitor-silence <secs>`), and command completion (`✓`/`✗`,
-  `:monitor-command`), all surfaced as status-bar window-list flags and
+  `:monitor-command`), surfaced as status-bar window-list flags and
   edge-triggered status-line alert messages
 - Configurable status bar with live config reload
 - Dynamic window names: an unnamed window derives its name from the active pane
@@ -66,8 +65,8 @@ integration.
   sessions, never rebuilding live ones) and `:switch` auto-creates a
   declared-but-not-running session
 - A visual session picker (`Ctrl+a w`) and a choose-tree
-  (session → window → pane drill-down with incremental filter `/`,
-  collapse/expand `h`/`l`, and session rename `r`, `Ctrl+a W`)
+  (session → window → pane drill-down with incremental filter `/`, collapse/expand `h`/`l`,
+  and session rename `r`, `Ctrl+a W`)
 - Pane mobility: break a pane to its own window, join it elsewhere, swap
   panes (including cross-window swap with the marked pane), and a marked pane
   for cross-window moves; focus and zoom follow the slot, mark is preserved
@@ -75,16 +74,16 @@ integration.
   per pane, with graceful fallback and clean teardown of the outer terminal
 - Colored underlines (SGR 58/59), advertised to applications
 - Command-block awareness (OSC 133, [needs shell
-  integration](#shell-integration-recommended)): navigate scrollback by
-  prompt with `Ctrl+a <` / `>`, jump prompts in copy mode with `[` / `]`,
-  click a prompt row while scrolled back to jump there, select a command's
-  output with `o` then `y`, yank it with `:copy-output`, or capture it from a
-  script with `plexy-glass capture --last-command` (plain text) or
+  integration](#shell-integration-recommended)): navigate scrollback by prompt
+  with `Ctrl+a <` / `>`, jump prompts in copy mode with `[` / `]`, click a
+  prompt row while scrolled back to jump there, select a command's output with
+  `o` then `y`, yank it with `:copy-output`, or capture it from a script with
+  `plexy-glass capture --last-command` (plain text) or
   `plexy-glass capture --last-command --json` (structured `{"output",
   "exit_code", "command_line"}`); `plexy-glass run --json` returns the same
-  structure for synchronous runs; each pane's left border (popup pane borders
-  included) is color-coded per row by block exit status (ok color `│` /
-  fail color `▌`), viewport-tracked and live-reloading with the `blocks`
+  structure for synchronous runs; each pane's left border (including popup
+  pane borders) is color-coded per row by block exit status (a `▐` bar in the
+  ok or fail color), viewport-tracked and live-reloading with the `blocks`
   config node
 
 ## Quick start

@@ -2613,16 +2613,16 @@ fn copy_mode_bracket_o_y_yanks_block_output() {
 // These tests exercise the block-border paint path end-to-end: synthetic OSC
 // 133 sequences are sent via printf so the emulator records real block marks;
 // the raw PTY output accumulated by `TestSession` is then inspected for the
-// expected Rgb-color SGR sequences and the half-block `▌` glyph (or their
+// expected Rgb-color SGR sequences and the half-block `▐` glyph (or their
 // absence). All assertions use `wait_for_from` on fresh output after a mark
 // so re-rendered earlier content does not produce false positives.
 //
 // Color constants (from crates/config/src/default.rs):
 //   alert (#c4746e) → decimal 196;116;110 → SGR `\x1b[38;2;196;116;110m`
 //   ok    (#87a987) → decimal 135;169;135 → SGR `\x1b[38;2;135;169;135m`
-// Glyph `▌` (U+258C) → UTF-8 bytes 0xE2 0x96 0x8C.
+// Glyph `▐` (U+2590) → UTF-8 bytes 0xE2 0x96 0x90.
 
-/// A completed FAILED block (`D;1`) paints `▌` with the alert color on the
+/// A completed FAILED block (`D;1`) paints `▐` with the alert color on the
 /// pane's left border.
 #[test]
 fn block_border_failed_block_paints_half_block_with_fail_color() {
@@ -2637,12 +2637,12 @@ fn block_border_failed_block_paints_half_block_with_fail_color() {
     let mark_before = sess.buffer_len();
     sess.send_str("printf '\\033]133;A\\007BDR'PROMPT'\\r\\n\\033]133;C\\007BDR_'FAIL'_OUT\\n\\033]133;D;1\\007\\033]133;A\\007BDR'NEXT'\\n'\n");
 
-    // Wait for the `▌` half-block glyph (UTF-8: 0xE2 0x96 0x8C). The diff renderer
+    // Wait for the `▐` half-block glyph (UTF-8: 0xE2 0x96 0x90). The diff renderer
     // emits this on the FIRST render after the marks are recorded, so it appears
     // at or after mark_before.
     assert!(
-        sess.wait_for_from(mark_before, b"\xe2\x96\x8c", Duration::from_secs(10)),
-        "\u{258c} (half-block) never appeared after failed block. raw: {}",
+        sess.wait_for_from(mark_before, b"\xe2\x96\x90", Duration::from_secs(10)),
+        "\u{2590} (half-block) never appeared after failed block. raw: {}",
         sess.snapshot_str()
     );
 
@@ -2655,7 +2655,7 @@ fn block_border_failed_block_paints_half_block_with_fail_color() {
     );
 }
 
-/// A completed OK block (`D;0`) paints `│` with the ok color; no `▌`.
+/// A completed OK block (`D;0`) paints `│` with the ok color; no `▐`.
 #[test]
 fn block_border_ok_block_paints_pipe_with_ok_color_no_half_block() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2675,20 +2675,20 @@ fn block_border_ok_block_paints_pipe_with_ok_color_no_half_block() {
         sess.snapshot_str()
     );
 
-    // Snapshot the bytes from mark_before and assert `▌` IS there.
-    // The ok case now paints ▌ (parity with fail); color carries pass/fail.
+    // Snapshot the bytes from mark_before and assert `▐` IS there.
+    // The ok case now paints ▐ (parity with fail); color carries pass/fail.
     let raw = sess.snapshot();
     let post_mark = &raw[mark_before.min(raw.len())..];
     assert!(
-        post_mark.windows(3).any(|w| w == b"\xe2\x96\x8c"),
-        "\u{258c} (half-block) must appear after an ok block (D;0). \
+        post_mark.windows(3).any(|w| w == b"\xe2\x96\x90"),
+        "\u{2590} (half-block) must appear after an ok block (D;0). \
          post-mark raw bytes (lossy): {}",
         String::from_utf8_lossy(post_mark)
     );
 }
 
-/// Entering the alt screen reverts the border to plain (no new `▌` while in
-/// alt screen); leaving it restores `▌` for the failed block still on the
+/// Entering the alt screen reverts the border to plain (no new `▐` while in
+/// alt screen); leaving it restores `▐` for the failed block still on the
 /// main grid.
 #[test]
 fn block_border_alt_screen_reverts_and_restores() {
@@ -2708,10 +2708,10 @@ fn block_border_alt_screen_reverts_and_restores() {
         sess.snapshot_str()
     );
 
-    // Confirm the failed block border painted (▌ appears at or after mark_before).
+    // Confirm the failed block border painted (▐ appears at or after mark_before).
     assert!(
-        sess.wait_for_from(mark_before, b"\xe2\x96\x8c", Duration::from_secs(10)),
-        "\u{258c} never appeared before alt-screen enter: {}",
+        sess.wait_for_from(mark_before, b"\xe2\x96\x90", Duration::from_secs(10)),
+        "\u{2590} never appeared before alt-screen enter: {}",
         sess.snapshot_str()
     );
 
@@ -2728,29 +2728,29 @@ fn block_border_alt_screen_reverts_and_restores() {
         sess.snapshot_str()
     );
 
-    // Assert that no NEW `▌` arrived after the alt-screen enter mark.
+    // Assert that no NEW `▐` arrived after the alt-screen enter mark.
     let raw = sess.snapshot();
     let post_alt_enter = &raw[mark_alt_enter.min(raw.len())..];
     assert!(
-        !post_alt_enter.windows(3).any(|w| w == b"\xe2\x96\x8c"),
-        "\u{258c} must NOT appear while in alt screen (alt-screen path should be all-None). \
+        !post_alt_enter.windows(3).any(|w| w == b"\xe2\x96\x90"),
+        "\u{2590} must NOT appear while in alt screen (alt-screen path should be all-None). \
          post-mark raw bytes (lossy): {}",
         String::from_utf8_lossy(post_alt_enter)
     );
 
     // Leave the alt screen.  The compositor re-renders the main grid with the
-    // failed block marks still present → `▌` must reappear.
+    // failed block marks still present → `▐` must reappear.
     let mark_alt_leave = sess.buffer_len();
     sess.send_str("printf '\\033[?1049l'\n");
     assert!(
-        sess.wait_for_from(mark_alt_leave, b"\xe2\x96\x8c", Duration::from_secs(10)),
-        "\u{258c} did not reappear after leaving alt screen: {}",
+        sess.wait_for_from(mark_alt_leave, b"\xe2\x96\x90", Duration::from_secs(10)),
+        "\u{2590} did not reappear after leaving alt screen: {}",
         sess.snapshot_str()
     );
 }
 
 /// With `blocks { enabled #false }` in the config, a failed block must NOT
-/// paint `▌` on the border.
+/// paint `▐` on the border.
 #[test]
 fn block_border_disabled_by_config_no_half_block() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2773,13 +2773,13 @@ fn block_border_disabled_by_config_no_half_block() {
     );
 
     // Snapshot the bytes from mark_before (entire render since the block was
-    // emitted) and assert `▌` is NOT there, and neither status SGR appears
+    // emitted) and assert `▐` is NOT there, and neither status SGR appears
     // (feature is fully disabled).
     let raw = sess.snapshot();
     let post_mark = &raw[mark_before.min(raw.len())..];
     assert!(
-        !post_mark.windows(3).any(|w| w == b"\xe2\x96\x8c"),
-        "\u{258c} (half-block) must NOT appear when blocks.enabled = false. \
+        !post_mark.windows(3).any(|w| w == b"\xe2\x96\x90"),
+        "\u{2590} (half-block) must NOT appear when blocks.enabled = false. \
          post-mark raw bytes (lossy): {}",
         String::from_utf8_lossy(post_mark)
     );
