@@ -102,7 +102,7 @@ impl Emulator {
     /// Drain queued OSC 10/11/12 color queries. The daemon calls this from
     /// the PTY reader thread (same place it drains `take_replies`) and replies
     /// with the current palette colors.
-    pub fn take_color_queries(&mut self) -> Vec<crate::screen::ColorQuery> {
+    pub fn take_color_queries(&mut self) -> Vec<(usize, crate::screen::ColorQuery)> {
         self.screen.take_color_queries()
     }
 
@@ -250,7 +250,7 @@ mod tests {
         let mut e = Emulator::new(4, 8);
         e.advance(b"\x1b]11;?\x07");
         let drained = e.take_color_queries();
-        assert_eq!(drained, vec![crate::screen::ColorQuery::Background]);
+        assert_eq!(drained, vec![(0, crate::screen::ColorQuery::Background)]);
         assert!(e.take_color_queries().is_empty());
     }
 

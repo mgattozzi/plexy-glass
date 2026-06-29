@@ -228,7 +228,23 @@ impl Pane {
                             bell_for_reader.store(true, Ordering::Relaxed);
                         }
                         notify_for_reader.notify_one();
-                        for reply in replies {
+                        // Re-interleave DA/DSR replies and deferred color replies
+                        // in the order the child emitted the queries (color replies
+                        // need the palette, so they were deferred to here). Only
+                        // lock config when there's actually a color query to format.
+                        let outbound = if color_queries.is_empty() {
+                            replies
+                        } else {
+                            // invariant: config mutex held briefly to clone the palette.
+                            let palette = {
+                                let cfg = config_for_reader
+                                    .lock()
+                                    .expect("pane config mutex poisoned");
+                                cfg.palette.clone()
+                            };
+                            merge_outbound(replies, color_queries, &palette)
+                        };
+                        for reply in outbound {
                             match reply_tx.try_send(Bytes::from(reply)) {
                                 Ok(()) => {}
                                 Err(mpsc::error::TrySendError::Full(_)) => {
@@ -244,29 +260,6 @@ impl Pane {
                         // the dedicated drain task may be slow behind pbcopy.
                         for payload in clip_writes {
                             clip_tx.try_send(payload).ok();
-                        }
-                        if !color_queries.is_empty() {
-                            // invariant: config mutex held briefly to clone the palette.
-                            let palette = {
-                                let cfg = config_for_reader
-                                    .lock()
-                                    .expect("pane config mutex poisoned");
-                                cfg.palette.clone()
-                            };
-                            for q in color_queries {
-                                if let Some(bytes) = format_color_reply(q, &palette) {
-                                    match reply_tx.try_send(Bytes::from(bytes)) {
-                                        Ok(()) => {}
-                                        Err(mpsc::error::TrySendError::Full(_)) => {
-                                            debug!("input channel full; dropping color reply");
-                                        }
-                                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                                            debug!("input channel closed; stop color replies");
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
                         }
                     }
                     Err(e) => {
@@ -703,6 +696,43 @@ fn format_color_reply(query: ColorQuery, palette: &PaletteConfig) -> Option<Vec<
         )
         .into_bytes(),
     )
+}
+
+/// Merge the emulator's two outbound queues, raw replies (DA/DSR/XTVERSION/…)
+/// and the deferred color replies, back into ONE stream in the order the child
+/// emitted the queries. `color_queries[k].0` is the number of raw replies that
+/// were queued before that color query, so it slots in just before that raw
+/// reply.
+///
+/// Order matters: apps probe "is OSC 10/11 supported?" by sending the color
+/// query followed by a DA1 (`CSI c`) and reading the responses in order. A DA1
+/// reply that overtakes the color reply makes them conclude the color query is
+/// unsupported, and the late color reply then leaks to the next shell prompt.
+fn merge_outbound(
+    replies: Vec<Vec<u8>>,
+    color_queries: Vec<(usize, ColorQuery)>,
+    palette: &PaletteConfig,
+) -> Vec<Vec<u8>> {
+    let mut out = Vec::with_capacity(replies.len() + color_queries.len());
+    let mut cq = color_queries.into_iter().peekable();
+    for (i, raw) in replies.into_iter().enumerate() {
+        // Color queries recorded at-or-before raw reply `i` came first.
+        while cq.peek().is_some_and(|(idx, _)| *idx <= i) {
+            if let Some((_, q)) = cq.next()
+                && let Some(bytes) = format_color_reply(q, palette)
+            {
+                out.push(bytes);
+            }
+        }
+        out.push(raw);
+    }
+    // Color queries emitted after the last raw reply.
+    for (_, q) in cq {
+        if let Some(bytes) = format_color_reply(q, palette) {
+            out.push(bytes);
+        }
+    }
+    out
 }
 
 fn to_portable(size: PtySize) -> PortablePtySize {
@@ -1175,5 +1205,43 @@ mod tests {
         let bytes = format_color_reply(ColorQuery::Cursor, &palette).expect("reply");
         // accent = #737c73.
         assert_eq!(bytes, b"\x1b]12;rgb:7373/7c7c/7373\x07");
+    }
+
+    #[test]
+    fn color_reply_precedes_da_when_queried_first() {
+        // bat/colorsaurus sends `OSC 11 ; ?` THEN `CSI c` (DA1) and reads the
+        // replies in order; the OSC reply MUST come before the DA reply, or the
+        // app concludes OSC 11 is unsupported and the color reply leaks to the
+        // next shell prompt. The color query carries index 0 (no raw reply
+        // preceded it).
+        let palette = plexy_glass_config::kanagawa_dragon_palette();
+        let replies = vec![b"\x1b[?1;2c".to_vec()]; // DA1 reply
+        let color_queries = vec![(0usize, ColorQuery::Background)];
+        let out = merge_outbound(replies, color_queries, &palette);
+        assert_eq!(
+            out,
+            vec![
+                b"\x1b]11;rgb:1d1d/1c1c/1919\x07".to_vec(), // OSC 11 reply first
+                b"\x1b[?1;2c".to_vec(),                     // DA1 reply second
+            ]
+        );
+    }
+
+    #[test]
+    fn da_precedes_color_reply_when_da_queried_first() {
+        // The reverse emission order is preserved too: we interleave by the
+        // child's order, not a blanket color-first rule. The color query carries
+        // index 1 (the one raw reply preceded it).
+        let palette = plexy_glass_config::kanagawa_dragon_palette();
+        let replies = vec![b"\x1b[?1;2c".to_vec()];
+        let color_queries = vec![(1usize, ColorQuery::Background)];
+        let out = merge_outbound(replies, color_queries, &palette);
+        assert_eq!(
+            out,
+            vec![
+                b"\x1b[?1;2c".to_vec(),
+                b"\x1b]11;rgb:1d1d/1c1c/1919\x07".to_vec(),
+            ]
+        );
     }
 }

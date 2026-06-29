@@ -72,7 +72,11 @@ pub struct Screen {
     pub clipboard_writes: Vec<Vec<u8>>,
     /// OSC 10/11/12 color queries from the child. Drained by
     /// `take_color_queries` and answered by the daemon with palette colors.
-    pub color_queries: Vec<ColorQuery>,
+    /// Each entry records the number of raw `replies` queued before it, so the
+    /// daemon can re-interleave color replies with DA/DSR replies in the order
+    /// the child emitted the queries (apps probe OSC-support with a color query
+    /// followed by a DA1 and rely on in-order responses).
+    pub color_queries: Vec<(usize, ColorQuery)>,
     /// Set when the child emits a standalone BEL (`0x07`); drained by
     /// `take_bell`. (A BEL that terminates an OSC string is routed to
     /// `osc_dispatch`, not here, so this flags only genuine bells.) Used by the
@@ -467,7 +471,7 @@ impl Screen {
     /// Drain queued color queries. The daemon calls this after
     /// `Emulator::advance` and writes back the palette color replies to the
     /// child's stdin.
-    pub fn take_color_queries(&mut self) -> Vec<ColorQuery> {
+    pub fn take_color_queries(&mut self) -> Vec<(usize, ColorQuery)> {
         std::mem::take(&mut self.color_queries)
     }
 
@@ -1496,7 +1500,9 @@ impl Screen {
         // Set form (e.g. payload = "#1d1c19"): ignored, the palette is daemon-controlled.
         let Some(payload) = params.get(1) else { return };
         if *payload == b"?" {
-            self.color_queries.push(query);
+            // Record where this query sits relative to the raw replies emitted
+            // so far, so the daemon re-interleaves the color reply in order.
+            self.color_queries.push((self.replies.len(), query));
         } else {
             tracing::trace!(?query, "OSC color set form ignored (palette is daemon-controlled)");
         }
@@ -2932,19 +2938,29 @@ mod tests {
     #[test]
     fn osc_11_query_pushes_background_color_query() {
         let s = parse(b"\x1b]11;?\x07");
-        assert_eq!(s.color_queries, vec![ColorQuery::Background]);
+        assert_eq!(s.color_queries, vec![(0, ColorQuery::Background)]);
     }
 
     #[test]
     fn osc_10_query_pushes_foreground_color_query() {
         let s = parse(b"\x1b]10;?\x07");
-        assert_eq!(s.color_queries, vec![ColorQuery::Foreground]);
+        assert_eq!(s.color_queries, vec![(0, ColorQuery::Foreground)]);
     }
 
     #[test]
     fn osc_12_query_pushes_cursor_color_query() {
         let s = parse(b"\x1b]12;?\x07");
-        assert_eq!(s.color_queries, vec![ColorQuery::Cursor]);
+        assert_eq!(s.color_queries, vec![(0, ColorQuery::Cursor)]);
+    }
+
+    #[test]
+    fn osc_color_query_records_replies_emitted_before_it() {
+        // DA1 (`CSI c`) emits a raw reply, THEN the OSC 11 query, so the query
+        // records index 1 and the daemon emits the DA reply before the color
+        // reply. This is the order the standard OSC-support probe expects.
+        let s = parse(b"\x1b[c\x1b]11;?\x07");
+        assert_eq!(s.replies.len(), 1, "DA1 queued one raw reply");
+        assert_eq!(s.color_queries, vec![(1, ColorQuery::Background)]);
     }
 
     #[test]
@@ -2956,10 +2972,13 @@ mod tests {
     #[test]
     fn take_color_queries_drains() {
         let mut s = Screen::new(8, 24);
-        s.color_queries.push(ColorQuery::Background);
-        s.color_queries.push(ColorQuery::Foreground);
+        s.color_queries.push((0, ColorQuery::Background));
+        s.color_queries.push((1, ColorQuery::Foreground));
         let drained = s.take_color_queries();
-        assert_eq!(drained, vec![ColorQuery::Background, ColorQuery::Foreground]);
+        assert_eq!(
+            drained,
+            vec![(0, ColorQuery::Background), (1, ColorQuery::Foreground)]
+        );
         assert!(s.color_queries.is_empty());
     }
 
