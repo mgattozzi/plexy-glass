@@ -29,9 +29,6 @@ fn row(s: &Screen, r: u16) -> String {
 }
 
 /// Per-cell expectation.
-// The variants below aren't constructed in this first batch of cases, but
-// the later tasks (tab-stops, wide-char, erase/insert ops) will use them.
-#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum Expect {
     Text(&'static str),
