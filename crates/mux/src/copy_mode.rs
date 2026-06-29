@@ -97,6 +97,8 @@ impl CopyMode {
             // Vertical wheel only scrolls copy mode; a horizontal wheel falls
             // through to the no-op arm rather than scrolling the wrong axis.
             (MouseKind::Wheel { delta, horizontal: false }, _) => {
+                // Equivalent note (100:26): `> → >=` is equivalent because when delta == 0 the
+                // else branch scrolls by 0 (no change), same as the if branch.
                 if delta > 0 {
                     self.viewport_top = self.viewport_top.saturating_sub(delta as u32);
                 } else {
@@ -128,6 +130,9 @@ impl CopyMode {
             return;
         }
         let mut start = col;
+        // Equivalent note (131:21, `> → >=`): `start >= 0` is always true for u16, but the
+        // extra iteration when start==0 checks index 65535 via wrapping sub, finds None →
+        // unwrap_or(false) → break; observable behavior is identical to `> 0`.
         while start > 0 {
             let prev = start - 1;
             if cells
@@ -141,6 +146,9 @@ impl CopyMode {
             }
         }
         let mut end = col;
+        // Equivalent note (144:34, `< → <=`): when end+1==cols (at the last column), the
+        // mutation does one extra iteration with next==cols; cells.get(cols) is None →
+        // unwrap_or(false) → break; observable behavior is identical to `< cols`.
         while (end as usize) + 1 < cols {
             let next = end + 1;
             if cells
@@ -217,10 +225,6 @@ pub fn handle(event: &KeyEvent, state: &mut CopyMode, screen: &Screen) -> CopyMo
     }
 
     // Otherwise: motion + selection + search-jump + yank dispatch.
-    // Equivalent note (217–310 match guards → true): all motion-key guards
-    // (`m.is_empty()`, `m == Modifiers::CTRL`, `m.is_empty() || m == Modifiers::SHIFT`)
-    // replaced with `true` are equivalent, since no test sends a modified motion key,
-    // so the guard is never the distinguishing condition.
     let cols = screen.active.num_cols();
     match (event.mods, event.key) {
         (m, Key::Char('h')) | (m, Key::Arrow(Direction::Left)) if m.is_empty() => {
@@ -413,12 +417,6 @@ fn handle_search_prompt(
     state: &mut CopyMode,
     screen: &Screen,
 ) -> CopyModeAction {
-    // Equivalent note (404:28, 429:32, 433:30 → true): all search-prompt
-    // match-arm guards replaced with `true` are equivalent, since no test sends a
-    // modified Enter, Backspace, or Char in search-prompt mode.
-    // Equivalent note (433:48 `== → !=`): `m == Modifiers::SHIFT → != SHIFT`
-    // would admit any non-empty non-SHIFT modifier in the Char arm; no test
-    // exercises that path.
     match (event.mods, event.key) {
         (m, Key::Enter) if m.is_empty() => {
             state.search.query = std::mem::take(&mut state.search.prompt_buf);
@@ -1116,7 +1114,7 @@ mod tests {
     #[test]
     fn mouse_press_double_click_selects_word() {
         // Kills: 77:13, 80:32 (>= → <), 82:39 (== → !=), 115:9, 118–143 (select_word).
-        // "hello world": 'w' is at col 6. Double-click expands to "world" (cols 6–10).
+        // "hello world": 'w' is at col 6. Double-click at col 6 expands to "world" (6–10).
         let scr = screen_with_lines(10, 30, &["hello world"]);
         let mut s = CopyMode::new(10, 10, 0, 0);
         s.viewport_top = 0;
@@ -1124,6 +1122,20 @@ mod tests {
         s.handle_mouse(&me, 2, &scr);
         assert_eq!(s.anchor, Some((0, 6)), "anchor at word start");
         assert_eq!(s.cursor.1, 10, "cursor at word end");
+    }
+
+    #[test]
+    fn mouse_double_click_mid_word_walks_backward() {
+        // Kills 131:21 `> → ==` and `> → <` survivors: those mutations disable the
+        // backward walk so anchor stays at the click column instead of the word start.
+        // Click at col 8 ('r' in "world"): the backward walk must reach col 6 ('w').
+        let scr = screen_with_lines(10, 30, &["hello world"]);
+        let mut s = CopyMode::new(10, 10, 0, 0);
+        s.viewport_top = 0;
+        let me = mouse_ev(MouseKind::Press, MouseButton::Left, 0, 8);
+        s.handle_mouse(&me, 2, &scr);
+        assert_eq!(s.anchor, Some((0, 6)), "anchor must walk back to word start");
+        assert_eq!(s.cursor.1, 10, "cursor must reach word end");
     }
 
     #[test]
@@ -1182,6 +1194,195 @@ mod tests {
             CopyModeAction::Yank(text) => assert_eq!(text, "wo"),
             other => panic!("expected Yank, got {other:?}"),
         }
+    }
+
+    // ── Modifier-guard tests ─────────────────────────────────────────────────────────
+    // All copy-mode keys require empty modifiers (or SHIFT for some). If the
+    // `m.is_empty()` guards were mutated to `true`, Ctrl-modified keys would
+    // fire their action instead of falling through to `_ => {}` → `Render`.
+
+    #[test]
+    fn motion_modifier_guards_reject_ctrl() {
+        // Kills the `m.is_empty() → true` mutants on the h/l/k/j/PageUp/PageDown/
+        // g/0/v/y//n arms. Without the guard, Ctrl+h decrements cursor.1, etc.
+        // With the guard in place, cursor and anchor are untouched.
+        let scr = screen(10, 80);
+        let mut s = CopyMode::new(50, 10, 20, 10);
+        let start = s.cursor;
+
+        // Ctrl+h must NOT decrement cursor.1
+        handle(&ev(Modifiers::CTRL, Key::Char('h')), &mut s, &scr);
+        assert_eq!(s.cursor, start, "Ctrl+h must not move cursor left");
+
+        // Ctrl+l must NOT increment cursor.1
+        handle(&ev(Modifiers::CTRL, Key::Char('l')), &mut s, &scr);
+        assert_eq!(s.cursor, start, "Ctrl+l must not move cursor right");
+
+        // Ctrl+k must NOT decrement cursor.0
+        handle(&ev(Modifiers::CTRL, Key::Char('k')), &mut s, &scr);
+        assert_eq!(s.cursor.0, start.0, "Ctrl+k must not move cursor up");
+
+        // Ctrl+j must NOT increment cursor.0
+        handle(&ev(Modifiers::CTRL, Key::Char('j')), &mut s, &scr);
+        assert_eq!(s.cursor.0, start.0, "Ctrl+j must not move cursor down");
+
+        // Ctrl+PageUp must NOT subtract pane_rows from cursor.0
+        handle(&ev(Modifiers::CTRL, Key::PageUp), &mut s, &scr);
+        assert_eq!(s.cursor.0, start.0, "Ctrl+PageUp must not page up");
+
+        // Ctrl+PageDown must NOT add pane_rows to cursor.0
+        handle(&ev(Modifiers::CTRL, Key::PageDown), &mut s, &scr);
+        assert_eq!(s.cursor.0, start.0, "Ctrl+PageDown must not page down");
+
+        // Ctrl+g must NOT jump to (0, 0)
+        handle(&ev(Modifiers::CTRL, Key::Char('g')), &mut s, &scr);
+        assert_eq!(s.cursor, start, "Ctrl+g must not jump to top");
+
+        // Ctrl+0 must NOT set cursor.1 to 0
+        handle(&ev(Modifiers::CTRL, Key::Char('0')), &mut s, &scr);
+        assert_eq!(s.cursor.1, start.1, "Ctrl+0 must not jump to col 0");
+
+        // Ctrl+v must NOT set anchor
+        handle(&ev(Modifiers::CTRL, Key::Char('v')), &mut s, &scr);
+        assert_eq!(s.anchor, None, "Ctrl+v must not toggle anchor");
+
+        // Ctrl+y: guard is `m.is_empty()` so returns Render (not Yank)
+        let action = handle(&ev(Modifiers::CTRL, Key::Char('y')), &mut s, &scr);
+        assert_eq!(action, CopyModeAction::Render, "Ctrl+y must not yank");
+
+        // Ctrl+/ must NOT open the search prompt
+        handle(&ev(Modifiers::CTRL, Key::Char('/')), &mut s, &scr);
+        assert!(!s.search.prompt_active, "Ctrl+/ must not open search prompt");
+
+        // Ctrl+n with pre-set matches: must NOT advance search.current
+        s.search.matches = vec![
+            MatchSpan { line_idx: 5, col_start: 0, col_end: 2 },
+            MatchSpan { line_idx: 15, col_start: 0, col_end: 2 },
+        ];
+        s.search.current = 0;
+        handle(&ev(Modifiers::CTRL, Key::Char('n')), &mut s, &scr);
+        assert_eq!(s.search.current, 0, "Ctrl+n must not advance to next match");
+        assert_eq!(s.cursor, start, "Ctrl+n must not move cursor");
+    }
+
+    #[test]
+    fn motion_shift_or_empty_guards_reject_ctrl() {
+        // Kills the `m.is_empty() || m == SHIFT → true` mutants on G/$/ N.
+        // With guard→true, Ctrl+G jumps cursor to bottom; Ctrl+$ to last col;
+        // Ctrl+N cycles to the previous match. Real guard rejects CTRL.
+        let scr = screen(10, 80);
+        let mut s = CopyMode::new(50, 10, 20, 10);
+        let start = s.cursor;
+
+        // Ctrl+G must NOT jump to the last line
+        handle(&ev(Modifiers::CTRL, Key::Char('G')), &mut s, &scr);
+        assert_eq!(s.cursor, start, "Ctrl+G must not jump to bottom");
+
+        // Ctrl+$ must NOT jump to the last column
+        handle(&ev(Modifiers::CTRL, Key::Char('$')), &mut s, &scr);
+        assert_eq!(s.cursor.1, start.1, "Ctrl+$ must not jump to last col");
+
+        // Ctrl+N with pre-set matches: must NOT cycle to prev match
+        s.search.matches = vec![
+            MatchSpan { line_idx: 5, col_start: 0, col_end: 2 },
+            MatchSpan { line_idx: 15, col_start: 0, col_end: 2 },
+        ];
+        s.search.current = 1;
+        handle(&ev(Modifiers::CTRL, Key::Char('N')), &mut s, &scr);
+        assert_eq!(s.search.current, 1, "Ctrl+N must not cycle to prev match");
+        assert_eq!(s.cursor, start, "Ctrl+N must not move cursor");
+    }
+
+    #[test]
+    fn motion_bracket_and_o_guards_reject_ctrl() {
+        // Kills the `m.is_empty() → true` mutants on [ / ] / o: with the guard,
+        // Ctrl+[ must not jump to prev prompt; Ctrl+] must not jump to next;
+        // Ctrl+o must not set anchor/cursor to the block output range.
+        let scr = marked_screen(); // has prompts at unified lines 0 and 3
+        let total_lines = total(&scr);
+        // Cursor at line 6, col 5, inside the second block's output.
+        let mut s = CopyMode::new(total_lines, 8, 6, 5);
+        let start = s.cursor;
+
+        // Ctrl+[ must NOT jump to prev prompt (line 3)
+        handle(&ev(Modifiers::CTRL, Key::Char('[')), &mut s, &scr);
+        assert_eq!(s.cursor, start, "Ctrl+[ must not jump to prev prompt");
+
+        // Ctrl+] must NOT jump to next prompt. From line 6 there is no prompt after line 3,
+        // so it would be a no-op anyway; test from a position where a next prompt exists.
+        let mut s2 = CopyMode::new(total_lines, 8, 1, 5);
+        let start2 = s2.cursor;
+        handle(&ev(Modifiers::CTRL, Key::Char(']')), &mut s2, &scr);
+        assert_eq!(s2.cursor, start2, "Ctrl+] must not jump to next prompt");
+
+        // Ctrl+o must NOT select the block output range
+        let mut s3 = CopyMode::new(total_lines, 8, 2, 3);
+        let start3 = s3.cursor;
+        handle(&ev(Modifiers::CTRL, Key::Char('o')), &mut s3, &scr);
+        assert_eq!(s3.anchor, None, "Ctrl+o must not set anchor");
+        assert_eq!(s3.cursor, start3, "Ctrl+o must not move cursor");
+    }
+
+    #[test]
+    fn ctrl_d_and_u_require_ctrl_modifier() {
+        // Kills the `m == Modifiers::CTRL → true` mutants on d and u.
+        // With guard→true, plain d does half-page-down; plain u does half-page-up.
+        let scr = screen(10, 80);
+        let mut s = CopyMode::new(50, 10, 20, 0);
+        let start_line = s.cursor.0; // 20
+
+        // Plain d (no mods): must NOT jump half-page-down
+        let action = handle(&ev(Modifiers::empty(), Key::Char('d')), &mut s, &scr);
+        assert_eq!(action, CopyModeAction::Render);
+        assert_eq!(s.cursor.0, start_line, "plain d must not do half-page jump");
+
+        // Plain u (no mods): must NOT jump half-page-up
+        let action = handle(&ev(Modifiers::empty(), Key::Char('u')), &mut s, &scr);
+        assert_eq!(action, CopyModeAction::Render);
+        assert_eq!(s.cursor.0, start_line, "plain u must not do half-page jump");
+    }
+
+    #[test]
+    fn search_prompt_ctrl_keys_are_ignored() {
+        // Kills (Enter/Backspace/Char guard → true): Ctrl+Enter would commit the
+        // search; Ctrl+Backspace would pop a char; Ctrl+Char would push.
+        // Real guards (`m.is_empty()`) reject all Ctrl-modified events.
+        let scr = screen(5, 80);
+        let mut s = CopyMode::new(10, 5, 0, 0);
+        s.search.prompt_active = true;
+        s.search.prompt_buf = "abc".into();
+
+        // Ctrl+Enter must NOT commit the query
+        handle(&ev(Modifiers::CTRL, Key::Enter), &mut s, &scr);
+        assert!(s.search.prompt_active, "Ctrl+Enter must not commit search");
+        assert_eq!(s.search.prompt_buf, "abc", "prompt_buf unchanged after Ctrl+Enter");
+
+        // Ctrl+Backspace must NOT pop a char
+        handle(&ev(Modifiers::CTRL, Key::Backspace), &mut s, &scr);
+        assert_eq!(s.search.prompt_buf, "abc", "Ctrl+Backspace must not pop from prompt");
+
+        // Ctrl+Char must NOT push a char
+        handle(&ev(Modifiers::CTRL, Key::Char('x')), &mut s, &scr);
+        assert_eq!(s.search.prompt_buf, "abc", "Ctrl+Char must not push to prompt");
+        assert!(s.search.prompt_active, "must still be in search prompt mode");
+    }
+
+    #[test]
+    fn search_prompt_shift_char_accepted_ctrl_char_rejected() {
+        // Kills the `m == Modifiers::SHIFT → m != Modifiers::SHIFT` mutant on the
+        // Char arm guard (`m.is_empty() || m == SHIFT`). The wrong guard would
+        // accept Ctrl+Char but reject Shift+Char, the opposite of the real behavior.
+        let scr = screen(5, 80);
+        let mut s = CopyMode::new(10, 5, 0, 0);
+        s.search.prompt_active = true;
+
+        // Shift+F: must push 'F' (capital letters arrive as Shift+char under Kitty)
+        handle(&ev(Modifiers::SHIFT, Key::Char('F')), &mut s, &scr);
+        assert_eq!(s.search.prompt_buf, "F", "Shift+Char must be accepted in search prompt");
+
+        // Ctrl+x: must NOT push (CTRL rejected by the guard)
+        handle(&ev(Modifiers::CTRL, Key::Char('x')), &mut s, &scr);
+        assert_eq!(s.search.prompt_buf, "F", "Ctrl+Char must be rejected in search prompt");
     }
 
     #[test]

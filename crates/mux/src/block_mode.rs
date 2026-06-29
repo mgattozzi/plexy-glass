@@ -238,6 +238,11 @@ fn move_to(state: &mut BlockMode, target: Option<u32>) -> BlockModeAction {
 /// committed filter has a non-empty query, otherwise every prompt.
 fn active_set(state: &BlockMode, screen: &Screen) -> Vec<u32> {
     match &state.filter {
+        // Equivalent note (241:20, `!f.query.is_empty() → true`): when the filter is
+        // Some, the query is always non-empty, since `handle_filter_prompt` clears the
+        // filter (`state.filter = None`) on Enter with an empty query, so `Some(f)`
+        // with an empty query is unreachable here; the guard is a redundant defensive
+        // check.
         Some(f) if !f.query.is_empty() => f.matches.clone(),
         _ => crate::blocks::all_prompt_lines(screen),
     }
@@ -297,6 +302,12 @@ fn recompute_matches(screen: &Screen, query: &str, prior: Option<&[u32]>) -> Vec
 fn snap_after_filter(state: &mut BlockMode) {
     let target = {
         let Some(f) = state.filter.as_ref() else { return };
+        // Equivalent note (299:31, first `|| → &&`): when query is empty and
+        // `recompute_matches` seeded matches as all_prompt_lines, selected is always
+        // in matches → the third `||` clause fires and returns early anyway.
+        // Equivalent note (299:55, second `|| → &&`): when matches is empty,
+        // `.find()` returns None → target = None → `if let Some` is no-op → same
+        // result as the early `return`.
         if f.query.is_empty() || f.matches.is_empty() || f.matches.contains(&state.selected) {
             return;
         }
@@ -304,6 +315,9 @@ fn snap_after_filter(state: &mut BlockMode) {
             .iter()
             .copied()
             .find(|&p| p >= state.selected)
+            // Equivalent note (306:69, `< → <=`): selected is guaranteed not in
+            // matches (the `contains` guard would have returned above), so
+            // `p <= selected` and `p < selected` find the same element.
             .or_else(|| f.matches.iter().copied().rev().find(|&p| p < state.selected))
     };
     if let Some(t) = target {
@@ -815,6 +829,34 @@ mod tests {
     }
 
     #[test]
+    fn motion_modifier_guards_reject_ctrl() {
+        // Kills `m.is_empty() → true` mutants on j/k/g and `m.is_empty() ||
+        // m == SHIFT → true` mutants on J/K/G/Z/O. Without the guards, Ctrl+j
+        // would move selection, Ctrl+Z would FoldAll, etc. All must return Ignore.
+        let s = two_blocks();
+        let mut bm = BlockMode::new_for(&s, 8).unwrap();
+        let ctrl = |k: Key| KeyEvent::new(k, Modifiers::CTRL);
+
+        // j and k have `m.is_empty()` guard → Ctrl falls through to _ => Ignore
+        assert_eq!(handle(&ctrl(Key::Char('j')), &mut bm, &s), BlockModeAction::Ignore);
+        assert_eq!(handle(&ctrl(Key::Char('k')), &mut bm, &s), BlockModeAction::Ignore);
+        assert_eq!(handle(&ctrl(Key::Char('g')), &mut bm, &s), BlockModeAction::Ignore);
+
+        // G/Z/O have `m.is_empty() || m == SHIFT` guard → Ctrl falls through
+        assert_eq!(handle(&ctrl(Key::Char('G')), &mut bm, &s), BlockModeAction::Ignore);
+        assert_eq!(handle(&ctrl(Key::Char('Z')), &mut bm, &s), BlockModeAction::Ignore);
+        assert_eq!(handle(&ctrl(Key::Char('O')), &mut bm, &s), BlockModeAction::Ignore);
+
+        // J/K jump to next/prev FAILED block. Use three_blocks_ok_fail_ok (fail at line 2)
+        // so next_failed returns Some(...) → move_to returns Render. With the guard mutation
+        // (→ true), Ctrl+J/K would match and return Render; without it they return Ignore.
+        let sf = three_blocks_ok_fail_ok();
+        let mut bmf = BlockMode::new_for(&sf, 12).unwrap();
+        assert_eq!(handle(&ctrl(Key::Char('J')), &mut bmf, &sf), BlockModeAction::Ignore);
+        assert_eq!(handle(&ctrl(Key::Char('K')), &mut bmf, &sf), BlockModeAction::Ignore);
+    }
+
+    #[test]
     fn snap_after_filter_snaps_forward_before_backward() {
         // When selection is between two filter matches, snap must choose the
         // FORWARD match (first >= selected), not the backward one.
@@ -861,5 +903,12 @@ mod tests {
         bm.filter.as_mut().unwrap().query = "abc".into();
         handle(&ctrl(Key::Backspace), &mut bm, &s);
         assert_eq!(bm.filter.as_ref().unwrap().query, "abc", "Ctrl+Backspace must not pop query");
+        // Ctrl+Char must not append to query (kills 351:31 guard→true mutant).
+        // SHIFT+Char MUST append (kills 351:49 ==→!= mutant, which would reject SHIFT).
+        handle(&ctrl(Key::Char('x')), &mut bm, &s);
+        assert_eq!(bm.filter.as_ref().unwrap().query, "abc", "Ctrl+Char must not push to query");
+        let shift_x = KeyEvent::new(Key::Char('X'), Modifiers::SHIFT);
+        handle(&shift_x, &mut bm, &s);
+        assert_eq!(bm.filter.as_ref().unwrap().query, "abcX", "SHIFT+Char must push to query");
     }
 }

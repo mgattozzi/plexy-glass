@@ -184,26 +184,47 @@ tests for the real gaps; the remaining missed mutants are documented as
 equivalent in source (`// Equivalent note:`). Note that the counts are
 as-measured before the new tests were added.
 
-| Module | caught | missed (all equiv after triage) | kill-rate |
+| Module | caught | missed (all equiv) | kill-rate |
 |---|---|---|---|
 | `layout.rs` | 125 | 10 | 93% |
 | `mouse.rs` | 60 | 1 | 98% |
 | `selection.rs` | 92 | 23 | 80% |
 | `borders.rs` | 81 | 15 | 84% |
-| `copy_mode.rs` | 99 | 70 | 59% |
+| `copy_mode.rs` | 163 | 4 | 98% |
 | `preset.rs` | 28 | 2 | 93% |
 | `hint.rs` | 72 | 22 | 77% |
 | `command_prompt.rs` | 52 | 6 | 90% |
-| `block_mode.rs` | 55 | 29 | 65% |
+| `block_mode.rs` | 80 | 4 | 95% |
 | `diff.rs` | 109 | 33 | 77% |
 | `compositor.rs` | 99 | 16 | 86% |
 | `blocks.rs` | 189 | 32 | 86% |
 
-Notes: `copy_mode.rs` has a large proportion of modifier-guard equivalents (no
-test sends modified motion keys, so the guards are never the distinguishing
-condition); `block_mode.rs` and `diff.rs` have many arithmetic-offset
-equivalents (viewport geometry that is clamped or overwritten by subsequent
-passes). All survivors are documented in source.
+Notes: `copy_mode.rs` and `block_mode.rs` numbers are post-fix: modifier-guard
+mutants previously mislabeled "equivalent" were killed by targeted tests (the
+mislabeling leaned on a coverage argument, not a genuine equivalence argument).
+`copy_mode.rs` rose from 80% to 98%; `block_mode.rs` rose from 76% to 95%. All
+remaining missed mutants in both files are genuine equivalents documented in
+source with `// Equivalent note:`.
+
+`copy_mode.rs` remaining 4 equivalents: `Release`-arm deletion at `96:13` (same
+value as fallthrough), `> → >=` at `100:26` (wheel delta==0 is a no-op either
+way), `> → >=` at `131:21` (u16: `start >= 0` is always true, but the extra
+iteration wraps to index 65535, finds `None`, and breaks, same as `> 0`),
+`< → <=` at `144:34` (the extra iteration at `cols` also finds `None` and
+breaks).
+
+`block_mode.rs` remaining 4 equivalents: `!f.query.is_empty() → true` in
+`active_set` (when the filter is `Some`, an empty-query commit clears the
+filter to `None` via `handle_filter_prompt`, so `Some(f)` with an empty query
+never reaches `active_set`); two `|| → &&` in `snap_after_filter` (empty query:
+`recompute_matches` seeds matches as all prompts, so `contains(selected)` is
+true and fires the return anyway; empty matches: `.find()` on empty returns
+`None`, same as the early `return`); `< → <=` in the reverse-search (selected
+is guaranteed absent from matches by the `contains` guard, so `<=` finds the
+same element).
+
+`diff.rs` and other survivors are arithmetic-offset equivalents (viewport geometry clamped or
+overwritten). All survivors are documented in source with `// Equivalent note:`.
 
 ### Lowest-covered modules (later-phase targets)
 
