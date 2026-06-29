@@ -210,6 +210,27 @@ pub struct Grid {
     pub cols: u16,
 }
 
+/// After a cell splice (ICH/DCH) a wide grapheme can be split from its spacer.
+/// Blank any orphan so the row stays well-formed: a width-2 grapheme must be
+/// followed by a `wide_spacer`; a spacer must follow a width-2 grapheme.
+fn normalize_wide_pairs(cells: &mut [Cell]) {
+    let n = cells.len();
+    for i in 0..n {
+        if cells[i].is_wide_spacer() {
+            let paired =
+                i > 0 && crate::width::display_width(cells[i - 1].grapheme.as_str()) == 2;
+            if !paired {
+                cells[i] = Cell::default();
+            }
+        } else if crate::width::display_width(cells[i].grapheme.as_str()) == 2 {
+            let paired = i + 1 < n && cells[i + 1].is_wide_spacer();
+            if !paired {
+                cells[i] = Cell::default();
+            }
+        }
+    }
+}
+
 impl Grid {
     pub fn new(rows: u16, cols: u16) -> Self {
         let rows = rows.max(1);
@@ -278,6 +299,45 @@ impl Grid {
                 }
             }
         }
+    }
+
+    /// ICH: insert `n` blank cells at (`row`, `col`), shifting the rest of the
+    /// row right; cells pushed past the right edge are lost. Cursor is not moved
+    /// here, the caller homes the cursor as required by the op.
+    pub fn insert_cells(&mut self, row: u16, col: u16, n: u16) {
+        let cols = self.cols as usize;
+        let col = col as usize;
+        let Some(r) = self.rows.get_mut(row as usize) else {
+            return;
+        };
+        if col >= cols {
+            return;
+        }
+        let n = (n as usize).min(cols - col);
+        for _ in 0..n {
+            r.cells.pop(); // the right-most cell falls off the edge
+            r.cells.insert(col, Cell::default());
+        }
+        normalize_wide_pairs(&mut r.cells);
+    }
+
+    /// DCH: delete `n` cells at (`row`, `col`), shifting the rest of the row
+    /// left; blanks fill in from the right edge. Cursor is not moved here.
+    pub fn delete_cells(&mut self, row: u16, col: u16, n: u16) {
+        let cols = self.cols as usize;
+        let col = col as usize;
+        let Some(r) = self.rows.get_mut(row as usize) else {
+            return;
+        };
+        if col >= cols {
+            return;
+        }
+        let n = (n as usize).min(cols - col);
+        for _ in 0..n {
+            r.cells.remove(col);
+            r.cells.push(Cell::default());
+        }
+        normalize_wide_pairs(&mut r.cells);
     }
 
     /// Scroll a region [top, bottom] (inclusive) up by `n`. If `popped` is

@@ -805,6 +805,48 @@ impl Screen {
                 let (top, bottom) = self.scroll_region;
                 self.active.scroll_down(top, bottom, n);
             }
+            '@' => {
+                // ICH: insert N blank cells at the cursor, shifting right (overflow lost).
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                self.active.insert_cells(self.cursor.row, self.cursor.col, n);
+                self.cursor.pending_wrap = false;
+            }
+            'P' => {
+                // DCH: delete N cells at the cursor, shifting left (blanks fill from right).
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                self.active.delete_cells(self.cursor.row, self.cursor.col, n);
+                self.cursor.pending_wrap = false;
+            }
+            'X' => {
+                // ECH: erase N cells from the cursor (overwrite blank, no shift).
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                let (r, c) = (self.cursor.row, self.cursor.col);
+                let last = c.saturating_add(n - 1).min(self.cols().saturating_sub(1));
+                self.active.clear_rect(r, c, r, last);
+                self.cursor.pending_wrap = false;
+            }
+            'L' => {
+                // IL: insert N blank lines at the cursor row within the scroll region.
+                // Cursor homes to column 0 (DEC VT220 pg. reference; xterm matches).
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                let (top, bottom) = self.scroll_region;
+                if self.cursor.row >= top && self.cursor.row <= bottom {
+                    self.active.scroll_down(self.cursor.row, bottom, n);
+                    self.cursor.col = 0;
+                    self.cursor.pending_wrap = false;
+                }
+            }
+            'M' => {
+                // DL: delete N lines at the cursor row within the scroll region.
+                // Cursor homes to column 0 (DEC VT220 pg. reference; xterm matches).
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                let (top, bottom) = self.scroll_region;
+                if self.cursor.row >= top && self.cursor.row <= bottom {
+                    self.active.scroll_up(self.cursor.row, bottom, n, None);
+                    self.cursor.col = 0;
+                    self.cursor.pending_wrap = false;
+                }
+            }
             'g' => {
                 let mode = first.unwrap_or(0);
                 match mode {
@@ -1128,10 +1170,10 @@ impl Screen {
 
     fn set_ansi_mode(&mut self, code: u16, on: bool) {
         // No ANSI (non-private) modes are honored. IRM (mode 4) in particular is
-        // deliberately unsupported: the emulator has no insert/delete-cell
-        // operations (no ICH/DCH/IL/DL/ECH), and DECRQM already reports IRM
-        // unsupported, so we must not flip an INSERT bit that put_grapheme never
-        // reads, which would silently lie about insert-mode support.
+        // deliberately unsupported: ICH/DCH/IL/DL/ECH are now implemented as
+        // explicit CSI ops, but IRM auto-insert-per-put_grapheme is not. DECRQM
+        // already reports IRM unsupported, so we must not flip an INSERT bit that
+        // put_grapheme never reads, which would silently lie about insert-mode.
         tracing::trace!(code, on, "unhandled ANSI mode");
     }
 

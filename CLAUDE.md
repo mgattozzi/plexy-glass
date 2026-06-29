@@ -205,7 +205,8 @@ the same way.
 ## Project status
 
 Implemented and on `main`: the daemon + client foundation; a full VT emulator
-(grid, scrollback, reflow, wide-char/grapheme correctness); windows, panes,
+(grid, scrollback, reflow, wide-char/grapheme correctness; ICH/DCH/ECH/IL/DL
+insert/delete/erase ops — IRM/ANSI-mode-4 remains an intentional no-op); windows, panes,
 H/V splits, zoom, resize; detach/reattach to a live (in-memory) daemon — the
 daemon is **memory-only**, sessions are NOT persisted to disk (removed
 2026-06-26, see below); multi-client; copy mode with search; full mouse; bracketed

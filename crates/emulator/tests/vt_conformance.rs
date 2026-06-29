@@ -237,3 +237,43 @@ fn conformance_ed_el() {
             cursor: Some((1, 1)), rows_text: &[(0, "    "), (1, "    ")], ..BASE },
     ]);
 }
+
+#[test]
+fn conformance_insert_delete_erase() {
+    check(&[
+        // ICH default (1): "abcdefg" 8-wide, cursor col1 → "a bcdefg".
+        Case { name: "ich_default", rows: 1, cols: 8, input: b"abcdefg\x1b[1;2H\x1b[@",
+            cursor: Some((0, 1)), rows_text: &[(0, "a bcdefg")], ..BASE },
+        // ICH explicit (2) with overflow lost: "ABCDEFGH" cursor col2 → "AB  CDEF".
+        Case { name: "ich_explicit_overflow_lost", rows: 1, cols: 8, input: b"ABCDEFGH\x1b[1;3H\x1b[2@",
+            cursor: Some((0, 2)), rows_text: &[(0, "AB  CDEF")], ..BASE },
+        // DCH default (1): "abcd" cursor col1 → "acd " (+ blank).
+        Case { name: "dch_default", rows: 1, cols: 4, input: b"abcd\x1b[1;2H\x1b[P",
+            cursor: Some((0, 1)), rows_text: &[(0, "acd ")], ..BASE },
+        // DCH explicit (2): "ABCDEFGH" cursor col2 → "ABEFGH  ".
+        Case { name: "dch_explicit", rows: 1, cols: 8, input: b"ABCDEFGH\x1b[1;3H\x1b[2P",
+            cursor: Some((0, 2)), rows_text: &[(0, "ABEFGH  ")], ..BASE },
+        // ECH (2): erase 2 at cursor, no shift: "ABCDEFGH" cursor col2 → "AB  EFGH".
+        Case { name: "ech_2", rows: 1, cols: 8, input: b"ABCDEFGH\x1b[1;3H\x1b[2X",
+            cursor: Some((0, 2)), rows_text: &[(0, "AB  EFGH")], ..BASE },
+        // ICH that would split a wide char blanks the orphan (well-formed row).
+        Case { name: "ich_does_not_split_wide", rows: 1, cols: 4, input: "好x\x1b[1;1H\x1b[@".as_bytes(),
+            cursor: Some((0, 0)), cells: &[(0, 0, Expect::Blank)], ..BASE },
+    ]);
+}
+
+#[test]
+fn conformance_insert_delete_line() {
+    check(&[
+        // IL: 4-row screen "AAAA/BBBB/CCCC/DDDD", cursor row1 col2, IL 1 → blank row1,
+        // B/C shift down, D lost. Cursor homes to col 0.
+        Case { name: "il_1", rows: 4, cols: 4, input: b"AAAA\r\nBBBB\r\nCCCC\r\nDDDD\x1b[2;3H\x1b[L",
+            cursor: Some((1, 0)), rows_text: &[(0, "AAAA"), (1, "    "), (2, "BBBB"), (3, "CCCC")], ..BASE },
+        // DL: same fill, cursor row1 col2, DL 1 → row1 deleted, C/D shift up, blank bottom.
+        Case { name: "dl_1", rows: 4, cols: 4, input: b"AAAA\r\nBBBB\r\nCCCC\r\nDDDD\x1b[2;3H\x1b[M",
+            cursor: Some((1, 0)), rows_text: &[(0, "AAAA"), (1, "CCCC"), (2, "DDDD"), (3, "    ")], ..BASE },
+        // IL is a no-op when the cursor is OUTSIDE the scroll region.
+        Case { name: "il_noop_outside_region", rows: 4, cols: 4, input: b"AAAA\r\nBBBB\r\nCCCC\r\nDDDD\x1b[1;3r\x1b[4;1H\x1b[L",
+            rows_text: &[(0, "AAAA"), (1, "BBBB"), (2, "CCCC"), (3, "DDDD")], ..BASE },
+    ]);
+}
