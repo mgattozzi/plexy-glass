@@ -80,7 +80,10 @@ scope. If a step is wrong, fix the plan first, then proceed.
   context-sensitive). **When a property fails, decide whether the CODE is wrong
   or the PROPERTY is mis-specified — never weaken a property just to make it
   pass.** Examples to copy: `prop_mouse` (SGR wire round-trip), `prop_width`,
-  `prop_layout` (geometry), `prop_grid` (RowMark), `prop_selection`.
+  `prop_layout` (geometry), `prop_grid` (RowMark), `prop_selection`,
+  `prop_reflow` (resize round-trip + mark redistribution),
+  `prop_blocks` (FoldProjection inverse + scroll math + duration formatting),
+  `prop_keys` (key decode∘encode), `prop_config` (decoder totality).
 - **Coverage.** `cargo llvm-cov nextest --workspace --summary-only` measures
   coverage (install: `rustup component add llvm-tools-preview && cargo install
   cargo-llvm-cov`). It is **measured, not gated** — no threshold yet. See
