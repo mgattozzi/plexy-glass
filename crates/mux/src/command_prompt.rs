@@ -398,6 +398,11 @@ fn longest_common_prefix(items: &[&str]) -> String {
             .count();
         end = end.min(common);
     }
+    // Equivalent note (`> → >=`): when `end == 0`, `is_char_boundary(0)` is always
+    // true (position 0 is a valid char boundary in any UTF-8 string), so the loop
+    // body never executes at end=0 with either `>` or `>=`. The other survivors
+    // (`> → ==`, `> → <`, `-= → +=`, `-= → /=`) are real gaps, they'd panic or
+    // return a wrong prefix for multi-byte candidates, and the test above kills them.
     while end > 0 && !first.is_char_boundary(end) {
         end -= 1;
     }
@@ -735,6 +740,24 @@ mod tests {
     }
 
     #[test]
+    fn save_buffer_path_without_whitespace() {
+        // `save-buffer /path/no-space`: rest has no whitespace, split_once returns
+        // None, and the guard `!rest.is_empty() && !is_buffer_name(rest)` must be
+        // true to reach the correct arm (SaveBuffer { name: None, path }).
+        // With the match-guard mutated to `false` this arm is skipped and the
+        // command incorrectly errors. (Survivors: line 202 guard mutated to false.)
+        assert_eq!(
+            p("save-buffer /path/no-space").unwrap(),
+            PromptCommand::SaveBuffer { name: None, path: "/path/no-space".into() }
+        );
+        // Same check with a relative path.
+        assert_eq!(
+            p("save-buffer output.txt").unwrap(),
+            PromptCommand::SaveBuffer { name: None, path: "output.txt".into() }
+        );
+    }
+
+    #[test]
     fn complete_unique() {
         assert_eq!(complete("zo", VERBS), Completion::Unique("zoom".into()));
     }
@@ -762,5 +785,22 @@ mod tests {
         // All three share only "w", so replacing "w" with "w" is no progress.
         assert_eq!(complete("w", &names), Completion::None);
         assert_eq!(complete("x", &names), Completion::None);
+    }
+
+    #[test]
+    fn complete_with_multibyte_common_prefix() {
+        // "é" (U+00E9, bytes [0xc3, 0xa9]) and "ê" (U+00EA, bytes [0xc3, 0xaa])
+        // share only the first byte 0xc3, a multi-byte lead byte, not a char
+        // boundary, so `longest_common_prefix` must walk back to byte 0 and return "".
+        //
+        // With the `while end > 0 && !is_char_boundary(end)` guard mutated to
+        // `end == 0` or `end < 0`, the loop never fires: `end` stays at 1 and
+        // `first[..1]` panics (invalid UTF-8 slice). With `end += 1` instead of
+        // `end -= 1`, the function walks forward into a valid boundary but yields
+        // the wrong prefix. All four mutations are killed by this assertion.
+        assert_eq!(complete("", &["étest", "êtest"]), Completion::None);
+        // A pair with a shared multi-byte prefix: "α" = [0xce, 0xb1],
+        // "β" = [0xce, 0xb2]; share [0xce] (1 byte, not a boundary) so lcp = "".
+        assert_eq!(complete("", &["αx", "βy"]), Completion::None);
     }
 }

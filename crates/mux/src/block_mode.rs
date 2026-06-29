@@ -762,4 +762,104 @@ mod tests {
         assert_eq!(handle(&key('q'), &mut bm, &s), BlockModeAction::Render);
         assert_eq!(bm.filter.as_ref().unwrap().query, "q", "q typed into the query");
     }
+
+    // ── Modifier-guard tests ─────────────────────────────────────────
+    // All block-mode keys require empty modifiers (or SHIFT for some cases).
+    // If the `m.is_empty()` guards were mutated to `true`, modified keys would
+    // fire their action instead of falling through to `_ => Ignore`.
+
+    #[test]
+    fn modifier_guarded_keys_are_ignored_with_ctrl() {
+        // Each of these keys has `if m.is_empty()` guards; adding Ctrl must
+        // produce Ignore, not the key's normal action.
+        let s = two_blocks();
+        let mut bm = BlockMode::new_for(&s, 8).unwrap();
+        let ctrl_key = |k: Key| KeyEvent::new(k, Modifiers::CTRL);
+        assert_eq!(handle(&ctrl_key(Key::Char('r')), &mut bm, &s), BlockModeAction::Ignore);
+        assert_eq!(handle(&ctrl_key(Key::Tab), &mut bm, &s), BlockModeAction::Ignore);
+        assert_eq!(handle(&ctrl_key(Key::Char('y')), &mut bm, &s), BlockModeAction::Ignore);
+        assert_eq!(handle(&ctrl_key(Key::Char('o')), &mut bm, &s), BlockModeAction::Ignore);
+        assert_eq!(handle(&ctrl_key(Key::Char('c')), &mut bm, &s), BlockModeAction::Ignore);
+    }
+
+    #[test]
+    fn shift_k_jumps_to_previous_failed() {
+        // `K` accepts plain or SHIFT mods. With `|| → &&` the arm is unreachable;
+        // with `== → !=`, shift+K would not match. Both survivors are killed here.
+        let s = three_blocks_ok_fail_ok(); // fail at line 2
+        let mut bm = BlockMode::new_for(&s, 12).unwrap(); // selected = 4 (newest ok)
+        // Plain K (no modifier):
+        assert_eq!(handle(&key('K'), &mut bm, &s), BlockModeAction::Render);
+        assert_eq!(bm.selected, 2, "K moves backward to failed block at 2");
+        // Reset to a non-fail block, then try Shift+K:
+        bm.selected = 4;
+        assert_eq!(handle(&shift_key('K'), &mut bm, &s), BlockModeAction::Render);
+        assert_eq!(bm.selected, 2, "Shift+K also moves backward to failed block");
+    }
+
+    #[test]
+    fn shift_g_jumps_to_last_and_shift_z_folds_all() {
+        // `G` (and `Z`, `O`) accept plain OR SHIFT mods. The `== → !=` mutation
+        // would break the Shift case. Both survivors killed here.
+        let s = two_blocks();
+        let mut bm = BlockMode::new_for(&s, 8).unwrap();
+        handle(&key('g'), &mut bm, &s); // go to first
+        assert_eq!(bm.selected, 0);
+        // Shift+G should jump to last:
+        assert_eq!(handle(&shift_key('G'), &mut bm, &s), BlockModeAction::Render);
+        assert_eq!(bm.selected, 3, "Shift+G jumps to last block");
+        // Shift+Z folds all:
+        assert_eq!(handle(&shift_key('Z'), &mut bm, &s), BlockModeAction::FoldAll);
+        // Shift+O unfolds all:
+        assert_eq!(handle(&shift_key('O'), &mut bm, &s), BlockModeAction::UnfoldAll);
+    }
+
+    #[test]
+    fn snap_after_filter_snaps_forward_before_backward() {
+        // When selection is between two filter matches, snap must choose the
+        // FORWARD match (first >= selected), not the backward one.
+        // Kills the `>= → <` mutation at line 305 (snap_after_filter).
+        let s = three_blocks_ok_fail_ok(); // prompts at 0, 2, 4
+        let mut bm = BlockMode::new_for(&s, 12).unwrap();
+        // Force: matches = [0, 4], selection = 2 (between them, not in matches).
+        bm.selected = 2;
+        bm.filter = Some(Filter { query: "out".into(), matches: vec![0, 4], prompt_active: false });
+        snap_after_filter(&mut bm);
+        assert_eq!(
+            bm.selected, 4,
+            "snap should go forward to 4, not backward to 0"
+        );
+    }
+
+    // Equivalent note: the `active_set` guard `!f.query.is_empty() → true` is
+    // observationally equivalent because `f.matches` always equals
+    // `all_prompt_lines(screen)` whenever `f.query.is_empty()`, an invariant of
+    // the filter state machine: opening a filter with empty query seeds matches =
+    // all_prompt_lines; backspace-to-empty calls recompute_matches("", _) which
+    // also returns all_prompt_lines; and committing an empty query sets filter=None.
+    // The `|| → &&` mutations at snap_after_filter line 299 and the `< → <=` at
+    // line 306 are also equivalent: 299 at most calls recenter() unnecessarily
+    // (no observable difference since selected is unchanged); 306's fallback only
+    // fires when no match >= selected exists, meaning all matches are strictly <
+    // selected, making `< ` and `<=` identical.
+
+    #[test]
+    fn filter_prompt_ctrl_keys_are_ignored() {
+        // handle_filter_prompt guards Enter/Esc/Backspace/Char with `m.is_empty()`.
+        // Sending Ctrl+Enter, Ctrl+Esc, Ctrl+Backspace must leave the filter open.
+        let s = three_blocks_ok_fail_ok();
+        let mut bm = BlockMode::new_for(&s, 12).unwrap();
+        handle(&key('/'), &mut bm, &s); // open filter
+        let ctrl = |k: Key| KeyEvent::new(k, Modifiers::CTRL);
+        // Ctrl+Enter should not commit (filter stays open):
+        handle(&ctrl(Key::Enter), &mut bm, &s);
+        assert!(bm.filter.as_ref().unwrap().prompt_active, "Ctrl+Enter must not commit filter");
+        // Ctrl+Esc should not cancel (filter stays):
+        handle(&ctrl(Key::Escape), &mut bm, &s);
+        assert!(bm.filter.is_some(), "Ctrl+Esc must not cancel filter");
+        // Ctrl+Backspace should not pop a char:
+        bm.filter.as_mut().unwrap().query = "abc".into();
+        handle(&ctrl(Key::Backspace), &mut bm, &s);
+        assert_eq!(bm.filter.as_ref().unwrap().query, "abc", "Ctrl+Backspace must not pop query");
+    }
 }

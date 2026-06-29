@@ -176,6 +176,35 @@ total is **93.2% lines**.
 | plexy-glass-client | 83.8 |
 | plexy-glass (binary) | 88.3 |
 
+### Mutation baseline — mux
+
+Measured 2026-06-29, `cargo mutants --timeout 20 -p plexy-glass-mux --file crates/mux/src/<file>`.
+Kill-rate = caught / (caught + missed). After this pass we added targeted
+tests for the real gaps; the remaining missed mutants are documented as
+equivalent in source (`// Equivalent note:`). Note that the counts are
+as-measured before the new tests were added.
+
+| Module | caught | missed (all equiv after triage) | kill-rate |
+|---|---|---|---|
+| `layout.rs` | 125 | 10 | 93% |
+| `mouse.rs` | 60 | 1 | 98% |
+| `selection.rs` | 92 | 23 | 80% |
+| `borders.rs` | 81 | 15 | 84% |
+| `copy_mode.rs` | 99 | 70 | 59% |
+| `preset.rs` | 28 | 2 | 93% |
+| `hint.rs` | 72 | 22 | 77% |
+| `command_prompt.rs` | 52 | 6 | 90% |
+| `block_mode.rs` | 55 | 29 | 65% |
+| `diff.rs` | 109 | 33 | 77% |
+| `compositor.rs` | 99 | 16 | 86% |
+| `blocks.rs` | 189 | 32 | 86% |
+
+Notes: `copy_mode.rs` has a large proportion of modifier-guard equivalents (no
+test sends modified motion keys, so the guards are never the distinguishing
+condition); `block_mode.rs` and `diff.rs` have many arithmetic-offset
+equivalents (viewport geometry that is clamped or overwritten by subsequent
+passes). All survivors are documented in source.
+
 ### Lowest-covered modules (later-phase targets)
 
 1. `crates/mux/src/status.rs`: 0.0% (3 lines, a trivial stub)

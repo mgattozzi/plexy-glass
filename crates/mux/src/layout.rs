@@ -1104,4 +1104,95 @@ mod tests {
         let applied = t.adjust_split(PaneId(99), BorderSide::Right, 3, vp);
         assert_eq!(applied, 0);
     }
+
+    // ── mutation-coverage tests ──────────────────────────────────────
+
+    #[test]
+    fn is_empty_false_for_nonempty_tree() {
+        // `is_empty → true` mutation at 76:9: would make `is_empty` always true.
+        assert!(!LayoutTree::single(PaneId(0)).is_empty(),
+            "a single-pane tree must not be empty");
+    }
+
+    #[test]
+    fn dfs_leaves_returns_all_panes() {
+        // `dfs_leaves → []` mutation at 299:9: would return an empty vec always.
+        let t = LayoutTree::single(PaneId(42));
+        assert_eq!(t.dfs_leaves(), vec![PaneId(42)]);
+    }
+
+    #[test]
+    fn map_layout_on_nonempty_returns_some() {
+        // `map_layout → None` mutation at 315:9: would return `None` always.
+        let t = LayoutTree::single(PaneId(7));
+        let result = t.map_layout(|id, _| id, |_, _, a, _| a);
+        assert_eq!(result, Some(PaneId(7)),
+            "map_layout on a nonempty tree must return Some");
+    }
+
+    #[test]
+    fn swap_panes_absent_first_arg_is_rejected() {
+        // `|| → &&` at 254:19 changes the guard to
+        // `(a==b && !contains(a)) || !contains(b)`. When `a` is absent and `b`
+        // is present the original short-circuits (returns false); the mutant
+        // skips the guard, calls `swap_in`, and corrupts the tree (`b` becomes `a`).
+        let mut t = build_two_pane_vertical(); // [PaneId(0), PaneId(1)]
+        let before = t.panes();
+        assert!(!t.swap_panes(PaneId(99), PaneId(0)),
+            "absent first pane must return false");
+        assert_eq!(t.panes(), before, "tree must be unchanged");
+
+        // Equivalent note: `&& → ||` at 263:17 (`found_a && found_b`): both flags
+        // are always set by the time we reach that line, because the guard at 254
+        // ensures both panes are present before `swap_in` is called, and with both
+        // present `swap_in` sets both flags, so `&&` and `||` agree.
+    }
+
+    #[test]
+    fn border_at_vertical_gutter_excludes_out_of_bounds_row() {
+        // `< → <=` at 357:65: extends the gutter's valid row range by one,
+        // matching a row that is exactly `vp.rows` (out of viewport).
+        let t = build_two_pane_vertical(); // [0] | [1], each full height
+        let vp = Rect::new(0, 0, 10, 21); // 10 rows
+        // Last valid row (9) must be a gutter hit; row 10 must not.
+        assert!(t.border_at(vp, 9, 10).is_some(),
+            "last valid gutter row must be a hit");
+        assert!(t.border_at(vp, 10, 10).is_none(),
+            "row=vp.rows is out of range and must not be a hit");
+    }
+
+    #[test]
+    fn border_at_horizontal_gutter_is_row_specific_and_col_bounded() {
+        // Three mutations on the horizontal-gutter check (line 366):
+        // - 366:42 `&& → ||`: fires for ANY col < a.cols, even non-gutter rows.
+        // - 366:58 `&& → ||`: fires for non-gutter rows too via the col range.
+        // - 366:65 `< → <=`: extends col range by one past the right edge.
+        let mut t = LayoutTree::single(PaneId(0));
+        t.split(PaneId(0), SplitDir::Horizontal, PaneId(1), SplitPosition::After).unwrap();
+        let vp = Rect::new(0, 0, 11, 20); // gutter at row 5, cols 0-19
+        // Gutter row is a hit.
+        assert!(t.border_at(vp, 5, 10).is_some(), "gutter row must be a hit");
+        // Rows adjacent to the gutter are NOT hits (kills 366:42 and 366:58).
+        assert!(t.border_at(vp, 4, 10).is_none(),
+            "row before gutter must not be a hit");
+        assert!(t.border_at(vp, 6, 10).is_none(),
+            "row after gutter must not be a hit");
+        // Column exactly at the right edge (col=a.cols=20) is NOT a hit (kills 366:65).
+        assert!(t.border_at(vp, 5, 20).is_none(),
+            "col=pane_width is out of range and must not be a hit");
+    }
+
+    #[test]
+    fn adjust_split_wrong_side_for_vertical_is_noop() {
+        // `&& → ||` at 413:7: the `split_matches` condition becomes
+        // `dir_match || pane_match`. For a vertical split + `BorderSide::Bottom`,
+        // `dir_match` is false but `pane_match` may be true
+        // (`bottommost_leaf == pane`), incorrectly applying an adjustment.
+        let t_orig = build_two_pane_vertical(); // [0] | [1], vertical
+        let mut t = t_orig.clone();
+        let vp = Rect::new(0, 0, 10, 21);
+        // BorderSide::Bottom makes no sense for a vertical split; must return 0.
+        let applied = t.adjust_split(PaneId(0), BorderSide::Bottom, 5, vp);
+        assert_eq!(applied, 0, "wrong border side on a vertical split must be a noop");
+    }
 }

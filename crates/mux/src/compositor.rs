@@ -5136,4 +5136,141 @@ mod tests {
         );
         insta::assert_snapshot!(dump_frame(&vs, false));
     }
+
+    // ── Pure helper unit tests ────────────────────────────────────────────────
+
+    #[test]
+    fn fold_ctx_display_row_excludes_row_at_viewport_boundary() {
+        // `display_row` returns None when `r == rows` (one past the last valid row).
+        // The `< → <=` mutation at line 78 would return Some(rows) instead of None,
+        // causing an out-of-bounds paint in the compositor.
+        let proj = crate::blocks::FoldProjection::identity(10);
+        let ctx = FoldCtx { proj, top_visible: 2 };
+        // Line at unified 4 → visible 4, r = 4 - 2 = 2.
+        assert_eq!(ctx.display_row(4, 3), Some(2), "r=2 < rows=3 → in viewport");
+        // r == rows: must return None (out of viewport).
+        assert_eq!(ctx.display_row(4, 2), None, "r=2 == rows=2 → out of viewport");
+    }
+
+    #[test]
+    fn crop_axis_no_offset_full_visible_is_exact() {
+        // The fast path `off == 0 && vis >= cells` must return (0, pixels) exactly.
+        // With `== → !=`, the fast path fires when off != 0 instead: a non-zero
+        // offset would return (0, pixels) (wrong crop).
+        assert_eq!(crop_axis(100, 10, 0, 10), (0, 100)); // full extent
+        assert_eq!(crop_axis(100, 10, 0, 8), (0, 80));   // off=0 but not fully visible
+        // non-zero offset must NOT take the fast path:
+        let (start, extent) = crop_axis(100, 10, 2, 6);
+        assert_eq!(start, 20, "off=2 → start at 20% of 100");
+        assert_eq!(extent, 60, "6 of 10 cells → 60% of 100");
+    }
+
+    #[test]
+    fn cells_width_sums_widths_correctly() {
+        use smol_str::SmolStr;
+        use plexy_glass_status::ResolvedStyle;
+        let style = ResolvedStyle::default();
+        // Kills `replace cells_width with 0` and `with 1` (both wrong return values).
+        let cells: Vec<StatusCell> = vec![
+            (SmolStr::new("a"), 1, style),
+            (SmolStr::new("好"), 2, style),
+            (SmolStr::new("b"), 1, style),
+        ];
+        assert_eq!(cells_width(&cells), 4);
+        assert_eq!(cells_width(&[]), 0);
+    }
+
+    #[test]
+    fn truncate_cells_cuts_at_max_width() {
+        use smol_str::SmolStr;
+        use plexy_glass_status::ResolvedStyle;
+        let style = ResolvedStyle::default();
+        let make = |g: &str, w: u16| -> StatusCell { (SmolStr::new(g), w, style) };
+        // Three cells: widths 1, 2, 1 → total 4. Truncate to 3 keeps the first two.
+        // `> → ==` mutation: keeps cells even when used > max (allows overflow).
+        // `+ → *` mutation: `used * w > max` gives wildly wrong threshold.
+        // `+= → *=` mutation: used *= w instead of accumulating.
+        let cells = vec![make("a", 1), make("好", 2), make("b", 1)];
+        let result = truncate_cells(cells.clone(), 3);
+        assert_eq!(result.len(), 2, "max_w=3 should keep 'a'(1) and '好'(2), drop 'b'");
+        assert_eq!(result[0].0.as_str(), "a");
+        assert_eq!(result[1].0.as_str(), "好");
+        // Exact fit: max_w = 4 keeps all three.
+        assert_eq!(truncate_cells(cells, 4).len(), 3);
+    }
+
+    #[test]
+    fn filter_match_spans_returns_correct_columns() {
+        // Verifies that grid_col tracking is correct (kills `+= → *=` and `+= → -=`
+        // mutations in filter_match_spans, and `+ → *` in the col_end calculation).
+        let mut e = Emulator::new(3, 20);
+        e.advance(b"hello world ");
+        let screen = e.screen().clone();
+        // "world" starts at col 6 in the grid (h-e-l-l-o-space = 6 cells).
+        let spans = filter_match_spans(&screen, "world", 0, 3);
+        assert!(!spans.is_empty(), "should find 'world' in the screen");
+        let (_, col_start, _) = spans[0];
+        assert_eq!(col_start, 6, "col_start for 'world' must be 6");
+    }
+
+    #[test]
+    fn filter_match_spans_tracks_wide_char_spacers() {
+        // A wide char (好, 2 cells) followed by ASCII. The wide spacer increments
+        // grid_col; with `+= → -=` or `+= → *=` at line 1000, the spacer's column
+        // increment is wrong and subsequent columns are off by 1.
+        let mut e = Emulator::new(3, 20);
+        // "好" is 3 bytes / 2 display cols. The parser needs a trailing byte to flush.
+        e.advance("好ab ".as_bytes());
+        let screen = e.screen().clone();
+        // "ab" starts at col 2 (wide char takes cols 0-1).
+        let spans = filter_match_spans(&screen, "ab", 0, 3);
+        assert!(!spans.is_empty(), "should find 'ab' in the screen");
+        let (_, col_start, _) = spans[0];
+        assert_eq!(col_start, 2, "col_start for 'ab' must be 2 (after the 2-col wide char)");
+    }
+
+    // Equivalent note: `effective_scroll_for` line 965 `+ → *` (scrollback * active
+    // instead of +): real gap, no test exercises the copy/block-mode branch with
+    // a scrollback-containing screen, so the wrong total_lines value goes undetected.
+    // Gap left as-is (would require setting up a full PaneView with scrollback).
+    //
+    // Equivalent note: `crop_axis` line 942 `== → !=`: EQUIVALENT. When off != 0,
+    // vis = cells - off < cells, so `vis >= cells` is false and the fast path still
+    // does not fire. When off == 0 the general path produces the same result as the
+    // fast path (0, pixels). Both branches are observationally identical in all
+    // reachable inputs.
+
+    #[test]
+    fn display_row_returns_none_at_viewport_boundary() {
+        // Kills: 78:12 `< → <=`: with `<=`, display_row(rows, rows) incorrectly
+        // returns Some(rows) instead of None for a row exactly at the viewport height.
+        let proj = FoldProjection::identity(10);
+        let ctx = FoldCtx { proj, top_visible: 0 };
+        assert_eq!(ctx.display_row(4, 5), Some(4), "last valid row must be Some");
+        assert_eq!(ctx.display_row(5, 5), None, "row == rows must be None");
+    }
+
+    #[test]
+    fn put_char_preserves_attrs() {
+        // Kills: 1837:9 `delete field attrs`. Without it, all put_char cells get
+        // Attrs::empty(), losing bold/italic/dim styling.
+        use plexy_glass_emulator::Attrs;
+        let mut screen = VirtualScreen::blank(5, 20);
+        put_char(&mut screen, 0, 0, 'X', Attrs::BOLD);
+        let cell = screen.cell(0, 0).expect("cell must exist");
+        assert!(cell.attrs.contains(Attrs::BOLD), "put_char must pass attrs through to the cell");
+    }
+
+    #[test]
+    fn cell_for_preserves_attrs() {
+        // Kills: 1986:9 `delete field attrs`. cell_for must copy style.attrs.
+        use plexy_glass_emulator::Attrs;
+        use plexy_glass_status::ResolvedStyle;
+        let style = ResolvedStyle { attrs: Attrs::BOLD, fg: None, bg: None };
+        let cell = cell_for(&smol_str::SmolStr::new("X"), &style);
+        assert!(
+            cell.attrs.contains(Attrs::BOLD),
+            "cell_for must copy attrs from the resolved style"
+        );
+    }
 }

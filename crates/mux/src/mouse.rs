@@ -286,6 +286,9 @@ pub fn encode_for_child(event: MouseEvent, mode: MouseEncoding) -> Vec<u8> {
             // OR (not assign) so the modifier bits set above survive; base 64 =
             // vertical wheel, 66 = horizontal; bit 0 flips up→down / left→right.
             button_code |= if horizontal { 66 } else { 64 };
+            // `delta < 0` and `delta <= 0` are observationally identical here
+            // because the parser always assigns delta = ±3, never 0. Both
+            // `prop_mouse` and the parser confirm delta ∈ {-3, +3}.
             if delta < 0 {
                 button_code |= 1;
             }

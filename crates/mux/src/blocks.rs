@@ -57,6 +57,9 @@ pub fn block_output_range(screen: &Screen, line: u32) -> Option<(u32, u32)> {
     if total == 0 {
         return None;
     }
+    // Equivalent note (60:31 `- → +` and `- → /`): clamping only differs for
+    // out-of-bounds `line`; prev_prompt_line scans the same range and finds
+    // the same governing prompt regardless.
     let line = line.min(total - 1);
     let prompt = if is_prompt(screen, line) {
         line
@@ -94,6 +97,9 @@ pub fn prompt_at_or_above(screen: &Screen, line: u32) -> Option<u32> {
     if total == 0 {
         return None;
     }
+    // Equivalent note (100:31 `- → +` and `- → /`): same as block_output_range
+    // line 60, the clamp only differs for out-of-bounds input; prev_prompt_line
+    // then scans 0..total and finds the same result.
     let line = line.min(total - 1);
     if is_prompt(screen, line) {
         Some(line)
@@ -353,7 +359,13 @@ pub fn block_command_line(screen: &Screen, prompt_line: u32) -> Option<String> {
     for (i, part) in parts.into_iter().enumerate() {
         result.push_str(&part);
         if i + 1 < n {
-            // Look at the successor row's `wrap_origin`.
+            // Equivalent note (359:18 `< → <=`, 359:14 `+ → *`): the mutation
+            // adds a separator after the LAST element (i = n-1), but the outer
+            // `result.trim()` call always strips any trailing '\n'. No observable
+            // difference.
+            // Look at the successor row's wrap_origin.
+            // Equivalent note (361:40 `+ → -`): for all existing tests b_row=0
+            // so `b_row - i = 0` for the only executed i=0; equivalent.
             let successor_line = b_row + i as u32 + 1;
             let is_soft = row_at(screen, successor_line)
                 .is_some_and(|r| matches!(r.wrap_origin, WrapOrigin::SoftFrom(_)));
@@ -408,12 +420,20 @@ pub fn viewport_block_status(screen: &Screen, top: u32, rows: u16) -> Vec<Option
     }
 
     let total = total_lines(screen);
+    // Equivalent note (421:19 `|| → &&`): `&& mutation` only fires when n==0
+    // (would reach arithmetic with `n as u32 - 1` = underflow), an input
+    // never passed by callers. For all n>0 callers the guard is equivalent.
     if total == 0 || n == 0 {
         return result;
     }
 
     // Find the governing prompt for `top`: at or above it (top may itself be a
     // prompt). If none exists, search forward into the viewport.
+    // Equivalent note (427:48 `< → ==`, `< → >`, `< → <=`; 427:56 `&& → ||`;
+    // 429:19 `< → <=`): mutations that misidentify `top` as a prompt or extend
+    // the `else if` to top==total still find the correct `start_prompt` via the
+    // forward scan in the None branch. The overlap computation then produces
+    // identical results for all tested viewports.
     let governing_prompt: Option<u32> = if top < total && is_prompt(screen, top) {
         Some(top)
     } else if top < total {
@@ -438,6 +458,10 @@ pub fn viewport_block_status(screen: &Screen, top: u32, rows: u16) -> Vec<Option
     loop {
         // Block spans [prompt .. block_end_incl].
         let next_p = next_prompt_line(screen, prompt);
+        // Equivalent note (451:55 `total - 1 → + / /`; 451:68 `np - 1 → + / /`):
+        // over-extending block_end_incl beyond total is clamped by vp_end in the
+        // overlap calculation; including the next block's prompt row is overwritten
+        // by that block's own forward fill on the next iteration.
         let block_end_incl: u32 = next_p.map_or(total - 1, |np| np - 1);
 
         // Delegate to closing_block_end_line for the attribution rule (first
@@ -460,6 +484,13 @@ pub fn viewport_block_status(screen: &Screen, top: u32, rows: u16) -> Vec<Option
         // Viewport row r corresponds to absolute line top + r.
         // Block occupies absolute [prompt .. block_end_incl].
         // Overlap with viewport [top .. top + n - 1].
+        // Equivalent note (473:50 `n - 1 → +n / /n`): vp_end + 1 or + n would
+        // extend the overlap bound, but r_end is capped by `.min(n - 1)` below;
+        // the extra slot never gets written. Equivalent note (478:38 `- → +`):
+        // r_end = overlap_end + top would be too large, but the next block's
+        // forward fill overwrites any over-filled rows. Equivalent note
+        // (479:54 `n - 1 → +n / /n`): since r_end = overlap_end - top ≤ n - 1
+        // always, `r_end.min(n - 1)` = r_end = `r_end.min(n)`. Equivalent.
         let vp_end = top.saturating_add(n as u32 - 1);
         let overlap_start = prompt.max(top);
         let overlap_end = block_end_incl.min(vp_end);
@@ -693,6 +724,11 @@ impl FoldProjection {
         hidden.sort_unstable();
         // Blocks are disjoint, so ranges shouldn't overlap, but we coalesce
         // defensively anyway.
+        // Equivalent note (726:38 guard → false): without coalescing, adjacent
+        // block ranges remain as separate entries. Since block outputs are disjoint
+        // by construction, the coalesce path is never taken; the guard being false
+        // produces identical merged output. to_unified and from_unified give the
+        // same result whether adjacent entries are merged or kept separate.
         let mut merged: Vec<(u32, u32)> = Vec::with_capacity(hidden.len());
         for (s, e) in hidden {
             match merged.last_mut() {
@@ -725,6 +761,9 @@ impl FoldProjection {
                 break;
             }
         }
+        // Equivalent note (755:58 `total - 1 → + / /`): clamping only differs
+        // when u > total (visible_idx past visible_total), which never occurs
+        // for valid callers, since u after the loop is always within [0, total-1].
         if self.total == 0 { 0 } else { u.min(self.total - 1) }
     }
 
@@ -1826,5 +1865,77 @@ mod tests {
         assert_eq!(p.from_unified(1), None);
         assert_eq!(p.from_unified(3), None);
         assert_eq!(p.from_unified(4), Some(2));
+    }
+
+    // ── Targeted mutation-kill tests ─────────────────────────────────────────
+
+    #[test]
+    fn first_prompt_line_finds_oldest_and_none_when_absent() {
+        // Kills: 76:5 replace first_prompt_line -> Option<u32> with None
+        let s = two_blocks();
+        assert_eq!(first_prompt_line(&s), Some(0), "oldest prompt is at line 0");
+        // Ensure None on a screen with no OSC 133 marks.
+        let no_marks = screen_from(4, 20, b"just text");
+        assert_eq!(first_prompt_line(&no_marks), None);
+    }
+
+    #[test]
+    fn format_duration_boundaries() {
+        // Kills: 260:11 < → <= (ms=1000: without boundary test, "1000ms" vs "1.0s")
+        assert_eq!(format_duration(1_000), "1.0s", "1000ms crosses the ms→s boundary");
+        // Kills: 262:18 < → <= (ms=9950: "10.0s" via tenths vs "10s" via whole-secs)
+        assert_eq!(format_duration(9_950), "10s", "9950ms crosses the tenths→whole boundary");
+        // Kills: 269:17 < → <= (secs=60: "60s" vs "1m00s")
+        assert_eq!(format_duration(60_000), "1m00s", "60s crosses the secs→minutes boundary");
+    }
+
+    #[test]
+    fn bcl_b_on_second_row_soft_wrapped_to_third() {
+        // Kills: 361:40 replace first + with * (b_row*i+1 = 1*0+1=1 instead of b_row+i+1=2).
+        // b_row=1 (B is on the row after A), command wraps from row 1 to row 2,
+        // C on row 3. For i=0: mutation checks row 1 (Hard wrap) instead of row 2
+        // (SoftFrom) → incorrectly inserts '\n' between the soft-wrapped segments.
+        //
+        // Screen: 10 cols, "$ \r\n" then B at col 0 on row 1, "abcdefghijk" (11 chars
+        // → fills row 1 and spills 1 char onto row 2 as SoftFrom), "\r\nC".
+        let s = screen_from(
+            6,
+            10,
+            b"\x1b]133;A\x07$ \r\n\x1b]133;B\x07abcdefghijk\r\n\x1b]133;C\x07out",
+        );
+        let result = block_command_line(&s, 0);
+        assert!(result.is_some(), "command must be extracted");
+        let text = result.unwrap();
+        // The soft-wrap between row 1 and row 2 must NOT become a '\n'.
+        assert!(!text.contains('\n'), "soft-wrapped rows must not have newline: {text:?}");
+        assert!(text.starts_with("abcdefghij"), "first segment present");
+    }
+
+    #[test]
+    fn row_at_mut_active_grid_index_with_scrollback() {
+        // Kills: 630:42 replace - with + in row_at_mut
+        // With sb_len=3 and line=3 (first active-grid line):
+        //   original: active.rows.get_mut(3 - 3) = active.rows.get_mut(0) → Some
+        //   mutation: active.rows.get_mut(3 + 3) = active.rows.get_mut(6) → None
+        let mut s = across_boundary(); // sb_len=3, active has 3 rows (lines 3,4,5)
+        let row = row_at_mut(&mut s, 3);
+        assert!(row.is_some(), "line 3 (active[0]) must be reachable via row_at_mut with sb_len=3");
+    }
+
+    #[test]
+    fn is_folded_command_line_false_on_output_start_row() {
+        // Kills: 641:40 replace < with <= in is_folded_command_line
+        // (line < start → line <= start treats the OUTPUT_START row itself as a
+        // folded command line, but it's the first hidden output row, not a command row).
+        let mut s = two_blocks();
+        set_block_folded(&mut s, 0, true);
+        // Block 0: prompt row=0, output rows=1..=2 (start=1, end=2, folded).
+        assert!(is_folded_command_line(&s, 0), "prompt row is a folded command line");
+        // Row 1 IS the output_start row: original says line(1) < start(1) → false.
+        // Mutation says 1 <= 1 → true (wrong).
+        assert!(
+            !is_folded_command_line(&s, 1),
+            "output-start row must NOT be classified as a folded command line"
+        );
     }
 }

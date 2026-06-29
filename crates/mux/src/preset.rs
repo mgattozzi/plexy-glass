@@ -277,6 +277,35 @@ mod tests {
     }
 
     #[test]
+    fn tiled_rows_are_evenly_split_in_height() {
+        // `even_node_chain` combines the per-row sub-trees with a balanced ratio.
+        // The ratio must be k1/k (not k1%k or k1*k). Verify that all distinct
+        // row-heights in the tiled preset are within 1 cell of each other,
+        // exercising the two-row case (n=4, k=2, k1=1, ratio should be 0.5).
+        let row_heights = |rs: &[Rect]| -> Vec<u16> {
+            let mut map = std::collections::HashMap::new();
+            for r in rs {
+                map.insert(r.row, r.rows);
+            }
+            let mut v: Vec<u16> = map.values().copied().collect();
+            v.sort_unstable();
+            v
+        };
+
+        // n=4: two rows of 2 panes, each row should get ~half the height (≈19 rows).
+        let rs4 = rects(LayoutPreset::Tiled, 4);
+        let hs4 = row_heights(&rs4);
+        assert_eq!(hs4.len(), 2, "n=4 tiled must have 2 distinct row heights");
+        assert!(hs4[1] - hs4[0] <= 1, "n=4 tiled row heights uneven: {hs4:?}");
+
+        // n=9: three rows of 3 panes, heights should be within 1 of each other.
+        let rs9 = rects(LayoutPreset::Tiled, 9);
+        let hs9 = row_heights(&rs9);
+        assert_eq!(hs9.len(), 3, "n=9 tiled must have 3 distinct row heights");
+        assert!(hs9[2] - hs9[0] <= 1, "n=9 tiled row heights uneven: {hs9:?}");
+    }
+
+    #[test]
     fn every_preset_preserves_all_panes_exactly_once() {
         // Exercises the remainder paths past the geometry tests' n<=5 (e.g.
         // tiled n=7 -> rows 3,2,2). A builder that dropped or duplicated a

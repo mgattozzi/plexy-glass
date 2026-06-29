@@ -134,8 +134,14 @@ pub fn draw(
                 continue;
             }
             let n = r > band.row && is_border(r - 1, c, band, &rects);
+            // Equivalent note (`s`: `< → <=`): `is_border(r+1, ...)` calls
+            // `band.contains(r+1, c)` which is false when r = bottom_edge_row,
+            // so `r < B` and `r <= B` both produce `s = false` at the boundary.
             let s = r < band.bottom_edge_row() && is_border(r + 1, c, band, &rects);
             let w = c > band.col && is_border(r, c - 1, band, &rects);
+            // Equivalent note (`e`: `< → <=`): same argument for columns, when
+            // c = right_edge_col, `is_border(r, c+1, ...)` returns false because
+            // c+1 is outside the band, so `<` and `<=` give the same `e` value.
             let e = c < band.right_edge_col() && is_border(r, c + 1, band, &rects);
             let glyph = box_glyph(n, s, e, w);
             let mut cell = Cell { grapheme: SmolStr::new(glyph), ..Cell::default() };
@@ -596,6 +602,97 @@ mod tests {
         assert_eq!(screen.cell(0, 3).unwrap().grapheme.as_str(), "\u{2500}");
     }
 
+    #[test]
+    fn bottom_interior_edge_is_horizontal_not_tee() {
+        // The cells directly below a pane's interior (row=4, cols 1-5 in a 5x7 band
+        // with pane at (1,1) 3x5) should be ─ (horizontal).  With `replace - with /`
+        // in the north-neighbour check (line 136), `is_border(r, c)` is used instead
+        // of `is_border(r-1, c)`, making n=true for those cells and turning ─ into ┴.
+        let band = Rect::new(0, 0, 5, 7);
+        let pane = Rect::new(1, 1, 3, 5);
+        let mut screen = VirtualScreen::blank(5, 7);
+        draw(&[frame(pane, false, None)], band, &mut screen, None, RingColors::ansi_default());
+        // Bottom edge cells at the pane's bottom interior boundary (row 4, cols 1-5).
+        // Their north neighbour is inside the pane (row 3 is the last pane row),
+        // so `n` must be false → glyph = ─, not ┴.
+        assert_eq!(screen.cell(4, 1).unwrap().grapheme.as_str(), "\u{2500}", "bottom-edge col 1");
+        assert_eq!(screen.cell(4, 3).unwrap().grapheme.as_str(), "\u{2500}", "bottom-edge col 3");
+        assert_eq!(screen.cell(4, 5).unwrap().grapheme.as_str(), "\u{2500}", "bottom-edge col 5");
+    }
+
+    #[test]
+    fn active_pane_title_gets_active_color() {
+        // `active_color = (active_rect == Some(f.rect)).then_some(...)`.  The
+        // `== → !=` mutation would apply the active color to the NON-active pane.
+        use plexy_glass_emulator::Color;
+        let band = Rect::new(0, 0, 5, 12);
+        let pane = Rect::new(1, 1, 3, 10);
+        let rings = RingColors {
+            active: Color::Rgb(255, 0, 0), // red
+            marked: Color::Rgb(0, 255, 0),
+            drag_source: Color::Rgb(0, 0, 255),
+            drag_target: Color::Rgb(128, 128, 128),
+        };
+        // Active pane with title: title cells should be the active (red) color.
+        let mut screen = VirtualScreen::blank(5, 12);
+        draw(&[frame(pane, true, Some("hi"))], band, &mut screen, None, rings);
+        // " hi " starts at col 2 (1 for the frame-start + 1 offset), so 'h' is at col 3.
+        let title_cell = screen.cell(0, 3).unwrap();
+        assert_eq!(title_cell.grapheme.as_str(), "h");
+        assert_eq!(title_cell.fg, Color::Rgb(255, 0, 0), "active pane title fg must be active color");
+
+        // Inactive pane with the same title must NOT get the active color.
+        let mut screen2 = VirtualScreen::blank(5, 12);
+        draw(&[frame(pane, false, Some("hi"))], band, &mut screen2, None, rings);
+        let title_cell2 = screen2.cell(0, 3).unwrap();
+        assert_ne!(title_cell2.fg, Color::Rgb(255, 0, 0), "inactive pane title must not be active color");
+    }
+
+    #[test]
+    fn selected_bracket_does_not_color_cells_outside_block_rows() {
+        // The `|| → &&` mutation at line 263 makes `r < top || r > bot` → `&&`
+        // which is always false, coloring ALL left-border cells as bracket.
+        // Verify cells above and below the block range keep their normal styling.
+        let band = Rect::new(0, 0, 8, 7);
+        let pane = Rect::new(1, 1, 6, 5); // rows 1-6, left border at col 0
+        // Block covers ONLY rows 1-3 (top at 0+1=1, bot at 2+1=3,
+        // cap_top = true, cap_bottom = false).
+        let sel = SelectedBlock { rows: (0, 2), cap_top: true, cap_bottom: false, color: sel_color() };
+        let mut screen = VirtualScreen::blank(8, 7);
+        draw(&[frame_with_selected(pane, Some(sel))], band, &mut screen, None, RingColors::ansi_default());
+        // Row 1 is inside the block range → must be bracket color.
+        assert_eq!(screen.cell(1, 0).unwrap().fg, sel_color(), "row 1 in block → bracket color");
+        // Row 5 is outside the block range → must NOT be bracket color.
+        assert_ne!(screen.cell(5, 0).unwrap().fg, sel_color(), "row 5 outside block must not get bracket");
+
+        // Equivalent notes:
+        // - Line 137 (`s`: `< → <=`): `is_border(r+1, ...)` returns false when
+        //   r = bottom_edge_row, so `<=` and `<` give the same `s` value.
+        // - Line 139 (`e`: `< → <=`): same argument for columns.
+        // Both are equivalent because `is_border` bounds-checks the band.
+    }
+
+    #[test]
+    fn paint_title_clips_wide_grapheme_at_edge() {
+        // A wide grapheme (width=2) that straddles the max_col boundary must not
+        // be painted; the guard on line 334 must use the right threshold.
+        // With `+ → -` or `+ → *` in `c + 1 > max_col`, the check is wrong and
+        // the wide grapheme would overrun the border.
+        let band = Rect::new(0, 0, 5, 7);
+        // Pane at (1,1) 3x3: right border at col 4, pane right edge col is col 3.
+        let pane = Rect::new(1, 1, 3, 3); // cols 1-3, right_edge_col=4
+        let mut screen = VirtualScreen::blank(5, 7);
+        // "好" (wide, width=2) followed by "x" (narrow): the wide glyph needs cols
+        // 2 and 3. start = pane.col + 1 = 2. max_col = pane.right_edge_col() = 4.
+        // " 好 " → col 2 = space, col 3+4 = 好+spacer, col 5 = space.
+        // max_col = 4. At col 3: c + 1 = 4 = max_col → guard fires, wide NOT painted.
+        draw(&[frame(pane, false, Some("好"))], band, &mut screen, None, RingColors::ansi_default());
+        // The wide grapheme "好" must not overrun max_col=4 (right border at col 4).
+        // col 4 must remain the border glyph (┐), not the wide spacer.
+        let border_cell = screen.cell(0, 4).unwrap();
+        assert!(!border_cell.is_wide_spacer(), "col 4 must not be wide spacer");
+    }
+
     // ── Block exit-status border segment tests ────────────────────────────────────
 
     /// Ok status row: left-segment cell gets ok fg AND the heavy `▌` (parity with fail).
@@ -910,6 +1007,60 @@ mod tests {
         let tgt_cell = screen.cell(0, 11).expect("tgt border cell");
         assert_eq!(src_cell.fg, plexy_glass_emulator::Color::Indexed(SOURCE_DRAG_COLOR));
         assert_eq!(tgt_cell.fg, plexy_glass_emulator::Color::Indexed(TARGET_DRAG_COLOR));
+    }
+
+    #[test]
+    fn border_cell_below_pane_content_is_horizontal_not_tee() {
+        // Kills: 136:49 `- → /`: `is_border(r/1, c)` equals `is_border(r, c)` which
+        // is always true, making n=true for cells whose northern neighbor is pane
+        // content. This turns the bottom-border `─` into `┴` (T-junction).
+        let band = Rect::new(0, 0, 5, 7);
+        let pane = Rect::new(1, 1, 3, 5); // content rows 1-3; bottom border at row 4
+        let mut screen = VirtualScreen::blank(5, 7);
+        draw(&[frame(pane, false, None)], band, &mut screen, None, RingColors::ansi_default());
+        // (4, 1): cell is a border (in band, not in pane). The cell above (3,1) IS
+        // in the pane → n must be false → glyph is ─ (not ┴).
+        assert_eq!(
+            screen.cell(4, 1).unwrap().grapheme.as_str(),
+            "\u{2500}", // ─
+            "bottom border below pane content must be horizontal (─), not T-junction (┴)"
+        );
+    }
+
+    #[test]
+    fn paint_title_narrow_char_at_max_col_is_painted() {
+        // Kills: 337:14 `> → ==` / `> → >=`: break one col too early, missing the
+        // character that lands exactly on max_col.
+        // Also kills: 340:14 `== → !=`: with !=, the wide guard fires for narrow
+        // chars (w=1) and breaks before 'a' reaches the screen.
+        let band = Rect::new(0, 0, 5, 7);
+        // pane col=1, cols=3 → max_col=3, start=2.  title "ab" → text=" ab ".
+        // 'a' lands at col 3 = max_col (must be painted).
+        let pane = Rect::new(1, 1, 3, 3);
+        let mut screen = VirtualScreen::blank(5, 7);
+        draw(&[frame(pane, false, Some("ab"))], band, &mut screen, None, RingColors::ansi_default());
+        assert_eq!(
+            screen.cell(0, 3).unwrap().grapheme.as_str(),
+            "a",
+            "character at exactly max_col must be painted (max_col is inclusive)"
+        );
+    }
+
+    #[test]
+    fn paint_title_wide_char_fits_when_ends_at_max_col() {
+        // Kills: 340:29 `> → >=`: `c + 1 >= max_col` rejects a wide char whose
+        // right half lands exactly at max_col, even though it fits.
+        let band = Rect::new(0, 0, 5, 10);
+        // pane col=1, cols=4 → max_col=4, start=2.  "好" lands at c=3, ends at col 4.
+        // c+1=4: original `4 > 4 = false` → painted. Mutation `4 >= 4 = true` → rejected.
+        let pane = Rect::new(1, 1, 3, 4);
+        let mut screen = VirtualScreen::blank(5, 10);
+        draw(&[frame(pane, false, Some("好"))], band, &mut screen, None, RingColors::ansi_default());
+        assert_eq!(
+            screen.cell(0, 3).unwrap().grapheme.as_str(),
+            "好",
+            "wide char whose right half ends at max_col must be painted"
+        );
     }
 
     /// Status-row safety: with the pane rect hitting the band bottom, the

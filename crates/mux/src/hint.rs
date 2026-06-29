@@ -98,6 +98,7 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     ]
 });
 
+#[derive(Debug, Clone)]
 struct Span {
     start_col: u16,
     end_col: u16,
@@ -637,4 +638,117 @@ mod tests {
         // "x" has only 1 distinct char, so it falls back to DEFAULT_ALPHABET.
         assert_eq!(effective_alphabet("x"), DEFAULT_ALPHABET);
     }
+
+    // ── hex_val / percent_decode tests ───────────────────────────────────────
+
+    #[test]
+    fn hex_val_handles_all_hex_digit_ranges() {
+        // Kills `delete match arm b'a'..=b'f'` / `b'A'..=b'F'` and all the
+        // arithmetic mutations on lines 210-211.
+        assert_eq!(hex_val(b'0'), Some(0));
+        assert_eq!(hex_val(b'9'), Some(9));
+        assert_eq!(hex_val(b'a'), Some(10));
+        assert_eq!(hex_val(b'f'), Some(15));
+        assert_eq!(hex_val(b'A'), Some(10));
+        assert_eq!(hex_val(b'F'), Some(15));
+        assert_eq!(hex_val(b'g'), None);
+    }
+
+    #[test]
+    fn percent_decode_handles_lowercase_and_uppercase_hex() {
+        // %2b = '+' (lowercase), %2B = '+' (uppercase). The existing test uses
+        // %20 (digit-only hex), missing the a-f / A-F arms of hex_val entirely.
+        assert_eq!(percent_decode("%2b"), "+");
+        assert_eq!(percent_decode("%2B"), "+");
+        // Mixed: space (%20) and plus (%2b) together.
+        assert_eq!(percent_decode("a%20b%2bc"), "a b+c");
+        // Invalid escape passes through unchanged.
+        assert_eq!(percent_decode("%zz"), "%zz");
+        // Percent at the very end (only 0 more bytes): must pass through, not panic.
+        assert_eq!(percent_decode("ok%"), "ok%");
+        // Percent with only 1 more byte: must pass through, not panic.
+        assert_eq!(percent_decode("ok%2"), "ok%2");
+    }
+
+    // ── resolve_overlaps tests ───────────────────────────────────────────────
+
+    #[test]
+    fn resolve_overlaps_prefers_longest_then_highest_priority() {
+        // Two spans starting at the same column: the longer one wins.
+        // Three spans: url covers cols 0-10, sha covers cols 0-7, path covers 3-8.
+        // Expected: url (longest from 0) wins; path starts within url so skipped.
+        // Kills `replace - with +` mutations at line 255 (length comparator).
+        let url = Span { start_col: 0, end_col: 10, kind: HintKind::Url, text: "http://x.c/ab".into() };
+        let sha = Span { start_col: 0, end_col: 7, kind: HintKind::Sha, text: "deadbee".into() };
+        let path = Span { start_col: 3, end_col: 8, kind: HintKind::Path, text: "c/ab".into() };
+        let result = resolve_overlaps(vec![sha.clone(), path.clone(), url.clone()]);
+        assert_eq!(result.len(), 1, "url should dominate: {result:?}");
+        assert_eq!(result[0].kind, HintKind::Url);
+    }
+
+    #[test]
+    fn resolve_overlaps_priority_breaks_same_length_tie() {
+        // Two spans of the same length at the same start: Hyperlink (priority 0)
+        // wins over Url (priority 1). Kills `replace priority with 0/1` mutations.
+        let hyper = Span { start_col: 0, end_col: 5, kind: HintKind::Hyperlink, text: "https://x".into() };
+        let url = Span { start_col: 0, end_col: 5, kind: HintKind::Url, text: "https://x".into() };
+        let result = resolve_overlaps(vec![url.clone(), hyper.clone()]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].kind, HintKind::Hyperlink, "hyperlink priority beats url");
+    }
+
+    // ── push_hyperlink_spans boundary tests ─────────────────────────────────
+
+    #[test]
+    fn push_hyperlink_inner_loop_exits_at_id_change() {
+        // The inner `while col < cols && hyperlink_id == Some(id)` loop must stop
+        // when the hyperlink region ends. With `&& → ||` the loop keeps going until
+        // col reaches the line's end, so the end_col covers the whole line instead
+        // of just the linked text.
+        // Also tests that `< → <=` at line 227:15 (outer loop) is equivalent
+        // (get_cell returns None at col=cols, so the extra iteration is a no-op).
+        let line = "\x1b]8;;https://a.io\x1b\\docs\x1b]8;;\x1b\\ rest";
+        let s = screen_from(1, 20, &[line]);
+
+        // Direct test: call push_hyperlink_spans and check start_col + end_col.
+        let mut spans = Vec::new();
+        push_hyperlink_spans(&s, 0, &mut spans);
+        assert_eq!(spans.len(), 1, "exactly one hyperlink span: {spans:?}");
+        assert_eq!(spans[0].start_col, 0, "link starts at col 0");
+        // "docs" is 4 graphemes, so end_col should be 4 (one past the last linked col).
+        assert_eq!(spans[0].end_col, 4, "link ends at col 4 (just past 'docs')");
+
+        // Equivalent notes:
+        // - 227:15 `< → <=`: outer loop adds one extra iteration at col=cols;
+        //   get_cell returns None, id is None, the None arm increments col past
+        //   cols and the loop exits, same result. EQUIVALENT.
+        // - 234:19 `< → <=`: inner loop at col=cols: get_cell returns None, id is
+        //   None ≠ Some(id), loop exits, same result. EQUIVALENT.
+    }
+
+    // ── assign_labels boundary tests ─────────────────────────────────────────
+
+    #[test]
+    fn assign_labels_cap_boundary_at_exactly_n() {
+        // When `cap == n` exactly, the current label length is sufficient.
+        // With `< → <=` at line 351, `cap == n` would trigger one extra length
+        // increment, producing unnecessarily long labels.
+        // k=2, n=4: 2^2=4 == n. With `<`, loop exits (4 is NOT < 4). len=2. ✓
+        // With `<=`, loop continues: 4 <= 4 → len=3, cap=8. len=3 is too long.
+        let labels = assign_labels(4, "ab");
+        assert!(labels.iter().all(|l| l.len() == 2), "4 targets with 2-char alphabet need len=2: {labels:?}");
+        assert_eq!(labels.len(), 4);
+    }
+
+    // Equivalent note (line 358): `chars[i.min(chars.len() - 1)]` vs
+    // `chars[i.min(chars.len() + 1)]` (`- → +`) or `chars[i.min(chars.len() / 1)]`
+    // (`- → /` = `chars[i.min(chars.len())]`): `i` (= idx[d]) is always < k =
+    // chars.len() (the counter resets at k), so i < chars.len() ≤ chars.len() ± 1,
+    // making i.min(any of these) = i. The clamp never fires for valid alphabet
+    // sizes (≥ 2). Both mutations are equivalent for all reachable states.
+    // Equivalent note (line 351:26): `len < 6 → len <= 6` adds one extra label-
+    // length increment; for practical hint counts (≤ 2000 with a ≥ 2-char alphabet)
+    // cap = k^6 ≥ 64 is always sufficient and the loop exits on the cap condition,
+    // not the len guard. Observable difference only for n > k^6, which does not
+    // occur in the application. Equivalent.
 }

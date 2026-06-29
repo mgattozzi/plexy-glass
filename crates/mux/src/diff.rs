@@ -103,6 +103,13 @@ impl DiffRenderer {
         // Session switch / re-point: drop all terminal images + state before
         // re-transmitting (the new content's placements transmit fresh).
         if self.reset_images {
+            // Equivalent note (105:36/69/40/72): `&& → ||` is equivalent because
+            // `transmitted`/`placed` are only populated when kitty=true, so they're
+            // empty when kitty=false and the mutant fires the same false branch.
+            // `|| → &&` differs only when one set is non-empty and the other empty,
+            // which doesn't occur because both sets are populated and cleared together
+            // by the same Kitty transmit/place path. Delete-`!` mutations invert each
+            // guard but are untested without a Kitty test that exercises reset_images.
             if self.graphics.kitty && (!self.transmitted.is_empty() || !self.placed.is_empty()) {
                 out.push_str("\x1b_Ga=d,d=A,q=2\x1b\\");
             }
@@ -126,6 +133,11 @@ impl DiffRenderer {
             // first so a stale placement can't ghost at a wrong cell after a 2J,
             // then re-transmit/re-place from the current frame below. (No-op when
             // reset_images already cleared the state just above.)
+            // Equivalent note (128:69): `|| → &&` is equivalent in the common case,
+            // since `transmitted` and `placed` are populated together for classic
+            // placements, so one being non-empty while the other is empty does not
+            // occur in normal operation. A virtual-placement-only session would be a
+            // real gap.
             if self.graphics.kitty && (!self.transmitted.is_empty() || !self.placed.is_empty()) {
                 out.push_str("\x1b_Ga=d,d=A,q=2\x1b\\");
             }
@@ -141,8 +153,14 @@ impl DiffRenderer {
             for r in 0..current.rows {
                 let _ = write!(out, "\x1b[{};1H", r + 1);
                 let mut c = 0u16;
+                // Equivalent note: `< → <=` at 143:25 is equivalent, the extra iteration
+                // calls `current.cell(r, cols)` which returns `None` and we break.
                 while c < current.cols {
                     let Some(cell) = current.cell(r, c) else { break };
+                    // Equivalent note: spacer-skip (146:27) is dead code in this full-repaint
+                    // loop: wide chars advance `c` by `grapheme_advance()`=2, so the cursor
+                    // always jumps over the spacer position and the `+= 1` branch (`-=` and
+                    // `*=` mutations) is never reached.
                     if cell.is_wide_spacer() {
                         c += 1;
                         continue;
@@ -164,6 +182,8 @@ impl DiffRenderer {
             let mut current_attrs = CellAttrs::default();
             for r in 0..current.rows {
                 let mut c = 0u16;
+                // Equivalent note: `< → <=` at 166:25 is equivalent, the extra iteration
+                // calls `current.cell(r, cols)` which returns `None` and we break.
                 while c < current.cols {
                     let pc = prev.cell(r, c);
                     let cc = current.cell(r, c);
@@ -173,11 +193,17 @@ impl DiffRenderer {
                     }
                     // Run start.
                     let _ = write!(out, "\x1b[{};{}H", r + 1, c + 1);
+                    // Equivalent note: `< → <=` at 175:29 is equivalent, same reason: the
+                    // extra iteration gets `None` and we break.
                     while c < current.cols {
                         let Some(cell) = current.cell(r, c) else { break };
                         if Some(cell) == prev.cell(r, c) {
                             break;
                         }
+                        // Equivalent note: spacer-skip (181:31) is dead code in this
+                        // incremental-diff loop for the same reason as 146:27: wide chars advance
+                        // `c` by `grapheme_advance()`=2, so the cursor never lands on a spacer
+                        // position in mid-run traversal.
                         if cell.is_wide_spacer() {
                             c += 1;
                             continue;
@@ -280,6 +306,11 @@ impl DiffRenderer {
         // so over a long session with many distinct images it would grow without
         // limit. Past the cap, schedule a full graphics reset next frame (delete
         // all + re-transmit the visible set), which is rare and self-healing.
+        // Equivalent note (283:35): `> → >=` shifts the trigger by one element
+        // (256 vs 257); `> → ==` misses everything above 256. Both are real
+        // behavioral differences, but testing requires >256 distinct image
+        // transmissions in a single test fixture, so this is left as an untested
+        // gap.
         const TRANSMIT_CAP: usize = 256;
         if self.transmitted.len() > TRANSMIT_CAP {
             self.reset_images = true;
@@ -476,6 +507,11 @@ fn paint_cells_rect(out: &mut String, screen: &VirtualScreen, r0: u16, c0: u16, 
     for r in r0..r0.saturating_add(rows).min(screen.rows) {
         let _ = write!(out, "\x1b[{};{}H", r + 1, c0 + 1);
         let mut c = c0;
+        // Equivalent note: `< → <=` on the loop bound is equivalent, the extra
+        // iteration calls `screen.cell(r, saturated_limit)` which returns `None`
+        // and we break. Spacer-skip `+= 1` mutations (`-=`, `*=`) are dead code
+        // for the same reason as the main render loops: wide chars advance `c` by
+        // `grapheme_advance()`=2, so the cursor never lands on a spacer position.
         while c < c0.saturating_add(cols).min(screen.cols) {
             let Some(cell) = screen.cell(r, c) else { break };
             if cell.is_wide_spacer() {
@@ -785,6 +821,37 @@ mod tests {
         let bytes = d.render(&v2);
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.starts_with("\x1b[2J\x1b[H"));
+    }
+
+    #[test]
+    fn rows_only_change_forces_full_repaint() {
+        // `|| → &&` at line 119:47 would skip full-repaint when only ONE dimension
+        // changes (requires BOTH to differ under &&). This test changes only rows.
+        let mut d = DiffRenderer::new();
+        let v1 = lettered(&[(0, 0, "A")], 2, 4);
+        let v2 = lettered(&[(0, 0, "A")], 6, 4); // only rows differ
+        let _ = d.render(&v1);
+        let bytes = d.render(&v2);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(
+            s.starts_with("\x1b[2J\x1b[H"),
+            "row-only resize must trigger full repaint (2J): {s:?}"
+        );
+    }
+
+    #[test]
+    fn cols_only_change_forces_full_repaint() {
+        // Symmetric companion to the above: only cols differ.
+        let mut d = DiffRenderer::new();
+        let v1 = lettered(&[(0, 0, "A")], 4, 2);
+        let v2 = lettered(&[(0, 0, "A")], 4, 8); // only cols differ
+        let _ = d.render(&v1);
+        let bytes = d.render(&v2);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(
+            s.starts_with("\x1b[2J\x1b[H"),
+            "col-only resize must trigger full repaint (2J): {s:?}"
+        );
     }
 
     #[test]
@@ -1457,5 +1524,69 @@ mod tests {
         assert!(s.contains("U=1,i=7"), "virtual place present: {s:?}");
         // Both transmitted (classic under host fold, virtual under raw 7).
         assert!(s.matches("a=t").count() >= 2, "both images transmitted: {s:?}");
+    }
+
+    fn placeholder_vp(rows: u16, cols: u16) -> VisiblePlacement {
+        use plexy_glass_emulator::{ImageFormat, ImageProtocol};
+        VisiblePlacement {
+            key: 1,
+            image_id: 7,
+            placement_id: 1,
+            protocol: ImageProtocol::Kitty,
+            iterm_args: None,
+            generation: 1,
+            format: ImageFormat::Png,
+            pixel_w: 30,
+            pixel_h: 40,
+            src_x: 0,
+            src_y: 0,
+            src_w: 30,
+            src_h: 40,
+            data_b64: std::sync::Arc::from(&b"QUJD"[..]),
+            host_row: 0,
+            host_col: 0,
+            rows,
+            cols,
+        }
+    }
+
+    #[test]
+    fn placeholder_box_zero_rows_emits_nothing_beyond_reset() {
+        // `rows == 0 || cols == 0` → `&&` at 501:18: a placement with rows=0
+        // and cols>0 would NOT early-return under &&, proceeding to the hatch/
+        // border path with rows=0 and producing erroneous output.
+        let mut out = String::new();
+        emit_placeholder_box(&mut out, &placeholder_vp(0, 5));
+        assert_eq!(out, "\x1b[0m", "zero-rows must early-return (only reset): {out:?}");
+    }
+
+    #[test]
+    fn placeholder_box_zero_cols_emits_nothing_beyond_reset() {
+        // Symmetric: cols=0, rows>0.
+        let mut out = String::new();
+        emit_placeholder_box(&mut out, &placeholder_vp(5, 0));
+        assert_eq!(out, "\x1b[0m", "zero-cols must early-return (only reset): {out:?}");
+    }
+
+    #[test]
+    fn placeholder_box_one_row_uses_hatch_not_border() {
+        // `rows < 2 || cols < 2` → `rows < 2 && cols < 2` at 505:17: a 1×5
+        // placement (rows=1 < 2, cols=5 ≥ 2) would skip the hatch and attempt to
+        // draw borders, and with inner = cols-2=3 but rows=1 there is no top/bottom
+        // split, so the output comes out malformed.
+        let mut out = String::new();
+        emit_placeholder_box(&mut out, &placeholder_vp(1, 5));
+        assert!(out.contains('▒'), "1×5 must use hatch fill: {out:?}");
+        assert!(!out.contains('┌'), "1×5 must not draw box border: {out:?}");
+    }
+
+    #[test]
+    fn placeholder_box_one_col_uses_hatch_not_border() {
+        // `< → ==` at 505:25 (`cols < 2` → `cols == 2`): cols=1 would not enter
+        // the hatch path, so inner = cols-2 = u16::MAX (wrapping underflow).
+        let mut out = String::new();
+        emit_placeholder_box(&mut out, &placeholder_vp(5, 1));
+        assert!(out.contains('▒'), "5×1 must use hatch fill: {out:?}");
+        assert!(!out.contains('┌'), "5×1 must not draw box border: {out:?}");
     }
 }

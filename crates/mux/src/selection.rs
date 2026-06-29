@@ -555,4 +555,138 @@ mod tests {
         let txt = super::screen_text(&screen);
         assert_eq!(txt, "content");
     }
+
+    // ── mutation-coverage tests ──────────────────────────────────────
+
+    #[test]
+    fn cells_walk_stops_at_end_col_not_max_cols() {
+        // end=(1,1) with max_cols=5: row 0 must yield all 5 cols (0-4), row 1
+        // only up to end.1=1.
+        // `== → !=` mutation at 83:33 inverts on_end_row: row 0 would use end.1=1
+        // (stopping early) and row 1 would use max_cols-1=4 (running long).
+        let mut s = Selection::start(PaneId(0), 0, 0);
+        s.extend(1, 1, Rect::new(0, 0, 5, 5));
+        let cells: Vec<_> = s.cells(5).collect();
+        assert_eq!(cells, vec![
+            (0, 0), (0, 1), (0, 2), (0, 3), (0, 4),
+            (1, 0), (1, 1),
+        ], "row 0 must run to max_cols-1, row 1 only to end.1");
+    }
+
+    #[test]
+    fn word_at_spacer_click_adjusts_leftward_not_rightward() {
+        // "好 ": col 0 is '好' (wide), col 1 is spacer, col 2 is space.
+        // A click on the spacer (col 1) must adjust LEFT to col 0, not right.
+        // `- → +` at line 165:50: col+1=2 (space), is_word=false → None instead of Some("好").
+        let mut emu = Emulator::new(1, 10);
+        emu.advance("好 ".as_bytes());
+        let s = emu.screen();
+        let sel = word_at(PaneId(0), s, 1, 0, 0, 1)
+            .expect("spacer click must find the wide char to its left");
+        assert_eq!(extract_text(&sel, s, 1, 0), "好",
+            "clicking 好's spacer must select 好, not jump right to space");
+
+        // Equivalent note: `col > 0 → col >= 0` at line 165:22 is equivalent because
+        // wide-spacer cells never appear at column 0 (a spacer is always preceded by
+        // its grapheme cell), so is_spacer(0) is always false and the extra `>= 0`
+        // case does not change the branch taken.
+    }
+
+    #[test]
+    fn word_at_left_walk_crosses_wide_char_spacer() {
+        // "ab中cd ": clicking 'd' (col 5) requires the left-walk to pass through
+        // 中's spacer (col 3) to reach 中's grapheme (col 2), then continue to a,b.
+        // `> → <` at line 173:37: `candidate < 0` always false for u16 → spacer
+        //   skipped, is_word(spacer)=false → walk stops, gives only "cd".
+        // `- → /` at line 173:77: grapheme = candidate/1 = candidate (the spacer cell
+        //   itself), is_word(spacer)=false → walk stops, gives only "cd".
+        // (The `- → +` variant at 173:77 causes an infinite loop → caught as timeout.)
+        //
+        // Equivalent note: `> → >=` at line 173:37 is equivalent because `candidate >= 0`
+        // is always true for u16; but when candidate=0, is_spacer(0) is always false
+        // (spacers never at col 0), so the `candidate-1` underflow branch is never taken.
+        let mut emu = Emulator::new(5, 20);
+        emu.advance("ab中cd ".as_bytes());
+        let s = emu.screen();
+        let sel = word_at(PaneId(0), s, 5, 0, 0, 5).expect("word at 'd'");
+        assert_eq!(extract_text(&sel, s, 5, 0), "ab中cd",
+            "left-walk from 'd' must cross 中's spacer to include 中,b,a");
+    }
+
+    #[test]
+    fn word_at_end_init_requires_spacer_check_not_just_bounds() {
+        // "abc def": clicking 'c' (col 2) should yield "abc", not "abc def".
+        // `&& → ||` at line 181:37: `col+1<cols` is true, so the spacer branch fires
+        //   unconditionally → end=3 (the space), walk continues and picks up "def".
+        //
+        // Equivalent note: `< → <=` at line 181:30 is equivalent: `col+1 <= cols`
+        //   adds one extra case (col+1=cols) where is_spacer(cols)=None→false → else
+        //   branch, same result. `+ → *` at line 181:26 changes `col+1<cols` to
+        //   `col*1<cols`=`col<cols`, and the extra case (col=cols-1) still results in
+        //   is_spacer(cols)=false → else, no difference in practice.
+        let screen = screen_from(1, 10, &["abc def"]);
+        let sel = word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 2)
+            .expect("on 'c'");
+        assert_eq!(
+            extract_text(&sel, &screen, screen.active.num_rows(), 0),
+            "abc",
+            "end init must require both bounds AND spacer; || extends into the space"
+        );
+    }
+
+    #[test]
+    fn word_at_wide_char_at_col_zero_includes_spacer_in_end() {
+        // "中abc ": 中 at col 0 (wide), spacer at col 1.
+        // Clicking '中' directly at col 0 must set end=col+1=1 (to include the spacer),
+        // then walk forward to include 'a','b','c'.
+        // `+ → -` at line 181:65: end = col-1 = 0-1 = u16 underflow → panic / wrong walk.
+        let mut emu = Emulator::new(1, 10);
+        emu.advance("中abc ".as_bytes());
+        let s = emu.screen();
+        let sel = word_at(PaneId(0), s, 1, 0, 0, 0).expect("word at col 0");
+        assert_eq!(extract_text(&sel, s, 1, 0), "中abc",
+            "clicking wide char at col 0 must include its spacer in the selection");
+
+        // Equivalent notes for the right-walk loop (lines 182-188):
+        // - 182:19 `< → <=`: extra iteration when end=cols-1; candidate=cols,
+        //   is_word(cols)=None→false, so break, same result. EQUIVALENT.
+        // - 182:15 `+ → *`: `end*1<cols` = `end<cols`, one more iteration,
+        //   is_word(cols)=false so break, same result. EQUIVALENT.
+        // - 185:36 `< → <=`: same analysis, an extra OOB iteration then break. EQUIVALENT.
+        // - 185:32 `+ → -`: changes bounds to `candidate-1<cols` (always true for
+        //   valid candidate>=1); is_spacer still checked at candidate+1, OOB returns
+        //   false so we take the else branch, same result. EQUIVALENT.
+        // - 185:32 `+ → *`: `candidate*1<cols` = `candidate<cols`, same argument. EQUIVALENT.
+        // (185:83 `+ → -` in the true branch causes an infinite loop, caught as timeout.)
+    }
+
+    #[test]
+    fn extract_text_starts_at_anchor_col_not_row_start() {
+        // Selection from col 6 ("world") to col 10 ('d') in "hello world".
+        // 256:38 `== → !=`: row_start=0 on the start row, so it emits "hello world".
+        // 261:17 `&& → ||`: `row_start>0` fires unconditionally, backs up to col 5
+        //   (space) and emits " world" (with leading space).
+        //
+        // Equivalent notes:
+        // - 260:30 `> → >=`: `row_start >= 0` always true for u16; but is_wide_spacer(0)
+        //   is false (spacers never at col 0), so the `row_start -= 1` path is never
+        //   taken, same result. EQUIVALENT.
+        // - 252:32 `< → <=`: when visible_idx=visible_total, proj.to_unified(OOB) means
+        //   row_at returns None, same as the `false.then(...)` branch. In practice,
+        //   selection rows are always < pane_rows so visible_idx never reaches
+        //   visible_total. EQUIVALENT.
+        let screen = screen_from(1, 15, &["hello world"]);
+        let sel = Selection { source_pane: PaneId(0), anchor: (0, 6), head: (0, 10) };
+        assert_eq!(
+            extract_text(&sel, &screen, screen.active.num_rows(), 0),
+            "world",
+            "extract_text must start at anchor col, not back up for non-spacer"
+        );
+    }
+
+    // Equivalent note: `< → <=` at line 128:10 (viewport_content_row) is equivalent:
+    // when idx=visible_total, proj.to_unified(visible_total) yields an OOB unified index
+    // and row_at returns None, the same result as `false.then(...)`. Selection rows are
+    // clamped to [0, pane_rows), so visible_idx never actually reaches visible_total
+    // in practice.
 }
