@@ -277,3 +277,28 @@ fn conformance_insert_delete_line() {
             rows_text: &[(0, "AAAA"), (1, "BBBB"), (2, "CCCC"), (3, "DDDD")], ..BASE },
     ]);
 }
+
+#[test]
+fn conformance_erase_clears_whole_wide_char() {
+    // Erasing part of a wide grapheme erases the WHOLE cell: a clear that splits a
+    // wide grapheme from its spacer blanks the orphaned half too, keeping the row
+    // well-formed (no dangling spacer, no half-wide grapheme).
+    check(&[
+        // ECH on the grapheme cell clears its now-orphaned spacer. "好x" (好@0-1,
+        // x@2), cursor col 0, ECH 1 → both halves of 好 blank, x survives.
+        Case { name: "ech_clears_orphan_spacer", rows: 1, cols: 4, input: "好x\x1b[1;1H\x1b[X".as_bytes(),
+            cursor: Some((0, 0)),
+            cells: &[(0, 0, Expect::Blank), (0, 1, Expect::Blank), (0, 2, Expect::Text("x"))], ..BASE },
+        // ECH on the SPACER (cursor parked on the right half) clears the orphaned
+        // grapheme too. "好x", cursor col 1, ECH 1.
+        Case { name: "ech_clears_orphan_grapheme", rows: 1, cols: 4, input: "好x\x1b[1;2H\x1b[X".as_bytes(),
+            cursor: Some((0, 1)),
+            cells: &[(0, 0, Expect::Blank), (0, 1, Expect::Blank), (0, 2, Expect::Text("x"))], ..BASE },
+        // EL 1 (start→cursor inclusive) ending ON a wide grapheme clears its spacer
+        // too. "x好" (x@0, 好@1-2), cursor col 1, CSI 1K erases cols 0..=1 → the
+        // spacer at col 2 is orphaned → blanked.
+        Case { name: "el1_clears_orphan_spacer", rows: 1, cols: 4, input: "x好\x1b[1;2H\x1b[1K".as_bytes(),
+            cursor: Some((0, 1)),
+            cells: &[(0, 0, Expect::Blank), (0, 1, Expect::Blank), (0, 2, Expect::Blank)], ..BASE },
+    ]);
+}

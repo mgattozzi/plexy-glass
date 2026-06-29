@@ -281,6 +281,12 @@ impl Grid {
     /// Deliberately leaves `Row.mark` alone: partial erases (EL, ED 0/1)
     /// blank cells on a line without unmaking the command block whose
     /// boundary that line is. Only a full-grid [`Grid::clear`] wipes marks.
+    ///
+    /// Erasing part of a wide grapheme erases the whole cell: if the clear range
+    /// splits a wide grapheme from its spacer at either boundary, the orphaned
+    /// half is blanked too (via `normalize_wide_pairs`) so the row stays
+    /// well-formed, no dangling spacer and no half-wide grapheme. This is what
+    /// the erase ops (ED/EL/ECH) route through.
     pub fn clear_rect(&mut self, start_row: u16, start_col: u16, end_row: u16, end_col: u16) {
         let end_row = end_row.min(self.num_rows().saturating_sub(1));
         let end_col = end_col.min(self.cols.saturating_sub(1));
@@ -297,6 +303,9 @@ impl Grid {
                         *cell = Cell::default();
                     }
                 }
+                // Clearing the spacer orphans its grapheme (and vice-versa) at the
+                // range boundaries; blank the orphaned half so the row is well-formed.
+                normalize_wide_pairs(&mut row.cells);
             }
         }
     }
