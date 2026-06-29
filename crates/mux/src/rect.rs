@@ -40,8 +40,20 @@ impl Rect {
         let ratio = ratio.clamp(0.1, 0.9);
         match dir {
             SplitDir::Horizontal => {
+                if self.rows <= 1 {
+                    // Too small to hold two children + a separator. The first
+                    // child takes the row(s); the second is EMPTY, positioned at
+                    // the boundary so it carries no cells. Crucially we do NOT
+                    // invent a usable row here, a 0-row viewport must yield
+                    // 0-row children, never a phantom 1-row rect that would sit
+                    // outside the parent and desync rect_of from pane_at_coord.
+                    let first = Rect::new(self.row, self.col, self.rows, self.cols);
+                    let second =
+                        Rect::new(self.row.saturating_add(self.rows), self.col, 0, self.cols);
+                    return (first, second);
+                }
                 // Children stack top/bottom; one row reserved for the separator.
-                let usable = self.rows.saturating_sub(1).max(1);
+                let usable = self.rows - 1;
                 let first_rows = ((usable as f32) * ratio).round() as u16;
                 let first_rows = first_rows.clamp(1, usable.saturating_sub(1).max(1));
                 let second_rows = usable.saturating_sub(first_rows);
@@ -55,8 +67,17 @@ impl Rect {
                 (first, second)
             }
             SplitDir::Vertical => {
+                if self.cols <= 1 {
+                    // Mirror of the Horizontal degenerate case: too narrow for two
+                    // children + a separator. First takes the col(s); second is
+                    // empty at the boundary. No invented column → no phantom rect.
+                    let first = Rect::new(self.row, self.col, self.rows, self.cols);
+                    let second =
+                        Rect::new(self.row, self.col.saturating_add(self.cols), self.rows, 0);
+                    return (first, second);
+                }
                 // Children sit side by side; one col reserved for the separator.
-                let usable = self.cols.saturating_sub(1).max(1);
+                let usable = self.cols - 1;
                 let first_cols = ((usable as f32) * ratio).round() as u16;
                 let first_cols = first_cols.clamp(1, usable.saturating_sub(1).max(1));
                 let second_cols = usable.saturating_sub(first_cols);
