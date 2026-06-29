@@ -113,13 +113,24 @@ your checkout is untouched. Results land in `mutants.out/` (gitignored):
 `caught / (caught + missed)`.
 
 Triaging a surviving (missed) mutant:
-- **Real gap** → add the smallest test that fails on the mutant and passes on the
-  real code (a unit test, or a `hegel` property test for invariant-rich modules);
-  re-run that file to confirm the mutant is now caught.
-- **Equivalent / untestable** → annotate the item with
-  `#[cfg_attr(test, mutants::skip)] // reason: …`. The `cfg_attr(test, …)` keeps
-  `mutants` a dev-dependency (it compiles out of release builds). Never skip a
-  mutant just to raise the number.
+- **Real gap**: add the smallest test that fails on the mutant and passes on
+  the real code (a unit test, or a `hegel` property test for invariant-rich
+  modules), then re-run that file to confirm the mutant is now caught.
+- **Equivalent / untestable**: two options, depending on how tightly killable
+  and equivalent mutants are mixed in the function:
+  - **(a) Whole-item skip**: if the *entire* function or item has only
+    equivalent mutants (or the function is pure glue with no distinguishable
+    observable behavior), annotate it with
+    `#[cfg_attr(test, mutants::skip)] // reason: …`. The `cfg_attr(test, …)`
+    keeps `mutants` a dev-dependency and compiles out of release builds.
+  - **(b) In-source note**: if the function mixes killable and equivalent
+    mutants (the common case in the emulator), leave the equivalent survivor
+    counted as missed and add an `// Equivalent note: <reason>` comment at the
+    mutation site explaining *why* the surviving mutation cannot change
+    observable behavior. This is more honest than suppressing the whole
+    function's measurement with `mutants::skip`: the kill-rate stays accurate
+    and the comment is auditable.
+  Never skip a mutant just to raise the kill-rate number.
 
 Large modules (`emulator/src/screen.rs`, `mux/src/compositor.rs`) are slow to
 mutate whole, so scope them by function with `--re '<fn-name-regex>'`.
@@ -144,7 +155,7 @@ no `mutants::skip` annotations, so the skipped column is 0 for all modules.
 | `parser.rs` | 45 | 3 | 0 | 94% |
 | `reflow.rs` | 71 | 3 | 0 | 96% |
 | `grid.rs` | 90 | 2 | 0 | 98% |
-| `graphics.rs` | 172 | 8 | 0 | 96% |
+| `graphics.rs` | 172 | 7 | 0 | 96% |
 
 Note that `reflow.rs` and `graphics.rs` each have additional timeout/unviable
 mutants (caught by test-timeout) that aren't reflected in the caught or missed

@@ -290,11 +290,17 @@ pub fn sixel_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
             }
             b'#' | b'"' => {
                 // Skip the parameter run (digits + `;`).
-                // Equivalent note: deleting this arm or mutating the while loop condition
-                // (lines 291-296) leaves digits (0x30-0x39) and `;` (0x3b) to be handled
-                // by `_ => {}` one by one, and all are below the data range 0x3f..=0x7e, so
-                // they count as nothing. The arm just skips them faster; net x/bands
-                // count is identical, so all mutations here are equivalent.
+                // Equivalent note (genuinely-equivalent survivors only):
+                // - Deleting this arm: digits (0x30-0x39) and `;` (0x3b) fall through to
+                //   `_ => {}` one by one, and all are below the data range 0x3f..=0x7e so
+                //   x/bands are unchanged; the arm just skips them faster.
+                // - `||` → `&&` on the inner condition: the conjunction `is_digit && == b';'`
+                //   is always false (no byte can be both), so the loop never runs; digits and
+                //   `;` fall through to `_ => {}` exactly as above, same net x/bands.
+                // - `<` → `==` or `<` → `>` on the range guard: loop never runs; same.
+                // NOT equivalent: `== b';'` → `!= b';'`, which turns data bytes (`~` etc.)
+                // into loop members, consuming them before they can advance x/bands.
+                // That mutation is killed by the `sixel_dims_color_register_then_data` test.
                 i += 1;
                 while i < payload.len() && (payload[i].is_ascii_digit() || payload[i] == b';') {
                     i += 1;
@@ -465,6 +471,17 @@ mod tests {
         assert_eq!(sixel_dimensions(b"!5~"), Some((5, 6)));
         // No data at all.
         assert_eq!(sixel_dimensions(b"#0;2;0;0;0"), None);
+    }
+
+    #[test]
+    fn sixel_dims_color_register_then_data() {
+        // `#0~~~`: color-select register 0 (no semicolons) immediately followed by
+        // three data bytes. This pins the `payload[i] == b';'` branch so the
+        // `==`→`!=` mutant (which would also consume `~` in the skip loop,
+        // returning None instead of Some) is caught.
+        assert_eq!(sixel_dimensions(b"#0~~~"), Some((3, 6)));
+        // With a semicolon-separated color spec the data must still be found.
+        assert_eq!(sixel_dimensions(b"#0;2;0;0;0~~~"), Some((3, 6)));
     }
 
     #[test]
