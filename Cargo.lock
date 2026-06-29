@@ -1200,6 +1200,7 @@ name = "plexy-glass-keys"
 version = "0.1.0"
 dependencies = [
  "bolero",
+ "hegeltest",
  "plexy-glass-config",
  "plexy-glass-mux",
  "smol_str",
