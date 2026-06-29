@@ -179,12 +179,15 @@ total is **93.2% lines**.
 ### Mutation baseline — mux
 
 Measured 2026-06-29, `cargo mutants --timeout 20 -p plexy-glass-mux --file crates/mux/src/<file>`.
-Kill-rate = caught / (caught + missed). After this pass we added targeted
-tests for the real gaps; the remaining missed mutants are documented as
-equivalent in source (`// Equivalent note:`). Note that the counts are
-as-measured before the new tests were added.
+Kill-rate = caught / (caught + missed). Counts are as-measured **after** this
+pass's tests were added: the real gaps were killed with targeted tests, and
+every remaining missed mutant is documented in source with
+`// Equivalent note:`, mostly genuine equivalents plus a few acknowledged
+coverage gaps left for on-demand follow-up (still counted as missed, never
+hidden). No `#[mutants::skip]` is used anywhere, so the skipped count is 0 for
+every module.
 
-| Module | caught | missed (all equiv) | kill-rate |
+| Module | caught | missed | kill-rate |
 |---|---|---|---|
 | `layout.rs` | 125 | 10 | 93% |
 | `mouse.rs` | 60 | 1 | 98% |
@@ -199,12 +202,12 @@ as-measured before the new tests were added.
 | `compositor.rs` | 99 | 16 | 86% |
 | `blocks.rs` | 189 | 32 | 86% |
 
-Notes: `copy_mode.rs` and `block_mode.rs` numbers are post-fix: modifier-guard
-mutants previously mislabeled "equivalent" were killed by targeted tests (the
-mislabeling leaned on a coverage argument, not a genuine equivalence argument).
-`copy_mode.rs` rose from 80% to 98%; `block_mode.rs` rose from 76% to 95%. All
-remaining missed mutants in both files are genuine equivalents documented in
-source with `// Equivalent note:`.
+Note that the `copy_mode.rs` and `block_mode.rs` numbers are post-fix:
+modifier-guard mutants previously mislabeled "equivalent" were killed with
+targeted tests (the mislabeling rested on a coverage argument, not a genuine
+equivalence argument). `copy_mode.rs` rose from 59% to 98% and `block_mode.rs`
+rose from 65% to 95%. All remaining missed mutants in both files are genuine
+equivalents documented in source with `// Equivalent note:`.
 
 `copy_mode.rs` remaining 4 equivalents: `Release`-arm deletion at `96:13` (same
 value as fallthrough), `> → >=` at `100:26` (wheel delta==0 is a no-op either
@@ -223,8 +226,11 @@ true and fires the return anyway; empty matches: `.find()` on empty returns
 is guaranteed absent from matches by the `contains` guard, so `<=` finds the
 same element).
 
-`diff.rs` and other survivors are arithmetic-offset equivalents (viewport geometry clamped or
-overwritten). All survivors are documented in source with `// Equivalent note:`.
+`diff.rs` survivors are a mix: most are arithmetic-offset equivalents (viewport
+geometry clamped or overwritten), but a few are real coverage gaps (e.g. the
+Kitty image-reset / virtual-placement paths that no current test exercises).
+Those are labeled as gaps, not equivalents, and stay counted as missed. All
+survivors are documented in source with `// Equivalent note:`.
 
 ### Lowest-covered modules (later-phase targets)
 
