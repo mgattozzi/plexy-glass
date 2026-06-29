@@ -256,9 +256,12 @@ fn conformance_insert_delete_erase() {
         // ECH (2): erase 2 at cursor, no shift: "ABCDEFGH" cursor col2 → "AB  EFGH".
         Case { name: "ech_2", rows: 1, cols: 8, input: b"ABCDEFGH\x1b[1;3H\x1b[2X",
             cursor: Some((0, 2)), rows_text: &[(0, "AB  EFGH")], ..BASE },
-        // ICH that would split a wide char blanks the orphan (well-formed row).
-        Case { name: "ich_does_not_split_wide", rows: 1, cols: 4, input: "好x\x1b[1;1H\x1b[@".as_bytes(),
-            cursor: Some((0, 0)), cells: &[(0, 0, Expect::Blank)], ..BASE },
+        // ICH inserted BETWEEN a wide char and its spacer would SPLIT 好. The
+        // orphaned grapheme (col 0) and orphaned spacer are both blanked so the
+        // row stays well-formed (no half-wide cell), while 'x' survives at col 3.
+        // (Cursor at col 1 = the spacer; ICH does not move it.)
+        Case { name: "ich_does_not_split_wide", rows: 1, cols: 4, input: "好x\x1b[1;2H\x1b[@".as_bytes(),
+            cursor: Some((0, 1)), cells: &[(0, 0, Expect::Blank), (0, 3, Expect::Text("x"))], ..BASE },
     ]);
 }
 
