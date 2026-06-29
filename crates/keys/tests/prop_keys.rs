@@ -35,11 +35,13 @@ fn draw_mods_nonempty(tc: &TestCase) -> Modifiers {
     Modifiers::from_bits_truncate(bits)
 }
 
-/// Returns `(event, is_codepoint_key)`. Codepoint keys need non-empty mods to
-/// take the 27-form; functional keys round-trip with any mods.
+/// Draw a `KeyEvent` from the round-trippable subset: codepoint keys (Char/Enter/
+/// Tab/Backspace/Escape, which need non-empty mods to take the 27-form) and
+/// functional keys (Arrow/Function/Home/End/Insert/Delete/PageUp/PageDown, any
+/// mods, legacy form).
 fn draw_event(tc: &TestCase) -> KeyEvent {
     let mods = draw_mods_nonempty(tc);
-    let key = match tc.draw(gs::integers::<u8>().min_value(0).max_value(12)) {
+    let key = match tc.draw(gs::integers::<u8>().min_value(0).max_value(13)) {
         // codepoint keys (lowercase ASCII letter avoids uppercase + control codepoints)
         0 => Key::Char(tc.draw(gs::integers::<u8>().min_value(b'a').max_value(b'z')) as char),
         1 => Key::Char(tc.draw(gs::integers::<u8>().min_value(b'0').max_value(b'9')) as char),
@@ -54,7 +56,8 @@ fn draw_event(tc: &TestCase) -> KeyEvent {
         9 => Key::End,
         10 => Key::Insert,
         11 => Key::Delete,
-        _ => Key::PageUp,
+        12 => Key::PageUp,
+        _ => Key::PageDown,
     };
     KeyEvent::new(key, mods) // kind=Press, text/shifted/base_layout=None
 }

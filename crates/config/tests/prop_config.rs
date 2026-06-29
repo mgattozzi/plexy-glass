@@ -18,9 +18,11 @@ fn parse_config_never_panics(tc: TestCase) {
     let _ = parse_config(&src); // must not panic regardless of Ok/Err
 }
 
-/// Plausible-KDL totality: even well-formed-looking documents with random node
-/// names/args don't panic the decoder. (`gs::text()` is mostly garbage; this
-/// reaches the decode paths past the KDL syntax gate more often.)
+/// Plausible-KDL totality: a document mixing a random node line with a valid
+/// `welcome` line never panics the decoder. (`gs::text()` alone is mostly garbage
+/// that fails at the KDL syntax gate; the appended `welcome #{b}` line guarantees
+/// at least one decodable node, while the random first node adds malformed-input
+/// coverage. Either way the decoder must return Ok/Err, never panic.)
 #[hegel::test(test_cases = 500)]
 fn parse_config_plausible_kdl_never_panics(tc: TestCase) {
     let node = tc.draw(gs::text());
