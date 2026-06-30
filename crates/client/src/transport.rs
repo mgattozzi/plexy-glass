@@ -54,10 +54,21 @@ pub async fn connect_or_spawn(socket: &Path) -> Result<UnixStream, ClientError> 
 fn spawn_daemon() -> Result<(), ClientError> {
     let exe = std::env::current_exe().map_err(ClientError::Io)?;
     let mut cmd = std::process::Command::new(exe);
+    let stderr = plexy_glass_daemon::RuntimePaths::for_current_user()
+        .ok()
+        .and_then(|p| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&p.log_file)
+                .ok()
+        })
+        .map(std::process::Stdio::from)
+        .unwrap_or_else(std::process::Stdio::null);
     cmd.arg("daemon")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(stderr);
     // SAFETY: setsid is async-signal-safe and called only in the child between
     // fork and exec. We do not touch any shared state from the closure.
     unsafe {

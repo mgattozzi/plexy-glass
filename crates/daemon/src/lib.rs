@@ -114,6 +114,7 @@ pub mod paste_buffers;
 pub mod paths;
 pub mod pipe;
 pub mod popup;
+mod panic_hook;
 pub mod registry;
 pub mod renderer;
 pub mod session;
@@ -155,6 +156,9 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
         // binary in tests), keep using it.
         let _ = tracing_subscriber::registry().with(layer).try_init();
     }
+
+    // Bridge panics into the tracing log (daemon stderr is /dev/null).
+    panic_hook::install_panic_logging();
 
     let (config, cfg_err) = plexy_glass_config::load_or_default();
     if let Some(e) = &cfg_err {
