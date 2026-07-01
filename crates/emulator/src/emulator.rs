@@ -254,4 +254,64 @@ mod tests {
         assert!(e.take_color_queries().is_empty());
     }
 
+    #[test]
+    fn nel_moves_to_next_row_with_carriage_return() {
+        // NEL (ESC E) = CR + IND: row advances by one, column resets to 0.
+        // Bug: NEL fell through to the `_ => trace` no-op, so "BBBx" kept
+        // appending onto row 0 instead of starting a fresh row 1.
+        let mut e = Emulator::new(4, 10);
+        e.advance(b"\x1b[1;1HAAA\x1bEBBBx");
+        e.parser.flush(&mut e.screen);
+        let s = e.screen();
+        assert_eq!(s.active.get_cell(0, 0).unwrap().grapheme.as_str(), "A");
+        assert_eq!(s.active.get_cell(0, 1).unwrap().grapheme.as_str(), "A");
+        assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "A");
+        assert!(
+            s.active.get_cell(0, 3).unwrap().is_blank(),
+            "row 0 must not carry BBBx after NEL"
+        );
+        assert_eq!(s.active.get_cell(1, 0).unwrap().grapheme.as_str(), "B");
+        assert_eq!(s.active.get_cell(1, 1).unwrap().grapheme.as_str(), "B");
+        assert_eq!(s.active.get_cell(1, 2).unwrap().grapheme.as_str(), "B");
+        assert_eq!(s.active.get_cell(1, 3).unwrap().grapheme.as_str(), "x");
+    }
+
+    #[test]
+    fn ind_preserves_column_no_carriage_return() {
+        // IND (ESC D) = line feed without carriage return: row advances by one,
+        // column is preserved (unlike NEL). Bug: IND fell through to the
+        // `_ => trace` no-op, so "BBBx" kept appending onto row 0.
+        let mut e = Emulator::new(4, 10);
+        e.advance(b"\x1b[1;1HAAA\x1bDBBBx");
+        e.parser.flush(&mut e.screen);
+        let s = e.screen();
+        assert_eq!(s.active.get_cell(0, 0).unwrap().grapheme.as_str(), "A");
+        assert_eq!(s.active.get_cell(0, 1).unwrap().grapheme.as_str(), "A");
+        assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "A");
+        assert!(
+            s.active.get_cell(0, 3).unwrap().is_blank(),
+            "row 0 must not carry BBBx after IND"
+        );
+        assert_eq!(s.active.get_cell(1, 3).unwrap().grapheme.as_str(), "B");
+        assert_eq!(s.active.get_cell(1, 4).unwrap().grapheme.as_str(), "B");
+        assert_eq!(s.active.get_cell(1, 5).unwrap().grapheme.as_str(), "B");
+        assert_eq!(s.active.get_cell(1, 6).unwrap().grapheme.as_str(), "x");
+    }
+
+    #[test]
+    fn ind_at_bottom_margin_scrolls_like_lf() {
+        // IND at the bottom of the (default, full-screen) scroll region must
+        // scroll the region up by one and retire the top row into scrollback,
+        // exactly like LF, since IND reuses `advance_to_next_row`. Isolated from
+        // autowrap: "TOPROW" (6 chars) fits well inside a 10-col row, so the
+        // scroll can only come from the trailing ESC D.
+        let mut e = Emulator::new(2, 10);
+        e.advance(b"TOPROW\r\n\x1bD");
+        e.parser.flush(&mut e.screen);
+        assert!(
+            !e.screen().scrollback.is_empty(),
+            "IND at the bottom margin must scroll like LF, retiring the top row"
+        );
+    }
+
 }

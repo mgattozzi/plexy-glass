@@ -1400,6 +1400,20 @@ impl Screen {
                     self.cursor.up(1);
                 }
             }
+            b'D' => {
+                // IND (index): line feed without carriage return. Mirrors the
+                // LF/VT/FF C0 handler exactly (`execute_c0` 0x0A..=0x0C) so IND
+                // and LF never diverge: scroll-region-correct downward move,
+                // column preserved, pending soft-wrap cleared.
+                self.advance_to_next_row(false);
+                self.cursor.pending_wrap = false;
+            }
+            b'E' => {
+                // NEL (next line) = CR + IND.
+                self.cursor.col = 0;
+                self.advance_to_next_row(false);
+                self.cursor.pending_wrap = false;
+            }
             _ => tracing::trace!(byte, "unhandled ESC"),
         }
     }
