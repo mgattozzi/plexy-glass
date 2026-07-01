@@ -38,11 +38,24 @@ pub enum OverlayKeyResult {
 }
 
 impl WindowManager {
+    /// Install `overlay` and clear `rename_pane_target`, first dropping any
+    /// in-flight mouse gesture (selection / resize / tab / pane drag). A drag
+    /// whose press latched a gesture but whose Release has not yet arrived must
+    /// not stay latched when a modal opens: the overlay guard at the top of
+    /// `handle_mouse` swallows every mouse event (Release included), so a
+    /// still-latched pane/tab drag would let the NEXT plain click complete a
+    /// phantom swap/reorder. Mirrors `open_popup`'s reset. `open_rename_pane`
+    /// re-sets `rename_pane_target` after this returns.
+    fn set_overlay(&mut self, overlay: Overlay) {
+        self.reset_mouse_gestures();
+        self.overlay = Some(overlay);
+        self.rename_pane_target = None;
+    }
+
     /// Open a rename prompt seeded with the active window's current name.
     pub fn open_rename_window(&mut self) {
         let buf = self.active_window().name.clone();
-        self.overlay = Some(Overlay::Rename { target: RenameTarget::Window, buf });
-        self.rename_pane_target = None;
+        self.set_overlay(Overlay::Rename { target: RenameTarget::Window, buf });
     }
 
     /// Open a rename prompt for the active pane, capturing its id so a later
@@ -54,44 +67,40 @@ impl WindowManager {
             .pane(pid)
             .and_then(|p| p.name())
             .unwrap_or_default();
-        self.overlay = Some(Overlay::Rename { target: RenameTarget::Pane, buf });
+        self.set_overlay(Overlay::Rename { target: RenameTarget::Pane, buf });
         self.rename_pane_target = Some(pid);
     }
 
     /// Open the scrollable help overlay.
     pub fn open_help(&mut self) {
-        self.overlay = Some(Overlay::Help { scroll: 0 });
-        self.rename_pane_target = None;
+        self.set_overlay(Overlay::Help { scroll: 0 });
     }
 
     /// Open the one-time welcome modal (first ever attach). Any key dismisses it.
     pub fn open_welcome(&mut self) {
-        self.overlay = Some(Overlay::Welcome);
-        self.rename_pane_target = None;
+        self.set_overlay(Overlay::Welcome);
     }
 
     /// Open the command prompt. `completions` is a snapshot of live session
     /// names for Tab-completing a `switch ` argument. History is cloned from the
     /// durable list so Up/Down recall survives reopening within the session.
     pub fn open_command_prompt(&mut self, completions: Vec<String>) {
-        self.overlay = Some(Overlay::Command {
+        self.set_overlay(Overlay::Command {
             buf: String::new(),
             history: self.command_history.clone(),
             hist_idx: None,
             completions,
         });
-        self.rename_pane_target = None;
     }
 
     /// Open the session picker over a snapshot of live sessions (sorted by name,
     /// the current one marked). Selection switches via the connection layer.
     pub fn open_session_picker(&mut self, entries: Vec<PickerEntry>) {
-        self.overlay = Some(Overlay::SessionPicker {
+        self.set_overlay(Overlay::SessionPicker {
             entries,
             filter: String::new(),
             selected: 0,
         });
-        self.rename_pane_target = None;
     }
 
     /// Open the choose-tree overlay over a pre-built node snapshot (assembled by
@@ -99,30 +108,26 @@ impl WindowManager {
     /// driven by `tree::handle_tree`; cross-session effects are dispatched at the
     /// connection layer.
     pub fn open_tree(&mut self, nodes: Vec<TreeNode>) {
-        self.overlay = Some(Overlay::Tree(TreeState::new(nodes)));
-        self.rename_pane_target = None;
+        self.set_overlay(Overlay::Tree(TreeState::new(nodes)));
     }
 
     /// Open the choose-buffer overlay over a snapshot of the paste buffers.
     pub fn open_buffer_picker(&mut self, entries: Vec<BufferEntry>) {
-        self.overlay = Some(Overlay::BufferPicker(BufferPickerState { entries, selected: 0 }));
-        self.rename_pane_target = None;
+        self.set_overlay(Overlay::BufferPicker(BufferPickerState { entries, selected: 0 }));
     }
 
     /// Open the history palette over a pre-built entry snapshot (assembled by the
     /// connection layer from every live session). Driven by `history::handle_history`;
     /// the jump is dispatched at the connection layer.
     pub fn open_history(&mut self, entries: Vec<HistoryEntry>) {
-        self.overlay = Some(Overlay::History(HistoryState::new(entries)));
-        self.rename_pane_target = None;
+        self.set_overlay(Overlay::History(HistoryState::new(entries)));
     }
 
     /// Open hint mode with a pre-built `HintState` (labels assigned by the caller
     /// from the focused pane's active grid). Driven by `hint::handle_hint`; the
     /// copy/open commit is dispatched at the connection layer.
     pub fn open_hints(&mut self, state: HintState) {
-        self.overlay = Some(Overlay::Hint(state));
-        self.rename_pane_target = None;
+        self.set_overlay(Overlay::Hint(state));
     }
 
     fn close_overlay(&mut self) {

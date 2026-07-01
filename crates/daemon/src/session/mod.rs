@@ -970,17 +970,34 @@ impl Session {
         self: &Arc<Self>,
         event: plexy_glass_mux::MouseEvent,
     ) -> Result<(), DaemonError> {
-        let had_message = {
+        let (yanked, had_message) = {
             let mut manager = self.window_manager.lock().await;
-            manager.handle_mouse(event).await?;
-            // A mouse copy/drag-yank sets a transient message via the WM's sync
-            // path, which can't schedule the TTL wake; note it to schedule below.
-            manager.has_active_message()
+            // A copy-mode / drag-select yank returns its text here rather than
+            // writing the clipboard under the lock: write_clipboard can block up
+            // to 2s on a wedged helper, and the render coordinator composes every
+            // frame under this same lock, so awaiting it here would freeze the
+            // session. Other mouse actions (hyperlink open, …) may set a WM
+            // message directly, which can't schedule the TTL wake, so note it.
+            let yanked = manager.handle_mouse(event).await?;
+            (yanked, manager.has_active_message())
         };
         self.notify.notify_one();
         // Auto-dismiss any message a mouse action set, on the same ~3s timer as
         // Session-set messages (otherwise it lingers until an unrelated render).
         if had_message {
+            self.schedule_status_expiry_wake();
+        }
+        // The lock is released: now write the clipboard and set the honest
+        // message on re-lock. Mirrors the release→await→re-lock pattern the
+        // connection.rs copy-mode / block-mode yank sites use.
+        if let Some(text) = yanked {
+            let wrote = crate::osc_actions::write_clipboard(text.as_bytes()).await;
+            let (msg, sev) = crate::osc_actions::yank_status(wrote, &text, false);
+            {
+                let mut manager = self.window_manager.lock().await;
+                manager.set_status_message(msg, sev);
+            }
+            self.notify.notify_one();
             self.schedule_status_expiry_wake();
         }
         Ok(())
@@ -2039,6 +2056,62 @@ mod tests {
         assert!(
             s.window_manager.lock().await.pane_drag_roles().is_none(),
             "deregister_client must clear the stuck pane drag"
+        );
+    }
+
+    // Finding #9 (honest yank) regression: a mouse drag-select yank must write
+    // the clipboard OFF the WM lock, since write_clipboard can block up to 2s on
+    // a wedged helper and the render coordinator composes every frame under that
+    // same lock, so awaiting it under the lock would freeze the session.
+    // WindowManager::handle_mouse now BUBBLES the yanked text up (no message set
+    // under the lock); Session::handle_mouse writes off-lock and sets the honest
+    // status message on re-lock. This proves the message still lands on both the
+    // success and the honest-failure branch.
+    #[tokio::test]
+    async fn mouse_drag_yank_sets_honest_message_off_lock() {
+        use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
+        let _g = crate::test_env::isolate();
+        let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
+        let (pane, r0) = {
+            let m = s.window_manager.lock().await;
+            let vp = m.viewport();
+            let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
+            (m.active_window().pane(PaneId(0)).cloned().unwrap(), r0)
+        };
+        // Paint "hello" onto pane-local rows 1 AND 2 so the drag lands on text
+        // whether the coordinator has set a 0- or 1-row status offset (physical
+        // row r0.row+2 → pane-local {1,2} depending on pane_row_offset).
+        pane.with_screen_mut(|sc| {
+            for row in [1usize, 2] {
+                for (i, ch) in "hello".chars().enumerate() {
+                    sc.active.rows[row].cells[i].grapheme = ch.to_string().into();
+                }
+            }
+        });
+        let ev = |kind, col| MouseEvent {
+            kind,
+            button: MouseButton::Left,
+            modifiers: MouseModifiers::default(),
+            row: r0.row + 2,
+            col: r0.col + col,
+        };
+        // Press→move→release across 5 columns → a real drag-select (Δcol > 1, not
+        // a click). Session::handle_mouse awaits the off-lock clipboard write
+        // inline, so the message is set by the time the release await returns.
+        s.handle_mouse(ev(MouseKind::Press, 0)).await.unwrap();
+        s.handle_mouse(ev(MouseKind::Move, 4)).await.unwrap();
+        s.handle_mouse(ev(MouseKind::Release, 4)).await.unwrap();
+
+        let msg = s
+            .window_manager
+            .lock()
+            .await
+            .take_active_message()
+            .map(str::to_string)
+            .expect("a drag-select yank must set an honest status message");
+        assert!(
+            msg.starts_with("copied") || msg == "clipboard unavailable",
+            "message must be an honest yank_status result (success or honest failure), got: {msg:?}"
         );
     }
 

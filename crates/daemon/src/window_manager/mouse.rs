@@ -44,9 +44,20 @@ pub(super) struct ClickHistory {
 
 impl WindowManager {
     /// Dispatch one decoded mouse event through the precedence ladder
-    /// (Rule 0: modal popup, see docs/superpowers/specs/2026-06-09-popup-panes-design.md;
-    /// then docs/superpowers/specs/2026-05-22-full-mouse-design.md §6).
-    pub async fn handle_mouse(&mut self, event: MouseEvent) -> Result<(), DaemonError> {
+    /// (Rule 0: modal popup, docs/superpowers/specs/2026-06-09-popup-panes-design.md;
+    /// then see docs/superpowers/specs/2026-05-22-full-mouse-design.md §6).
+    ///
+    /// Returns `Some(text)` when a copy-mode or drag-select yank produced text
+    /// the caller must copy to the clipboard. The write is done by
+    /// `Session::handle_mouse` AFTER releasing the WM lock, because
+    /// `write_clipboard` can block up to 2s on a wedged helper, and the render
+    /// coordinator composes every frame under this same lock, so awaiting it
+    /// here would freeze the session. The honest status message is set on
+    /// re-lock (see yank_status).
+    pub async fn handle_mouse(
+        &mut self,
+        event: MouseEvent,
+    ) -> Result<Option<String>, DaemonError> {
         // Overlay isolation: an open modal overlay (rename / help / picker /
         // choose-tree / history / hints) owns ALL input, mouse included. Keys,
         // Bytes and Paste are already discarded while an overlay is open (see
@@ -54,7 +65,7 @@ impl WindowManager {
         // through and let a status-bar click detach or a wheel scroll the pane
         // behind the modal. Root-cause guard at the top covers every caller.
         if self.overlay().is_some() {
-            return Ok(());
+            return Ok(None);
         }
         // Rule 0: a floating popup owns the mouse entirely while open. A click
         // in the box interior is forwarded to the child (translated to interior
@@ -70,10 +81,10 @@ impl WindowManager {
                 && event.col > rect.col
                 && event.col < rect.col + rect.cols - 1;
             if !interior {
-                return Ok(());
+                return Ok(None);
             }
             if !popup.pane.with_screen(|s| s.modes.any_mouse_mode_active()) {
-                return Ok(());
+                return Ok(None);
             }
             let mut local = event;
             local.row = event.row - rect.row - 1;
@@ -82,13 +93,14 @@ impl WindowManager {
             let bytes = encode_for_child(local, encoding);
             let pane = popup.pane.clone();
             let _ = pane.send_input(bytes::Bytes::from(bytes)).await;
-            return Ok(());
+            return Ok(None);
         }
         // Rule 1a: tab-drag modal (physical coords, since the pointer may leave
         // the status row mid-drag). Takes precedence over the status-bar hit so a
         // drag that wanders off the tab strip still routes to the drag handler.
         if self.tab_drag.is_some() {
-            return self.handle_tab_drag_event(event).await;
+            self.handle_tab_drag_event(event).await?;
+            return Ok(None);
         }
         // Rule 2 (first): status-bar row hit. The bar lives outside the pane
         // band, so test it against the *physical* row before translating. A
@@ -102,9 +114,10 @@ impl WindowManager {
             if self.pane_drag.is_some() && matches!(event.kind, MouseKind::Release) {
                 self.pane_drag = None;
                 self.notify.notify_one();
-                return Ok(());
+                return Ok(None);
             }
-            return self.handle_status_bar_event(event).await;
+            self.handle_status_bar_event(event).await?;
+            return Ok(None);
         }
         // Everything below addresses panes/borders, which live in the layout's
         // logical coordinate space. Translate away the status-bar offset (1 row
@@ -113,11 +126,13 @@ impl WindowManager {
         let event = self.to_pane_coords(event);
         // Pane-swap drag in progress consumes everything (pane-logical coords).
         if self.pane_drag.is_some() {
-            return self.handle_pane_drag_event(event).await;
+            self.handle_pane_drag_event(event).await?;
+            return Ok(None);
         }
         // Rule 1: resize-drag in progress consumes everything until release.
         if self.resize_drag.is_some() {
-            return self.handle_resize_drag_event(event).await;
+            self.handle_resize_drag_event(event).await?;
+            return Ok(None);
         }
         // Rule 3: border hit on left press.
         if matches!(event.kind, MouseKind::Press)
@@ -129,7 +144,7 @@ impl WindowManager {
                 side: hit.side,
                 last_pos: (event.row, event.col),
             });
-            return Ok(());
+            return Ok(None);
         }
         // Rule 4: copy-mode pane.
         let viewport = self.viewport();
@@ -138,7 +153,7 @@ impl WindowManager {
             .layout()
             .pane_at_coord(viewport, event.row, event.col)
         else {
-            return Ok(());
+            return Ok(None);
         };
         // Drag-modifier + left-press starts a pane-swap drag. Placed ahead of
         // copy-mode, focus-only, and child-mouse forwarding so a pane running an
@@ -151,7 +166,7 @@ impl WindowManager {
             if drag_held {
                 self.pane_drag = Some(PaneDrag { source: pane_id, target: None });
                 self.notify.notify_one();
-                return Ok(());
+                return Ok(None);
             }
         }
         if self.pane_is_in_copy_mode(pane_id) {
@@ -168,11 +183,12 @@ impl WindowManager {
         {
             self.active_window_mut().focus(pane_id);
             self.notify.notify_one();
-            return Ok(());
+            return Ok(None);
         }
         // Rule 5: pane has child-app mouse-mode on → passthrough.
         if self.pane_has_any_mouse_mode(pane_id) {
-            return self.forward_mouse_to_pane(pane_id, event).await;
+            self.forward_mouse_to_pane(pane_id, event).await?;
+            return Ok(None);
         }
         // Rule 6: default daemon handlers.
         self.handle_default_mouse(pane_id, event, viewport).await
@@ -398,7 +414,7 @@ impl WindowManager {
         &mut self,
         pane_id: PaneId,
         event: MouseEvent,
-    ) -> Result<(), DaemonError> {
+    ) -> Result<Option<String>, DaemonError> {
         let click_count = self.classify_click_count(pane_id, &event);
         // CopyMode::handle_mouse treats the event as pane-local 0-based, so the
         // viewport-space event must be translated to the pane rect origin first,
@@ -415,7 +431,7 @@ impl WindowManager {
         local.row = event.row.saturating_sub(rect.row);
         local.col = event.col.saturating_sub(rect.col);
         let Some(pane) = self.active_window().pane(pane_id).cloned() else {
-            return Ok(());
+            return Ok(None);
         };
         // The handler mutates copy-mode state; we need both with_screen + with_copy_mode_mut.
         let action: Option<plexy_glass_mux::CopyModeAction> = pane.with_screen(|screen| {
@@ -430,20 +446,19 @@ impl WindowManager {
                     self.notify.notify_one();
                 }
                 CopyModeAction::Yank(text) => {
-                    // Await the write so the message is honest: a failed clipboard
-                    // must not flash "✓ copied". No paste-buffer fallback here (the
-                    // WM has no registry), so the failure message doesn't promise
-                    // Ctrl+a ]. Fast on the common no-tool path; only a wedged
-                    // helper hits the 2s bound (see write_clipboard).
-                    let wrote = crate::osc_actions::write_clipboard(text.as_bytes()).await;
-                    let (msg, sev) = crate::osc_actions::yank_status(wrote, &text, false);
+                    // Bubble the yanked text up so the caller writes the clipboard
+                    // OFF the WM lock (write_clipboard can block up to 2s on a
+                    // wedged helper; the render coordinator composes under this
+                    // lock). The honest status message is set on re-lock in
+                    // Session::handle_mouse. Everything else (exiting copy mode)
+                    // happens here, still under the lock.
                     pane.exit_copy_mode();
-                    self.set_status_message(msg, sev);
                     self.notify.notify_one();
+                    return Ok(Some(text));
                 }
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Classify the current left-press as count=1/2/3 based on time + target
@@ -538,30 +553,34 @@ impl WindowManager {
         pane_id: PaneId,
         event: MouseEvent,
         viewport: Rect,
-    ) -> Result<(), DaemonError> {
-        match event.kind {
+    ) -> Result<Option<String>, DaemonError> {
+        let yanked = match event.kind {
             MouseKind::Press if event.button == MouseButton::Left => {
                 self.handle_left_press(pane_id, event, viewport).await?;
+                None
             }
             MouseKind::Release if event.button == MouseButton::Left => {
-                self.handle_left_release().await?;
+                self.handle_left_release().await?
             }
             MouseKind::Move if event.button == MouseButton::Left => {
                 self.handle_left_drag(event, viewport);
+                None
             }
             MouseKind::Press if event.button == MouseButton::Middle => {
                 self.handle_middle_press(pane_id).await?;
+                None
             }
             // Only a vertical wheel scrolls scrollback; a horizontal wheel on a
             // non-mouse-mode pane is ignored (mouse-mode panes get it forwarded
             // verbatim via Rule 5 / encode_for_child).
             MouseKind::Wheel { delta, horizontal: false } => {
                 self.handle_wheel(pane_id, delta);
+                None
             }
-            _ => {}
-        }
+            _ => None,
+        };
         self.notify.notify_one();
-        Ok(())
+        Ok(yanked)
     }
 
     /// Middle-click pastes from the system clipboard. Bracketed-paste-aware:
@@ -773,9 +792,9 @@ impl WindowManager {
         }
     }
 
-    async fn handle_left_release(&mut self) -> Result<(), DaemonError> {
+    async fn handle_left_release(&mut self) -> Result<Option<String>, DaemonError> {
         let Some(sel) = self.selection.take() else {
-            return Ok(());
+            return Ok(None);
         };
         if !self.selection_word_line && sel.is_click() {
             // A click (no drag beyond the one-cell dead-zone, and not an
@@ -801,7 +820,7 @@ impl WindowManager {
                     self.notify.notify_one();
                 }
             }
-            return Ok(());
+            return Ok(None);
         }
         let text = self.active_window().pane(sel.source_pane).and_then(|pane| {
             // Map the viewport-relative selection through the pane's current
@@ -812,17 +831,13 @@ impl WindowManager {
                 pane.with_screen(|s| extract_text(&sel, s, s.active.num_rows(), scroll_offset));
             (!text.is_empty()).then_some(text)
         });
-        if let Some(text) = text {
-            // Await the write and report honestly: a failed clipboard must not
-            // claim "✓ copied". This drag-select path has no paste-buffer fallback
-            // (the WM has no registry), so the failure message says only
-            // "clipboard unavailable".
-            let wrote = crate::osc_actions::write_clipboard(text.as_bytes()).await;
-            let (msg, sev) = crate::osc_actions::yank_status(wrote, &text, false);
-            self.set_status_message(msg, sev);
-            self.notify.notify_one();
-        }
-        Ok(())
+        // Bubble the yanked text up: the caller (`Session::handle_mouse`) writes
+        // the clipboard OFF the WM lock and sets the honest message on re-lock,
+        // since write_clipboard can block up to 2s on a wedged helper and the
+        // render coordinator composes under this lock. No paste-buffer fallback
+        // here (the WM has no registry), so a failed write reports only
+        // "clipboard unavailable".
+        Ok(text)
     }
 
     fn handle_wheel(&mut self, pane_id: PaneId, delta: i16) {

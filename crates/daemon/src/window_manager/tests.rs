@@ -371,14 +371,24 @@ async fn double_click_on_a_two_char_word_still_copies() {
     // Double-click 'l' at physical (6,3) → pane-local (5,2). Two press/release
     // pairs in quick succession → the second press classifies as count==2 →
     // word_at selects "ls".
+    let mut yanked = None;
     for _ in 0..2 {
         m.handle_mouse(ev(MouseKind::Press, 6, 3)).await.unwrap();
-        m.handle_mouse(ev(MouseKind::Release, 6, 3)).await.unwrap();
+        yanked = m.handle_mouse(ev(MouseKind::Release, 6, 3)).await.unwrap();
     }
-    let msg = m.take_active_message();
-    assert!(
-        msg.is_some_and(|s| s.starts_with("copied")),
-        "double-clicking a 2-char word must copy it, not be swallowed by the dead-zone"
+    // The yank text is BUBBLED UP, not written to the clipboard under the WM
+    // lock (`write_clipboard` can block up to 2s and the render coordinator
+    // composes under this lock). So the WM sets NO message here; the caller
+    // (`Session::handle_mouse`) writes off-lock and sets the honest message.
+    assert_eq!(
+        yanked.as_deref(),
+        Some("ls"),
+        "double-clicking a 2-char word must yield its text, not be swallowed by the dead-zone"
+    );
+    assert_eq!(
+        m.take_active_message(),
+        None,
+        "the WM must NOT write the clipboard / set the message under the lock — the caller does it off-lock"
     );
 }
 
@@ -3806,6 +3816,25 @@ async fn reset_mouse_gestures_clears_in_flight_drag() {
     m.reset_mouse_gestures();
     assert!(m.pane_drag_roles().is_none(), "reset clears the pane drag");
     assert!(m.selection().is_none() && m.dragging_window_idx().is_none());
+}
+
+// #4 residual: opening a modal OVERLAY (not only a popup) mid-drag must clear the
+// in-flight pane_drag. Every `open_*` routes through `set_overlay`, which calls
+// reset_mouse_gestures; without it the overlay guard at the top of handle_mouse
+// swallows the Release and the next plain click would complete a phantom swap.
+#[tokio::test]
+async fn open_overlay_clears_in_flight_pane_drag() {
+    let mut m = make_two_pane_manager().await; // `PaneId(0)`, `PaneId(1)`; active = 1
+    let vp = m.viewport();
+    let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
+    let (cr, cc) = (r0.row + r0.rows / 2, r0.col + r0.cols / 2);
+    // Alt-press inside pane 0 → pane drag begins.
+    m.handle_mouse(mev(MouseKind::Press, cr, cc, true)).await.unwrap();
+    assert!(m.pane_drag_roles().is_some(), "premise: pane drag started");
+    // A help overlay opens mid-drag (e.g. via its keybinding).
+    m.handle_command(Command::ShowHelp).unwrap();
+    assert!(m.overlay().is_some(), "premise: overlay open");
+    assert!(m.pane_drag_roles().is_none(), "overlay open must clear the frozen pane drag");
 }
 
 // #4: a pane-swap drag whose Release lands on the status-bar row aborts cleanly,
