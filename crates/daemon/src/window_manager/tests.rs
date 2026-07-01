@@ -1506,6 +1506,187 @@ async fn pane_death_of_active_middle_window_focuses_next() {
     );
 }
 
+/// A spec that runs an explicit command (non-empty args), a stand-in for a
+/// declared `command="claude"` pane. `exit 7` finishes immediately, but the
+/// respawn logic only cares that the pane was spawned with args.
+fn command_spec() -> SpawnSpec {
+    SpawnSpec {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), "exit 7".into()],
+        env: vec![],
+        cwd: None,
+    }
+}
+
+/// Bug 1: a window whose pane ran an explicit command must NOT close when the
+/// command exits: it respawns an interactive `$SHELL` in the same slot.
+#[tokio::test]
+async fn command_pane_death_respawns_shell_in_place() {
+    let _g = crate::test_env::isolate();
+    let mut m = WindowManager::new(
+        command_spec(), // `PaneId(0)` runs a command → respawn-on-exit
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        Arc::new(Notify::new()),
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh"); // fallback shell must not depend on `$SHELL`
+    assert!(
+        m.active_window().active_pane().unwrap().respawn_shell_on_exit(),
+        "the command pane is flagged to respawn a shell on exit",
+    );
+    let windows_before = m.windows().len();
+
+    m.handle_pane_death(PaneId(0)).unwrap();
+
+    assert_eq!(m.windows().len(), windows_before, "window survives the command exit");
+    let new_active = m.active_window().active();
+    assert_ne!(new_active, PaneId(0), "the slot holds a fresh pane with a new id");
+    let new_pane = m.active_window().active_pane().expect("slot still occupied by a live pane");
+    assert!(
+        !new_pane.respawn_shell_on_exit(),
+        "the fallback shell has empty args → it closes normally when the user exits it",
+    );
+    assert_eq!(
+        m.active_window().layout().panes(),
+        vec![new_active],
+        "layout arity preserved: exactly one leaf, now the new pane",
+    );
+    new_pane.kill_child();
+}
+
+/// A default-shell pane (empty args, e.g. from `new-window`/split) still closes
+/// its window on exit, so no behavior change for interactive panes.
+#[tokio::test]
+async fn shell_pane_death_still_closes_window() {
+    let _g = crate::test_env::isolate();
+    let mut m = WindowManager::new(
+        spec(), // `/bin/cat`, empty args → interactive shell semantics
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        Arc::new(Notify::new()),
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh");
+    assert!(
+        !m.active_window().active_pane().unwrap().respawn_shell_on_exit(),
+        "an empty-args pane is not flagged for respawn",
+    );
+    m.handle_pane_death(PaneId(0)).unwrap();
+    assert!(m.windows().is_empty(), "the sole shell window closes on exit");
+}
+
+/// Respawn-once: the fallback shell has empty args, so when IT dies the window
+/// closes normally, no infinite respawn loop.
+#[tokio::test]
+async fn respawn_is_single_shot() {
+    let _g = crate::test_env::isolate();
+    let mut m = WindowManager::new(
+        command_spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        Arc::new(Notify::new()),
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh");
+    m.handle_pane_death(PaneId(0)).unwrap(); // command exits → respawn shell
+    assert_eq!(m.windows().len(), 1, "still one window after the first (respawn) death");
+    let shell_id = m.active_window().active();
+    // The user later exits the fallback shell.
+    m.handle_pane_death(shell_id).unwrap();
+    assert!(m.windows().is_empty(), "the fallback shell's exit closes the window");
+}
+
+/// A split that runs a command respawns a shell in ITS slot; the sibling pane
+/// is untouched (scope = any command pane, not only a window's sole pane).
+#[tokio::test]
+async fn command_split_pane_death_respawns_only_its_slot() {
+    let _g = crate::test_env::isolate();
+    let mut m = WindowManager::new(
+        spec(), // `PaneId(0)`: interactive shell
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        Arc::new(Notify::new()),
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh");
+    // Split, placing a COMMAND pane (non-empty args) in the new slot (PaneId(1)).
+    let new_id = m.alloc_pane_id();
+    let viewport = m.viewport();
+    m.active_window_mut()
+        .split(
+            SplitDir::Vertical,
+            new_id,
+            command_spec(),
+            viewport,
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .unwrap();
+    assert_eq!(new_id, PaneId(1));
+    assert!(m.active_window().pane(PaneId(1)).unwrap().respawn_shell_on_exit());
+
+    m.handle_pane_death(PaneId(1)).unwrap();
+
+    let panes = m.active_window().layout().panes();
+    assert_eq!(panes.len(), 2, "both slots survive; the command slot got a fresh pane");
+    assert!(panes.contains(&PaneId(0)), "sibling untouched");
+    assert!(!panes.contains(&PaneId(1)), "old command pane id is gone");
+    for pid in panes {
+        m.active_window().pane(pid).unwrap().kill_child();
+    }
+}
+
+/// A session whose only window is a command window does NOT end when the
+/// command exits: the window survives with an interactive shell.
+#[tokio::test]
+async fn command_session_survives_command_exit() {
+    let _g = crate::test_env::isolate();
+    let mut m = WindowManager::new(
+        command_spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        Arc::new(Notify::new()),
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh");
+    m.handle_pane_death(PaneId(0)).unwrap();
+    assert!(!m.is_empty(), "the session's last window survives the command exit");
+    m.active_window().active_pane().unwrap().kill_child();
+}
+
+/// The session-wide mark follows the slot across a respawn: marking a command
+/// pane and then having it exit re-points the mark to the fresh shell (the slot
+/// is still occupied), rather than leaving a dangling reference or clearing it.
+#[tokio::test]
+async fn respawn_repoints_marked_pane_to_new_shell() {
+    let _g = crate::test_env::isolate();
+    let mut m = WindowManager::new(
+        command_spec(), // `PaneId(0)`: command pane, active
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        Arc::new(Notify::new()),
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_default_program("/bin/sh");
+    m.handle_command(Command::MarkPane).unwrap();
+    assert_eq!(m.marked_pane(), Some(PaneId(0)), "command pane marked");
+
+    m.handle_pane_death(PaneId(0)).unwrap();
+
+    let new_id = m.active_window().active();
+    assert_ne!(new_id, PaneId(0));
+    assert_eq!(m.marked_pane(), Some(new_id), "mark follows the slot to the fresh shell");
+    m.active_window().active_pane().unwrap().kill_child();
+}
+
 #[tokio::test]
 async fn cross_window_swap_into_monitored_window_does_not_replay_done() {
     // A pane that ran commands (blocks_completed > 0) swapped into a background

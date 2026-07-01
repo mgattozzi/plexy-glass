@@ -70,6 +70,14 @@ struct Inner {
     /// own `Arc` so the drain task and the reader thread hold it WITHOUT
     /// keeping the whole pane (and its broadcast sender) alive.
     pipe: crate::pipe::PipeSlot,
+    /// When true, this pane's death drops to an interactive `$SHELL` in the
+    /// same layout slot instead of closing the window (see
+    /// `WindowManager::handle_pane_death`). Computed once at spawn as
+    /// `!spec.args.is_empty()`: declared `command=` / `$SHELL -c` panes carry
+    /// explicit args, while every interactive shell (new-window / split /
+    /// `default_spec`) spawns with empty args. A future explicit
+    /// `on-exit "close"|"shell"` config knob would supersede this heuristic.
+    respawn_shell_on_exit: bool,
 }
 
 impl Pane {
@@ -82,6 +90,10 @@ impl Pane {
         death_tx: Option<mpsc::Sender<PaneId>>,
         config: Arc<Config>,
     ) -> Result<Self, DaemonError> {
+        // A pane that runs an explicit command (non-empty args, so a declared
+        // `command=` / `$SHELL -c`) drops to a shell on exit; an interactive
+        // shell (empty args) closes its window on exit. See the field docs.
+        let respawn_shell_on_exit = !spec.args.is_empty();
         let pty_system = portable_pty::native_pty_system();
         // openpty can transiently fail under load (the OS PTY table is briefly
         // exhausted, observed as "Unknown error: -6" on macOS), so we retry a few
@@ -363,8 +375,16 @@ impl Pane {
                 activity,
                 bell,
                 pipe,
+                respawn_shell_on_exit,
             }),
         })
+    }
+
+    /// Whether this pane's death should drop to an interactive `$SHELL` in the
+    /// same layout slot (a declared command pane) rather than close the window.
+    /// See [`Inner::respawn_shell_on_exit`].
+    pub fn respawn_shell_on_exit(&self) -> bool {
+        self.inner.respawn_shell_on_exit
     }
 
     /// Swap the pane's config in place. Called by hot reload so subsequent

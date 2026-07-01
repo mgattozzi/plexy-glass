@@ -514,6 +514,81 @@ impl Window {
         Ok(())
     }
 
+    /// Respawn a fresh interactive `$SHELL` in the slot currently held by the
+    /// dead pane `dead_id` (its child exited), instead of closing the window.
+    /// Shape-preserving, like [`Self::install_in_slot`]: the layout leaf,
+    /// `active`, every `focus_history` entry, and the zoom overlay are all
+    /// rewritten from `dead_id` to the new pane's id, so focus and zoom follow
+    /// the slot. The dead pane is removed from the map and killed (its child is
+    /// already gone; this releases its PTY/threads and cancels any pipe). The
+    /// new shell spawns with EMPTY args at the window's `home_cwd`, so it is
+    /// itself NOT a respawn-on-exit pane, and the user later exiting it closes
+    /// the window normally (respawn-once falls out for free).
+    ///
+    /// Returns `Err` ONLY when the fresh shell fails to spawn, in which case
+    /// nothing is mutated (the dead pane is still in place) so the caller can
+    /// fall back to closing the slot.
+    #[allow(clippy::too_many_arguments)] // spawn plumbing, mirrors split_at
+    pub fn respawn_pane_as_shell(
+        &mut self,
+        dead_id: PaneId,
+        new_pane_id: PaneId,
+        program: String,
+        env: Vec<(String, String)>,
+        viewport: Rect,
+        output_notify: std::sync::Arc<tokio::sync::Notify>,
+        death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
+        config: std::sync::Arc<plexy_glass_config::Config>,
+    ) -> Result<(), DaemonError> {
+        // Fallible, pre-commit work first: resolve the dead slot's rect and
+        // spawn the replacement. If either fails, the window is untouched.
+        let rect = self
+            .layout
+            .rect_of(dead_id, viewport)
+            .ok_or_else(|| DaemonError::Io(std::io::Error::other("respawn: dead pane rect missing")))?;
+        let size = pane_pty_size(rect, self.cell_px);
+        let spec = SpawnSpec {
+            program,
+            args: Vec::new(), // interactive shell → NOT respawn-on-exit
+            env,
+            cwd: self.home_cwd.clone(),
+        };
+        let pane = Pane::spawn(new_pane_id, spec, size, output_notify, death_tx, config)?;
+
+        // Point of no return: swap the new pane into the dead pane's slot.
+        let replaced = self.layout.replace_leaf(dead_id, new_pane_id);
+        debug_assert!(replaced, "respawn_pane_as_shell: no leaf for {dead_id:?}");
+        if let Some(dead) = self.panes.remove(&dead_id) {
+            dead.kill_child();
+        }
+        self.panes.insert(new_pane_id, pane);
+        // A fresh shell starts at zero completed blocks; drop the dead pane's
+        // baseline and seed the new one so the next drain compares correctly.
+        self.block_baselines.remove(&dead_id);
+        self.block_baselines.insert(new_pane_id, 0);
+        // Rewrite every reference to the dead id → the new one (focus/zoom
+        // follow the slot, exactly as install_in_slot does for a swap).
+        if self.active == dead_id {
+            self.active = new_pane_id;
+        }
+        for p in self.focus_history.iter_mut() {
+            if *p == dead_id {
+                *p = new_pane_id;
+            }
+        }
+        if self.zoomed == Some(dead_id) {
+            self.zoomed = Some(new_pane_id);
+        }
+        // Size the new pane's PTY to the slot. A resize error here is a spurious
+        // PTY failure on a brand-new pane (essentially never); the slot is
+        // already correctly occupied, so we log and keep the valid state rather
+        // than unwinding a committed swap, and the next host resize corrects it.
+        if let Err(e) = self.resize(viewport) {
+            tracing::warn!(error = %e, "respawn: resize after shell swap failed");
+        }
+        Ok(())
+    }
+
     /// Build a new window whose single pane is an existing `pane` (break-pane).
     pub fn from_pane(id: WindowId, name: String, pane: Pane, cell_px: (u16, u16)) -> Self {
         let pid = pane.id();

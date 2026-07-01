@@ -172,8 +172,16 @@ impl Session {
                 // (unlike handle_command) nothing else reconciles the tick task,
                 // so it would keep waking 1 Hz for a now-pointless check.
                 let armed = m.any_silence_monitored();
+                // A command-pane death that dropped to a shell sets a transient
+                // status message under this lock; schedule its TTL-expiry wake
+                // after releasing the lock (see the coordinator's set_status_message
+                // note) so the bar clears even absent other repaints.
+                let has_message = m.has_active_message();
                 drop(m);
                 session_for_death.notify.notify_one();
+                if has_message {
+                    session_for_death.schedule_status_expiry_wake();
+                }
                 session_for_death.reconcile_silence_task(armed);
                 if now_empty {
                     break;
@@ -1930,9 +1938,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn coordinator_emits_tail_frame_when_last_pane_dies() {
         let _g = crate::test_env::isolate();
+        // An EMPTY-args pane (interactive-shell semantics) that exits on its own:
+        // `/bin/echo` with no args prints a newline and exits. It must CLOSE the
+        // window on death; a command pane (non-empty args) would instead drop to
+        // a shell in place and keep the session alive (see Bug 1 / handle_pane_death).
         let spec = SpawnSpec {
             program: "/bin/echo".into(),
-            args: vec!["hi".into()],
+            args: vec![],
             env: vec![],
             cwd: None,
         };

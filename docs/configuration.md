@@ -932,6 +932,15 @@ Node by node:
   focused pane on build, and at most one pane per window may be active (a
   second is a decode error); the default is the DFS-leftmost pane.
 
+When a `command` pane's command exits, plexy-glass **drops to an interactive
+`$SHELL` in that same slot** rather than closing the window: the window (and,
+if it was the last one, the session) survives, and you land at a shell prompt
+where the command was. The fallback shell closes its window normally when you
+exit it, as any interactive pane does. This applies to any command pane, a
+window's sole pane or a declared `split` child alike; only that pane's slot
+is replaced, its siblings are untouched. (An interactive pane with no
+`command` is unaffected: exiting its shell closes the window as before.)
+
 ### Split ratios (`ratio=`)
 
 Each **direct child of a `split`** (a `pane`, or a nested `split`) may carry

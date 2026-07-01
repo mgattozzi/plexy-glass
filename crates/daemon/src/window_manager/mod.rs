@@ -327,16 +327,64 @@ impl WindowManager {
             return Ok(());
         }
         let viewport = self.viewport();
-        let mut closed_idx: Option<usize> = None;
-        for (idx, w) in self.windows.iter_mut().enumerate() {
-            if w.pane(pane_id).is_some() {
-                let outcome = w.close_pane(pane_id)?;
-                if matches!(outcome, plexy_glass_mux::CloseOutcome::TreeEmpty) {
-                    closed_idx = Some(idx);
-                } else {
-                    w.resize(viewport)?;
+        // Locate the window holding the dead pane. If it is already gone
+        // (raced with a synchronous close), just clear a stale mark + notify.
+        let Some(win_idx) = self.windows.iter().position(|w| w.pane(pane_id).is_some()) else {
+            if self.marked_pane == Some(pane_id) {
+                self.marked_pane = None;
+            }
+            self.notify.notify_one();
+            return Ok(());
+        };
+
+        // Bug 1: a pane that ran an explicit command (declared `command=` /
+        // `$SHELL -c`, flagged at spawn) drops to an interactive `$SHELL` in the
+        // SAME slot instead of closing the window. The fallback shell spawns
+        // with empty args, so it is not itself respawn-on-exit, and the user
+        // later exiting it closes the window normally (respawn-once).
+        let respawn = self.windows[win_idx]
+            .pane(pane_id)
+            .is_some_and(|p| p.respawn_shell_on_exit());
+        if respawn {
+            let new_id = self.alloc_pane_id();
+            let program = self.default_spec.program.clone();
+            let env = self.default_spec.env.clone();
+            let notify = Arc::clone(&self.notify);
+            let death = self.death_tx.clone();
+            let config = Arc::clone(&self.config);
+            match self.windows[win_idx].respawn_pane_as_shell(
+                pane_id, new_id, program, env, viewport, notify, death, config,
+            ) {
+                Ok(()) => {
+                    // The session-wide mark follows the slot too. The slot is
+                    // still occupied (by the fresh shell), so re-point rather
+                    // than leave a dangling reference to the dead pane.
+                    if self.marked_pane == Some(pane_id) {
+                        self.marked_pane = Some(new_id);
+                    }
+                    self.set_status_message(
+                        "command exited — dropped to shell".into(),
+                        Severity::Info,
+                    );
+                    self.notify.notify_one();
+                    return Ok(());
                 }
-                break;
+                // Spawn failed: fall through to the normal close so the window
+                // doesn't wedge with a dead pane in the slot.
+                Err(e) => {
+                    tracing::warn!(error = %e, "respawn-shell-on-exit failed; closing pane");
+                }
+            }
+        }
+
+        let mut closed_idx: Option<usize> = None;
+        {
+            let w = &mut self.windows[win_idx];
+            let outcome = w.close_pane(pane_id)?;
+            if matches!(outcome, plexy_glass_mux::CloseOutcome::TreeEmpty) {
+                closed_idx = Some(win_idx);
+            } else {
+                w.resize(viewport)?;
             }
         }
         if let Some(idx) = closed_idx {

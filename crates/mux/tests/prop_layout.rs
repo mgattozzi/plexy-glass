@@ -65,6 +65,48 @@ fn every_corner_of_a_pane_rect_hit_tests_to_it(tc: TestCase) {
     }
 }
 
+/// `replace_leaf(old, new)` is the slot-preserving swap that "drop to shell on
+/// command exit" relies on (a dying command pane's leaf is re-occupied by a
+/// fresh shell). It must keep the layout's SHAPE: the pane count is unchanged,
+/// the new id inherits the old leaf's exact rect, and every OTHER pane's rect
+/// is untouched, only the occupant id changes.
+#[hegel::test(test_cases = 300)]
+fn replace_leaf_preserves_slot_set_and_rects(tc: TestCase) {
+    let mut t = random_layout(&tc);
+    let vp = Rect::new(0, 0, 60, 100);
+    let panes_before = t.panes();
+    // Pick a leaf to replace and a fresh id not already in the tree.
+    let idx = tc.draw(
+        gs::integers::<usize>()
+            .min_value(0)
+            .max_value(panes_before.len() - 1),
+    );
+    let old = panes_before[idx];
+    let new = PaneId(10_000); // random_layout only ever mints ids < 7
+    let old_rect = t.rect_of(old, vp);
+    let others_before: Vec<(PaneId, Option<Rect>)> = panes_before
+        .iter()
+        .filter(|p| **p != old)
+        .map(|p| (*p, t.rect_of(*p, vp)))
+        .collect();
+
+    let replaced = t.replace_leaf(old, new);
+    assert!(replaced, "replacing an existing leaf {old:?} must report success");
+
+    let panes_after = t.panes();
+    tc.note(&format!("before={panes_before:?} old={old:?} after={panes_after:?}"));
+    // Arity preserved: same count, old gone, new present.
+    assert_eq!(panes_after.len(), panes_before.len(), "pane count must not change");
+    assert!(!panes_after.contains(&old), "old id must be gone");
+    assert!(panes_after.contains(&new), "new id must occupy the slot");
+    // The new occupant inherits the exact slot rect.
+    assert_eq!(t.rect_of(new, vp), old_rect, "new pane inherits the old slot's rect");
+    // Every other pane's rect is untouched.
+    for (p, rect) in others_before {
+        assert_eq!(t.rect_of(p, vp), rect, "sibling {p:?} rect must be unchanged");
+    }
+}
+
 #[hegel::test(test_cases = 300)]
 fn pane_rects_never_overlap(tc: TestCase) {
     let t = random_layout(&tc);
