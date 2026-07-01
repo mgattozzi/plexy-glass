@@ -302,3 +302,126 @@ fn conformance_erase_clears_whole_wide_char() {
             cells: &[(0, 0, Expect::Blank), (0, 1, Expect::Blank), (0, 2, Expect::Blank)], ..BASE },
     ]);
 }
+
+#[test]
+fn conformance_rep() {
+    check(&[
+        // REP (CSI Ps b): repeat the last printed graphic Ps times. "a" + CSI 4 b
+        // → five 'a's (the original + 4 repeats), cursor after the last.
+        Case { name: "rep_4", input: b"a\x1b[4b", cursor: Some((0, 5)),
+            cells: &[(0, 0, Expect::Text("a")), (0, 4, Expect::Text("a")), (0, 5, Expect::Blank)], ..BASE },
+        // REP default count is 1.
+        Case { name: "rep_default_1", input: b"z\x1b[b", cursor: Some((0, 2)),
+            cells: &[(0, 0, Expect::Text("z")), (0, 1, Expect::Text("z")), (0, 2, Expect::Blank)], ..BASE },
+        // REP repeats a wide grapheme whole (spacer included): 好 + CSI 2 b → three 好.
+        Case { name: "rep_wide", input: "好\x1b[2b".as_bytes(), cursor: Some((0, 6)),
+            cells: &[(0, 0, Expect::Text("好")), (0, 1, Expect::Spacer), (0, 2, Expect::Text("好")),
+                     (0, 4, Expect::Text("好")), (0, 5, Expect::Spacer)], ..BASE },
+        // A control (CR/LF) between the char and REP clears the target → REP is a
+        // no-op (ECMA-48: REP after a control is undefined). Row 1 stays blank.
+        Case { name: "rep_cleared_by_newline", input: b"a\r\n\x1b[3b", cursor: Some((1, 0)),
+            cells: &[(0, 0, Expect::Text("a")), (1, 0, Expect::Blank)], ..BASE },
+    ]);
+}
+
+#[test]
+fn conformance_cht_cbt() {
+    check(&[
+        // CHT (CSI Ps I): advance Ps tab stops. 40-wide stops at 0,8,16,24,32.
+        Case { name: "cht_3", rows: 8, cols: 40, input: b"\x1b[3I", cursor: Some((0, 24)), ..BASE },
+        Case { name: "cht_default_1", rows: 8, cols: 40, input: b"\x1b[I", cursor: Some((0, 8)), ..BASE },
+        // Runs out of stops → clamps to the last column.
+        Case { name: "cht_clamps_last", rows: 8, cols: 40, input: b"\x1b[99I", cursor: Some((0, 39)), ..BASE },
+        // CBT (CSI Ps Z): retreat Ps tab stops. From col 20 → 16.
+        Case { name: "cbt_1", rows: 8, cols: 40, input: b"\x1b[1;21H\x1b[Z", cursor: Some((0, 16)), ..BASE },
+        Case { name: "cbt_3", rows: 8, cols: 40, input: b"\x1b[1;21H\x1b[3Z", cursor: Some((0, 0)), ..BASE },
+        // CBT saturates at col 0.
+        Case { name: "cbt_saturates", rows: 8, cols: 40, input: b"\x1b[1;3H\x1b[Z", cursor: Some((0, 0)), ..BASE },
+        // CHT then CBT round-trips back to home (stop-aligned).
+        Case { name: "cht_cbt_round_trip", rows: 8, cols: 40, input: b"\x1b[3I\x1b[3Z", cursor: Some((0, 0)), ..BASE },
+    ]);
+}
+
+#[test]
+fn conformance_cnl_cpl() {
+    check(&[
+        // CNL (CSI Ps E): move down Ps lines to column 0. "Hello" then CNL 2 puts
+        // the cursor at row 2 col 0; 'x' lands there while "Hello" stays on row 0.
+        Case { name: "cnl_2", input: b"Hello\x1b[2Ex", cursor: Some((2, 1)),
+            cells: &[(0, 0, Expect::Text("H")), (0, 4, Expect::Text("o")),
+                     (1, 0, Expect::Blank), (2, 0, Expect::Text("x"))], ..BASE },
+        // CNL default 1.
+        Case { name: "cnl_default_1", input: b"\x1b[Ex", cursor: Some((1, 1)),
+            cells: &[(1, 0, Expect::Text("x"))], ..BASE },
+        // CNL clamps at the bottom row.
+        Case { name: "cnl_clamps_bottom", input: b"\x1b[99Ex", cursor: Some((7, 1)),
+            cells: &[(7, 0, Expect::Text("x"))], ..BASE },
+        // CPL (CSI Ps F): move up Ps lines to column 0. Start row 5 col 9, CPL 2 →
+        // row 3 col 0.
+        Case { name: "cpl_2", input: b"\x1b[6;10H\x1b[2Fx", cursor: Some((3, 1)),
+            cells: &[(3, 0, Expect::Text("x"))], ..BASE },
+    ]);
+}
+
+#[test]
+fn conformance_decaln() {
+    check(&[
+        // DECALN (ESC # 8): fill the whole grid with 'E', cursor home.
+        Case { name: "decaln_fills_e", input: b"\x1b#8", cursor: Some((0, 0)),
+            cells: &[(0, 0, Expect::Text("E")), (0, 23, Expect::Text("E")),
+                     (3, 12, Expect::Text("E")), (7, 0, Expect::Text("E")),
+                     (7, 23, Expect::Text("E"))], ..BASE },
+    ]);
+}
+
+#[test]
+fn conformance_attach_zero_width() {
+    check(&[
+        // A combining mark after a WIDE grapheme must attach to the wide base, not
+        // its spacer. CUP col 10, print 好 (cols 10-11), then U+0301 → "好\u{0301}"
+        // at col 10, spacer at col 11 preserved. (SGR reset separates the two
+        // print calls so the mark takes the zero-width attach path.)
+        Case { name: "zwj_after_wide", input: b"\x1b[1;11H\xe5\xa5\xbd\x1b[m\xcc\x81\x1b[m",
+            cells: &[(0, 10, Expect::Text("好\u{0301}")), (0, 11, Expect::Spacer)], ..BASE },
+        // A combining mark after a width-1 char written at the LAST column (pending
+        // wrap latched, cursor did not advance) attaches to that char, not the cell
+        // to its left. 'a' at col 23 → "a\u{0301}".
+        Case { name: "zwj_at_last_col_pending_wrap", input: b"\x1b[1;24Ha\x1b[m\xcc\x81\x1b[m",
+            cursor: Some((0, 23)),
+            cells: &[(0, 22, Expect::Blank), (0, 23, Expect::Text("a\u{0301}"))], ..BASE },
+    ]);
+}
+
+#[test]
+fn ed3_clears_scrollback() {
+    // Feed more than `rows` lines so scrollback is non-empty, then CSI 3 J (ED 3,
+    // erase saved lines) must clear the scrollback buffer.
+    let mut s = Screen::new(4, 8);
+    let mut p = Parser::new();
+    for i in 0..20u16 {
+        p.advance(&mut s, format!("line{i}\r\n").as_bytes());
+    }
+    p.flush(&mut s);
+    assert!(!s.scrollback.is_empty(), "scrollback should be populated before ED 3");
+    p.advance(&mut s, b"\x1b[3J");
+    p.flush(&mut s);
+    assert!(s.scrollback.is_empty(), "ED 3 must clear the scrollback buffer");
+}
+
+#[test]
+fn decscusr_sets_cursor_shape() {
+    use plexy_glass_emulator::CursorShape;
+    // DECSCUSR (CSI Ps SP q): 0/1/2 block, 3/4 underline, 5/6 bar. Each case
+    // starts from a different shape to prove the sequence actually changes it.
+    let cases: &[(&[u8], CursorShape)] = &[
+        (b"\x1b[6 q", CursorShape::Bar),          // from default Block
+        (b"\x1b[4 q", CursorShape::Underline),
+        (b"\x1b[6 q\x1b[2 q", CursorShape::Block), // Bar → Block
+        (b"\x1b[6 q\x1b[0 q", CursorShape::Block),
+        (b"\x1b[6 q\x1b[3 q", CursorShape::Underline),
+    ];
+    for (input, want) in cases {
+        let s = run(4, 8, input);
+        assert_eq!(s.cursor.shape, *want, "DECSCUSR {input:?}");
+    }
+}

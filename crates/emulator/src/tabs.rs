@@ -43,6 +43,12 @@ impl TabStops {
             .map(|i| i as u16)
     }
 
+    /// Column index of the previous tab stop strictly less than `col` (for CBT).
+    pub fn prev(&self, col: u16) -> Option<u16> {
+        let start = (col as usize).min(self.stops.len());
+        (0..start).rev().find(|&i| self.stops[i]).map(|i| i as u16)
+    }
+
     /// Resize, preserving existing stops and seeding the new tail with defaults.
     pub fn resize(&mut self, cols: u16) {
         let old_len = self.stops.len();
@@ -118,6 +124,28 @@ mod tests {
                 None,
                 "expected no tab stop after col {col} after clear_all"
             );
+        }
+    }
+
+    #[test]
+    fn prev_finds_previous_stop() {
+        let t = TabStops::new(40);
+        // Default stops at 0,8,16,24,32.
+        assert_eq!(t.prev(20), Some(16));
+        assert_eq!(t.prev(16), Some(8)); // strictly less than
+        assert_eq!(t.prev(8), Some(0));
+        assert_eq!(t.prev(0), None); // nothing before col 0
+        assert_eq!(t.prev(100), Some(32)); // clamps to buffer end
+    }
+
+    #[test]
+    fn next_prev_round_trip() {
+        let t = TabStops::new(40);
+        // From a stop, forward then back returns to the same stop.
+        for &start in &[0u16, 8, 16, 24] {
+            if let Some(fwd) = t.next(start) {
+                assert_eq!(t.prev(fwd), Some(start), "round-trip from {start}");
+            }
         }
     }
 

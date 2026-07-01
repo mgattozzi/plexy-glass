@@ -135,6 +135,10 @@ pub struct Screen {
     /// re-transmit of an existing id carries a fresh `Image::generation` and the
     /// per-client renderer re-sends the new pixels instead of the stale ones.
     image_gen: u64,
+    /// Last graphic character printed with no intervening control (for REP,
+    /// `CSI Ps b`). Set on the print path, cleared by cursor moves / newlines /
+    /// resets per ECMA-48 (a control before REP makes it undefined → no-op).
+    last_graphic: Option<Box<str>>,
 }
 
 impl Screen {
@@ -173,6 +177,7 @@ impl Screen {
             placement_id_seq: 0,
             image_id_seq: 0x8000_0000, // synthesized ids; high to avoid child collisions
             image_gen: 0,
+            last_graphic: None,
         }
     }
 
@@ -419,6 +424,26 @@ impl Screen {
         });
     }
 
+    /// DECALN (`ESC # 8`): fill the entire active grid with `E` (the DEC screen
+    /// alignment test pattern) and home the cursor.
+    fn decaln(&mut self) {
+        let (rows, cols) = (self.rows(), self.cols());
+        for r in 0..rows {
+            for c in 0..cols {
+                self.active.put_cell(
+                    r,
+                    c,
+                    Cell {
+                        grapheme: "E".into(),
+                        ..Cell::default()
+                    },
+                );
+            }
+        }
+        self.cursor.move_to(0, 0, rows, cols);
+        self.last_graphic = None;
+    }
+
     /// Set the text-area pixel size relayed from the client's terminal.
     pub fn set_pixel_area(&mut self, w: u16, h: u16) {
         self.area_px_w = w;
@@ -500,6 +525,9 @@ impl Screen {
             return;
         }
 
+        // Remember the last printed graphic for REP (`CSI Ps b`).
+        self.last_graphic = Some(cluster.into());
+
         if self.cursor.pending_wrap && self.modes.contains(Modes::AUTOWRAP) {
             self.advance_to_next_row(true);
             self.cursor.col = 0;
@@ -578,14 +606,29 @@ impl Screen {
     }
 
     fn attach_zero_width(&mut self, cluster: &str) {
-        // Try the cell to the left on the same row.
-        if self.cursor.col > 0 {
-            if let Some(prev) = self.active.get_cell(self.cursor.row, self.cursor.col - 1) {
+        // Base column of the grapheme this mark attaches to. When pending_wrap is
+        // latched, the cursor still sits ON the base cell (it never advanced past
+        // the last column), so the base is `col`; otherwise the cursor advanced
+        // one column past the base, so it is `col - 1`.
+        let base = if self.cursor.pending_wrap {
+            Some(self.cursor.col)
+        } else {
+            self.cursor.col.checked_sub(1)
+        };
+        if let Some(mut base) = base {
+            // A wide grapheme leaves the cursor two columns past its base, so the
+            // cell to the left is the wide_spacer and we step one further to the base.
+            if self.active.get_cell(self.cursor.row, base).is_some_and(|c| c.is_wide_spacer())
+                && let Some(b) = base.checked_sub(1)
+            {
+                base = b;
+            }
+            if let Some(prev) = self.active.get_cell(self.cursor.row, base) {
                 let mut updated = prev.clone();
                 let mut s = String::from(updated.grapheme.as_str());
                 s.push_str(cluster);
                 updated.grapheme = s.into();
-                self.active.put_cell(self.cursor.row, self.cursor.col - 1, updated);
+                self.active.put_cell(self.cursor.row, base, updated);
             }
         } else if self.cursor.row > 0 {
             // Append to the last cell of the previous row.
@@ -659,6 +702,8 @@ impl Screen {
 
     /// Handle C0 control characters: BEL, BS, HT, LF, VT, FF, CR.
     pub fn execute_c0(&mut self, byte: u8) {
+        // Any C0 control ends the REP graphic-character context (ECMA-48).
+        self.last_graphic = None;
         match byte {
             0x07 => self.bell_pending = true, // BEL → flag for per-window monitoring
             0x08 => {
@@ -698,6 +743,11 @@ impl Screen {
             params.iter().nth(idx).and_then(|p| p.first().copied())
         };
 
+        // A CSI control ends the REP graphic-character context; REP (`b`) below
+        // reads the value taken here, and re-prints it (re-arming last_graphic
+        // via put_grapheme) so consecutive REPs chain.
+        let last_graphic = self.last_graphic.take();
+
         match final_byte {
             'A' => {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
@@ -730,6 +780,28 @@ impl Screen {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 self.cursor.left(n);
             }
+            'E' => {
+                // CNL (cursor next line): down N (clamped like CUD 'B'), col 0.
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                let (_, bottom) = self.scroll_region;
+                let ceil = if self.cursor.row <= bottom {
+                    bottom
+                } else {
+                    self.rows().saturating_sub(1)
+                };
+                self.cursor.row = self.cursor.row.saturating_add(n).min(ceil);
+                self.cursor.col = 0;
+                self.cursor.pending_wrap = false;
+            }
+            'F' => {
+                // CPL (cursor previous line): up N (clamped like CUU 'A'), col 0.
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                let (top, _) = self.scroll_region;
+                let floor = if self.cursor.row >= top { top } else { 0 };
+                self.cursor.row = self.cursor.row.saturating_sub(n).max(floor);
+                self.cursor.col = 0;
+                self.cursor.pending_wrap = false;
+            }
             'G' => {
                 let col = first.unwrap_or(1).saturating_sub(1);
                 self.cursor.col = col.min(self.cols().saturating_sub(1));
@@ -748,6 +820,45 @@ impl Screen {
                 self.cursor.row = self.absolute_row(row_arg);
                 self.cursor.pending_wrap = false;
             }
+            'I' => {
+                // CHT (cursor forward tabulation): advance N tab stops.
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                let last = self.cols().saturating_sub(1);
+                for _ in 0..n {
+                    match self.tabs.next(self.cursor.col) {
+                        Some(c) => self.cursor.col = c.min(last),
+                        None => {
+                            self.cursor.col = last;
+                            break;
+                        }
+                    }
+                }
+                self.cursor.pending_wrap = false;
+            }
+            'Z' => {
+                // CBT (cursor backward tabulation): retreat N tab stops.
+                let n = first.filter(|&n| n > 0).unwrap_or(1);
+                for _ in 0..n {
+                    match self.tabs.prev(self.cursor.col) {
+                        Some(c) => self.cursor.col = c,
+                        None => {
+                            self.cursor.col = 0;
+                            break;
+                        }
+                    }
+                }
+                self.cursor.pending_wrap = false;
+            }
+            'b' => {
+                // REP: repeat the last printed graphic character N times.
+                // No-op if a control intervened (last_graphic taken → None above).
+                if let Some(g) = last_graphic {
+                    let n = first.filter(|&n| n > 0).unwrap_or(1);
+                    for _ in 0..n {
+                        self.put_grapheme(&g);
+                    }
+                }
+            }
             'J' => {
                 let mode = first.unwrap_or(0);
                 let (r, c) = (self.cursor.row, self.cursor.col);
@@ -765,8 +876,27 @@ impl Screen {
                         }
                         self.active.clear_rect(r, 0, r, c);
                     }
-                    2 | 3 => {
+                    2 => {
                         self.active.clear();
+                    }
+                    3 => {
+                        // ED 3 (xterm E3): clear the visible grid AND the saved
+                        // (scrollback) lines. Placements anchored within the
+                        // dropped scrollback rows are gone; the rest (anchored in
+                        // the visible grid) shift down by the cleared count.
+                        self.active.clear();
+                        let cleared = self.scrollback.len() as u32;
+                        self.scrollback.rows_mut().clear();
+                        if cleared > 0 {
+                            self.placements
+                                .retain_mut(|p| match p.anchor_line.checked_sub(cleared) {
+                                    Some(a) => {
+                                        p.anchor_line = a;
+                                        true
+                                    }
+                                    None => false,
+                                });
+                        }
                     }
                     _ => {}
                 }
@@ -934,15 +1064,29 @@ impl Screen {
                     self.replies.push(b"\x1b[?1;2c".to_vec());
                 }
             }
-            'q' => {
+            'q' => match intermediates.first() {
                 // \e[>q (= \e[>0q) is XTVERSION. Reply with a DCS naming us.
-                if intermediates.first() == Some(&b'>') {
+                Some(b'>') => {
                     let reply = format!("\x1bP>|plexy-glass({})\x1b\\", env!("CARGO_PKG_VERSION"));
                     self.replies.push(reply.into_bytes());
-                } else {
+                }
+                // \e[Ps SP q is DECSCUSR: set the cursor shape (blink bit ignored,
+                // we don't model blink). 0/1/2 block, 3/4 underline, 5/6 bar. The
+                // shape is stored on the cursor; forwarding it to the client's
+                // rendered cursor is a separate follow-up (see report).
+                Some(b' ') => {
+                    let shape = match first.unwrap_or(0) {
+                        0..=2 => crate::cursor::CursorShape::Block,
+                        3..=4 => crate::cursor::CursorShape::Underline,
+                        5..=6 => crate::cursor::CursorShape::Bar,
+                        _ => self.cursor.shape,
+                    };
+                    self.cursor.shape = shape;
+                }
+                _ => {
                     tracing::trace!(?intermediates, "unhandled CSI q");
                 }
-            }
+            },
             't' => {
                 // Window-manipulation REPORTS only. We never honor child-driven
                 // window resize/move/title ops (1..13, 20..24), since we are a
@@ -1363,10 +1507,22 @@ impl Screen {
     }
 
     pub fn handle_esc(&mut self, intermediates: &[u8], byte: u8) {
+        // DECALN (ESC # 8) carries the `#` intermediate, so it must be handled
+        // before the generic non-empty-intermediate bail below.
+        if intermediates == [b'#'] {
+            if byte == b'8' {
+                self.decaln();
+            } else {
+                tracing::trace!(byte, "unhandled ESC # sequence");
+            }
+            return;
+        }
         if !intermediates.is_empty() {
             tracing::trace!(?intermediates, byte, "unhandled ESC intermediates");
             return;
         }
+        // An ESC control ends the REP graphic-character context (ECMA-48).
+        self.last_graphic = None;
         match byte {
             b'7' => {
                 self.saved_cursor = Some(self.cursor.clone());
