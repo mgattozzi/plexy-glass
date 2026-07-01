@@ -54,14 +54,15 @@ pub struct Session {
     pub death_tx: mpsc::Sender<PaneId>,
     pub closing: AtomicBool,
     next_client_id: AtomicU64,
-    coordinator_handle: StdMutex<Option<JoinHandle<()>>>,
+    coordinator_handle: StdMutex<Option<tokio::task::AbortHandle>>,
     status_engine_slot: StdMutex<Arc<plexy_glass_status::EngineInner>>,
     status_tick_handle: StdMutex<Option<JoinHandle<()>>>,
     config_slot: StdMutex<Arc<plexy_glass_config::Config>>,
-    /// JoinHandle for the death-consumer task. It pins a strong `Arc` (blocked
-    /// on `death_rx.recv()`), so teardown must abort it explicitly, since `Drop`
-    /// can never run while it holds the `Arc`.
-    death_handle: StdMutex<Option<JoinHandle<()>>>,
+    /// AbortHandle for the death-consumer task. It pins a strong Arc (blocked
+    /// on death_rx.recv()), so teardown must abort it explicitly, since Drop
+    /// can never run while it holds the Arc. The task's `JoinHandle` is owned
+    /// by a watcher (`supervise_core`) that escalates to teardown on panic.
+    death_handle: StdMutex<Option<tokio::task::AbortHandle>>,
     /// One-shot wake that repaints an expired status-line message away. Aborted
     /// and replaced each time a new message is set, and aborted on `Drop`.
     status_msg_handle: StdMutex<Option<JoinHandle<()>>>,
@@ -150,7 +151,12 @@ impl Session {
         });
         let coord_handle = tokio::spawn(render_coordinator(Arc::clone(&session), frame_tx));
         // invariant: no other thread holds coordinator_handle at construction time
-        *session.coordinator_handle.lock_recover() = Some(coord_handle);
+        *session.coordinator_handle.lock_recover() = Some(coord_handle.abort_handle());
+        tokio::spawn(supervise_core(
+            "render-coordinator",
+            Arc::downgrade(&session),
+            coord_handle,
+        ));
 
         // Spawn the pane-death consumer; it owns the receiver end of the
         // death channel.
@@ -175,7 +181,12 @@ impl Session {
             }
         });
         // invariant: no other thread holds death_handle at construction time.
-        *session.death_handle.lock_recover() = Some(death_task);
+        *session.death_handle.lock_recover() = Some(death_task.abort_handle());
+        tokio::spawn(supervise_core(
+            "death-consumer",
+            Arc::downgrade(&session),
+            death_task,
+        ));
 
         // Spawn the status tick task. Capture a `Weak<Session>` so the task
         // doesn't keep the session alive on its own; when the registry
@@ -1126,6 +1137,28 @@ fn encode_for_pane(
     reencode_input(client_kbd, kitty_flags, modkeys, app_cursor, event, raw_bytes)
 }
 
+/// Await a core session task; if it ends by panic (or unexpectedly), log and
+/// escalate to a clean session teardown. No in-place restart: the coordinator
+/// (watch::Sender) and death task (mpsc::Receiver) own non-clonable channel
+/// endpoints. See the terminal-trust-hardening spec, Phase 1.
+async fn supervise_core(
+    name: &'static str,
+    weak: std::sync::Weak<Session>,
+    handle: tokio::task::JoinHandle<()>,
+) {
+    match handle.await {
+        Ok(()) => {} // clean end (closing / empty); nothing to do
+        Err(e) if e.is_cancelled() => {} // begin_close/Drop aborted it
+        Err(_panic) => {
+            tracing::error!(task = name, "core session task panicked; tearing down session");
+            if let Some(session) = weak.upgrade() {
+                session.begin_close();
+                session.terminate_panes().await;
+            }
+        }
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         // Abort the background tasks so they don't outlive the Session.
@@ -1274,6 +1307,20 @@ mod tests {
         let s = Session::new("main".into(), spec(), size(), cfg()).expect("construct session");
         assert_eq!(s.name(), "main");
         assert!(!s.closing.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn supervise_core_escalates_to_teardown_on_panic() {
+        let _g = crate::test_env::isolate();
+        let session =
+            Session::new("s".into(), spec(), size(), cfg()).expect("construct session");
+        // A task that panics immediately.
+        let h = tokio::spawn(async { panic!("core task died") });
+        supervise_core("test-core", std::sync::Arc::downgrade(&session), h).await;
+        assert!(
+            session.closing.load(Ordering::SeqCst),
+            "a panicked core task must escalate to begin_close (closing=true)"
+        );
     }
 
     #[tokio::test]
