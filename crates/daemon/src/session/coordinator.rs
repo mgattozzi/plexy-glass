@@ -24,12 +24,9 @@ struct OwnedPane {
 /// the frame (the process panic hook records the location). See the
 /// terminal-trust-hardening spec, Phase 1.
 fn catch_compose(f: impl FnOnce() -> VirtualScreen) -> Option<VirtualScreen> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok(frame) => Some(frame),
-        Err(_) => {
-            tracing::error!("compositor panicked; skipping frame");
-            None
-        }
+    if let Ok(frame) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) { Some(frame) } else {
+        tracing::error!("compositor panicked; skipping frame");
+        None
     }
 }
 
@@ -109,11 +106,11 @@ pub(super) async fn render_coordinator(
                     owned.push(OwnedPane {
                         id,
                         rect,
-                        screen: pane.with_screen(|s| s.clone()),
+                        screen: pane.with_screen(std::clone::Clone::clone),
                         is_active: id == active_id,
                         scroll: pane.scroll_offset(),
-                        copy_mode: pane.with_copy_mode(|cm| cm.clone()),
-                        block_mode: pane.with_block_mode(|bm| bm.clone()),
+                        copy_mode: pane.with_copy_mode(std::clone::Clone::clone),
+                        block_mode: pane.with_block_mode(std::clone::Clone::clone),
                         name: pane.name(),
                     });
                 }
@@ -142,7 +139,7 @@ pub(super) async fn render_coordinator(
             let popup_owned: Option<(plexy_glass_emulator::Screen, String, plexy_glass_mux::Rect)> =
                 m.popup().map(|p| {
                     (
-                        p.pane.with_screen(|s| s.clone()),
+                        p.pane.with_screen(std::clone::Clone::clone),
                         p.title.clone(),
                         plexy_glass_mux::popup_rect(m.viewport()),
                     )
@@ -170,8 +167,7 @@ pub(super) async fn render_coordinator(
             let copy_mode_active = m
                 .active_window()
                 .active_pane()
-                .map(|p| p.is_in_copy_mode())
-                .unwrap_or(false);
+                .is_some_and(super::super::pane::Pane::is_in_copy_mode);
             let sync_active = m.active_window().sync_input;
             let zoom_active = m.active_window().is_zoomed();
             // Any-client-armed aggregate; same WM→clients lock order as the
@@ -259,7 +255,7 @@ pub(super) async fn render_coordinator(
             let right_w = right
                 .iter()
                 .map(|s| plexy_glass_emulator::display_width(&s.text))
-                .fold(0u16, |a, w| a.saturating_add(w));
+                .fold(0u16, u16::saturating_add);
             let mut hits = zone_hits(&left, 0);
             hits.extend(zone_hits(&right, host_size.cols.saturating_sub(right_w)));
             m.set_status_hits(hits);

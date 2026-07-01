@@ -171,7 +171,7 @@ impl MouseParser {
     /// resolved to a mouse event or bailed). A lone `\x1b` parks here as
     /// `SawEsc`, so the connection loop must treat a mid-sequence mouse parser
     /// as "pending" too (the key parser hasn't seen the ESC yet).
-    pub fn is_mid_sequence(&self) -> bool {
+    pub const fn is_mid_sequence(&self) -> bool {
         !matches!(self.state, ParseState::Idle)
     }
 
@@ -200,7 +200,7 @@ impl MouseParser {
         MouseParseAction::BailedBytes(bytes)
     }
 
-    fn reset_state(&mut self) {
+    const fn reset_state(&mut self) {
         self.state = ParseState::Idle;
         self.params = [0; 3];
     }
@@ -259,10 +259,9 @@ impl Default for MouseParser {
 /// any-event panes use the legacy `\e[M` form (button, col, row each +32).
 pub fn encode_for_child(event: MouseEvent, mode: MouseEncoding) -> Vec<u8> {
     let mut button_code: u32 = match event.button {
-        MouseButton::Left => 0,
+        MouseButton::Left | MouseButton::None => 0,
         MouseButton::Middle => 1,
         MouseButton::Right => 2,
-        MouseButton::None => 0,
     };
     if event.modifiers.shift {
         button_code |= 4;
@@ -496,7 +495,7 @@ mod tests {
         let left = drive(b"\x1b[<66;10;5M");
         match left.last() {
             Some(MouseParseAction::Event(e)) => {
-                assert_eq!(e.kind, MouseKind::Wheel { delta: 3, horizontal: true })
+                assert_eq!(e.kind, MouseKind::Wheel { delta: 3, horizontal: true });
             }
             other => panic!("expected horizontal wheel, got {other:?}"),
         }

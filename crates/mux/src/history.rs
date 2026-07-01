@@ -52,7 +52,7 @@ pub enum HistoryOutcome {
 }
 
 impl HistoryState {
-    pub fn new(entries: Vec<HistoryEntry>) -> Self {
+    pub const fn new(entries: Vec<HistoryEntry>) -> Self {
         Self { entries, selected: 0, filter: String::new() }
     }
 

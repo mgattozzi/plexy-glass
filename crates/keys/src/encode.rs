@@ -595,11 +595,9 @@ mod tests {
         );
         // Round-trips: the parser decodes NUL back to Ctrl+Space.
         let mut p = KeyParser::new();
-        let mut got = None;
-        if let KeyParseOutput::Event { event, .. } = p.consume(0x00) {
-            got = Some(event);
-        }
-        let got = got.expect("decoded event");
+        let KeyParseOutput::Event { event: got, .. } = p.consume(0x00) else {
+            panic!("decoded event")
+        };
         assert_eq!(got.key, Key::Char(' '));
         assert_eq!(got.mods, Modifiers::CTRL);
     }

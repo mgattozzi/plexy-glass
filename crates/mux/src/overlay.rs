@@ -135,7 +135,7 @@ fn handle_rename(event: &KeyEvent, buf: &mut String) -> OverlayAction {
         // Esc cancels. Note: unlike the help overlay, `q` is a normal character
         // here and must NOT dismiss.
         (m, Key::Escape) if m.is_empty() => OverlayAction::Cancel,
-        (_, Key::Enter) | (_, Key::KeypadEnter) => OverlayAction::Commit(buf.trim().to_string()),
+        (_, Key::Enter | Key::KeypadEnter) => OverlayAction::Commit(buf.trim().to_string()),
         (m, Key::Backspace) if m.is_empty() => {
             if buf.pop().is_some() {
                 OverlayAction::Redraw
@@ -161,17 +161,17 @@ fn handle_help(event: &KeyEvent, scroll: &mut u16) -> OverlayAction {
     }
     let before = *scroll;
     let next = match (event.mods, event.key) {
-        (m, Key::Char('j')) | (m, Key::Arrow(Direction::Down)) if m.is_empty() => {
+        (m, Key::Char('j') | Key::Arrow(Direction::Down)) if m.is_empty() => {
             scroll.saturating_add(1)
         }
-        (m, Key::Char('k')) | (m, Key::Arrow(Direction::Up)) if m.is_empty() => {
+        (m, Key::Char('k') | Key::Arrow(Direction::Up)) if m.is_empty() => {
             scroll.saturating_sub(1)
         }
         (m, Key::PageDown) if m.is_empty() => scroll.saturating_add(PAGE_STEP),
         (m, Key::PageUp) if m.is_empty() => scroll.saturating_sub(PAGE_STEP),
         (m, Key::Char('d')) if m == Modifiers::CTRL => scroll.saturating_add(PAGE_STEP),
         (m, Key::Char('u')) if m == Modifiers::CTRL => scroll.saturating_sub(PAGE_STEP),
-        (m, Key::Char('g')) | (m, Key::Home) if m.is_empty() => 0,
+        (m, Key::Char('g') | Key::Home) if m.is_empty() => 0,
         // `G` arrives shifted; jump to the bottom (renderer clamps to content).
         (m, Key::Char('G')) if m == Modifiers::SHIFT => u16::MAX,
         (m, Key::End) if m.is_empty() => u16::MAX,
@@ -188,7 +188,7 @@ fn handle_help(event: &KeyEvent, scroll: &mut u16) -> OverlayAction {
 /// The welcome modal dismisses on any key (a "press any key to continue"
 /// banner). The key is swallowed, and `Cancel` closes the overlay at the WM
 /// layer.
-fn handle_welcome(_event: &KeyEvent) -> OverlayAction {
+const fn handle_welcome(_event: &KeyEvent) -> OverlayAction {
     OverlayAction::Cancel
 }
 
@@ -202,7 +202,7 @@ fn handle_command_prompt(
     match (event.mods, event.key) {
         (m, Key::Escape) if m.is_empty() => OverlayAction::Cancel,
         // Empty/whitespace line cancels; otherwise commit the trimmed line.
-        (_, Key::Enter) | (_, Key::KeypadEnter) => {
+        (_, Key::Enter | Key::KeypadEnter) => {
             let trimmed = buf.trim();
             if trimmed.is_empty() {
                 OverlayAction::Cancel
@@ -303,14 +303,14 @@ fn history_recall(
             Some(i) => i - 1,
         };
         *hist_idx = Some(new_idx);
-        *buf = history[new_idx].clone();
+        buf.clone_from(&history[new_idx]);
         OverlayAction::Redraw
     } else {
         match *hist_idx {
             None => OverlayAction::None,
             Some(i) if i + 1 < history.len() => {
                 *hist_idx = Some(i + 1);
-                *buf = history[i + 1].clone();
+                buf.clone_from(&history[i + 1]);
                 OverlayAction::Redraw
             }
             Some(_) => {
@@ -335,7 +335,7 @@ fn handle_session_picker(
     let filtered_len = picker_filtered_indices(entries, filter).len();
     match (event.mods, event.key) {
         (m, Key::Escape) if m.is_empty() => OverlayAction::Cancel,
-        (_, Key::Enter) | (_, Key::KeypadEnter) => {
+        (_, Key::Enter | Key::KeypadEnter) => {
             let filtered = picker_filtered_indices(entries, filter);
             match filtered.get(*selected) {
                 Some(&idx) => OverlayAction::Commit(entries[idx].name.clone()),
@@ -385,20 +385,20 @@ fn move_picker(selected: &mut usize, len: usize, down: bool) -> OverlayAction {
     } else {
         selected.saturating_sub(1)
     };
-    if new != *selected {
+    if new == *selected {
+        OverlayAction::None
+    } else {
         *selected = new;
         OverlayAction::Redraw
-    } else {
-        OverlayAction::None
     }
 }
 
-fn set_picker(selected: &mut usize, target: usize) -> OverlayAction {
-    if *selected != target {
+const fn set_picker(selected: &mut usize, target: usize) -> OverlayAction {
+    if *selected == target {
+        OverlayAction::None
+    } else {
         *selected = target;
         OverlayAction::Redraw
-    } else {
-        OverlayAction::None
     }
 }
 

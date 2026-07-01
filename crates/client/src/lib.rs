@@ -462,12 +462,9 @@ pub async fn client_exec(
             if !json && !output.is_empty() {
                 println!("{output}");
             }
-            match exit {
-                Some(n) => Ok(n),
-                None => {
-                    eprintln!("run: shell integration reported no exit code");
-                    Ok(0)
-                }
+            if let Some(n) = exit { Ok(n) } else {
+                eprintln!("run: shell integration reported no exit code");
+                Ok(0)
             }
         }
         ServerMsg::CommandResult { ok: false, message } => {
@@ -495,11 +492,10 @@ fn default_spawn_spec() -> SpawnSpec {
 
 fn spawn_sigwinch_task(tx: mpsc::Sender<plexy_glass_protocol::PtySize>, fd: std::os::fd::OwnedFd) {
     tokio::spawn(async move {
-        let mut sig = match tokio::signal::unix::signal(
+        let Ok(mut sig) = tokio::signal::unix::signal(
             tokio::signal::unix::SignalKind::window_change(),
-        ) {
-            Ok(s) => s,
-            Err(_) => return,
+        ) else {
+            return;
         };
         while sig.recv().await.is_some() {
             if let Ok(size) = current_size(fd.as_fd())

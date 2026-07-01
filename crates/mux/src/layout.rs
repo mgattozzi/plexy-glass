@@ -17,8 +17,8 @@ pub(crate) enum LayoutNode {
     Split {
         dir: SplitDir,
         ratio: f32,
-        first: Box<LayoutNode>,
-        second: Box<LayoutNode>,
+        first: Box<Self>,
+        second: Box<Self>,
     },
 }
 
@@ -56,7 +56,7 @@ pub enum CloseOutcome {
     NotPresent,
 }
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum LayoutError {
     #[error("pane {0:?} not found in layout")]
     PaneNotFound(PaneId),
@@ -68,11 +68,11 @@ pub struct LayoutTree {
 }
 
 impl LayoutTree {
-    pub fn single(pane: PaneId) -> Self {
+    pub const fn single(pane: PaneId) -> Self {
         Self { root: Some(LayoutNode::Leaf(pane)) }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.root.is_none()
     }
 
@@ -137,11 +137,7 @@ impl LayoutTree {
             return;
         }
         debug_assert!(
-            {
-                let mut seen = panes.to_vec();
-                seen.sort_unstable();
-                seen.windows(2).all(|w| w[0] != w[1])
-            },
+            panes.iter().collect::<std::collections::HashSet<_>>().len() == panes.len(),
             "apply_preset requires unique PaneIds (duplicates would violate the \
              one-leaf-per-pane tree invariant)"
         );
@@ -427,19 +423,19 @@ fn adjust_split_recurse(
             SplitDir::Vertical => a.cols,
             SplitDir::Horizontal => a.rows,
         };
-        let new_first = (first_cells as i32 + delta as i32)
-            .max(MIN_PANE_CELLS as i32)
-            .min((total_usable - MIN_PANE_CELLS) as i32) as u16;
-        let clamped = (new_first as f32 / total_usable as f32).clamp(0.1, 0.9);
+        let new_first = (i32::from(first_cells) + i32::from(delta))
+            .max(i32::from(MIN_PANE_CELLS))
+            .min(i32::from(total_usable - MIN_PANE_CELLS)) as u16;
+        let clamped = (f32::from(new_first) / f32::from(total_usable)).clamp(0.1, 0.9);
         *ratio = clamped;
         // Report the delta against the ACTUAL painted first-pane width (which
         // `subdivide` re-derives from the ratio), not the cell-space `new_first`:
         // when the [0.1,0.9] ratio clamp and the `MIN_PANE_CELLS` clamp disagree
         // (at the extremes), the painted border lands at the ratio width, so a
         // cell-space `applied` would desync the drag anchor from the border.
-        let actual_first = ((total_usable as f32 * clamped).round() as u16)
+        let actual_first = ((f32::from(total_usable) * clamped).round() as u16)
             .clamp(1, total_usable.saturating_sub(1).max(1));
-        let applied = actual_first as i32 - first_cells as i32;
+        let applied = i32::from(actual_first) - i32::from(first_cells);
         return applied as i16;
     }
     let from_first = adjust_split_recurse(first, a, adjacent_pane, side, delta);
@@ -536,7 +532,7 @@ fn pick_neighbor(
     } else {
         (src.col, src.right_edge_col())
     };
-    let src_center = src_lo as i32 + (src_hi as i32 - src_lo as i32) / 2;
+    let src_center = i32::from(src_lo) + (i32::from(src_hi) - i32::from(src_lo)) / 2;
 
     panes
         .iter()
@@ -551,7 +547,7 @@ fn pick_neighbor(
             if overlap == 0 {
                 None
             } else {
-                let center = lo as i32 + (hi as i32 - lo as i32) / 2;
+                let center = i32::from(lo) + (i32::from(hi) - i32::from(lo)) / 2;
                 let center_dist = (center - src_center).unsigned_abs();
                 Some((*p, overlap, center_dist))
             }
@@ -591,13 +587,13 @@ fn resize_in(
 
             let descendant_handled = handled_first || handled_second;
             let mut new_ratio = ratio;
-            let mut handled = descendant_handled;
             // Adjust only at the nearest enclosing same-axis split: skip if a
             // deeper same-axis split already consumed the resize.
-            if dir == axis && (in_first || in_second) && !descendant_handled {
+            let adjust_here = dir == axis && (in_first || in_second) && !descendant_handled;
+            if adjust_here {
                 let size = match axis {
-                    SplitDir::Horizontal => viewport.rows.saturating_sub(1).max(1) as i32,
-                    SplitDir::Vertical => viewport.cols.saturating_sub(1).max(1) as i32,
+                    SplitDir::Horizontal => i32::from(viewport.rows.saturating_sub(1).max(1)),
+                    SplitDir::Vertical => i32::from(viewport.cols.saturating_sub(1).max(1)),
                 };
                 let dr = (delta_cells as f32) / (size as f32);
                 if in_first {
@@ -605,8 +601,8 @@ fn resize_in(
                 } else {
                     new_ratio = (ratio - dr).clamp(0.1, 0.9);
                 }
-                handled = true;
             }
+            let handled = descendant_handled || adjust_here;
 
             (
                 LayoutNode::Split {
@@ -1189,7 +1185,7 @@ mod tests {
         // `dir_match` is false but `pane_match` may be true
         // (`bottommost_leaf == pane`), incorrectly applying an adjustment.
         let t_orig = build_two_pane_vertical(); // [0] | [1], vertical
-        let mut t = t_orig.clone();
+        let mut t = t_orig;
         let vp = Rect::new(0, 0, 10, 21);
         // BorderSide::Bottom makes no sense for a vertical split; must return 0.
         let applied = t.adjust_split(PaneId(0), BorderSide::Bottom, 5, vp);

@@ -106,11 +106,10 @@ impl PasteParser {
                 if byte == 0x1b {
                     self.held.push(byte);
                     self.state = State::InEsc;
-                    PasteParseOutput::Pending
                 } else {
                     self.push_content(byte);
-                    PasteParseOutput::Pending
                 }
+                PasteParseOutput::Pending
             }
             State::InEsc => self.advance_close(byte, b'[', State::InBracket),
             State::InBracket => self.advance_close(byte, b'2', State::InTwo),
@@ -143,7 +142,7 @@ impl PasteParser {
     /// inside an active paste there is no Esc to deliver, and the connection
     /// loop must not arm the Esc idle-flush there (it would prematurely bail an
     /// in-progress paste).
-    pub fn is_pending_open(&self) -> bool {
+    pub const fn is_pending_open(&self) -> bool {
         matches!(
             self.state,
             State::SawEsc
@@ -186,13 +185,12 @@ impl PasteParser {
         if byte == expected {
             self.held.push(byte);
             self.state = next;
-            PasteParseOutput::Pending
         } else {
             self.flush_held_into_buffer();
             self.push_content(byte);
             self.state = State::Content;
-            PasteParseOutput::Pending
         }
+        PasteParseOutput::Pending
     }
 
     /// Bail from a partial open sequence: emit held + current byte as

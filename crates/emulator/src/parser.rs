@@ -300,7 +300,7 @@ impl<S: ScreenOps> vte::Perform for Performer<'_, S> {
         self.dcs_intermediates.clear();
         self.dcs_intermediates.extend_from_slice(intermediates);
         self.dcs_params.clear();
-        self.dcs_params.extend(params.iter().map(|g| g.to_vec()));
+        self.dcs_params.extend(params.iter().map(<[u16]>::to_vec));
         self.dcs_payload.clear();
     }
 
@@ -355,7 +355,7 @@ mod tests {
             self.c0.push(byte);
         }
         fn handle_csi(&mut self, params: &vte::Params, intermediates: &[u8], action: char) {
-            let p: Vec<Vec<u16>> = params.iter().map(|s| s.to_vec()).collect();
+            let p: Vec<Vec<u16>> = params.iter().map(<[u16]>::to_vec).collect();
             self.csi.push((p, intermediates.to_vec(), action));
         }
         fn handle_osc(&mut self, params: &[&[u8]]) {

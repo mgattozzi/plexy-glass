@@ -15,13 +15,13 @@ pub enum Color {
 
 impl Color {
     /// Map an ANSI 30-37 / 40-47 code to an indexed color.
-    pub fn from_ansi_basic(n: u8) -> Self {
-        Color::Indexed(n)
+    pub const fn from_ansi_basic(n: u8) -> Self {
+        Self::Indexed(n)
     }
 
     /// Map an ANSI 90-97 / 100-107 bright code to an indexed color in 8..=15.
-    pub fn from_ansi_bright(n: u8) -> Self {
-        Color::Indexed(n + 8)
+    pub const fn from_ansi_bright(n: u8) -> Self {
+        Self::Indexed(n + 8)
     }
 }
 

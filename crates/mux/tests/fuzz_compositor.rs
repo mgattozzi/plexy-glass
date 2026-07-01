@@ -16,8 +16,8 @@ fn fuzz_compose_does_not_panic() {
         if bytes.len() < 4 {
             return;
         }
-        let rows = (bytes[0] % 60).max(1) as u16;
-        let cols = (bytes[1] % 200).max(1) as u16;
+        let rows = u16::from((bytes[0] % 60).max(1));
+        let cols = u16::from((bytes[1] % 200).max(1));
         let scroll = u32::from(bytes[2]);
         let stream = &bytes[4..];
 

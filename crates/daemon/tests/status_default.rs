@@ -17,7 +17,7 @@ fn spec() -> SpawnSpec {
     }
 }
 
-fn size() -> PtySize {
+const fn size() -> PtySize {
     PtySize { rows: 8, cols: 40, pixel_width: 0, pixel_height: 0 }
 }
 
@@ -48,8 +48,7 @@ async fn default_status_includes_session_name() {
     let cols = frame.cols;
     let row_text: String = (0..cols)
         .filter_map(|c| frame.cell(rows - 1, c).map(|cell| cell.grapheme.as_str().to_owned()))
-        .collect::<Vec<_>>()
-        .join("");
+        .collect::<String>();
 
     if !row_text.contains("demo") {
         eprintln!("note: status row missing session name (fail-soft). row: {row_text:?}");

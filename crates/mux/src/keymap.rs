@@ -92,7 +92,7 @@ pub type Chord = (Modifiers, Key);
 
 #[derive(Debug, Default, Clone)]
 struct TrieNode {
-    children: HashMap<Chord, TrieNode>,
+    children: HashMap<Chord, Self>,
     terminal: Option<Command>,
 }
 
@@ -126,13 +126,13 @@ impl Keymap {
     /// Add a binding. Later bindings with the same chord-sequence override earlier ones.
     pub fn bind(&mut self, chords: &[Chord], command: Command) {
         let mut node = &mut self.root;
-        for chord in chords.iter() {
+        for chord in chords {
             node = node.children.entry(*chord).or_default();
         }
         node.terminal = Some(command);
     }
 
-    pub fn prefix_active(&self) -> bool {
+    pub const fn prefix_active(&self) -> bool {
         !self.pending.is_empty()
     }
 

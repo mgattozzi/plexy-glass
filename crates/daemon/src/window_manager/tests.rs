@@ -408,10 +408,10 @@ async fn panes_inherit_real_host_cell_size_pixels() {
     let host = PtySize { rows: 24, cols: 80, pixel_width: 720, pixel_height: 432 };
     let mut m = WindowManager::new(spec(), host, notify, None, cfg()).unwrap();
     let pane = m.active_window().pane(PaneId(0)).cloned().unwrap();
-    assert_eq!(pane.with_screen(|s| s.cell_pixels()), (9, 18), "construction must relay host cell size");
+    assert_eq!(pane.with_screen(plexy_glass_emulator::Screen::cell_pixels), (9, 18), "construction must relay host cell size");
     m.on_host_resize(PtySize { rows: 24, cols: 80, pixel_width: 800, pixel_height: 480 })
         .unwrap();
-    assert_eq!(pane.with_screen(|s| s.cell_pixels()), (10, 20), "host resize must update the cell size");
+    assert_eq!(pane.with_screen(plexy_glass_emulator::Screen::cell_pixels), (10, 20), "host resize must update the cell size");
 }
 
 /// Copy-mode mouse must use pane-local coordinates (CopyMode::handle_mouse
@@ -675,7 +675,7 @@ async fn rename_pane_overlay_sets_pane_name() {
     m.handle_overlay_key(&okey(plexy_glass_mux::Key::Enter));
     assert!(m.overlay().is_none());
     assert_eq!(
-        m.active_window().pane(active).and_then(|p| p.name()).as_deref(),
+        m.active_window().pane(active).and_then(super::super::pane::Pane::name).as_deref(),
         Some("logs")
     );
 }
@@ -987,7 +987,7 @@ async fn fold_via_block_mode_dispatch_persists_after_exit() {
         s.active.rows[1].mark.set(RowMark::OUTPUT_START);
         s.active.rows[3].mark.set(RowMark::PROMPT_START);
     });
-    let screen = pane.with_screen(|s| s.clone());
+    let screen = pane.with_screen(std::clone::Clone::clone);
     pane.enter_block_mode(plexy_glass_mux::BlockMode::new_for(&screen, 24).unwrap());
     // Apply the fold exactly as the connection dispatch does.
     pane.with_screen_mut(|s| plexy_glass_mux::blocks::toggle_block_fold(s, 0));
@@ -1033,8 +1033,7 @@ fn gutter_col_for(m: &WindowManager) -> u16 {
     m.active_window()
         .layout()
         .rect_of(PaneId(0), vp)
-        .map(|r| r.col + r.cols)
-        .unwrap_or(0)
+        .map_or(0, |r| r.col + r.cols)
 }
 
 #[tokio::test]
@@ -2377,9 +2376,7 @@ async fn update_monitor_flags_sets_background_activity_then_clears_on_switch() {
         if m.windows()[1].activity_flag() {
             break;
         }
-        if Instant::now() > deadline {
-            panic!("background activity never flagged");
-        }
+        assert!(Instant::now() <= deadline, "background activity never flagged");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(!m.active_window().activity_flag(), "the current window is never flagged");
@@ -2419,9 +2416,7 @@ async fn update_monitor_flags_sets_background_bell_from_a_real_bel() {
         if m.windows()[1].bell_flag() {
             break;
         }
-        if Instant::now() > deadline {
-            panic!("background bell never flagged window 1");
-        }
+        assert!(Instant::now() <= deadline, "background bell never flagged window 1");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(!m.active_window().bell_flag(), "the current window is never bell-flagged");
@@ -2854,20 +2849,20 @@ async fn input_target_pane_prefers_popup() {
     m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
     let layout_pane = m.active_window().active();
     assert_eq!(
-        m.input_target_pane().map(|p| p.id()),
+        m.input_target_pane().map(super::super::pane::Pane::id),
         Some(layout_pane),
         "no popup: input targets the active layout pane"
     );
     m.handle_command(Command::OpenPopup { command: None }).unwrap();
     let popup_id = m.popup().unwrap().pane.id();
     assert_eq!(
-        m.input_target_pane().map(|p| p.id()),
+        m.input_target_pane().map(super::super::pane::Pane::id),
         Some(popup_id),
         "popup open: it is modal and owns user input"
     );
     m.handle_command(Command::ClosePopup).unwrap();
     assert_eq!(
-        m.input_target_pane().map(|p| p.id()),
+        m.input_target_pane().map(super::super::pane::Pane::id),
         Some(layout_pane),
         "popup closed: input returns to the active layout pane"
     );

@@ -126,7 +126,7 @@ mod tests {
         assert_eq!(v.rows, 4);
         assert_eq!(v.cols, 6);
         assert_eq!(v.cells.len(), 24);
-        assert!(v.cells.iter().all(|c| c.is_blank()));
+        assert!(v.cells.iter().all(plexy_glass_emulator::Cell::is_blank));
     }
 
     #[test]
@@ -149,6 +149,6 @@ mod tests {
             ..Cell::default()
         };
         v.put(99, 99, c);
-        assert!(v.cells.iter().all(|c| c.is_blank()));
+        assert!(v.cells.iter().all(plexy_glass_emulator::Cell::is_blank));
     }
 }

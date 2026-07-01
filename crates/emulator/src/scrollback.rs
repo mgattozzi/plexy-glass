@@ -46,11 +46,11 @@ impl Scrollback {
         self.rows.is_empty()
     }
 
-    pub fn rows(&self) -> &VecDeque<Row> {
+    pub const fn rows(&self) -> &VecDeque<Row> {
         &self.rows
     }
 
-    pub fn rows_mut(&mut self) -> &mut VecDeque<Row> {
+    pub const fn rows_mut(&mut self) -> &mut VecDeque<Row> {
         &mut self.rows
     }
 }

@@ -163,7 +163,7 @@ fn is_alive(pid: i32) -> bool {
     // outcome as ForceKilled for a process we never signalled.
     !matches!(
         nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
-        Err(nix::errno::Errno::ESRCH) | Err(nix::errno::Errno::EPERM)
+        Err(nix::errno::Errno::ESRCH | nix::errno::Errno::EPERM)
     )
 }
 

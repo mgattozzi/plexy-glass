@@ -126,7 +126,7 @@ pub struct GlyphSet {
 }
 
 impl GlyphSet {
-    pub const NERD: GlyphSet = GlyphSet {
+    pub const NERD: Self = Self {
         powerline: true,
         sep_right: "\u{e0b0}",
         sep_left: "\u{e0b2}",
@@ -141,7 +141,7 @@ impl GlyphSet {
         host: "\u{f108}",
         clients: "\u{f0c0}",
     };
-    pub const UNICODE: GlyphSet = GlyphSet {
+    pub const UNICODE: Self = Self {
         powerline: false,
         sep_right: "",
         sep_left: "",
@@ -156,7 +156,7 @@ impl GlyphSet {
         host: "@",
         clients: "^",
     };
-    pub const ASCII: GlyphSet = GlyphSet {
+    pub const ASCII: Self = Self {
         powerline: false,
         sep_right: "",
         sep_left: "",
@@ -172,7 +172,7 @@ impl GlyphSet {
         clients: "cl:",
     };
 
-    pub fn for_tier(tier: GlyphTier) -> &'static GlyphSet {
+    pub const fn for_tier(tier: GlyphTier) -> &'static Self {
         match tier {
             GlyphTier::Unicode => &Self::UNICODE,
             GlyphTier::Nerd => &Self::NERD,

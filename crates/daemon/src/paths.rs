@@ -23,7 +23,7 @@ impl RuntimePaths {
     /// On macOS uses `$TMPDIR/plexy-glass-$UID` and `~/Library/Logs/plexy-glass`.
     pub fn for_current_user() -> std::io::Result<Self> {
         let uid = nix::unistd::getuid().as_raw();
-        let runtime_dir = Self::resolve_runtime_dir(uid)?;
+        let runtime_dir = Self::resolve_runtime_dir(uid);
         let log_dir = Self::resolve_log_dir()?;
         Ok(Self::for_dirs(&runtime_dir, &log_dir))
     }
@@ -40,7 +40,7 @@ impl RuntimePaths {
         }
     }
 
-    fn resolve_runtime_dir(uid: u32) -> std::io::Result<PathBuf> {
+    fn resolve_runtime_dir(uid: u32) -> PathBuf {
         // An explicit instance root wins on every platform. This is the single
         // knob for running a second, fully isolated daemon next to the default
         // one (see also `sessions_dir` / `resolve_log_dir`), and it's the only
@@ -48,7 +48,7 @@ impl RuntimePaths {
         // canonical path is otherwise a fixed per-UID dir, so all invocations
         // share one daemon.
         if let Some(root) = std::env::var_os("PLEXY_GLASS_DIR") {
-            return Ok(PathBuf::from(root).join("run"));
+            return PathBuf::from(root).join("run");
         }
         // Per the spec: only honor XDG_RUNTIME_DIR on Linux. On macOS the
         // canonical path is $TMPDIR/plexy-glass-$UID; a stray XDG_RUNTIME_DIR
@@ -56,12 +56,10 @@ impl RuntimePaths {
         // point at /run/user/$UID which doesn't exist on macOS.
         #[cfg(target_os = "linux")]
         if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-            return Ok(PathBuf::from(dir).join("plexy-glass"));
+            return PathBuf::from(dir).join("plexy-glass");
         }
-        let tmp = std::env::var_os("TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
-        Ok(tmp.join(format!("plexy-glass-{uid}")))
+        let tmp = std::env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+        tmp.join(format!("plexy-glass-{uid}"))
     }
 
     fn resolve_log_dir() -> std::io::Result<PathBuf> {

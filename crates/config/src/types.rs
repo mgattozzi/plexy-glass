@@ -34,7 +34,7 @@ pub struct Config {
 }
 
 /// Configuration for the block exit-status border feature.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlocksConfig {
     /// When `false`, no block-status border painting is performed.
     pub enabled: bool,
@@ -68,7 +68,7 @@ impl Default for BlocksConfig {
 }
 
 /// Configuration for hint mode (`prefix f`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HintsConfig {
     pub enabled: bool,
     /// Label characters (home row by default). Must be >= 2 distinct chars;
@@ -102,7 +102,7 @@ pub enum DragModifier {
     Ctrl,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MouseConfig {
     pub drag_modifier: DragModifier,
 }
@@ -114,7 +114,7 @@ impl Default for MouseConfig {
 }
 
 /// Desktop notifications on command completion (long + unattended).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationsConfig {
     /// Master switch.
     pub enabled: bool,
@@ -128,7 +128,7 @@ impl Default for NotificationsConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeymapConfig {
     pub prefix: String,
     pub inherit_defaults: bool,
@@ -145,7 +145,7 @@ impl Default for KeymapConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeymapBinding {
     pub keys: String,
     pub command: String,
@@ -155,7 +155,7 @@ fn default_prefix() -> String {
     "Ctrl+a".to_string()
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PaletteConfig {
     pub entries: HashMap<String, String>,
 }
@@ -167,7 +167,7 @@ pub enum Position {
     Top,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusConfig {
     pub position: Position,
     pub refresh: Duration,
@@ -188,11 +188,11 @@ impl Default for StatusConfig {
     }
 }
 
-fn default_refresh() -> Duration {
+const fn default_refresh() -> Duration {
     Duration::from_secs(5)
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StyleConfig {
     pub fg: Option<String>,
     pub bg: Option<String>,
@@ -202,13 +202,13 @@ pub struct StyleConfig {
     pub reverse: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Padding {
     pub left: u8,
     pub right: u8,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WidgetSpec {
     Session {
         style: StyleConfig,
@@ -305,7 +305,7 @@ pub enum PaneNode {
     Leaf(PaneTemplate),
     Split {
         dir: SplitDirection,
-        children: Vec<PaneNode>, // invariant: len() >= 2 (enforced by the decoder)
+        children: Vec<Self>, // invariant: len() >= 2 (enforced by the decoder)
         /// Relative split weights aligned to `children`.
         // invariant: weights.len() == children.len() >= 2, every weight >= 1
         // (enforced by the decoder: `ratio=` defaults to 1 and `ratio=0` is a
@@ -314,7 +314,7 @@ pub enum PaneNode {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneTemplate {
     /// Shell command string (run via the default shell `-c`); None = interactive shell.
     pub command: Option<String>,

@@ -16,3 +16,6 @@ base64 = "0.22.1"
 hegeltest = { workspace = true }
 bolero = { workspace = true }
 mutants = { workspace = true }
+
+[lints]
+workspace = true

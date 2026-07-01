@@ -63,7 +63,7 @@ pub fn handle_buffers(event: &KeyEvent, state: &mut BufferPickerState) -> Buffer
         (m, Key::End) if m.is_empty() => set_sel(state, last),
         // 'G' arrives as (empty, 'G') from the byte parser; accept SHIFT too.
         (m, Key::Char('G')) if m.is_empty() || m == Modifiers::SHIFT => set_sel(state, last),
-        (_, Key::Enter) | (_, Key::KeypadEnter) => {
+        (_, Key::Enter | Key::KeypadEnter) => {
             BufferOutcome::Act(BufferAction::Paste(state.entries[state.selected].name.clone()))
         }
         (m, Key::Char('d')) if m.is_empty() => {
@@ -88,11 +88,11 @@ fn move_sel(state: &mut BufferPickerState, down: bool) -> BufferOutcome {
 
 fn set_sel(state: &mut BufferPickerState, target: usize) -> BufferOutcome {
     let clamped = target.min(state.entries.len().saturating_sub(1));
-    if clamped != state.selected {
+    if clamped == state.selected {
+        BufferOutcome::None
+    } else {
         state.selected = clamped;
         BufferOutcome::Redraw
-    } else {
-        BufferOutcome::None
     }
 }
 

@@ -61,7 +61,7 @@ pub fn reflow(
 
     // 3. Trim trailing default blanks from each logical line. We want to drop
     //    row-padding spaces so reflow doesn't accumulate trailing whitespace.
-    for line in logical_lines.iter_mut() {
+    for line in &mut logical_lines {
         while line.last().is_some_and(Cell::is_blank) {
             line.pop();
         }
@@ -462,7 +462,7 @@ mod tests {
         reflow(&mut active, &mut sb, &mut c, 2, 4);
         assert_eq!(active.rows.len(), 2);
         for r in &active.rows {
-            assert!(r.cells.iter().all(|c| c.is_blank()));
+            assert!(r.cells.iter().all(super::super::cell::Cell::is_blank));
         }
     }
 

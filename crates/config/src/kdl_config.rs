@@ -161,7 +161,7 @@ fn pos_arg(node: &KdlNode, idx: usize) -> Option<&KdlValue> {
         .iter()
         .filter(|e| e.name().is_none())
         .nth(idx)
-        .map(|e| e.value())
+        .map(kdl::KdlEntry::value)
 }
 
 fn string_arg<'a>(node: &'a KdlNode, idx: usize, src: &str, what: &str) -> Result<&'a str, ConfigError> {
@@ -172,7 +172,7 @@ fn string_arg<'a>(node: &'a KdlNode, idx: usize, src: &str, what: &str) -> Resul
 
 fn bool_arg(node: &KdlNode, idx: usize, src: &str, what: &str) -> Result<bool, ConfigError> {
     pos_arg(node, idx)
-        .and_then(|v| v.as_bool())
+        .and_then(kdl::KdlValue::as_bool)
         .ok_or_else(|| decode_err(src, node, &format!("expected boolean {what} (use #true / #false)")))
 }
 
@@ -298,10 +298,10 @@ fn decode_blocks(node: &KdlNode, src: &str) -> Result<BlocksConfig, ConfigError>
                 "ok-color" => blocks.ok_color = string_arg(child, 0, src, "ok-color")?.to_string(),
                 "fail-color" => blocks.fail_color = string_arg(child, 0, src, "fail-color")?.to_string(),
                 "select-color" => {
-                    blocks.select_color = string_arg(child, 0, src, "select-color")?.to_string()
+                    blocks.select_color = string_arg(child, 0, src, "select-color")?.to_string();
                 }
                 "sticky-header" => {
-                    blocks.sticky_header = bool_arg(child, 0, src, "sticky-header")?
+                    blocks.sticky_header = bool_arg(child, 0, src, "sticky-header")?;
                 }
                 "duration" => blocks.duration = bool_arg(child, 0, src, "duration")?,
                 "duration-threshold" => {
@@ -551,8 +551,7 @@ fn decode_env_child(node: &KdlNode, src: &str) -> Result<Vec<(String, String)>, 
     // vars, and we'd rather fail loud, matching the decoder's strictness elsewhere.
     let env_count = node
         .children()
-        .map(|d| d.nodes().iter().filter(|n| n.name().value() == "env").count())
-        .unwrap_or(0);
+        .map_or(0, |d| d.nodes().iter().filter(|n| n.name().value() == "env").count());
     if env_count > 1 {
         return Err(decode_err(src, node, "at most one `env` block is allowed"));
     }
@@ -578,8 +577,8 @@ fn prop_val<'a>(node: &'a KdlNode, key: &str) -> Option<&'a KdlValue> {
     node.entries()
         .iter()
         .rev()
-        .find(|e| e.name().map(|n| n.value()) == Some(key))
-        .map(|e| e.value())
+        .find(|e| e.name().map(kdl::KdlIdentifier::value) == Some(key))
+        .map(kdl::KdlEntry::value)
 }
 
 fn prop_str<'a>(node: &'a KdlNode, key: &str) -> Option<&'a str> {
@@ -1008,7 +1007,7 @@ mod tests {
         // A config with only a session must still get the default palette,
         // status bar, and keymap, not empty ones. (Regression: `parse_config`
         // used to start from `Config::default()`, yielding an empty status bar.)
-        let cfg = parse_config(r##"session "dev" { window "w" { pane } }"##).unwrap();
+        let cfg = parse_config(r#"session "dev" { window "w" { pane } }"#).unwrap();
         let d = built_in_default();
         assert_eq!(cfg.palette, d.palette, "omitted palette → default palette");
         assert_eq!(cfg.status, d.status, "omitted status → default status bar");
@@ -1019,7 +1018,7 @@ mod tests {
     #[test]
     fn partial_status_keeps_default_zones() {
         // Overriding one field keeps the rest of the default bar.
-        let cfg = parse_config(r##"status { position "top" }"##).unwrap();
+        let cfg = parse_config(r#"status { position "top" }"#).unwrap();
         let d = built_in_default();
         assert_eq!(cfg.status.position, Position::Top);
         assert_eq!(cfg.status.left.len(), d.status.left.len(), "omitted zones keep defaults");
@@ -1030,7 +1029,7 @@ mod tests {
     #[test]
     fn decodes_keymap_prefix_inherit_and_binds() {
         let cfg = parse_config(
-            r##"keymap { prefix "Ctrl+a"; inherit-defaults #true; bind "Ctrl+a c" "new_window"; bind "Ctrl+a v" "split_v" }"##,
+            r#"keymap { prefix "Ctrl+a"; inherit-defaults #true; bind "Ctrl+a c" "new_window"; bind "Ctrl+a v" "split_v" }"#,
         )
         .unwrap();
         assert_eq!(cfg.keymap.prefix, "Ctrl+a");
@@ -1053,14 +1052,14 @@ mod tests {
 
     #[test]
     fn inherit_defaults_false_is_respected() {
-        let cfg = parse_config(r##"keymap { inherit-defaults #false }"##).unwrap();
+        let cfg = parse_config(r"keymap { inherit-defaults #false }").unwrap();
         assert!(!cfg.keymap.inherit_defaults);
     }
 
     #[test]
     fn bare_bool_is_a_v2_syntax_error() {
         // KDL v2 requires `#true`/`#false`; bare `true` is a parse error.
-        assert!(parse_config(r##"keymap { inherit-defaults true }"##).is_err());
+        assert!(parse_config(r"keymap { inherit-defaults true }").is_err());
     }
 
     #[test]
@@ -1184,21 +1183,21 @@ keymap {
 
     #[test]
     fn position_top_and_refresh_parse() {
-        let cfg = parse_config(r##"status { position "top"; refresh "10s" }"##).unwrap();
+        let cfg = parse_config(r#"status { position "top"; refresh "10s" }"#).unwrap();
         assert_eq!(cfg.status.position, Position::Top);
         assert_eq!(cfg.status.refresh, Duration::from_secs(10));
     }
 
     #[test]
     fn text_requires_value() {
-        assert!(parse_config(r##"status { left { text } }"##).is_err());
+        assert!(parse_config(r"status { left { text } }").is_err());
     }
 
     #[test]
     fn shell_requires_command_and_parses_args() {
-        assert!(parse_config(r##"status { left { shell } }"##).is_err());
+        assert!(parse_config(r"status { left { shell } }").is_err());
         let cfg = parse_config(
-            r##"status { left { shell command="echo" interval="30s" { args "hi" "there" } } }"##,
+            r#"status { left { shell command="echo" interval="30s" { args "hi" "there" } } }"#,
         )
         .unwrap();
         match &cfg.status.left[0] {
@@ -1215,12 +1214,12 @@ keymap {
     #[test]
     fn window_list_requires_both_styles() {
         // Missing inactive-style is a decode error (window-list requires both styles).
-        assert!(parse_config(r##"status { middle { window-list { active-style fg="fg" } } }"##).is_err());
+        assert!(parse_config(r#"status { middle { window-list { active-style fg="fg" } } }"#).is_err());
     }
 
     #[test]
     fn attached_clients_min_count_defaults_to_two() {
-        let cfg = parse_config(r##"status { right { attached-clients { style fg="fg" } } }"##).unwrap();
+        let cfg = parse_config(r#"status { right { attached-clients { style fg="fg" } } }"#).unwrap();
         match &cfg.status.right[0] {
             WidgetSpec::AttachedClients { min_count, .. } => assert_eq!(*min_count, 2),
             other => panic!("expected AttachedClients, got {other:?}"),
@@ -1229,8 +1228,8 @@ keymap {
 
     #[test]
     fn style_child_node_form_matches_property_form() {
-        let props = parse_config(r##"status { left { session { style fg="bg" bg="accent" bold=#true } } }"##).unwrap();
-        let children = parse_config(r##"status { left { session { style { fg "bg"; bg "accent"; bold #true } } } }"##).unwrap();
+        let props = parse_config(r#"status { left { session { style fg="bg" bg="accent" bold=#true } } }"#).unwrap();
+        let children = parse_config(r#"status { left { session { style { fg "bg"; bg "accent"; bold #true } } } }"#).unwrap();
         assert_eq!(props.status.left, children.status.left);
     }
 
@@ -1238,36 +1237,36 @@ keymap {
     fn separator_is_supported_but_not_in_default() {
         // Separator decodes (default char '|'); the built-in default uses no
         // dividers at all (lean divider-free right cluster).
-        let cfg = parse_config(r##"status { right { separator char="*" } }"##).unwrap();
+        let cfg = parse_config(r#"status { right { separator char="*" } }"#).unwrap();
         match &cfg.status.right[0] {
             WidgetSpec::Separator { char, .. } => assert_eq!(*char, '*'),
             other => panic!("expected Separator, got {other:?}"),
         }
-        assert!(parse_config(r##"status { right { separator char="ab" } }"##).is_err());
+        assert!(parse_config(r#"status { right { separator char="ab" } }"#).is_err());
     }
 
     #[test]
     fn unknown_widget_and_unknown_property_error() {
-        assert!(parse_config(r##"status { left { not-a-widget } }"##).is_err());
-        assert!(parse_config(r##"status { left { text value="x" bogus="y" } }"##).is_err());
+        assert!(parse_config(r"status { left { not-a-widget } }").is_err());
+        assert!(parse_config(r#"status { left { text value="x" bogus="y" } }"#).is_err());
     }
 
     #[test]
     fn bad_duration_errors() {
-        assert!(parse_config(r##"status { refresh "not-a-duration" }"##).is_err());
+        assert!(parse_config(r#"status { refresh "not-a-duration" }"#).is_err());
     }
 
     #[test]
     fn prefix_indicator_requires_content_and_style() {
         // Both fields are required (no defaults).
-        assert!(parse_config(r##"status { left { prefix-indicator { style fg="fg" } } }"##).is_err());
-        assert!(parse_config(r##"status { left { prefix-indicator content=" PFX " } }"##).is_err());
+        assert!(parse_config(r#"status { left { prefix-indicator { style fg="fg" } } }"#).is_err());
+        assert!(parse_config(r#"status { left { prefix-indicator content=" PFX " } }"#).is_err());
     }
 
     #[test]
     fn attached_clients_requires_style() {
         // Missing `style` child is a decode error (attached-clients requires it).
-        assert!(parse_config(r##"status { right { attached-clients min-count=2 } }"##).is_err());
+        assert!(parse_config(r"status { right { attached-clients min-count=2 } }").is_err());
     }
 
     #[test]
@@ -1282,24 +1281,24 @@ keymap {
 
     #[test]
     fn unknown_child_node_on_widget_errors() {
-        assert!(parse_config(r##"status { left { session { bad-child { } } } }"##).is_err());
+        assert!(parse_config(r"status { left { session { bad-child { } } } }").is_err());
     }
 
     #[test]
     fn padding_out_of_range_or_malformed_errors() {
-        assert!(parse_config(r##"status { left { session { padding 256 1 } } }"##).is_err());
-        assert!(parse_config(r##"status { left { session { padding -1 1 } } }"##).is_err());
-        assert!(parse_config(r##"status { left { session { padding 1 } } }"##).is_err());
+        assert!(parse_config(r"status { left { session { padding 256 1 } } }").is_err());
+        assert!(parse_config(r"status { left { session { padding -1 1 } } }").is_err());
+        assert!(parse_config(r"status { left { session { padding 1 } } }").is_err());
     }
 
     #[test]
     fn cwd_max_components_optional() {
-        let with = parse_config(r##"status { left { cwd max-components=2 } }"##).unwrap();
+        let with = parse_config(r"status { left { cwd max-components=2 } }").unwrap();
         match &with.status.left[0] {
             WidgetSpec::Cwd { max_components, .. } => assert_eq!(*max_components, Some(2)),
             other => panic!("expected Cwd, got {other:?}"),
         }
-        let without = parse_config(r##"status { left { cwd } }"##).unwrap();
+        let without = parse_config(r"status { left { cwd } }").unwrap();
         match &without.status.left[0] {
             WidgetSpec::Cwd { max_components, .. } => assert_eq!(*max_components, None),
             other => panic!("expected Cwd, got {other:?}"),
@@ -1309,7 +1308,7 @@ keymap {
     #[test]
     fn hostname_git_branch_memory_decode() {
         let cfg = parse_config(
-            r##"status { left { hostname interval="30s"; git-branch; memory interval="2s" } }"##,
+            r#"status { left { hostname interval="30s"; git-branch; memory interval="2s" } }"#,
         )
         .unwrap();
         assert!(matches!(cfg.status.left[0], WidgetSpec::Hostname { .. }));
@@ -1321,7 +1320,7 @@ keymap {
 
     #[test]
     fn decodes_single_pane_session() {
-        let cfg = parse_config(r##"session "dev" { window "main" { pane command="htop" } }"##).unwrap();
+        let cfg = parse_config(r#"session "dev" { window "main" { pane command="htop" } }"#).unwrap();
         assert_eq!(cfg.sessions.len(), 1);
         let s = &cfg.sessions[0];
         assert_eq!(s.name, "dev");
@@ -1336,7 +1335,7 @@ keymap {
     #[test]
     fn decodes_session_cwd_and_pane_overrides() {
         let cfg = parse_config(
-            r##"session "x" cwd="~/p" { window "w" { pane cwd="~/p/sub" name="left" } }"##,
+            r#"session "x" cwd="~/p" { window "w" { pane cwd="~/p/sub" name="left" } }"#,
         )
         .unwrap();
         assert_eq!(cfg.sessions[0].cwd.as_deref(), Some("~/p"));
@@ -1352,7 +1351,7 @@ keymap {
     #[test]
     fn decodes_split_two_and_three_children() {
         let cfg = parse_config(
-            r##"session "s" { window "w" { split vertical { pane; pane command="a"; pane } } }"##,
+            r#"session "s" { window "w" { split vertical { pane; pane command="a"; pane } } }"#,
         )
         .unwrap();
         match &cfg.sessions[0].windows[0].layout {
@@ -1369,7 +1368,7 @@ keymap {
     #[test]
     fn decodes_nested_split() {
         let cfg = parse_config(
-            r##"session "s" { window "w" { split vertical { pane; split horizontal { pane; pane } } } }"##,
+            r#"session "s" { window "w" { split vertical { pane; split horizontal { pane; pane } } } }"#,
         )
         .unwrap();
         match &cfg.sessions[0].windows[0].layout {
@@ -1389,7 +1388,7 @@ keymap {
     #[test]
     fn split_ratio_weights_parse_and_default_to_one() {
         let cfg = parse_config(
-            r##"session "s" { window "w" { split vertical { pane ratio=2; pane; pane ratio=3 } } }"##,
+            r#"session "s" { window "w" { split vertical { pane ratio=2; pane; pane ratio=3 } } }"#,
         )
         .unwrap();
         match &cfg.sessions[0].windows[0].layout {
@@ -1406,7 +1405,7 @@ keymap {
         // A `split` that is itself a child of a split may carry `ratio=` (its
         // weight in the OUTER split); the inner children keep their own.
         let cfg = parse_config(
-            r##"session "s" { window "w" { split vertical { pane ratio=2; split horizontal ratio=1 { pane; pane } } } }"##,
+            r#"session "s" { window "w" { split vertical { pane ratio=2; split horizontal ratio=1 { pane; pane } } } }"#,
         )
         .unwrap();
         match &cfg.sessions[0].windows[0].layout {
@@ -1423,25 +1422,25 @@ keymap {
 
     #[test]
     fn ratio_zero_is_a_decode_error() {
-        assert!(parse_config(r##"session "s" { window "w" { split vertical { pane ratio=0; pane } } }"##).is_err());
+        assert!(parse_config(r#"session "s" { window "w" { split vertical { pane ratio=0; pane } } }"#).is_err());
     }
 
     #[test]
     fn ratio_on_non_split_child_is_rejected() {
         // A top-level window pane (not a split child) with `ratio=` is rejected
         // by the standalone `decode_pane` allowlist (which omits `ratio`).
-        assert!(parse_config(r##"session "s" { window "w" { pane ratio=2 } }"##).is_err());
+        assert!(parse_config(r#"session "s" { window "w" { pane ratio=2 } }"#).is_err());
         // A bare split (the window's top layout) with `ratio=` is likewise rejected.
-        assert!(parse_config(r##"session "s" { window "w" { split vertical ratio=2 { pane; pane } } }"##).is_err());
+        assert!(parse_config(r#"session "s" { window "w" { split vertical ratio=2 { pane; pane } } }"#).is_err());
     }
 
     #[test]
     fn active_window_and_pane_parse() {
         let cfg = parse_config(
-            r##"session "s" {
+            r#"session "s" {
                 window "a" { pane }
                 window "b" active=#true { split vertical { pane; pane active=#true } }
-            }"##,
+            }"#,
         )
         .unwrap();
         let s = &cfg.sessions[0];
@@ -1459,7 +1458,7 @@ keymap {
     #[test]
     fn duplicate_active_window_is_a_decode_error() {
         assert!(parse_config(
-            r##"session "s" { window "a" active=#true { pane } window "b" active=#true { pane } }"##
+            r#"session "s" { window "a" active=#true { pane } window "b" active=#true { pane } }"#
         )
         .is_err());
     }
@@ -1467,7 +1466,7 @@ keymap {
     #[test]
     fn duplicate_active_pane_is_a_decode_error() {
         assert!(parse_config(
-            r##"session "s" { window "w" { split vertical { pane active=#true; pane active=#true } } }"##
+            r#"session "s" { window "w" { split vertical { pane active=#true; pane active=#true } } }"#
         )
         .is_err());
     }
@@ -1475,7 +1474,7 @@ keymap {
     #[test]
     fn env_blocks_parse_at_all_levels() {
         let cfg = parse_config(
-            r##"session "s" {
+            r#"session "s" {
                 env { RUST_LOG "debug" }
                 window "w" {
                     env { TIER "win" }
@@ -1484,7 +1483,7 @@ keymap {
                         pane command="x"
                     }
                 }
-            }"##,
+            }"#,
         )
         .unwrap();
         let s = &cfg.sessions[0];
@@ -1504,7 +1503,7 @@ keymap {
     #[test]
     fn env_keeps_declared_order_and_multiple_keys() {
         let cfg = parse_config(
-            r##"session "s" { window "w" { pane { env { A "1"; B "2"; C "3" } } } }"##,
+            r#"session "s" { window "w" { pane { env { A "1"; B "2"; C "3" } } } }"#,
         )
         .unwrap();
         match &cfg.sessions[0].windows[0].layout {
@@ -1522,25 +1521,25 @@ keymap {
 
     #[test]
     fn env_non_string_value_is_a_decode_error() {
-        assert!(parse_config(r##"session "s" { window "w" { pane { env { PORT 8080 } } } }"##).is_err());
+        assert!(parse_config(r#"session "s" { window "w" { pane { env { PORT 8080 } } } }"#).is_err());
     }
 
     #[test]
     fn unknown_child_on_pane_still_rejected() {
         // `env` is now allowed on a pane, but other children are not.
-        assert!(parse_config(r##"session "s" { window "w" { pane { bogus "x" } } }"##).is_err());
+        assert!(parse_config(r#"session "s" { window "w" { pane { bogus "x" } } }"#).is_err());
     }
 
     #[test]
     fn unknown_child_on_session_still_rejected() {
         // `window` and `env` are the only session children.
-        assert!(parse_config(r##"session "s" { window "w" { pane } bogus "x" }"##).is_err());
+        assert!(parse_config(r#"session "s" { window "w" { pane } bogus "x" }"#).is_err());
     }
 
     #[test]
     fn active_non_bool_is_a_decode_error() {
         // KDL v2 requires `#true`/`#false`; a string is a decode error.
-        assert!(parse_config(r##"session "s" { window "w" active="yes" { pane } }"##).is_err());
+        assert!(parse_config(r#"session "s" { window "w" active="yes" { pane } }"#).is_err());
     }
 
     #[test]
@@ -1548,27 +1547,27 @@ keymap {
         // command/cwd/name with a non-string value used to be silently dropped;
         // they must now fail loud like the other typed props.
         assert!(
-            parse_config(r##"session "s" { window "w" { pane command=#true } }"##).is_err(),
+            parse_config(r#"session "s" { window "w" { pane command=#true } }"#).is_err(),
             "non-string command must error"
         );
         assert!(
-            parse_config(r##"session "s" { window "w" { pane cwd=5 } }"##).is_err(),
+            parse_config(r#"session "s" { window "w" { pane cwd=5 } }"#).is_err(),
             "non-string pane cwd must error"
         );
         assert!(
-            parse_config(r##"session "s" { window "w" { pane name=42 } }"##).is_err(),
+            parse_config(r#"session "s" { window "w" { pane name=42 } }"#).is_err(),
             "non-string pane name must error"
         );
         assert!(
-            parse_config(r##"session "s" cwd=5 { window "w" { pane } }"##).is_err(),
+            parse_config(r#"session "s" cwd=5 { window "w" { pane } }"#).is_err(),
             "non-string session cwd must error"
         );
         assert!(
-            parse_config(r##"session "s" { window "w" cwd=#false { pane } }"##).is_err(),
+            parse_config(r#"session "s" { window "w" cwd=#false { pane } }"#).is_err(),
             "non-string window cwd must error"
         );
         // A well-typed string still parses.
-        assert!(parse_config(r##"session "s" { window "w" { pane command="echo hi" } }"##).is_ok());
+        assert!(parse_config(r#"session "s" { window "w" { pane command="echo hi" } }"#).is_ok());
     }
 
     #[test]
@@ -1577,42 +1576,42 @@ keymap {
         // it must now be rejected.
         assert!(
             parse_config(
-                r##"session "s" { env { A "1" } env { B "2" } window "w" { pane } }"##
+                r#"session "s" { env { A "1" } env { B "2" } window "w" { pane } }"#
             )
             .is_err(),
             "duplicate session env must error"
         );
         assert!(
             parse_config(
-                r##"session "s" { window "w" { pane { env { A "1" } env { B "2" } } } }"##
+                r#"session "s" { window "w" { pane { env { A "1" } env { B "2" } } } }"#
             )
             .is_err(),
             "duplicate pane env must error"
         );
         // A single env block still parses.
         assert!(
-            parse_config(r##"session "s" { window "w" { pane { env { A "1" } } } }"##).is_ok()
+            parse_config(r#"session "s" { window "w" { pane { env { A "1" } } } }"#).is_ok()
         );
     }
 
     #[test]
     fn session_errors() {
         // no name
-        assert!(parse_config(r##"session { window "w" { pane } }"##).is_err());
+        assert!(parse_config(r#"session { window "w" { pane } }"#).is_err());
         // no windows
-        assert!(parse_config(r##"session "s" { }"##).is_err());
+        assert!(parse_config(r#"session "s" { }"#).is_err());
         // window with zero layout nodes
-        assert!(parse_config(r##"session "s" { window "w" { } }"##).is_err());
+        assert!(parse_config(r#"session "s" { window "w" { } }"#).is_err());
         // window with two layout nodes (must wrap in a split)
-        assert!(parse_config(r##"session "s" { window "w" { pane; pane } }"##).is_err());
+        assert!(parse_config(r#"session "s" { window "w" { pane; pane } }"#).is_err());
         // split with one child
-        assert!(parse_config(r##"session "s" { window "w" { split vertical { pane } } }"##).is_err());
+        assert!(parse_config(r#"session "s" { window "w" { split vertical { pane } } }"#).is_err());
         // bad split direction
-        assert!(parse_config(r##"session "s" { window "w" { split sideways { pane; pane } } }"##).is_err());
+        assert!(parse_config(r#"session "s" { window "w" { split sideways { pane; pane } } }"#).is_err());
         // unknown pane property
-        assert!(parse_config(r##"session "s" { window "w" { pane bogus="x" } }"##).is_err());
+        assert!(parse_config(r#"session "s" { window "w" { pane bogus="x" } }"#).is_err());
         // duplicate session name
-        assert!(parse_config(r##"session "s" { window "w" { pane } } session "s" { window "w" { pane } }"##).is_err());
+        assert!(parse_config(r#"session "s" { window "w" { pane } } session "s" { window "w" { pane } }"#).is_err());
     }
 
     #[test]
@@ -1624,10 +1623,10 @@ keymap {
     #[test]
     fn decodes_window_cwd() {
         let cfg = parse_config(
-            r##"session "x" cwd="~/p" {
+            r#"session "x" cwd="~/p" {
                 window "api" cwd="~/p/api" { pane }
                 window "logs" { pane }
-            }"##,
+            }"#,
         )
         .unwrap();
         assert_eq!(cfg.sessions[0].windows[0].cwd.as_deref(), Some("~/p/api"));
@@ -1720,7 +1719,7 @@ session "dev" cwd="~/projects/app" {
             WidgetSpec::Shell { command, args, interval, timeout, .. } => {
                 assert_eq!(command, "uname");
                 assert_eq!(args, &vec!["-sr".to_string()]);
-                assert_eq!(*interval, Some(Duration::from_secs(60)));
+                assert_eq!(*interval, Some(Duration::from_mins(1)));
                 assert_eq!(*timeout, Duration::from_secs(2));
             }
             other => panic!("expected Shell, got {other:?}"),
@@ -1753,14 +1752,14 @@ session "dev" cwd="~/projects/app" {
 
     #[test]
     fn window_rejects_unknown_prop() {
-        let err = parse_config(r##"session "x" { window "w" bogus="1" { pane } }"##);
+        let err = parse_config(r#"session "x" { window "w" bogus="1" { pane } }"#);
         assert!(err.is_err(), "unknown window property must error");
     }
 
     /// The v2 worked example from `docs/configuration.md` (~line 514). Kept
     /// verbatim-identical to the docs so a future schema tweak that breaks the
     /// most-copied declarative-sessions snippet fails here. Update both together.
-    const DOCS_V2_SECTION_EXAMPLE: &str = r##"
+    const DOCS_V2_SECTION_EXAMPLE: &str = r#"
 session "dev" cwd="~/projects/app" {
     env { RUST_LOG "debug" }
     window "edit" active=#true {
@@ -1773,7 +1772,7 @@ session "dev" cwd="~/projects/app" {
         }
     }
 }
-"##;
+"#;
 
     #[test]
     fn docs_v2_section_example_parses() {
@@ -1820,14 +1819,14 @@ session "dev" cwd="~/projects/app" {
 
     #[test]
     fn notifications_round_trip() {
-        let cfg = parse_config(r##"notifications { enabled #false; min-duration "60s" }"##).unwrap();
+        let cfg = parse_config(r#"notifications { enabled #false; min-duration "60s" }"#).unwrap();
         assert!(!cfg.notifications.enabled);
         assert_eq!(cfg.notifications.min_duration_ms, 60_000);
     }
 
     #[test]
     fn notifications_min_duration_invalid_errors() {
-        assert!(parse_config(r##"notifications { min-duration "soon" }"##).is_err());
+        assert!(parse_config(r#"notifications { min-duration "soon" }"#).is_err());
     }
 
     #[test]
@@ -1851,7 +1850,7 @@ session "dev" cwd="~/projects/app" {
     #[test]
     fn blocks_annotation_round_trip() {
         let cfg = parse_config(
-            r##"blocks { sticky-header #false; duration #false; duration-threshold "500ms" }"##,
+            r#"blocks { sticky-header #false; duration #false; duration-threshold "500ms" }"#,
         )
         .unwrap();
         assert!(!cfg.blocks.sticky_header);
@@ -1861,15 +1860,15 @@ session "dev" cwd="~/projects/app" {
 
     #[test]
     fn blocks_duration_threshold_seconds_and_zero() {
-        let a = parse_config(r##"blocks { duration-threshold "1.5s" }"##).unwrap();
+        let a = parse_config(r#"blocks { duration-threshold "1.5s" }"#).unwrap();
         assert_eq!(a.blocks.duration_threshold_ms, 1500);
-        let b = parse_config(r##"blocks { duration-threshold "0" }"##).unwrap();
+        let b = parse_config(r#"blocks { duration-threshold "0" }"#).unwrap();
         assert_eq!(b.blocks.duration_threshold_ms, 0);
     }
 
     #[test]
     fn blocks_duration_threshold_invalid_errors() {
-        assert!(parse_config(r##"blocks { duration-threshold "soon" }"##).is_err());
+        assert!(parse_config(r#"blocks { duration-threshold "soon" }"#).is_err());
     }
 
     #[test]
@@ -1892,7 +1891,7 @@ session "dev" cwd="~/projects/app" {
 
     #[test]
     fn blocks_round_trip_palette_names() {
-        let cfg = parse_config(r##"blocks { ok-color "ok"; fail-color "alert" }"##).unwrap();
+        let cfg = parse_config(r#"blocks { ok-color "ok"; fail-color "alert" }"#).unwrap();
         assert_eq!(cfg.blocks.ok_color, "ok");
         assert_eq!(cfg.blocks.fail_color, "alert");
     }
@@ -1908,7 +1907,7 @@ session "dev" cwd="~/projects/app" {
 
     #[test]
     fn blocks_enabled_false_decodes() {
-        let cfg = parse_config(r##"blocks { enabled #false }"##).unwrap();
+        let cfg = parse_config(r"blocks { enabled #false }").unwrap();
         assert!(!cfg.blocks.enabled);
     }
 
@@ -1923,18 +1922,18 @@ session "dev" cwd="~/projects/app" {
 
     #[test]
     fn blocks_unknown_child_errors() {
-        assert!(parse_config(r##"blocks { bogus "x" }"##).is_err());
+        assert!(parse_config(r#"blocks { bogus "x" }"#).is_err());
     }
 
     #[test]
     fn blocks_duplicate_node_errors() {
-        assert!(parse_config(r##"blocks { } blocks { }"##).is_err());
+        assert!(parse_config(r"blocks { } blocks { }").is_err());
     }
 
     #[test]
     fn blocks_property_form_rejected() {
         // blocks takes no properties on the node itself.
-        assert!(parse_config(r##"blocks enabled=#true"##).is_err());
+        assert!(parse_config(r"blocks enabled=#true").is_err());
     }
 
     // --- glyph tier + auto-rename ---

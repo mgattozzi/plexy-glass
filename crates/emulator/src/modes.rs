@@ -27,7 +27,7 @@ bitflags::bitflags! {
 
 impl Default for Modes {
     fn default() -> Self {
-        Modes::AUTOWRAP | Modes::CURSOR_VISIBLE
+        Self::AUTOWRAP | Self::CURSOR_VISIBLE
     }
 }
 
@@ -42,14 +42,14 @@ impl Modes {
 
     /// True if any of the DEC mouse-reporting modes (?9 / ?1000 / ?1002 / ?1003 /
     /// ?1006) is currently enabled, meaning the child wants raw mouse events.
-    pub fn any_mouse_mode_active(self) -> bool {
+    pub const fn any_mouse_mode_active(self) -> bool {
         self.intersects(Self::MOUSE_REPORTING_BITS)
     }
 
     /// DECRQM `Pm` value for a queried private mode `ps`: 1 = set, 2 = reset,
     /// 0 = not recognized (still echoed by the caller). Consults the *specific*
     /// bit, not the mouse-gating mask.
-    pub fn decrqm_state(self, ps: u16) -> u8 {
+    pub const fn decrqm_state(self, ps: u16) -> u8 {
         let flag = match ps {
             1 => Self::APP_CURSOR_KEYS,
             6 => Self::ORIGIN,

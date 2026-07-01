@@ -81,7 +81,7 @@ impl PipeHandle {
 
     /// The consumer's pid at spawn time (`None` if it exited before spawn
     /// returned the id).
-    pub fn pid(&self) -> Option<u32> {
+    pub const fn pid(&self) -> Option<u32> {
         self.pid
     }
 }
@@ -187,7 +187,7 @@ async fn drain(
         // Phase 1: wait for the next chunk (or a close condition).
         let chunk = tokio::select! {
             biased;
-            r = cancel_rx.wait_for(|r| r.is_some()) => break cancel_reason(r),
+            r = cancel_rx.wait_for(std::option::Option::is_some) => break cancel_reason(r),
             // The consumer exited on its own (its `$SHELL -c` toplevel; a
             // grandchild may keep the pipe's read end open, which is why the
             // exit path below kills explicitly rather than just dropping
@@ -207,7 +207,7 @@ async fn drain(
         // channel close, so it must keep the side-band cancel selectable.
         tokio::select! {
             biased;
-            r = cancel_rx.wait_for(|r| r.is_some()) => break cancel_reason(r),
+            r = cancel_rx.wait_for(std::option::Option::is_some) => break cancel_reason(r),
             w = stdin.write_all(&chunk) => {
                 if w.is_err() {
                     // EPIPE: the consumer closed its stdin or died.
@@ -250,7 +250,7 @@ mod tests {
     /// Whether `pid` names a live (un-reaped) process. `kill -0` semantics:
     /// a zombie still counts as alive until its parent reaps it, which is exactly
     /// the signal the no-zombie assertions need.
-    pub(crate) fn pid_alive(pid: u32) -> bool {
+    pub fn pid_alive(pid: u32) -> bool {
         nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
     }
 

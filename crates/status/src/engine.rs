@@ -281,7 +281,7 @@ impl EngineInner {
         next_deadline
     }
 
-    pub fn refresh(&self) -> Duration {
+    pub const fn refresh(&self) -> Duration {
         self.refresh
     }
 
@@ -368,6 +368,7 @@ pub enum ClickAction {
 }
 
 /// One clickable region in the rendered status bar: column range + action.
+///
 /// Computed by the render coordinator from a `SegmentSnapshot` and pushed to
 /// `WindowManager::set_status_hits` so click dispatch can binary-search by
 /// column. Note that column ranges are zone-relative; the render coordinator
@@ -402,7 +403,7 @@ mod tests {
         let mut cfg = built_in_default();
         // Force a fast interval on an interval-driven widget so the tick fires
         // often (the default right cluster has CpuLoad, which carries one).
-        for w in cfg.status.right.iter_mut() {
+        for w in &mut cfg.status.right {
             if let plexy_glass_config::WidgetSpec::CpuLoad { interval, .. } = w {
                 *interval = Some(std::time::Duration::from_millis(100));
             }

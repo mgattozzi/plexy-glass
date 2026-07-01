@@ -10,7 +10,7 @@ pub struct GitBranchWidget {
 }
 
 impl GitBranchWidget {
-    pub fn new(style: ResolvedStyle, interval: Option<Duration>, icon: SmolStr) -> Self {
+    pub const fn new(style: ResolvedStyle, interval: Option<Duration>, icon: SmolStr) -> Self {
         Self { style, interval, icon }
     }
 }
@@ -71,7 +71,7 @@ impl Widget for GitBranchWidget {
 mod tests {
     use super::*;
 
-    fn ctx_with_cwd<'a>(cwd: &'a str) -> EvalContext<'a> {
+    fn ctx_with_cwd(cwd: &str) -> EvalContext<'_> {
         EvalContext {
             session_name: "main",
             windows: &[],

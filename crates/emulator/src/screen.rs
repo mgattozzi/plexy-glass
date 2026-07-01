@@ -61,7 +61,7 @@ enum Charset {
 /// load-bearing part. Bytes outside the range have no entry (return `None`) and
 /// print unchanged, so ASCII digits/letters/space are untouched even under this
 /// charset.
-fn dec_special_graphic(byte: u8) -> Option<&'static str> {
+const fn dec_special_graphic(byte: u8) -> Option<&'static str> {
     Some(match byte {
         b'`' => "◆", // U+25C6 black diamond
         b'a' => "▒", // U+2592 medium shade (checkerboard)
@@ -245,7 +245,7 @@ impl Screen {
     }
 
     /// The charset GL currently maps to (G1 when shifted out, else G0).
-    fn active_charset(&self) -> Charset {
+    const fn active_charset(&self) -> Charset {
         if self.charset_shift_out { self.charset_g1 } else { self.charset_g0 }
     }
 
@@ -306,15 +306,12 @@ impl Screen {
         match cmd.action {
             b'd' => {
                 // Delete: by image id when given, else all placements.
-                match cmd.id {
-                    Some(id) => {
-                        self.placements.retain(|p| p.image_id != id);
-                        self.virtual_placements.retain(|p| p.image_id != id);
-                    }
-                    None => {
-                        self.placements.clear();
-                        self.virtual_placements.clear();
-                    }
+                if let Some(id) = cmd.id {
+                    self.placements.retain(|p| p.image_id != id);
+                    self.virtual_placements.retain(|p| p.image_id != id);
+                } else {
+                    self.placements.clear();
+                    self.virtual_placements.clear();
                 }
             }
             b'p' => {
@@ -513,7 +510,7 @@ impl Screen {
     }
 
     /// Set the text-area pixel size relayed from the client's terminal.
-    pub fn set_pixel_area(&mut self, w: u16, h: u16) {
+    pub const fn set_pixel_area(&mut self, w: u16, h: u16) {
         self.area_px_w = w;
         self.area_px_h = h;
     }
@@ -545,7 +542,7 @@ impl Screen {
     /// Record the outer-terminal color scheme (true = dark) so a `\e[?996n`
     /// query answers the real preference. The daemon calls this when it relays a
     /// `\e[?997;Xn` from the client.
-    pub fn set_color_scheme_dark(&mut self, dark: bool) {
+    pub const fn set_color_scheme_dark(&mut self, dark: bool) {
         self.color_scheme_dark = dark;
     }
 
@@ -574,11 +571,11 @@ impl Screen {
         std::mem::take(&mut self.bell_pending)
     }
 
-    pub fn rows(&self) -> u16 {
+    pub const fn rows(&self) -> u16 {
         self.active.num_rows()
     }
 
-    pub fn cols(&self) -> u16 {
+    pub const fn cols(&self) -> u16 {
         self.active.num_cols()
     }
 
@@ -668,7 +665,7 @@ impl Screen {
     fn clear_wide_straddle(&mut self, start: u16, end: u16) {
         let row = self.cursor.row;
         // Left edge lands on a spacer, so its grapheme to the left is orphaned.
-        if start > 0 && self.active.get_cell(row, start).is_some_and(|c| c.is_wide_spacer()) {
+        if start > 0 && self.active.get_cell(row, start).is_some_and(super::cell::Cell::is_wide_spacer) {
             self.active.put_cell(row, start - 1, Cell::default());
         }
         // Right edge lands on a wide grapheme → its spacer to the right is orphaned.
@@ -694,7 +691,7 @@ impl Screen {
         if let Some(mut base) = base {
             // A wide grapheme leaves the cursor two columns past its base, so the
             // cell to the left is the wide_spacer and we step one further to the base.
-            if self.active.get_cell(self.cursor.row, base).is_some_and(|c| c.is_wide_spacer())
+            if self.active.get_cell(self.cursor.row, base).is_some_and(super::cell::Cell::is_wide_spacer)
                 && let Some(b) = base.checked_sub(1)
             {
                 base = b;
@@ -738,32 +735,36 @@ impl Screen {
 
     pub fn advance_to_next_row(&mut self, soft_wrap: bool) {
         let (top, bottom) = self.scroll_region;
-        if self.cursor.row == bottom {
-            // At the bottom margin: scroll the region up by one. Only the
-            // physical top line of the screen (region top at row 0) feeds
-            // scrollback. A partial scroll region (DECSTBM top>0) scrolls an
-            // interior region, and rows leaving the top of THAT region are
-            // discarded (matching xterm/tmux/wezterm/VTE), not pushed into
-            // scrollback, which would corrupt history/block marks.
-            let mut popped: Vec<crate::grid::Row> = Vec::new();
-            let target = if self.alt.is_none() && top == 0 {
-                Some(&mut popped)
-            } else {
-                None
-            };
-            self.active.scroll_up(top, bottom, 1, target);
-            for r in popped {
-                self.push_scrollback(r);
+        match self.cursor.row.cmp(&bottom) {
+            std::cmp::Ordering::Equal => {
+                // At the bottom margin: scroll the region up by one. Only the
+                // physical top line of the screen (region top at row 0) feeds
+                // scrollback. A partial scroll region (DECSTBM top>0) scrolls an
+                // interior region, and rows leaving the top of THAT region are
+                // discarded (matching xterm/tmux/wezterm/VTE), not pushed into
+                // scrollback, which would corrupt history/block marks.
+                let mut popped: Vec<crate::grid::Row> = Vec::new();
+                let target = if self.alt.is_none() && top == 0 {
+                    Some(&mut popped)
+                } else {
+                    None
+                };
+                self.active.scroll_up(top, bottom, 1, target);
+                for r in popped {
+                    self.push_scrollback(r);
+                }
+                // Stay at the bottom; new content goes there.
+                self.cursor.row = bottom;
             }
-            // Stay at the bottom; new content goes there.
-            self.cursor.row = bottom;
-        } else if self.cursor.row > bottom {
-            // Below the scroll region: a line feed moves the cursor down toward
-            // the grid bottom WITHOUT scrolling the region (per xterm, the cursor
-            // is outside the region, so the region's content is untouched).
-            self.cursor.row = (self.cursor.row + 1).min(self.rows().saturating_sub(1));
-        } else {
-            self.cursor.row += 1;
+            std::cmp::Ordering::Greater => {
+                // Below the scroll region: a line feed moves the cursor down toward
+                // the grid bottom WITHOUT scrolling the region (per xterm, the cursor
+                // is outside the region, so the region's content is untouched).
+                self.cursor.row = (self.cursor.row + 1).min(self.rows().saturating_sub(1));
+            }
+            std::cmp::Ordering::Less => {
+                self.cursor.row += 1;
+            }
         }
         if soft_wrap {
             // Mark the new row as a soft continuation. The logical-line id is
@@ -792,7 +793,7 @@ impl Screen {
                 let next = self
                     .tabs
                     .next(self.cursor.col)
-                    .unwrap_or(self.cols().saturating_sub(1));
+                    .unwrap_or_else(|| self.cols().saturating_sub(1));
                 self.cursor.col = next.min(self.cols().saturating_sub(1));
                 self.cursor.pending_wrap = false;
             }
@@ -903,12 +904,9 @@ impl Screen {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 let last = self.cols().saturating_sub(1);
                 for _ in 0..n {
-                    match self.tabs.next(self.cursor.col) {
-                        Some(c) => self.cursor.col = c.min(last),
-                        None => {
-                            self.cursor.col = last;
-                            break;
-                        }
+                    if let Some(c) = self.tabs.next(self.cursor.col) { self.cursor.col = c.min(last) } else {
+                        self.cursor.col = last;
+                        break;
                     }
                 }
                 self.cursor.pending_wrap = false;
@@ -917,12 +915,9 @@ impl Screen {
                 // CBT (cursor backward tabulation): retreat N tab stops.
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 for _ in 0..n {
-                    match self.tabs.prev(self.cursor.col) {
-                        Some(c) => self.cursor.col = c,
-                        None => {
-                            self.cursor.col = 0;
-                            break;
-                        }
+                    if let Some(c) = self.tabs.prev(self.cursor.col) { self.cursor.col = c } else {
+                        self.cursor.col = 0;
+                        break;
                     }
                 }
                 self.cursor.pending_wrap = false;
@@ -1006,7 +1001,7 @@ impl Screen {
             'l' => self.set_mode(params, intermediates, false),
             'r' => {
                 let top = first.unwrap_or(1).saturating_sub(1);
-                let bottom = nth(params, 1).unwrap_or(self.rows()).saturating_sub(1);
+                let bottom = nth(params, 1).unwrap_or_else(|| self.rows()).saturating_sub(1);
                 let bottom = bottom.min(self.rows().saturating_sub(1));
                 if top < bottom {
                     self.scroll_region = (top, bottom);
@@ -1330,12 +1325,9 @@ impl Screen {
     /// failures), always terminated with ST (`\e\\`).
     fn xtgettcap(&mut self, payload: &[u8]) {
         use crate::terminfo::{Capability, hex_decode, hex_encode, lookup};
-        let payload = match std::str::from_utf8(payload) {
-            Ok(p) => p,
-            Err(_) => {
-                tracing::trace!("XTGETTCAP payload not UTF-8; ignoring");
-                return;
-            }
+        let Ok(payload) = std::str::from_utf8(payload) else {
+            tracing::trace!("XTGETTCAP payload not UTF-8; ignoring");
+            return;
         };
         for hexname in payload.split(';') {
             // Skip empty segments (e.g. a trailing `;` or empty payload) so we
@@ -1369,12 +1361,12 @@ impl Screen {
 
     fn set_mode(&mut self, params: &vte::Params, intermediates: &[u8], on: bool) {
         let private = intermediates.first() == Some(&b'?');
-        for p in params.iter() {
+        for p in params {
             let Some(&code) = p.first() else { continue };
             if private {
                 self.set_dec_private_mode(code, on);
             } else {
-                self.set_ansi_mode(code, on);
+                Self::set_ansi_mode(code, on);
             }
         }
     }
@@ -1426,7 +1418,7 @@ impl Screen {
         }
     }
 
-    fn set_ansi_mode(&mut self, code: u16, on: bool) {
+    fn set_ansi_mode(code: u16, on: bool) {
         // No ANSI (non-private) modes are honored. IRM (mode 4) in particular is
         // deliberately unsupported: ICH/DCH/IL/DL/ECH are now implemented as
         // explicit CSI ops, but IRM auto-insert-per-put_grapheme is not. DECRQM
@@ -1475,7 +1467,7 @@ impl Screen {
         // arrive as separate single-element groups and are intentionally left as
         // "underline; italic".)
         let mut codes: Vec<u16> = Vec::new();
-        for g in params.iter() {
+        for g in params {
             match g {
                 // Styled underline `4:x`: resolve here, push nothing. style 0
                 // clears the underline; any other code sets it with the mapped
@@ -1577,7 +1569,7 @@ impl Screen {
                 59 => self.cursor.underline_color = crate::color::Color::Default,
                 90..=97 => self.cursor.fg = crate::color::Color::from_ansi_bright((n - 90) as u8),
                 100..=107 => {
-                    self.cursor.bg = crate::color::Color::from_ansi_bright((n - 100) as u8)
+                    self.cursor.bg = crate::color::Color::from_ansi_bright((n - 100) as u8);
                 }
                 _ => {
                     tracing::trace!(code = n, "unhandled SGR");
@@ -1640,7 +1632,7 @@ impl Screen {
                 let (rows, cols) = (self.rows(), self.cols());
                 let term = std::mem::take(&mut self.term);
                 let scheme_dark = self.color_scheme_dark;
-                *self = Screen::new(rows, cols);
+                *self = Self::new(rows, cols);
                 self.term = term;
                 self.color_scheme_dark = scheme_dark;
             }
@@ -1809,7 +1801,7 @@ impl Screen {
                 let duration_ms = self
                     .pending_command_start
                     .take()
-                    .map(|start| start.elapsed().as_millis().min(u32::MAX as u128) as u32);
+                    .map(|start| start.elapsed().as_millis().min(u128::from(u32::MAX)) as u32);
                 // BLOCK_END is set even when the code is missing/malformed:
                 // "last completed block" must not depend on a parseable code.
                 self.mark_cursor_row(|m| {
@@ -1853,12 +1845,9 @@ impl Screen {
         if !matches!(selection, b'c' | b's') {
             return;
         }
-        let decoded = match base64::engine::general_purpose::STANDARD.decode(payload) {
-            Ok(d) => d,
-            Err(_) => {
-                tracing::trace!("OSC 52 base64 decode failed; ignoring");
-                return;
-            }
+        let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(payload) else {
+            tracing::trace!("OSC 52 base64 decode failed; ignoring");
+            return;
         };
         if decoded.len() > Self::OSC52_MAX_BYTES {
             tracing::warn!(bytes = decoded.len(), "OSC 52 payload exceeds cap; dropping");
@@ -1898,33 +1887,33 @@ fn parse_extended_color(rest: &[u16]) -> (Option<crate::color::Color>, usize) {
 
 impl ScreenOps for Screen {
     fn put_grapheme(&mut self, cluster: &str) {
-        Screen::put_grapheme(self, cluster);
+        Self::put_grapheme(self, cluster);
     }
     fn execute_c0(&mut self, byte: u8) {
-        Screen::execute_c0(self, byte);
+        Self::execute_c0(self, byte);
     }
     fn handle_csi(&mut self, params: &vte::Params, intermediates: &[u8], action: char) {
-        Screen::handle_csi(self, params, intermediates, action);
+        Self::handle_csi(self, params, intermediates, action);
     }
     fn handle_osc(&mut self, params: &[&[u8]]) {
-        Screen::handle_osc(self, params);
+        Self::handle_osc(self, params);
     }
     fn handle_esc(&mut self, intermediates: &[u8], byte: u8) {
-        Screen::handle_esc(self, intermediates, byte);
+        Self::handle_esc(self, intermediates, byte);
     }
     fn handle_dcs(&mut self, intermediates: &[u8], action: u8, params: &[Vec<u16>], payload: &[u8]) {
         // XTGETTCAP: DCS + q <hexnames> ST.
         if intermediates.first() == Some(&b'+') && action == b'q' {
-            Screen::xtgettcap(self, payload);
+            Self::xtgettcap(self, payload);
         } else if action == b'q' && intermediates.is_empty() {
             // Sixel: DCS <params> q <data> ST (no `+`/`$` intermediate).
-            Screen::handle_sixel(self, params, payload);
+            Self::handle_sixel(self, params, payload);
         } else {
             tracing::trace!(?intermediates, action = %(action as char), "unhandled DCS");
         }
     }
     fn handle_graphics(&mut self, framed: &[u8]) {
-        Screen::handle_graphics(self, framed);
+        Self::handle_graphics(self, framed);
     }
 }
 
@@ -2307,7 +2296,7 @@ mod tests {
     fn autowrap_to_next_row() {
         let s = drive(b"abcdefghi"); // 9 chars on an 8-wide grid
         assert_eq!(text_at(&s, 0)[..8], *"abcdefgh");
-        assert!(text_at(&s, 1).starts_with("i"));
+        assert!(text_at(&s, 1).starts_with('i'));
     }
 
     #[test]

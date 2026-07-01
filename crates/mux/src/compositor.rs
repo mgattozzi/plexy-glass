@@ -605,8 +605,7 @@ pub fn compose(
             let cmd_end = (v.rect.col..pane_right)
                 .rev()
                 .find(|&c| screen.cell(host_row, c).is_some_and(|cell| !cell.is_blank()))
-                .map(|c| c + 1)
-                .unwrap_or(v.rect.col);
+                .map_or(v.rect.col, |c| c + 1);
             if cmd_end >= start_col {
                 continue; // command fills the row up to the annotation → omit
             }
@@ -800,36 +799,33 @@ pub fn compose(
 
     // Cursor from the active pane, overridden by the copy-mode cursor when present.
     if let Some(active) = panes.iter().find(|v| v.is_active) {
-        let cursor_pos = match active.copy_mode {
-            Some(cm) => {
-                if cm.cursor.0 >= cm.viewport_top
-                    && cm.cursor.0 < cm.viewport_top + u32::from(active.rect.rows)
-                {
-                    let local_row = (cm.cursor.0 - cm.viewport_top) as u16;
-                    let host_r = active.rect.row.saturating_add(local_row);
-                    let host_c = active.rect.col.saturating_add(cm.cursor.1);
-                    Some((host_r, host_c))
-                } else {
-                    None
-                }
+        let cursor_pos = if let Some(cm) = active.copy_mode {
+            if cm.cursor.0 >= cm.viewport_top
+                && cm.cursor.0 < cm.viewport_top + u32::from(active.rect.rows)
+            {
+                let local_row = (cm.cursor.0 - cm.viewport_top) as u16;
+                let host_r = active.rect.row.saturating_add(local_row);
+                let host_c = active.rect.col.saturating_add(cm.cursor.1);
+                Some((host_r, host_c))
+            } else {
+                None
             }
-            None => {
-                let cur = &active.screen.cursor;
-                let c = active.rect.col.saturating_add(cur.col);
-                // Live panes map the cursor's unified line through the fold
-                // context (folds above it shift it up; a folded/off-screen cursor
-                // hides). Copy/block panes keep the prior active-grid placement.
-                let local_row = if active.copy_mode.is_none() && active.block_mode.is_none() {
-                    let sb_len = active.screen.scrollback.len() as u32;
-                    fold_ctx[&active.id].display_row(sb_len + u32::from(cur.row), active.rect.rows)
-                } else {
-                    Some(cur.row)
-                };
-                local_row.and_then(|lr| {
-                    let r = active.rect.row.saturating_add(lr);
-                    (r < pane_area_rows && c < host_cols).then_some((r, c))
-                })
-            }
+        } else {
+            let cur = &active.screen.cursor;
+            let c = active.rect.col.saturating_add(cur.col);
+            // Live panes map the cursor's unified line through the fold
+            // context (folds above it shift it up; a folded/off-screen cursor
+            // hides). Copy/block panes keep the prior active-grid placement.
+            let local_row = if active.copy_mode.is_none() && active.block_mode.is_none() {
+                let sb_len = active.screen.scrollback.len() as u32;
+                fold_ctx[&active.id].display_row(sb_len + u32::from(cur.row), active.rect.rows)
+            } else {
+                Some(cur.row)
+            };
+            local_row.and_then(|lr| {
+                let r = active.rect.row.saturating_add(lr);
+                (r < pane_area_rows && c < host_cols).then_some((r, c))
+            })
         };
         if let Some((r, c)) = cursor_pos
             && r < pane_area_rows && c < host_cols
@@ -962,7 +958,7 @@ fn effective_scroll_for(view: &PaneView<'_>) -> u32 {
     match viewport_top {
         Some(vt) => {
             let total_lines = view.screen.scrollback.len() as u32
-                + view.screen.active.num_rows() as u32;
+                + u32::from(view.screen.active.num_rows());
             total_lines
                 .saturating_sub(vt)
                 .saturating_sub(u32::from(view.rect.rows))
@@ -986,7 +982,7 @@ fn filter_match_spans(
     }
     let q = query.to_lowercase();
     let cols = screen.active.num_cols();
-    let total = screen.scrollback.rows().len() as u32 + screen.active.num_rows() as u32;
+    let total = screen.scrollback.rows().len() as u32 + u32::from(screen.active.num_rows());
     let span = display_width(&q).max(1);
     for line in lo..hi.min(total) {
         let Some(row) = crate::blocks::row_at(screen, line) else { continue };
@@ -1011,8 +1007,7 @@ fn filter_match_spans(
                 .iter()
                 .rev()
                 .find(|(b, _)| *b <= byte_off)
-                .map(|(_, gc)| *gc)
-                .unwrap_or(0);
+                .map_or(0, |(_, gc)| *gc);
             let col_end = col_start
                 .saturating_add(span.saturating_sub(1))
                 .min(cols.saturating_sub(1));
@@ -1792,7 +1787,7 @@ fn paint_popup(
 }
 
 /// Box-drawing glyph for cell (r, c) within a `h`x`w` frame; space inside.
-fn border_glyph(r: u16, c: u16, h: u16, w: u16) -> char {
+const fn border_glyph(r: u16, c: u16, h: u16, w: u16) -> char {
     let last_r = h - 1;
     let last_c = w - 1;
     match (r, c) {
@@ -1996,7 +1991,7 @@ fn cell_for(
     cell
 }
 
-fn rgb_to_color(rgb: plexy_glass_status::Rgb) -> plexy_glass_emulator::Color {
+const fn rgb_to_color(rgb: plexy_glass_status::Rgb) -> plexy_glass_emulator::Color {
     // `Color::Rgb(u8, u8, u8)`, confirmed in `crates/emulator/src/color.rs`.
     plexy_glass_emulator::Color::Rgb(rgb.r, rgb.g, rgb.b)
 }
@@ -2311,8 +2306,7 @@ mod tests {
         // Row 0 should be the last scrollback row (BBBB), not CCCC.
         let r0: String = (0..4)
             .map(|c| vs.cell(0, c).unwrap().grapheme.as_str().to_string())
-            .collect::<Vec<_>>()
-            .join("");
+            .collect::<String>();
         assert_eq!(r0, "BBBB", "expected BBBB at top; got {r0}");
     }
 
@@ -3351,7 +3345,7 @@ mod tests {
     fn tree_overlay_hides_collapsed_rows() {
         let state = crate::tree::TreeState {
             nodes: tree_v2_nodes(),
-            collapsed: [crate::tree::NodeKey::Session("main".into())].into_iter().collect(),
+            collapsed: std::iter::once(crate::tree::NodeKey::Session("main".into())).collect(),
             ..Default::default()
         };
         let text = tree_frame(&state, 12, 50);
@@ -4237,7 +4231,7 @@ mod tests {
         e.screen().clone()
     }
 
-    fn plain_view<'a>(screen: &'a Screen, rect: Rect) -> PaneView<'a> {
+    fn plain_view(screen: &Screen, rect: Rect) -> PaneView<'_> {
         PaneView {
             id: PaneId(1),
             rect,
@@ -4252,7 +4246,7 @@ mod tests {
         }
     }
 
-    fn scrolled_view<'a>(screen: &'a Screen, rect: Rect, scroll_offset: u32) -> PaneView<'a> {
+    fn scrolled_view(screen: &Screen, rect: Rect, scroll_offset: u32) -> PaneView<'_> {
         PaneView { scroll_offset, ..plain_view(screen, rect) }
     }
 
@@ -4440,7 +4434,7 @@ mod tests {
     fn dump_frame(vs: &VirtualScreen, attrs: bool) -> String {
         let mut text: Vec<String> = (0..vs.rows).map(|r| composed_row(vs, r)).collect();
         if !attrs {
-            while text.last().is_some_and(|l| l.is_empty()) {
+            while text.last().is_some_and(std::string::String::is_empty) {
                 text.pop();
             }
             return text.join("\n");
@@ -4824,7 +4818,7 @@ mod tests {
             (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR,
             ChromeColors::ansi_default(),
         );
-        let mut folded = screen.clone();
+        let mut folded = screen;
         crate::blocks::set_block_folded(&mut folded, 0, true);
         let vs1 = compose(
             &[plain_view(&folded, Rect::new(0, 0, 8, 40))],

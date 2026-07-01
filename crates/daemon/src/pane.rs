@@ -436,7 +436,7 @@ impl Pane {
     /// observability for the kill/reap (no-zombie) assertions.
     pub fn pipe_pid(&self) -> Option<u32> {
         // invariant: pipe slot mutex held briefly; no await, no nested locks.
-        self.inner.pipe.lock_recover().as_ref().and_then(|h| h.pid())
+        self.inner.pipe.lock_recover().as_ref().and_then(super::pipe::PipeHandle::pid)
     }
 
     pub fn id(&self) -> PaneId {
@@ -498,7 +498,7 @@ impl Pane {
         let mut rx = self.inner.exit_rx.clone();
         // Err only if the sender (the child-exit watch) dropped without a
         // value; the old loop returned Unknown in that case, so match it.
-        match rx.wait_for(|s| s.is_some()).await {
+        match rx.wait_for(std::option::Option::is_some).await {
             Ok(s) => s.unwrap_or(ExitStatus::Unknown),
             Err(_) => ExitStatus::Unknown,
         }
@@ -542,7 +542,7 @@ impl Pane {
         let _ = self.inner.scroll_offset.fetch_update(
             Ordering::SeqCst,
             Ordering::SeqCst,
-            |current| Some((current as i64 + delta as i64).clamp(0, max_offset as i64) as u32),
+            |current| Some((i64::from(current) + i64::from(delta)).clamp(0, i64::from(max_offset)) as u32),
         );
     }
 
@@ -685,8 +685,7 @@ fn format_color_reply(query: ColorQuery, palette: &PaletteConfig) -> Option<Vec<
     })?;
     Some(
         format!(
-            "\x1b]{osc_num};rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x07",
-            r, r, g, g, b, b,
+            "\x1b]{osc_num};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x07",
         )
         .into_bytes(),
     )
@@ -729,7 +728,7 @@ fn merge_outbound(
     out
 }
 
-fn to_portable(size: PtySize) -> PortablePtySize {
+const fn to_portable(size: PtySize) -> PortablePtySize {
     PortablePtySize {
         rows: size.rows,
         cols: size.cols,
@@ -801,7 +800,7 @@ mod tests {
         p.kill_child();
         // exit_rx flips to Some once the wait thread observes the child dying.
         let res = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            exit.wait_for(|s| s.is_some()).await
+            exit.wait_for(std::option::Option::is_some).await
         })
         .await;
         assert!(res.is_ok(), "child did not exit within 5s after kill_child");
@@ -861,7 +860,7 @@ mod tests {
         let sz = PtySize { rows: 24, cols: 80, pixel_width: 1600, pixel_height: 960 };
         let p = Pane::spawn(PaneId(0), spec, sz, Arc::new(Notify::new()), None, cfg())
             .expect("spawn");
-        assert_eq!(p.with_screen(|s| s.cell_pixels()), (20, 40));
+        assert_eq!(p.with_screen(plexy_glass_emulator::Screen::cell_pixels), (20, 40));
         p.kill_child();
     }
 
@@ -872,7 +871,7 @@ mod tests {
             .expect("spawn");
         p.resize(PtySize { rows: 24, cols: 80, pixel_width: 800, pixel_height: 480 })
             .expect("resize");
-        assert_eq!(p.with_screen(|s| s.cell_pixels()), (10, 20));
+        assert_eq!(p.with_screen(plexy_glass_emulator::Screen::cell_pixels), (10, 20));
         p.kill_child();
     }
 

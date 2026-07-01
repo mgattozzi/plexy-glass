@@ -332,7 +332,7 @@ impl Session {
                 total_panes += ids.len();
                 let panes = ids
                     .iter()
-                    .map(|id| (*id, w.pane(*id).and_then(|p| p.name())))
+                    .map(|id| (*id, w.pane(*id).and_then(super::pane::Pane::name)))
                     .collect();
                 // The picker shows the live derived name (auto-rename on); a
                 // pinned window returns its name verbatim regardless.
@@ -1120,7 +1120,7 @@ pub(crate) fn wrap_bracketed_paste(inner: &[u8]) -> Vec<u8> {
 
 /// Pick the encode target for a pane from its negotiated state. Precedence per
 /// the spec: Kitty flags > modifyOtherKeys level > Legacy.
-pub(crate) fn select_target(
+pub(crate) const fn select_target(
     kitty_flags: u8,
     modify_other_keys: u8,
 ) -> plexy_glass_keys::KeyboardTarget {
@@ -1271,7 +1271,7 @@ async fn silence_tick_loop(weak: std::sync::Weak<Session>) {
 /// The tick task is normally aborted on Drop, but a tick may have already
 /// started; in that case we return a benign default so widgets render as if
 /// no session were attached.
-fn empty_snapshot_ctx() -> plexy_glass_status::SnapshotCtx {
+const fn empty_snapshot_ctx() -> plexy_glass_status::SnapshotCtx {
     plexy_glass_status::SnapshotCtx {
         session_name: String::new(),
         windows: Vec::new(),
@@ -1316,8 +1316,7 @@ async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::Snaps
     let copy_mode_active = manager
         .active_window()
         .active_pane()
-        .map(|p| p.is_in_copy_mode())
-        .unwrap_or(false);
+        .is_some_and(super::pane::Pane::is_in_copy_mode);
     let sync_active = manager.active_window().sync_input;
     let zoom_active = manager.active_window().is_zoomed();
     let prefix_active = session.any_prefix_armed().await;
@@ -1457,7 +1456,7 @@ mod tests {
             let m = s.window_manager.lock().await;
             let pid = m.active_window().active();
             assert_eq!(
-                m.active_window().pane(pid).and_then(|p| p.name()).as_deref(),
+                m.active_window().pane(pid).and_then(super::super::pane::Pane::name).as_deref(),
                 Some("logs")
             );
         }
@@ -1907,8 +1906,7 @@ mod tests {
                 .filter_map(|c| {
                     screen.active.get_cell(0, c).map(|cell| cell.grapheme.as_str().to_string())
                 })
-                .collect::<Vec<_>>()
-                .join("")
+                .collect::<String>()
         });
         assert!(saw.contains("hello"), "expected 'hello' in active grid; got {saw:?}");
         let _ = pane.send_input(bytes::Bytes::from_static(&[0x04])).await;
@@ -1942,8 +1940,7 @@ mod tests {
                     .filter_map(|c| {
                         screen.active.get_cell(0, c).map(|cell| cell.grapheme.as_str().to_string())
                     })
-                    .collect::<Vec<_>>()
-                    .join("")
+                    .collect::<String>()
             });
             assert!(saw.contains("hello"), "pane {id:?} missing 'hello' broadcast: {saw:?}");
         }
@@ -2302,7 +2299,7 @@ mod tests {
     async fn build_from_template_two_way_default_is_fifty_fifty() {
         // Regression: a 2-way default split stays 50/50 (byte-identical to v1).
         let _g = crate::test_env::isolate();
-        let cfg = build_cfg(r##"session "s" { window "w" { split vertical { pane; pane } } }"##);
+        let cfg = build_cfg(r#"session "s" { window "w" { split vertical { pane; pane } } }"#);
         let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
         {
             let wm = s.window_manager.lock().await;
@@ -2312,7 +2309,7 @@ mod tests {
             let r0 = win.layout().rect_of(leaves[0], vp).unwrap();
             let r1 = win.layout().rect_of(leaves[1], vp).unwrap();
             // Equal within one cell (odd usable width splits off-by-one).
-            assert!((r0.cols as i32 - r1.cols as i32).abs() <= 1, "{r0:?} {r1:?}");
+            assert!((i32::from(r0.cols) - i32::from(r1.cols)).abs() <= 1, "{r0:?} {r1:?}");
         }
         s.terminate_panes().await;
     }
@@ -2322,7 +2319,7 @@ mod tests {
         // INTENTIONAL v2 change: a flat 3-way default builds 33/33/33, not v1's
         // 50/25/25 right-lean cascade.
         let _g = crate::test_env::isolate();
-        let cfg = build_cfg(r##"session "s" { window "w" { split vertical { pane; pane; pane } } }"##);
+        let cfg = build_cfg(r#"session "s" { window "w" { split vertical { pane; pane; pane } } }"#);
         let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
         {
             let wm = s.window_manager.lock().await;
@@ -2334,8 +2331,8 @@ mod tests {
                 .map(|p| win.layout().rect_of(*p, vp).unwrap().cols)
                 .collect();
             // All three within ~2 cells of each other (gutters + rounding).
-            let max = *widths.iter().max().unwrap() as i32;
-            let min = *widths.iter().min().unwrap() as i32;
+            let max = i32::from(*widths.iter().max().unwrap());
+            let min = i32::from(*widths.iter().min().unwrap());
             assert!(max - min <= 2, "expected ~even thirds, got {widths:?}");
         }
         s.terminate_panes().await;
@@ -2345,7 +2342,7 @@ mod tests {
     async fn build_from_template_two_to_one_ratio_honored() {
         let _g = crate::test_env::isolate();
         let cfg = build_cfg(
-            r##"session "s" { window "w" { split vertical { pane ratio=2; pane ratio=1 } } }"##,
+            r#"session "s" { window "w" { split vertical { pane ratio=2; pane ratio=1 } } }"#,
         );
         let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
         {
@@ -2357,7 +2354,7 @@ mod tests {
             let r1 = win.layout().rect_of(leaves[1], vp).unwrap();
             // First pane should be ~2x the second (2:1).
             assert!(
-                r0.cols as f32 / r1.cols as f32 > 1.6,
+                f32::from(r0.cols) / f32::from(r1.cols) > 1.6,
                 "expected ~2:1, got {} vs {}",
                 r0.cols,
                 r1.cols
@@ -2372,7 +2369,7 @@ mod tests {
         // The outer split is 2:1 regardless of the inner split's 2 leaves.
         let _g = crate::test_env::isolate();
         let cfg = build_cfg(
-            r##"session "s" { window "w" { split vertical { pane ratio=2; split horizontal ratio=1 { pane; pane } } } }"##,
+            r#"session "s" { window "w" { split vertical { pane ratio=2; split horizontal ratio=1 { pane; pane } } } }"#,
         );
         let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
         {
@@ -2386,7 +2383,7 @@ mod tests {
             // Left pane is ~2x the right column's width (outer 2:1), and the
             // right panes share the right column's width.
             assert!(
-                left.cols as f32 / right_top.cols as f32 > 1.6,
+                f32::from(left.cols) / f32::from(right_top.cols) > 1.6,
                 "outer 2:1: left {} vs right {}",
                 left.cols,
                 right_top.cols
@@ -2399,10 +2396,10 @@ mod tests {
     async fn build_from_template_active_window_and_pane_selected() {
         let _g = crate::test_env::isolate();
         let cfg = build_cfg(
-            r##"session "s" {
+            r#"session "s" {
                 window "a" { pane }
                 window "b" active=#true { split vertical { pane; pane active=#true } }
-            }"##,
+            }"#,
         );
         let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
         {
@@ -2436,7 +2433,7 @@ mod tests {
         // newline echoes, no literal `\n` in the KDL string value, which KDL
         // would reject). Inner double-quotes are KDL-escaped (`\"`).
         let cmd = format!(
-            r#"echo FOO=$FOO > {out_str}; echo PATH=$PATH >> {out_str}; echo TERM=$TERM >> {out_str}"#
+            r"echo FOO=$FOO > {out_str}; echo PATH=$PATH >> {out_str}; echo TERM=$TERM >> {out_str}"
         );
         let kdl = format!(
             "session \"s\" {{ window \"w\" {{ pane command=\"{cmd}\" {{ env {{ FOO \"bar\" }} }} }} }}"
@@ -2445,8 +2442,7 @@ mod tests {
         let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
         let wrote = crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
             std::fs::read_to_string(&out)
-                .map(|b| b.contains("FOO=") && b.contains("PATH=") && b.contains("TERM="))
-                .unwrap_or(false)
+                .is_ok_and(|b| b.contains("FOO=") && b.contains("PATH=") && b.contains("TERM="))
         })
         .await;
         assert!(wrote, "pane command never wrote the env file");
@@ -2529,9 +2525,8 @@ mod tests {
         let got_eof = tokio::time::timeout(std::time::Duration::from_secs(3), async {
             loop {
                 match cr.read(&mut buf).await {
-                    Ok(0) => break true,
-                    Ok(_) => continue,
-                    Err(_) => break true,
+                    Ok(0) | Err(_) => break true,
+                    Ok(_) => {}
                 }
             }
         })

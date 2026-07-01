@@ -159,14 +159,14 @@ struct TestSessionBuilder<'e> {
     path_prepend: Option<String>,
 }
 
-impl<'e> TestSessionBuilder<'e> {
+impl TestSessionBuilder<'_> {
     /// Override the argv (default `["attach"]`); e.g. `["attach", "-n", "foo"]`.
     fn args(mut self, args: &[&str]) -> Self {
-        self.args = args.iter().map(|s| s.to_string()).collect();
+        self.args = args.iter().map(std::string::ToString::to_string).collect();
         self
     }
 
-    fn size(mut self, rows: u16, cols: u16) -> Self {
+    const fn size(mut self, rows: u16, cols: u16) -> Self {
         self.size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
         self
     }
@@ -211,7 +211,7 @@ impl<'e> TestSessionBuilder<'e> {
         let mut reader = master.try_clone_reader().expect("clone reader");
         let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
         let buf_rd = Arc::clone(&buf);
-        let _reader = std::thread::spawn(move || {
+        let reader_handle = std::thread::spawn(move || {
             use std::io::Read;
             let mut chunk = [0u8; 4096];
             loop {
@@ -225,7 +225,7 @@ impl<'e> TestSessionBuilder<'e> {
                 }
             }
         });
-        TestSession { child: Some(child), master, writer, buf, _reader }
+        TestSession { child: Some(child), master, writer, buf, _reader: reader_handle }
     }
 }
 
@@ -293,7 +293,7 @@ impl TestSession {
     /// Current length of the accumulated buffer; pass to `wait_for_from` to
     /// match only output produced after this point.
     fn buffer_len(&self) -> usize {
-        self.buf.lock().map(|b| b.len()).unwrap_or(0)
+        self.buf.lock().map_or(0, |b| b.len())
     }
 
     /// Like `wait_for` but only searches output appended at/after byte offset
@@ -325,7 +325,7 @@ impl TestSession {
         self.wait_for(session_name.as_bytes(), timeout.max(Duration::from_secs(20)))
     }
 
-    fn resize(&mut self, rows: u16, cols: u16) {
+    fn resize(&self, rows: u16, cols: u16) {
         self.master
             .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .expect("resize");
@@ -914,14 +914,14 @@ fn custom_config_file_overrides_default() {
     let marker = "HELLO_FROM_CONFIG";
 
     let kdl_body = format!(
-        r##"
+        r#"
 status {{
     refresh "5s"
     right {{
         text value="{marker}"
     }}
 }}
-"##
+"#
     );
 
     write_config(&env, &kdl_body);
@@ -1016,13 +1016,13 @@ fn declared_session_is_built_and_renders() {
     // echoes a marker. `exec tail -f /dev/null` keeps the pane alive so the
     // marker stays on screen for the poll.
     let kdl_body = format!(
-        r##"
+        r#"
 session "main" {{
     window "w" {{
         pane command="echo {marker}; exec tail -f /dev/null"
     }}
 }}
-"##
+"#
     );
     write_config(&env, &kdl_body);
 
@@ -1044,13 +1044,13 @@ fn plain_attach_creates_main_not_the_declared_session() {
     // landing in a declared session just because it is the only one running.
     write_config(
         &env,
-        r##"
+        r#"
 session "dev" {
     window "w" {
         pane command="tail -f /dev/null"
     }
 }
-"##,
+"#,
     );
 
     let sess = TestSession::spawn(&env);
@@ -1082,7 +1082,7 @@ fn declared_v2_ratio_active_window_and_env() {
     // alive.
     write_config(
         &env,
-        r##"
+        r#"
 session "v2" {
     window "first" {
         pane command="tail -f /dev/null"
@@ -1094,7 +1094,7 @@ session "v2" {
         }
     }
 }
-"##,
+"#,
     );
 
     let mut sess = TestSession::builder(&env).args(&["attach", "-n", "v2"]).start();
@@ -1132,13 +1132,13 @@ fn reload_adds_a_new_declared_session_then_attachable() {
     // Add a new declared session "fresh".
     write_config(
         &env,
-        r##"
+        r#"
 session "fresh" {
     window "w" {
         pane command="tail -f /dev/null"
     }
 }
-"##,
+"#,
     );
 
     // Reload from a second process; build_declared runs for the new name.
@@ -1276,13 +1276,13 @@ fn reload_config_picks_up_custom_text_widget() {
     assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
 
     // Write a custom config that adds a recognizable text widget.
-    let body = r##"
+    let body = r#"
 status {
     right {
         text value="RELOADED_TAG"
     }
 }
-"##;
+"#;
     write_config(&env, body);
 
     // Issue `plexy-glass reload` from a second process.
@@ -3389,10 +3389,10 @@ fn cli_pipe_pane_streams_then_stops() {
     // have quiesced, so a later growth can only come from a live pipe.
     let settled_len = {
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut last = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+        let mut last = std::fs::metadata(&log).map_or(0, |m| m.len());
         loop {
             std::thread::sleep(Duration::from_millis(200));
-            let now = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+            let now = std::fs::metadata(&log).map_or(0, |m| m.len());
             if now == last || Instant::now() >= deadline {
                 break now;
             }
@@ -3414,7 +3414,7 @@ fn cli_pipe_pane_streams_then_stops() {
     // Give a stopped-but-buggy pipe a chance to (wrongly) write before checking.
     std::thread::sleep(Duration::from_millis(500));
 
-    let after_len = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    let after_len = std::fs::metadata(&log).map_or(0, |m| m.len());
     assert_eq!(
         after_len, settled_len,
         "file grew after the pipe was stopped (pipe did not stop). \

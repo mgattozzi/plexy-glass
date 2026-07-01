@@ -79,7 +79,7 @@ pub struct KeyEvent {
 }
 
 impl KeyEvent {
-    pub fn new(key: Key, mods: Modifiers) -> Self {
+    pub const fn new(key: Key, mods: Modifiers) -> Self {
         Self {
             key,
             mods,
@@ -90,7 +90,7 @@ impl KeyEvent {
         }
     }
 
-    pub fn plain(key: Key) -> Self {
+    pub const fn plain(key: Key) -> Self {
         Self::new(key, Modifiers::empty())
     }
 }

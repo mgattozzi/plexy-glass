@@ -20,7 +20,7 @@ struct KittyStack {
 impl KittyStack {
     /// `\e[=<flags>;<mode>u` sets flags in place.
     /// mode 1 = set-exactly (default), 2 = OR-in, 3 = clear listed bits.
-    fn set(&mut self, flags: u8, mode: u8) {
+    const fn set(&mut self, flags: u8, mode: u8) {
         match mode {
             2 => self.current |= flags,
             3 => self.current &= !flags,
@@ -41,12 +41,9 @@ impl KittyStack {
     /// `\e[<<n>u` pops `n` entries; popping an empty stack resets flags to 0.
     fn pop(&mut self, n: u16) {
         for _ in 0..n.max(1) {
-            match self.stack.pop() {
-                Some(prev) => self.current = prev,
-                None => {
-                    self.current = 0;
-                    break;
-                }
+            if let Some(prev) = self.stack.pop() { self.current = prev } else {
+                self.current = 0;
+                break;
             }
         }
     }
@@ -67,24 +64,24 @@ pub struct KeyboardState {
 
 impl KeyboardState {
     /// `\e[>4;<Pv>m` sets the modifyOtherKeys level (0/1/2; others ignored).
-    pub fn set_modify_other_keys(&mut self, level: u16) {
+    pub const fn set_modify_other_keys(&mut self, level: u16) {
         if level <= 2 {
             self.modify_other_keys = level as u8;
         }
     }
 
     /// `\e[>4m` / `\e[>4;m` resets modifyOtherKeys to the initial level (0).
-    pub fn reset_modify_other_keys(&mut self) {
+    pub const fn reset_modify_other_keys(&mut self) {
         self.modify_other_keys = 0;
     }
 
     /// Current modifyOtherKeys level, read by the daemon's re-encode stage.
-    pub fn modify_other_keys(&self) -> u8 {
+    pub const fn modify_other_keys(&self) -> u8 {
         self.modify_other_keys
     }
 
     /// `\e[=<flags>;<mode>u` on the active screen's stack.
-    pub fn kitty_set(&mut self, alt_screen: bool, flags: u8, mode: u8) {
+    pub const fn kitty_set(&mut self, alt_screen: bool, flags: u8, mode: u8) {
         self.active_mut(alt_screen).set(flags, mode);
     }
 
@@ -100,7 +97,7 @@ impl KeyboardState {
 
     /// Current Kitty flags for the active screen, read by both the `\e[?u`
     /// reply and the daemon's re-encode stage.
-    pub fn kitty_flags(&self, alt_screen: bool) -> u8 {
+    pub const fn kitty_flags(&self, alt_screen: bool) -> u8 {
         self.active(alt_screen).current
     }
 
@@ -111,11 +108,11 @@ impl KeyboardState {
         self.kitty_alt.clear();
     }
 
-    fn active(&self, alt_screen: bool) -> &KittyStack {
+    const fn active(&self, alt_screen: bool) -> &KittyStack {
         if alt_screen { &self.kitty_alt } else { &self.kitty_main }
     }
 
-    fn active_mut(&mut self, alt_screen: bool) -> &mut KittyStack {
+    const fn active_mut(&mut self, alt_screen: bool) -> &mut KittyStack {
         if alt_screen { &mut self.kitty_alt } else { &mut self.kitty_main }
     }
 }

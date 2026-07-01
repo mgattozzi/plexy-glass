@@ -182,7 +182,7 @@ impl SessionRegistry {
             match self.create_declared(template, Arc::clone(config), size).await {
                 Ok(_) => tracing::info!(session = %template.name, "built declared session"),
                 Err(e) => {
-                    tracing::warn!(session = %template.name, error = %e, "skipping declared session")
+                    tracing::warn!(session = %template.name, error = %e, "skipping declared session");
                 }
             }
         }
@@ -423,7 +423,7 @@ mod tests {
     async fn name_validation_rejects_empty() {
         let _g = crate::test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let err = r.create("".into(), spec(), size(), cfg()).await.map(|_| ()).unwrap_err();
+        let err = r.create(String::new(), spec(), size(), cfg()).await.map(|_| ()).unwrap_err();
         assert!(matches!(err, DaemonError::Protocol(ProtocolError::EmptyName)));
     }
 
@@ -590,7 +590,7 @@ mod tests {
     async fn create_declared_builds_template() {
         let _g = crate::test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let cfg = cfg_with_session(r##"session "dev" { window "w" { pane } }"##);
+        let cfg = cfg_with_session(r#"session "dev" { window "w" { pane } }"#);
         let s = r.create_declared(&cfg.sessions[0], Arc::clone(&cfg), size()).await.unwrap();
         assert_eq!(s.name(), "dev");
         assert!(r.get("dev").await.is_some());
@@ -618,7 +618,7 @@ mod tests {
         // (the reload "live sessions are never rebuilt" guarantee).
         let _g = crate::test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let cfg_v1 = cfg_with_session(r##"session "dev" { window "w" { split vertical { pane; pane } } }"##);
+        let cfg_v1 = cfg_with_session(r#"session "dev" { window "w" { split vertical { pane; pane } } }"#);
         let live = r.create_declared(&cfg_v1.sessions[0], Arc::clone(&cfg_v1), size()).await.unwrap();
         let live_ptr = Arc::as_ptr(&live);
         {
@@ -626,7 +626,7 @@ mod tests {
             assert_eq!(wm.windows()[0].layout().panes().len(), 2);
         }
         // A reloaded config with a CHANGED (1-pane) "dev" template.
-        let cfg_v2 = cfg_with_session(r##"session "dev" { window "w" { pane } }"##);
+        let cfg_v2 = cfg_with_session(r#"session "dev" { window "w" { pane } }"#);
         r.build_declared(&cfg_v2, size()).await;
         let still = r.get("dev").await.expect("dev still live");
         assert!(std::ptr::eq(Arc::as_ptr(&still), live_ptr), "same session Arc (not rebuilt)");
@@ -641,7 +641,7 @@ mod tests {
     async fn attach_or_create_routes_declared_name_to_template() {
         let _g = crate::test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let cfg = cfg_with_session(r##"session "dev" { window "w" { split vertical { pane; pane } } }"##);
+        let cfg = cfg_with_session(r#"session "dev" { window "w" { split vertical { pane; pane } } }"#);
         // No saved file, no live session: attach must build the 2-pane template,
         // not a 1-pane fresh `create`.
         let s = r.attach_or_create("dev".into(), spec(), size(), Arc::clone(&cfg)).await.unwrap();
@@ -655,7 +655,7 @@ mod tests {
     async fn non_declared_name_unaffected_by_routing() {
         let _g = crate::test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let cfg = cfg_with_session(r##"session "dev" { window "w" { pane } }"##);
+        let cfg = cfg_with_session(r#"session "dev" { window "w" { pane } }"#);
         // "other" isn't declared, so this is a normal fresh create (1 pane from
         // `spec()`).
         let s = r.attach_or_create("other".into(), spec(), size(), Arc::clone(&cfg)).await.unwrap();

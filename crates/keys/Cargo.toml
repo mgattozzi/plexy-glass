@@ -15,3 +15,6 @@ tracing = { workspace = true }
 [dev-dependencies]
 bolero = { workspace = true }
 hegeltest = { workspace = true }
+
+[lints]
+workspace = true

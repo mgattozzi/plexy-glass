@@ -14,8 +14,8 @@ pub(crate) enum BinLayout<'a> {
     Leaf(&'a PaneTemplate),
     Split {
         dir: SplitDir,
-        first: Box<BinLayout<'a>>,
-        second: Box<BinLayout<'a>>,
+        first: Box<Self>,
+        second: Box<Self>,
     },
 }
 
@@ -32,7 +32,7 @@ pub(crate) fn to_binary(node: &PaneNode) -> BinLayout<'_> {
     }
 }
 
-fn map_dir(d: SplitDirection) -> SplitDir {
+const fn map_dir(d: SplitDirection) -> SplitDir {
     match d {
         SplitDirection::Vertical => SplitDir::Vertical,
         SplitDirection::Horizontal => SplitDir::Horizontal,
@@ -231,7 +231,7 @@ pub(crate) fn merge_env(
     let mut out: Vec<(String, String)> = Vec::new();
     for (k, v) in session.iter().chain(window).chain(pane) {
         if let Some(slot) = out.iter_mut().find(|(ek, _)| ek == k) {
-            slot.1 = v.clone();
+            slot.1.clone_from(v);
         } else {
             out.push((k.clone(), v.clone()));
         }

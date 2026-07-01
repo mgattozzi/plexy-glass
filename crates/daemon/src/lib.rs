@@ -31,14 +31,14 @@ pub(crate) mod test_env {
     /// and cheap. Tests that build a `WindowManager` directly (no
     /// Session/registry, no guard) pin via
     /// `WindowManager::set_default_program` instead.
-    pub(crate) struct EnvGuard {
+    pub struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         old_xdg: Option<std::ffi::OsString>,
         old_shell: Option<std::ffi::OsString>,
         _tmp: tempfile::TempDir,
     }
 
-    pub(crate) fn isolate() -> EnvGuard {
+    pub fn isolate() -> EnvGuard {
         // A poisoned lock is safe to reuse: the panicking test's guard already
         // restored the env vars during unwind.
         let lock = super::STATE_ENV_LOCK
@@ -85,7 +85,7 @@ pub(crate) mod test_env {
     /// Note that for *negative* assertions ("X did NOT happen") a poll cannot
     /// prove absence, so keep a short fixed sleep there and mark it with a
     /// comment.
-    pub(crate) async fn poll_until(
+    pub async fn poll_until(
         deadline: std::time::Duration,
         mut cond: impl FnMut() -> bool,
     ) -> bool {
@@ -173,7 +173,7 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
     let registry = std::sync::Arc::new(SessionRegistry::new());
     // Surface a boot config error on the next attach (it would otherwise only
     // reach the log). Cleared by the first clean reload.
-    registry.set_config_error(cfg_err.as_ref().map(|e| e.to_string()));
+    registry.set_config_error(cfg_err.as_ref().map(std::string::ToString::to_string));
 
     // Build config-declared default sessions eagerly (Feature B). A failure to
     // build one is logged and skipped, so it never blocks the accept loop. The

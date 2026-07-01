@@ -60,7 +60,7 @@ impl Cursor {
     }
 
     /// Move up by `n`, clamped to row 0.
-    pub fn up(&mut self, n: u16) {
+    pub const fn up(&mut self, n: u16) {
         self.row = self.row.saturating_sub(n);
         self.pending_wrap = false;
     }
@@ -72,7 +72,7 @@ impl Cursor {
     }
 
     /// Move left by `n`, clamped to column 0.
-    pub fn left(&mut self, n: u16) {
+    pub const fn left(&mut self, n: u16) {
         self.col = self.col.saturating_sub(n);
         self.pending_wrap = false;
     }

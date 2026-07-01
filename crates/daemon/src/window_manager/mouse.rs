@@ -203,7 +203,7 @@ impl WindowManager {
     /// Translate a physical mouse event into the layout's logical pane
     /// coordinates by removing the status-bar offset. A no-op when the bar is
     /// at the bottom (offset 0).
-    fn to_pane_coords(&self, mut event: MouseEvent) -> MouseEvent {
+    const fn to_pane_coords(&self, mut event: MouseEvent) -> MouseEvent {
         event.row = event.row.saturating_sub(self.pane_row_offset);
         event
     }
@@ -406,8 +406,7 @@ impl WindowManager {
     fn pane_is_in_copy_mode(&self, pane: PaneId) -> bool {
         self.active_window()
             .pane(pane)
-            .map(|p| p.is_in_copy_mode())
-            .unwrap_or(false)
+            .is_some_and(super::super::pane::Pane::is_in_copy_mode)
     }
 
     async fn handle_copy_mode_mouse(
@@ -483,8 +482,7 @@ impl WindowManager {
         let count = if same_target {
             self.click_history
                 .as_ref()
-                .map(|h| h.count.saturating_add(1).min(3))
-                .unwrap_or(1)
+                .map_or(1, |h| h.count.saturating_add(1).min(3))
         } else {
             1
         };
@@ -502,12 +500,11 @@ impl WindowManager {
     pub(super) fn pane_has_any_mouse_mode(&self, pane_id: PaneId) -> bool {
         self.active_window()
             .pane(pane_id)
-            .map(|p| p.with_screen(|s| s.modes.any_mouse_mode_active()))
-            .unwrap_or(false)
+            .is_some_and(|p| p.with_screen(|s| s.modes.any_mouse_mode_active()))
     }
 
     async fn forward_mouse_to_pane(
-        &mut self,
+        &self,
         pane_id: PaneId,
         event: MouseEvent,
     ) -> Result<(), DaemonError> {
@@ -587,7 +584,7 @@ impl WindowManager {
     /// if the active pane's emulator has `Modes::BRACKETED_PASTE` on, the
     /// pasted bytes are wrapped with `\x1b[200~ ... \x1b[201~` so inner apps
     /// can distinguish paste from typed input.
-    async fn handle_middle_press(&mut self, pane_id: PaneId) -> Result<(), DaemonError> {
+    async fn handle_middle_press(&self, pane_id: PaneId) -> Result<(), DaemonError> {
         let bytes = crate::osc_actions::read_clipboard().await;
         if bytes.is_empty() {
             return Ok(());
@@ -595,13 +592,12 @@ impl WindowManager {
         let bracketed = self
             .active_window()
             .pane(pane_id)
-            .map(|p| {
+            .is_some_and(|p| {
                 p.with_screen(|s| {
                     s.modes
                         .contains(plexy_glass_emulator::Modes::BRACKETED_PASTE)
                 })
-            })
-            .unwrap_or(false);
+            });
         let to_send = if bracketed {
             let mut v = Vec::with_capacity(bytes.len() + 12);
             v.extend_from_slice(b"\x1b[200~");
@@ -643,8 +639,7 @@ impl WindowManager {
             && self
                 .selection
                 .as_ref()
-                .map(|s| s.source_pane == pane_id)
-                .unwrap_or(false)
+                .is_some_and(|s| s.source_pane == pane_id)
         {
             if let Some(sel) = self.selection.as_mut() {
                 sel.extend(local_row, local_col, pane_rect);
@@ -705,7 +700,7 @@ impl WindowManager {
                         // right cell) must read the hyperlink off the owning
                         // grapheme cell, which holds the id.
                         let mut c = local_col as usize;
-                        if c > 0 && row.cells.get(c).is_some_and(|cell| cell.is_wide_spacer()) {
+                        if c > 0 && row.cells.get(c).is_some_and(plexy_glass_emulator::Cell::is_wide_spacer) {
                             c -= 1;
                         }
                         row.cells.get(c)
@@ -773,8 +768,7 @@ impl WindowManager {
         self.selection_press_scroll = self
             .active_window()
             .pane(pane_id)
-            .map(|p| p.scroll_offset())
-            .unwrap_or(0);
+            .map_or(0, super::super::pane::Pane::scroll_offset);
         Ok(())
     }
 
@@ -840,7 +834,7 @@ impl WindowManager {
         Ok(text)
     }
 
-    fn handle_wheel(&mut self, pane_id: PaneId, delta: i16) {
+    fn handle_wheel(&self, pane_id: PaneId, delta: i16) {
         let Some(pane) = self.active_window().pane(pane_id) else {
             return;
         };
@@ -855,7 +849,7 @@ impl WindowManager {
 
 /// Derive the wire encoding from a pane's mouse-related modes. `?1006` (SGR)
 /// takes precedence; otherwise the most-specific legacy mode is used.
-fn mouse_encoding_for(modes: plexy_glass_emulator::Modes) -> MouseEncoding {
+const fn mouse_encoding_for(modes: plexy_glass_emulator::Modes) -> MouseEncoding {
     use plexy_glass_emulator::Modes;
     if modes.contains(Modes::MOUSE_SGR) {
         MouseEncoding::Sgr

@@ -33,12 +33,12 @@ pub enum Severity {
 
 impl Severity {
     /// Palette key resolved against the active palette for the message color.
-    pub fn palette_key(self) -> &'static str {
+    pub const fn palette_key(self) -> &'static str {
         match self {
-            Severity::Info => "info",
-            Severity::Success => "ok",
-            Severity::Warn => "warn",
-            Severity::Error => "alert",
+            Self::Info => "info",
+            Self::Success => "ok",
+            Self::Warn => "warn",
+            Self::Error => "alert",
         }
     }
 
@@ -48,16 +48,16 @@ impl Severity {
     // ponytail: severity glyphs live here (not in the status crate's glyphs.rs)
     // so message styling stays self-contained in the daemon. The daemon→status
     // dependency is one-way, so a `Severity`-keyed table can't live over there.
-    pub fn glyph(self, tier: GlyphTier) -> &'static str {
+    pub const fn glyph(self, tier: GlyphTier) -> &'static str {
         match (tier, self) {
-            (GlyphTier::Ascii, Severity::Info) => "i",
-            (GlyphTier::Ascii, Severity::Success) => "+",
-            (GlyphTier::Ascii, Severity::Warn) => "!",
-            (GlyphTier::Ascii, Severity::Error) => "x",
-            (_, Severity::Info) => "ℹ",
-            (_, Severity::Success) => "✓",
-            (_, Severity::Warn) => "⚠",
-            (_, Severity::Error) => "✗",
+            (GlyphTier::Ascii, Self::Info) => "i",
+            (GlyphTier::Ascii, Self::Success) => "+",
+            (GlyphTier::Ascii, Self::Warn) => "!",
+            (GlyphTier::Ascii, Self::Error) => "x",
+            (_, Self::Info) => "ℹ",
+            (_, Self::Success) => "✓",
+            (_, Self::Warn) => "⚠",
+            (_, Self::Error) => "✗",
         }
     }
 }
@@ -239,7 +239,7 @@ impl WindowManager {
 
     /// The session-wide marked pane, if any. Read by the frame build to draw the
     /// marked indicator.
-    pub fn marked_pane(&self) -> Option<PaneId> {
+    pub const fn marked_pane(&self) -> Option<PaneId> {
         self.marked_pane
     }
 
@@ -255,7 +255,7 @@ impl WindowManager {
     /// gesture must not linger and fire an unintended swap/resize/reorder on the
     /// NEXT click. Deliberately leaves `click_history` (multi-click timing is
     /// self-expiring and target-scoped, so a stale entry can't cross-fire).
-    pub fn reset_mouse_gestures(&mut self) {
+    pub const fn reset_mouse_gestures(&mut self) {
         self.selection = None;
         self.resize_drag = None;
         self.tab_drag = None;
@@ -266,7 +266,7 @@ impl WindowManager {
     /// click routing) and the pane band's vertical offset (`0` for a bottom
     /// bar, `1` for a top bar). Called by the render coordinator each frame so
     /// mouse hit-testing stays aligned with the compositor's placement.
-    pub fn set_status_layout(&mut self, status_row: Option<u16>, pane_row_offset: u16) {
+    pub const fn set_status_layout(&mut self, status_row: Option<u16>, pane_row_offset: u16) {
         self.status_bar_row = status_row;
         self.pane_row_offset = pane_row_offset;
     }
@@ -278,7 +278,7 @@ impl WindowManager {
 
     /// The active overlay, if any. Read by the render coordinator and by the
     /// connection layer to decide whether to capture keys.
-    pub fn overlay(&self) -> Option<&Overlay> {
+    pub const fn overlay(&self) -> Option<&Overlay> {
         self.overlay.as_ref()
     }
 
@@ -311,21 +311,20 @@ impl WindowManager {
     pub fn active_severity(&self) -> Severity {
         self.status_message
             .as_ref()
-            .map(|m| m.severity)
-            .unwrap_or(Severity::Info)
+            .map_or(Severity::Info, |m| m.severity)
     }
 
     /// Whether any transient message is currently set (a peek; does not clear).
     /// `Session::handle_mouse` uses it to schedule the TTL-expiry wake for a
     /// message a mouse action set under the WM lock (the sync set path can't
     /// schedule it itself).
-    pub fn has_active_message(&self) -> bool {
+    pub const fn has_active_message(&self) -> bool {
         self.status_message.is_some()
     }
 
     /// Read-only access to the in-flight selection, if any. Used by the
     /// compositor to draw highlight cells.
-    pub fn selection(&self) -> Option<&Selection> {
+    pub const fn selection(&self) -> Option<&Selection> {
         self.selection.as_ref()
     }
 
@@ -357,7 +356,7 @@ impl WindowManager {
         // later exiting it closes the window normally (respawn-once).
         let respawn = self.windows[win_idx]
             .pane(pane_id)
-            .is_some_and(|p| p.respawn_shell_on_exit());
+            .is_some_and(super::pane::Pane::respawn_shell_on_exit);
         if respawn {
             let new_id = self.alloc_pane_id();
             let program = self.default_spec.program.clone();
@@ -547,7 +546,7 @@ impl WindowManager {
         }
     }
 
-    pub fn host_size(&self) -> PtySize {
+    pub const fn host_size(&self) -> PtySize {
         self.host_size
     }
 
@@ -567,7 +566,7 @@ impl WindowManager {
         &mut self.windows
     }
 
-    pub fn set_active_window(&mut self, idx: usize) {
+    pub const fn set_active_window(&mut self, idx: usize) {
         if idx < self.windows.len() {
             self.active = idx;
         }
@@ -667,11 +666,11 @@ impl WindowManager {
     }
 
     /// The floating popup, if open.
-    pub fn popup(&self) -> Option<&crate::popup::Popup> {
+    pub const fn popup(&self) -> Option<&crate::popup::Popup> {
         self.popup.as_ref()
     }
 
-    pub fn has_popup(&self) -> bool {
+    pub const fn has_popup(&self) -> bool {
         self.popup.is_some()
     }
 
@@ -901,7 +900,7 @@ impl WindowManager {
     /// Rename the pane with `id` (stores the exact string; trimming already
     /// happened in `handle_tree`). `false` if not found.
     pub fn rename_pane_by_id(&mut self, pane: PaneId, name: String) -> bool {
-        for w in self.windows.iter() {
+        for w in &self.windows {
             if let Some(p) = w.pane(pane) {
                 p.set_name(Some(name));
                 return true;
@@ -928,7 +927,7 @@ impl WindowManager {
     /// SIGHUP the pane child with `id`; the death channel closes it. `false` if
     /// not found.
     pub fn kill_pane_child(&mut self, pane: PaneId) -> bool {
-        for w in self.windows.iter() {
+        for w in &self.windows {
             if let Some(p) = w.pane(pane) {
                 p.kill_child();
                 return true;
@@ -941,7 +940,7 @@ impl WindowManager {
         &self.windows
     }
 
-    pub fn active_idx(&self) -> usize {
+    pub const fn active_idx(&self) -> usize {
         self.active
     }
 
@@ -954,7 +953,7 @@ impl WindowManager {
     /// Switch the active window to `idx`, recording the current window as the
     /// "last active" so `select_last_window` can toggle back. No-op for an
     /// out-of-range or same index.
-    fn switch_to_window(&mut self, idx: usize) {
+    const fn switch_to_window(&mut self, idx: usize) {
         if idx >= self.windows.len() || idx == self.active {
             return;
         }
@@ -977,7 +976,7 @@ impl WindowManager {
         self.host_size = new_size;
         let viewport = host_viewport(new_size);
         let cell = host_cell_px(new_size);
-        for w in self.windows.iter_mut() {
+        for w in &mut self.windows {
             w.set_cell_px(cell);
             w.resize(viewport)?;
         }
@@ -989,7 +988,7 @@ impl WindowManager {
         Ok(())
     }
 
-    fn alloc_pane_id(&mut self) -> PaneId {
+    const fn alloc_pane_id(&mut self) -> PaneId {
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
         id
@@ -1049,7 +1048,7 @@ impl WindowManager {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.windows.is_empty()
     }
 }

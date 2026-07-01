@@ -135,7 +135,7 @@ fn scroll_geometry_inverse(tc: TestCase) {
     tc.note(&format!("vt={vt} rows={rows} max={max}"));
     assert_eq!(
         max,
-        vt.saturating_sub(rows as u32),
+        vt.saturating_sub(u32::from(rows)),
         "max_scroll_offset must be visible_total - rows"
     );
 

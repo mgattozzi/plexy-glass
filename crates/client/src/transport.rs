@@ -62,9 +62,7 @@ fn spawn_daemon() -> Result<(), ClientError> {
                 .append(true)
                 .open(&p.log_file)
                 .ok()
-        })
-        .map(std::process::Stdio::from)
-        .unwrap_or_else(std::process::Stdio::null);
+        }).map_or_else(std::process::Stdio::null, std::process::Stdio::from);
     cmd.arg("daemon")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

@@ -27,7 +27,7 @@ precmd_functions+=(__plexy_osc133_precmd)
 PS1=$'%{\033]133;A\007%}'"$PS1"$'%{\033]133;B\007%}'
 "#;
 
-const FISH: &str = r#"# plexy-glass OSC 133 shell integration (fish)
+const FISH: &str = r"# plexy-glass OSC 133 shell integration (fish)
 function __plexy_osc133_prompt --on-event fish_prompt
     printf '\033]133;A\007'
 end
@@ -37,13 +37,13 @@ end
 function __plexy_osc133_postexec --on-event fish_postexec
     printf '\033]133;D;%s\007' $status
 end
-"#;
+";
 
-const NU: &str = r#"# Nushell has BUILT-IN OSC 133 — no eval needed. Ensure it's on in config.nu
+const NU: &str = r"# Nushell has BUILT-IN OSC 133 — no eval needed. Ensure it's on in config.nu
 # (it is by default). Do NOT also set the marks via prompt hooks; that fights
 # the built-in. See docs/command-blocks.md.
 $env.config.shell_integration.osc133 = true
-"#;
+";
 
 /// The eval-able snippet for `shell`, or `None` for an unknown shell. Accepts
 /// the common shell names; `nu`/`nushell` print the built-in config line.

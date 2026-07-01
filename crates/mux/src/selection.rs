@@ -13,7 +13,7 @@ pub struct Selection {
 }
 
 impl Selection {
-    pub fn start(source_pane: PaneId, row: u16, col: u16) -> Self {
+    pub const fn start(source_pane: PaneId, row: u16, col: u16) -> Self {
         Self {
             source_pane,
             anchor: (row, col),
@@ -59,7 +59,7 @@ impl Selection {
     /// nudges a cell or two; treating that as a click (rather than a
     /// one-character selection) keeps click-to-reposition from degrading into a
     /// stray single-character copy on imprecise hardware.
-    pub fn is_click(&self) -> bool {
+    pub const fn is_click(&self) -> bool {
         self.anchor.0 == self.head.0 && self.anchor.1.abs_diff(self.head.1) <= 1
     }
 }
@@ -156,7 +156,7 @@ pub fn word_at(
         content
             .cells
             .get(c as usize)
-            .is_some_and(|cell| cell.is_wide_spacer())
+            .is_some_and(plexy_glass_emulator::Cell::is_wide_spacer)
     };
     // A wide (CJK/emoji) grapheme occupies its cell plus a wide-spacer in the
     // next column. A click on that spacer (the glyph's right half) targets the
@@ -259,7 +259,7 @@ pub fn extract_text(
             // to the owning grapheme cell so the leading glyph isn't dropped.
             if r == start.0
                 && row_start > 0
-                && row.cells.get(row_start as usize).is_some_and(|c| c.is_wide_spacer())
+                && row.cells.get(row_start as usize).is_some_and(plexy_glass_emulator::Cell::is_wide_spacer)
             {
                 row_start -= 1;
             }
@@ -305,7 +305,7 @@ pub fn screen_text(screen: &plexy_glass_emulator::Screen) -> String {
         let trimmed = line.trim_end();
         lines.push(trimmed.to_string());
     }
-    while lines.last().is_some_and(|l| l.is_empty()) {
+    while lines.last().is_some_and(std::string::String::is_empty) {
         lines.pop();
     }
     lines.join("\n")

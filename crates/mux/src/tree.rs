@@ -36,7 +36,7 @@ pub struct TreeNode {
 }
 
 impl TreeNode {
-    pub fn kind(&self) -> TreeKind {
+    pub const fn kind(&self) -> TreeKind {
         match (self.window, self.pane) {
             (_, Some(_)) => TreeKind::Pane,
             (Some(_), None) => TreeKind::Window,
@@ -392,7 +392,7 @@ fn handle_rename(event: &KeyEvent, state: &mut TreeState) -> TreeOutcome {
             state.mode = TreeMode::Navigate;
             TreeOutcome::Redraw
         }
-        (_, Key::Enter) | (_, Key::KeypadEnter) => {
+        (_, Key::Enter | Key::KeypadEnter) => {
             let trimmed = buf.trim().to_string();
             state.mode = TreeMode::Navigate;
             if trimmed.is_empty() {
@@ -401,7 +401,7 @@ fn handle_rename(event: &KeyEvent, state: &mut TreeState) -> TreeOutcome {
             let n = &mut state.nodes[state.selected];
             match n.kind() {
                 TreeKind::Window => {
-                    n.name = trimmed.clone();
+                    n.name.clone_from(&trimmed);
                     n.label = window_label(n.index, &trimmed);
                     TreeOutcome::Act(TreeAction::RenameWindow {
                         session: n.session.clone(),
@@ -411,7 +411,7 @@ fn handle_rename(event: &KeyEvent, state: &mut TreeState) -> TreeOutcome {
                     })
                 }
                 TreeKind::Pane => {
-                    n.name = trimmed.clone();
+                    n.name.clone_from(&trimmed);
                     n.label = pane_label(n.index, &trimmed);
                     TreeOutcome::Act(TreeAction::RenamePane {
                         session: n.session.clone(),
@@ -473,11 +473,11 @@ fn select_visible(state: &mut TreeState, vis: &[usize], pos: usize) -> TreeOutco
     let Some(&idx) = vis.get(pos.min(vis.len().saturating_sub(1))) else {
         return TreeOutcome::None;
     };
-    if idx != state.selected {
+    if idx == state.selected {
+        TreeOutcome::None
+    } else {
         state.selected = idx;
         TreeOutcome::Redraw
-    } else {
-        TreeOutcome::None
     }
 }
 
@@ -490,7 +490,7 @@ fn clamp_sel(state: &mut TreeState) {
     if vis.contains(&state.selected) {
         return;
     }
-    match vis.iter().rev().find(|&&i| i <= state.selected).or(vis.first()) {
+    match vis.iter().rev().find(|&&i| i <= state.selected).or_else(|| vis.first()) {
         Some(&i) => state.selected = i,
         None => state.selected = 0,
     }

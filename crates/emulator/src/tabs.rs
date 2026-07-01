@@ -31,7 +31,7 @@ impl TabStops {
     }
 
     pub fn clear_all(&mut self) {
-        for s in self.stops.iter_mut() {
+        for s in &mut self.stops {
             *s = false;
         }
     }

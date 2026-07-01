@@ -29,7 +29,7 @@ impl HyperlinkTable {
     }
 
     pub fn get(&self, id: u16) -> Option<&str> {
-        self.urls.get(id as usize).map(|s| s.as_str())
+        self.urls.get(id as usize).map(std::string::String::as_str)
     }
 }
 

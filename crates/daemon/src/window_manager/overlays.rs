@@ -65,7 +65,7 @@ impl WindowManager {
         let buf = self
             .active_window()
             .pane(pid)
-            .and_then(|p| p.name())
+            .and_then(super::super::pane::Pane::name)
             .unwrap_or_default();
         self.set_overlay(Overlay::Rename { target: RenameTarget::Pane, buf });
         self.rename_pane_target = Some(pid);

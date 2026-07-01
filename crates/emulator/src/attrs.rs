@@ -22,17 +22,17 @@ pub enum UnderlineStyle {
 }
 
 impl UnderlineStyle {
-    /// Map an SGR underline sub-parameter style code (`4:N`) to a style. Codes
-    /// outside `0..=5` clamp to `Single` (any underline present, unknown shape).
-    pub fn from_sgr_subparam(code: u16) -> Self {
+    /// Map an SGR underline sub-parameter style code (`4:N`) to a style. Code 1
+    /// (single) and codes outside `0..=5` both clamp to `Single` (any underline
+    /// present, unknown shape) via the wildcard arm.
+    pub const fn from_sgr_subparam(code: u16) -> Self {
         match code {
-            0 => UnderlineStyle::None,
-            1 => UnderlineStyle::Single,
-            2 => UnderlineStyle::Double,
-            3 => UnderlineStyle::Curly,
-            4 => UnderlineStyle::Dotted,
-            5 => UnderlineStyle::Dashed,
-            _ => UnderlineStyle::Single,
+            0 => Self::None,
+            2 => Self::Double,
+            3 => Self::Curly,
+            4 => Self::Dotted,
+            5 => Self::Dashed,
+            _ => Self::Single,
         }
     }
 }

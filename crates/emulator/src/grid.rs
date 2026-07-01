@@ -66,18 +66,18 @@ impl RowMark {
 
     /// Set a flag (one of the public associated consts). `|=`, so re-marking
     /// the same row is idempotent (shells redraw prompts).
-    pub fn set(&mut self, flag: u8) {
+    pub const fn set(&mut self, flag: u8) {
         self.flags |= flag;
     }
 
     /// True when `flag` (one of the public associated consts) is set.
-    pub fn contains(self, flag: u8) -> bool {
+    pub const fn contains(self, flag: u8) -> bool {
         self.flags & flag != 0
     }
 
     /// Record the prompt-end column from `OSC 133;B`. Sets the `PROMPT_END`
     /// flag and stores `col`; re-calling updates `col` (idempotent re-mark).
-    pub fn set_prompt_end(&mut self, col: u16) {
+    pub const fn set_prompt_end(&mut self, col: u16) {
         self.flags |= Self::PROMPT_END;
         self.prompt_end_col = col;
     }
@@ -85,7 +85,7 @@ impl RowMark {
     /// The cursor column recorded by `OSC 133;B`, if any. `None` when the
     /// `PROMPT_END` flag is unset (kept `0` in that case so `PartialEq` is
     /// well-defined).
-    pub fn prompt_end_col(self) -> Option<u16> {
+    pub const fn prompt_end_col(self) -> Option<u16> {
         if self.flags & Self::PROMPT_END != 0 {
             Some(self.prompt_end_col)
         } else {
@@ -94,23 +94,20 @@ impl RowMark {
     }
 
     /// Record (or clear) the exit code from `OSC 133;D;code`.
-    pub fn set_exit(&mut self, exit: Option<i32>) {
-        match exit {
-            Some(code) => {
-                self.flags |= Self::HAS_EXIT;
-                self.exit_code = code;
-            }
-            None => {
-                self.flags &= !Self::HAS_EXIT;
-                self.exit_code = 0;
-            }
+    pub const fn set_exit(&mut self, exit: Option<i32>) {
+        if let Some(code) = exit {
+            self.flags |= Self::HAS_EXIT;
+            self.exit_code = code;
+        } else {
+            self.flags &= !Self::HAS_EXIT;
+            self.exit_code = 0;
         }
     }
 
     /// The exit code recorded by `OSC 133;D;code`, if any. `None` when `D`
     /// arrived without a parseable code (the row is still a block end via
     /// [`RowMark::BLOCK_END`]).
-    pub fn exit(self) -> Option<i32> {
+    pub const fn exit(self) -> Option<i32> {
         if self.flags & Self::HAS_EXIT != 0 {
             Some(self.exit_code)
         } else {
@@ -119,13 +116,13 @@ impl RowMark {
     }
 
     /// True when the row carries no block annotation at all.
-    pub fn is_empty(self) -> bool {
+    pub const fn is_empty(self) -> bool {
         self.flags == 0
     }
 
     /// Set or clear the runtime [`RowMark::FOLDED`] flag. Unlike [`RowMark::set`]
     /// (which only ORs), this can clear, so a block can be unfolded.
-    pub fn set_folded(&mut self, folded: bool) {
+    pub const fn set_folded(&mut self, folded: bool) {
         if folded {
             self.flags |= Self::FOLDED;
         } else {
@@ -134,29 +131,26 @@ impl RowMark {
     }
 
     /// True when this row's block is folded (output collapsed).
-    pub fn is_folded(self) -> bool {
+    pub const fn is_folded(self) -> bool {
         self.flags & Self::FOLDED != 0
     }
 
     /// Record (or clear) the block duration in millis (`OSC 133;C`→`;D`). Like
     /// [`RowMark::set_exit`], clears the field to 0 when `None` so the derived
     /// `PartialEq` stays well-defined.
-    pub fn set_duration(&mut self, dur: Option<u32>) {
-        match dur {
-            Some(ms) => {
-                self.flags |= Self::HAS_DURATION;
-                self.duration_ms = ms;
-            }
-            None => {
-                self.flags &= !Self::HAS_DURATION;
-                self.duration_ms = 0;
-            }
+    pub const fn set_duration(&mut self, dur: Option<u32>) {
+        if let Some(ms) = dur {
+            self.flags |= Self::HAS_DURATION;
+            self.duration_ms = ms;
+        } else {
+            self.flags &= !Self::HAS_DURATION;
+            self.duration_ms = 0;
         }
     }
 
     /// The block duration in millis, if one was recorded. `None` when the
     /// `HAS_DURATION` flag is unset.
-    pub fn duration_ms(self) -> Option<u32> {
+    pub const fn duration_ms(self) -> Option<u32> {
         if self.flags & Self::HAS_DURATION != 0 {
             Some(self.duration_ms)
         } else {
@@ -172,7 +166,7 @@ impl RowMark {
     /// mid-wrapped-line when the OSC arrives), so merge defensively.
     /// "Other wins" is the natural order: callers merge first→last row, so a
     /// later mark supersedes an earlier one.
-    pub fn merge(&mut self, other: RowMark) {
+    pub const fn merge(&mut self, other: Self) {
         self.flags |= other.flags;
         if other.flags & Self::HAS_EXIT != 0 {
             self.exit_code = other.exit_code;
@@ -241,11 +235,11 @@ impl Grid {
         }
     }
 
-    pub fn num_rows(&self) -> u16 {
+    pub const fn num_rows(&self) -> u16 {
         self.rows.len() as u16
     }
 
-    pub fn num_cols(&self) -> u16 {
+    pub const fn num_cols(&self) -> u16 {
         self.cols
     }
 
@@ -265,8 +259,8 @@ impl Grid {
 
     /// Reset every cell to default.
     pub fn clear(&mut self) {
-        for r in self.rows.iter_mut() {
-            for c in r.cells.iter_mut() {
+        for r in &mut self.rows {
+            for c in &mut r.cells {
                 *c = Cell::default();
             }
             r.wrap_origin = WrapOrigin::Hard;

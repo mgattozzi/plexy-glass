@@ -71,7 +71,7 @@ impl CopyMode {
         let max_line = self.total_lines.saturating_sub(1);
         let line = self
             .viewport_top
-            .saturating_add(event.row as u32)
+            .saturating_add(u32::from(event.row))
             .min(max_line);
         match (event.kind, event.button) {
             (MouseKind::Press, MouseButton::Left) => {
@@ -91,9 +91,6 @@ impl CopyMode {
                 self.cursor = (line, event.col);
                 CopyModeAction::Render
             }
-            // Equivalent note (94:13): deleting this arm is equivalent, the
-            // fallthrough `_ => CopyModeAction::Render` returns the same value.
-            (MouseKind::Release, MouseButton::Left) => CopyModeAction::Render,
             // Vertical wheel only scrolls copy mode; a horizontal wheel falls
             // through to the no-op arm rather than scrolling the wrong axis.
             (MouseKind::Wheel { delta, horizontal: false }, _) => {
@@ -104,7 +101,7 @@ impl CopyMode {
                 } else {
                     let max_top = self
                         .total_lines
-                        .saturating_sub(self.pane_rows as u32);
+                        .saturating_sub(u32::from(self.pane_rows));
                     self.viewport_top = (self.viewport_top + (-delta) as u32).min(max_top);
                 }
                 CopyModeAction::Render
@@ -127,7 +124,7 @@ impl CopyMode {
                 .get(c)
                 .is_some_and(|cell| crate::selection::is_word_char(cell.grapheme.as_str()))
         };
-        let is_spacer = |c: usize| cells.get(c).is_some_and(|cell| cell.is_wide_spacer());
+        let is_spacer = |c: usize| cells.get(c).is_some_and(plexy_glass_emulator::Cell::is_wide_spacer);
         // A wide (CJK/emoji) grapheme occupies its cell plus a wide-spacer in the
         // next column. A click on that spacer (the glyph's right half) targets the
         // owning grapheme, and the outward walks must STEP OVER spacers, since
@@ -225,17 +222,17 @@ pub fn handle(event: &KeyEvent, state: &mut CopyMode, screen: &Screen) -> CopyMo
     // Otherwise: motion + selection + search-jump + yank dispatch.
     let cols = screen.active.num_cols();
     match (event.mods, event.key) {
-        (m, Key::Char('h')) | (m, Key::Arrow(Direction::Left)) if m.is_empty() => {
+        (m, Key::Char('h') | Key::Arrow(Direction::Left)) if m.is_empty() => {
             state.cursor.1 = state.cursor.1.saturating_sub(1);
         }
-        (m, Key::Char('l')) | (m, Key::Arrow(Direction::Right)) if m.is_empty() => {
+        (m, Key::Char('l') | Key::Arrow(Direction::Right)) if m.is_empty() => {
             state.cursor.1 = (state.cursor.1 + 1).min(cols.saturating_sub(1));
         }
-        (m, Key::Char('k')) | (m, Key::Arrow(Direction::Up)) if m.is_empty() => {
+        (m, Key::Char('k') | Key::Arrow(Direction::Up)) if m.is_empty() => {
             state.cursor.0 = state.cursor.0.saturating_sub(1);
             ensure_visible(state);
         }
-        (m, Key::Char('j')) | (m, Key::Arrow(Direction::Down)) if m.is_empty() => {
+        (m, Key::Char('j') | Key::Arrow(Direction::Down)) if m.is_empty() => {
             let max_line = state.total_lines.saturating_sub(1);
             state.cursor.0 = (state.cursor.0 + 1).min(max_line);
             ensure_visible(state);
@@ -361,15 +358,12 @@ fn unified_line_cells(screen: &Screen, line: u32) -> Option<Vec<plexy_glass_emul
 /// Extract the selected (or current-line) text from the unified
 /// scrollback + active grid line space.
 fn extract_selection(state: &CopyMode, screen: &Screen) -> String {
-    let (start, end) = match state.anchor {
-        Some(anchor) => normalize(anchor, state.cursor),
-        None => {
-            let line = state.cursor.0;
-            (
-                (line, 0),
-                (line, screen.active.num_cols().saturating_sub(1)),
-            )
-        }
+    let (start, end) = if let Some(anchor) = state.anchor { normalize(anchor, state.cursor) } else {
+        let line = state.cursor.0;
+        (
+            (line, 0),
+            (line, screen.active.num_cols().saturating_sub(1)),
+        )
     };
     let cols = screen.active.num_cols();
     let mut out = String::new();
@@ -483,7 +477,7 @@ fn find_matches(screen: &Screen, query: &str) -> Vec<MatchSpan> {
         return out;
     }
     let cols = screen.active.num_cols();
-    let total = screen.scrollback.rows().len() as u32 + screen.active.num_rows() as u32;
+    let total = screen.scrollback.rows().len() as u32 + u32::from(screen.active.num_rows());
     for line_idx in 0..total {
         let Some(cells) = unified_line_cells(screen, line_idx) else { continue };
         // Build the line's text from non-spacer cells, recording where each
@@ -493,7 +487,7 @@ fn find_matches(screen: &Screen, query: &str) -> Vec<MatchSpan> {
         let mut line_text = String::new();
         let mut starts: Vec<(usize, u16)> = Vec::new();
         let mut grid_col = 0u16;
-        for c in cells.iter() {
+        for c in &cells {
             if c.is_wide_spacer() {
                 grid_col += 1;
                 continue;
@@ -512,8 +506,7 @@ fn find_matches(screen: &Screen, query: &str) -> Vec<MatchSpan> {
                 .iter()
                 .rev()
                 .find(|(b, _)| *b <= byte_off)
-                .map(|(_, gc)| *gc)
-                .unwrap_or(0);
+                .map_or(0, |(_, gc)| *gc);
             let col_end = col_start
                 .saturating_add(span.saturating_sub(1))
                 .min(cols.saturating_sub(1));

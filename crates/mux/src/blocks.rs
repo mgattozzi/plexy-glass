@@ -114,7 +114,8 @@ pub fn prompt_at_or_above(screen: &Screen, line: u32) -> Option<u32> {
 /// extent the block-mode bracket spans and the "whole block" yank renders.
 pub fn block_extent(screen: &Screen, prompt_line: u32) -> (u32, u32) {
     let total = total_lines(screen);
-    let end = next_prompt_line(screen, prompt_line).map_or(total.saturating_sub(1), |n| n - 1);
+    let end =
+        next_prompt_line(screen, prompt_line).map_or_else(|| total.saturating_sub(1), |n| n - 1);
     (prompt_line, end)
 }
 
@@ -133,7 +134,7 @@ fn closing_block_end_line(screen: &Screen, prompt_line: u32) -> Option<u32> {
     // Search range: (prompt_line, next_p], including the next prompt row so a
     // shared D+A row still counts.
     let last = total.saturating_sub(1);
-    let search_end = next_p.map(|np| np.min(last)).unwrap_or(last);
+    let search_end = next_p.map_or(last, |np| np.min(last));
     (prompt_line + 1..=search_end)
         .find(|&l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::BLOCK_END)))
 }
@@ -270,7 +271,7 @@ pub fn format_duration(ms: u32) -> String {
     } else if ms < 9_950 {
         // Tenths, e.g. `2.3s`. Capped below 9.95s so `{:.1}` rounding can never
         // produce `10.0s` (the whole-seconds branch renders that as `10s`).
-        format!("{:.1}s", ms as f64 / 1_000.0)
+        format!("{:.1}s", f64::from(ms) / 1_000.0)
     } else {
         // Whole seconds, rounded (saturating_add avoids debug overflow at u32::MAX).
         let secs = ms.saturating_add(500) / 1_000;
@@ -497,7 +498,7 @@ pub fn viewport_block_status(screen: &Screen, top: u32, rows: u16) -> Vec<Option
         if overlap_start <= overlap_end {
             let r_start = (overlap_start - top) as usize;
             let r_end = (overlap_end - top) as usize;
-            for slot in result[r_start..=r_end.min(n - 1)].iter_mut() {
+            for slot in &mut result[r_start..=r_end.min(n - 1)] {
                 *slot = status;
             }
         }
@@ -566,9 +567,8 @@ pub fn pane_at_prompt(screen: &Screen) -> bool {
         return false;
     }
     // Find the newest PROMPT_START by scanning backwards.
-    let newest_prompt = match (0..total).rev().find(|&l| is_prompt(screen, l)) {
-        Some(l) => l,
-        None => return false,
+    let Some(newest_prompt) = (0..total).rev().find(|&l| is_prompt(screen, l)) else {
+        return false;
     };
     // The pane is at a prompt iff no OUTPUT_START exists strictly after it.
     let has_output_after = (newest_prompt + 1..total).any(|l| {
@@ -612,7 +612,7 @@ pub fn block_text(screen: &Screen, (start, end): (u32, u32)) -> String {
         let trimmed = text.trim_end();
         lines.push(trimmed.to_string());
     }
-    while lines.last().is_some_and(|l| l.is_empty()) {
+    while lines.last().is_some_and(std::string::String::is_empty) {
         lines.pop();
     }
     lines.join("\n")
@@ -709,7 +709,7 @@ pub struct FoldProjection {
 impl FoldProjection {
     /// An identity projection over `total` lines (nothing folded), used for panes
     /// where folds don't apply (copy mode, block mode).
-    pub fn identity(total: u32) -> Self {
+    pub const fn identity(total: u32) -> Self {
         Self { hidden: Vec::new(), total }
     }
 
@@ -740,7 +740,7 @@ impl FoldProjection {
     }
 
     /// True when nothing is folded (callers can take the cheap 1:1 path).
-    pub fn is_identity(&self) -> bool {
+    pub const fn is_identity(&self) -> bool {
         self.hidden.is_empty()
     }
 
@@ -1201,7 +1201,7 @@ mod tests {
             b"\x1b]133;A\x07$ run\r\n\x1b]133;C\x07working",
         );
         let status = viewport_block_status(&s, 0, 4);
-        assert!(status.iter().all(|s| s.is_none()), "running block → all None");
+        assert!(status.iter().all(std::option::Option::is_none), "running block → all None");
     }
 
     /// D without exit code → None (completed but unknown).
@@ -1339,7 +1339,7 @@ mod tests {
         );
         // Alt screen is active → all None regardless.
         let status = viewport_block_status(&s, 0, 4);
-        assert!(status.iter().all(|s| s.is_none()), "alt screen → all None");
+        assert!(status.iter().all(std::option::Option::is_none), "alt screen → all None");
     }
 
     /// Rows before the first prompt → None.
@@ -1365,7 +1365,7 @@ mod tests {
         let s = two_blocks();
         // top = 1000 (beyond total_lines = 8)
         let status = viewport_block_status(&s, 1000, 4);
-        assert!(status.iter().all(|s| s.is_none()), "top past total → all None");
+        assert!(status.iter().all(std::option::Option::is_none), "top past total → all None");
     }
 
     /// D on the prompt's own row (D;0 + A on line 0, no surviving prior block):
@@ -1377,7 +1377,7 @@ mod tests {
         // one. Block 1 (prompt at line 0) has no D strictly after it → running → None.
         let s = screen_from(4, 20, b"\x1b]133;D;0\x07\x1b]133;A\x07$ a\r\nrunning");
         let status = viewport_block_status(&s, 0, 4);
-        assert!(status.iter().all(|s| s.is_none()),
+        assert!(status.iter().all(std::option::Option::is_none),
             "D on prompt's own row excluded from that block → all None");
     }
 
@@ -1387,7 +1387,7 @@ mod tests {
         let s = screen_from(4, 20, b"\x1b]133;A\x07$ cmd");
         // total_lines = 4; top = 4 → at end → all None
         let status = viewport_block_status(&s, 4, 4);
-        assert!(status.iter().all(|s| s.is_none()), "top at total_lines → all None");
+        assert!(status.iter().all(std::option::Option::is_none), "top at total_lines → all None");
     }
 
     // ── pane_at_prompt tests ─────────────────────────────────────────────────
@@ -1505,7 +1505,7 @@ mod tests {
         let result = block_command_line(&s, 0);
         assert!(result.is_some(), "should extract wrapped command");
         let text = result.unwrap();
-        assert!(!text.contains('\n'), "soft-wrapped command must not contain newline: {:?}", text);
+        assert!(!text.contains('\n'), "soft-wrapped command must not contain newline: {text:?}");
         assert!(text.contains("abcdefgh"), "first segment present");
         assert!(text.contains("ijklmnop"), "second segment present");
     }

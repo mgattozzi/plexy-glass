@@ -16,3 +16,6 @@ hegeltest = { workspace = true }
 bolero = { workspace = true }
 insta = { workspace = true }
 mutants = { workspace = true }
+
+[lints]
+workspace = true

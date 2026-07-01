@@ -116,7 +116,7 @@ impl BlockMode {
 
 /// Consume one key event, mutate state, return the action the caller applies.
 pub fn handle(event: &KeyEvent, state: &mut BlockMode, screen: &Screen) -> BlockModeAction {
-    use BlockModeAction::*;
+    use BlockModeAction::{Exit, Render, Yank, Ignore, ReRun, ToggleFold, FoldAll, UnfoldAll};
 
     // A full-screen app took over the pane (alt screen) while block mode was
     // open. The OSC 133 marks live on the MAIN grid's scrollback, not on what
@@ -169,10 +169,10 @@ pub fn handle(event: &KeyEvent, state: &mut BlockMode, screen: &Screen) -> Block
     // wrapping at the ends.
     let set = active_set(state, screen);
     match (event.mods, event.key) {
-        (m, Key::Char('j')) | (m, Key::Arrow(Direction::Down)) if m.is_empty() => {
+        (m, Key::Char('j') | Key::Arrow(Direction::Down)) if m.is_empty() => {
             move_to(state, next_in(&set, state.selected, true))
         }
-        (m, Key::Char('k')) | (m, Key::Arrow(Direction::Up)) if m.is_empty() => {
+        (m, Key::Char('k') | Key::Arrow(Direction::Up)) if m.is_empty() => {
             move_to(state, next_in(&set, state.selected, false))
         }
         // `J`/`K` (failed-jump) arrive like `G`: empty mods on legacy /
@@ -332,7 +332,7 @@ fn handle_filter_prompt(
     state: &mut BlockMode,
     screen: &Screen,
 ) -> BlockModeAction {
-    use BlockModeAction::*;
+    use BlockModeAction::{Render, Ignore};
     match (event.mods, event.key) {
         (m, Key::Enter) if m.is_empty() => {
             if let Some(f) = state.filter.as_mut() {

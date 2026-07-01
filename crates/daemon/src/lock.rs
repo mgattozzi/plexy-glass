@@ -9,7 +9,7 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-pub(crate) trait LockExt<T> {
+pub trait LockExt<T> {
     /// Lock, recovering the guard from a poisoned lock instead of panicking.
     fn lock_recover(&self) -> MutexGuard<'_, T>;
 }
@@ -17,7 +17,7 @@ pub(crate) trait LockExt<T> {
 impl<T> LockExt<T> for Mutex<T> {
     fn lock_recover(&self) -> MutexGuard<'_, T> {
         // `PoisonError` carries the guard; take it and move on.
-        self.lock().unwrap_or_else(|poison| poison.into_inner())
+        self.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

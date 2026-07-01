@@ -43,7 +43,7 @@ impl Listener {
             && meta.uid() != nix::unistd::getuid().as_raw()
         {
             return Err(DaemonError::SocketOwnedByOtherUser {
-                path: paths.socket.clone(),
+                path: paths.socket,
             });
         }
 
@@ -116,7 +116,7 @@ mod tests {
     async fn second_bind_fails_with_lockfile_busy() {
         let (_tmp, paths) = fixture();
         let _l1 = Listener::bind(paths.clone()).expect("first bind");
-        let err = Listener::bind(paths.clone()).expect_err("second bind must fail");
+        let err = Listener::bind(paths).expect_err("second bind must fail");
         match err {
             DaemonError::LockfileBusy { .. } => {}
             other => panic!("expected LockfileBusy, got {other:?}"),

@@ -111,12 +111,9 @@ where
         tokio::select! {
             // Daemon -> client
             frame = &mut read_fut => {
-                let frame = match frame? {
-                    Some(f) => f,
-                    None => {
-                        exit_status = ExitStatus::Unknown;
-                        break;
-                    }
+                let Some(frame) = frame? else {
+                    exit_status = ExitStatus::Unknown;
+                    break;
                 };
                 // Recreate the pinned read future for the next iteration, and only ever
                 // after it completed, so no buffered frame bytes are lost. Drop the old
@@ -140,8 +137,8 @@ where
                     ServerMsg::Error(e) => {
                         return Err(ClientError::DaemonError(e));
                     }
-                    ServerMsg::Attached { .. } => {} // already saw it in the caller
-                    // `ServerMsg` is `#[non_exhaustive]`; future variants are ignored here.
+                    // `Attached` was already handled by the caller; `ServerMsg`
+                    // is `#[non_exhaustive]`, so ignore it and any future variants.
                     #[allow(unreachable_patterns)]
                     _ => {}
                 }

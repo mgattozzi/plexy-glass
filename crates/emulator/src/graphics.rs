@@ -32,7 +32,7 @@ pub enum ImageProtocol {
 }
 
 impl ImageFormat {
-    pub fn from_kitty_f(f: u32) -> Option<Self> {
+    pub const fn from_kitty_f(f: u32) -> Option<Self> {
         match f {
             100 => Some(Self::Png),
             24 => Some(Self::Rgb),
@@ -41,7 +41,7 @@ impl ImageFormat {
         }
     }
 
-    pub fn kitty_f(self) -> u32 {
+    pub const fn kitty_f(self) -> u32 {
         match self {
             Self::Png => 100,
             Self::Rgb => 24,
@@ -236,7 +236,7 @@ pub fn sixel_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
                 // saturating: the payload is child-controlled, so a pathological
                 // run of digits must not overflow-panic.
                 b'0'..=b'9' => {
-                    cur = Some(cur.unwrap_or(0).saturating_mul(10).saturating_add(u32::from(b - b'0')))
+                    cur = Some(cur.unwrap_or(0).saturating_mul(10).saturating_add(u32::from(b - b'0')));
                 }
                 b';' => {
                     if idx < 4 {
@@ -670,7 +670,7 @@ mod tests {
             format: ImageFormat::Png,
             pixel_w: 1,
             pixel_h: 1,
-            data_b64: mb25.clone(),
+            data_b64: mb25,
             iterm_args: None,
             protocol: ImageProtocol::Kitty,
             generation: 1,
@@ -695,7 +695,7 @@ mod tests {
         });
         let ev2 = store.insert(Image {
             id: 2, format: ImageFormat::Png, pixel_w: 1, pixel_h: 1,
-            data_b64: mb32.clone(), iterm_args: None,
+            data_b64: mb32, iterm_args: None,
             protocol: ImageProtocol::Kitty, generation: 1,
         });
         assert!(ev1.is_empty(), "first insert: no eviction");
@@ -743,7 +743,7 @@ mod tests {
             format: ImageFormat::Png,
             pixel_w: 1,
             pixel_h: 1,
-            data_b64: mb40.clone(),
+            data_b64: mb40,
             iterm_args: None,
             protocol: ImageProtocol::Kitty,
             generation: 1,

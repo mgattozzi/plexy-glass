@@ -18,3 +18,6 @@ plexy-glass-daemon = { path = "../daemon" }
 tempfile = { workspace = true }
 tokio-test = { workspace = true }
 portable-pty = { workspace = true }
+
+[lints]
+workspace = true

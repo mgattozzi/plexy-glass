@@ -78,7 +78,7 @@ impl HostTty {
 
     /// Borrow the saved original termios snapshot. Used by
     /// `install_emergency_restore` to seed the global restore state.
-    pub fn original_termios(&self) -> &Termios {
+    pub const fn original_termios(&self) -> &Termios {
         &self.original
     }
 }
@@ -134,7 +134,7 @@ pub fn set_enabled_caps(caps: crate::negotiate::EnabledCaps) {
 fn negotiated_teardown_bytes() -> Vec<u8> {
     ENABLED_CAPS
         .get()
-        .map(|c| c.teardown_bytes())
+        .map(super::negotiate::EnabledCaps::teardown_bytes)
         .unwrap_or_default()
 }
 

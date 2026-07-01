@@ -88,11 +88,11 @@ fn check(cases: &[Case]) {
                 .unwrap_or_else(|| panic!("{}: cell ({},{}) out of bounds", c.name, r, col));
             match e {
                 Expect::Text(t) => {
-                    assert_eq!(cell.grapheme.as_str(), *t, "{}: cell ({},{}) text", c.name, r, col)
+                    assert_eq!(cell.grapheme.as_str(), *t, "{}: cell ({},{}) text", c.name, r, col);
                 }
                 Expect::Blank => assert!(cell.is_blank(), "{}: cell ({},{}) not blank", c.name, r, col),
                 Expect::Spacer => {
-                    assert!(cell.is_wide_spacer(), "{}: cell ({},{}) not spacer", c.name, r, col)
+                    assert!(cell.is_wide_spacer(), "{}: cell ({},{}) not spacer", c.name, r, col);
                 }
             }
         }

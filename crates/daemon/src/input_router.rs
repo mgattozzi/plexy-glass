@@ -8,9 +8,10 @@ use plexy_glass_mux::{KeyEvent, MouseEvent, MouseParseAction, MouseParser};
 use plexy_glass_protocol::NegotiatedKbd;
 
 /// Map the client's negotiated outer-terminal protocol to the decode scope.
+///
 /// A free fn rather than a `From` impl: the orphan rule forbids implementing a
 /// foreign trait for two foreign types from the daemon crate.
-pub fn decode_protocol(kbd: NegotiatedKbd) -> KeyboardProtocol {
+pub const fn decode_protocol(kbd: NegotiatedKbd) -> KeyboardProtocol {
     match kbd {
         NegotiatedKbd::Legacy => KeyboardProtocol::Legacy,
         // The parser's mode covers both modifyOtherKeys levels and any Kitty flag
@@ -130,7 +131,7 @@ impl InputRouter {
         if let Some(out) = self.keys.flush() {
             match out {
                 KeyParseOutput::Event { event, bytes } => {
-                    events.push(InputEvent::Key(event, bytes))
+                    events.push(InputEvent::Key(event, bytes));
                 }
                 KeyParseOutput::Bytes(bs) => events.push(InputEvent::Bytes(bs)),
                 KeyParseOutput::Pending => {}

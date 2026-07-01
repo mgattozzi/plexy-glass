@@ -21,16 +21,16 @@ pub enum HintKind {
 
 impl HintKind {
     /// Lower = higher priority when two spans overlap.
-    fn priority(self) -> u8 {
+    const fn priority(self) -> u8 {
         match self {
-            HintKind::Hyperlink => 0,
-            HintKind::Url => 1,
-            HintKind::Email => 2,
-            HintKind::Path => 3,
-            HintKind::Uuid => 4,
-            HintKind::Ip => 5,
-            HintKind::Sha => 6,
-            HintKind::HexColor => 7,
+            Self::Hyperlink => 0,
+            Self::Url => 1,
+            Self::Email => 2,
+            Self::Path => 3,
+            Self::Uuid => 4,
+            Self::Ip => 5,
+            Self::Sha => 6,
+            Self::HexColor => 7,
         }
     }
 }
@@ -205,7 +205,7 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn hex_val(b: u8) -> Option<u8> {
+const fn hex_val(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
         b'a'..=b'f' => Some(b - b'a' + 10),
@@ -486,7 +486,7 @@ mod tests {
         // extra targets: longest-match-wins, so the url out-prioritizes them.
         let s = screen_from(1, 50, &["x http://h.com/deadbeef1234/p y"]);
         let ts = scan_hints(&s);
-        assert_eq!(ts.len(), 1, "{:?}", ts);
+        assert_eq!(ts.len(), 1, "{ts:?}");
         assert_eq!(ts[0].kind, HintKind::Url);
     }
 
@@ -681,7 +681,7 @@ mod tests {
         let url = Span { start_col: 0, end_col: 10, kind: HintKind::Url, text: "http://x.c/ab".into() };
         let sha = Span { start_col: 0, end_col: 7, kind: HintKind::Sha, text: "deadbee".into() };
         let path = Span { start_col: 3, end_col: 8, kind: HintKind::Path, text: "c/ab".into() };
-        let result = resolve_overlaps(vec![sha.clone(), path.clone(), url.clone()]);
+        let result = resolve_overlaps(vec![sha, path, url]);
         assert_eq!(result.len(), 1, "url should dominate: {result:?}");
         assert_eq!(result[0].kind, HintKind::Url);
     }
@@ -692,7 +692,7 @@ mod tests {
         // wins over Url (priority 1). Kills `replace priority with 0/1` mutations.
         let hyper = Span { start_col: 0, end_col: 5, kind: HintKind::Hyperlink, text: "https://x".into() };
         let url = Span { start_col: 0, end_col: 5, kind: HintKind::Url, text: "https://x".into() };
-        let result = resolve_overlaps(vec![url.clone(), hyper.clone()]);
+        let result = resolve_overlaps(vec![url, hyper]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].kind, HintKind::Hyperlink, "hyperlink priority beats url");
     }

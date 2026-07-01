@@ -122,7 +122,7 @@ fn pane_pty_size(rect: Rect, cell_px: (u16, u16)) -> PtySize {
 impl Window {
     /// Refresh the host cell size (pixels per cell). Called on host resize; the
     /// next `resize` propagates it to every pane's PTY.
-    pub fn set_cell_px(&mut self, cell_px: (u16, u16)) {
+    pub const fn set_cell_px(&mut self, cell_px: (u16, u16)) {
         self.cell_px = cell_px;
     }
 
@@ -191,16 +191,16 @@ impl Window {
         }
     }
 
-    pub fn active(&self) -> PaneId {
+    pub const fn active(&self) -> PaneId {
         self.active
     }
 
-    pub fn is_zoomed(&self) -> bool {
+    pub const fn is_zoomed(&self) -> bool {
         self.zoomed.is_some()
     }
 
     /// Toggle zoom on the active pane. Returns the new zoom state.
-    pub fn toggle_zoom(&mut self) -> bool {
+    pub const fn toggle_zoom(&mut self) -> bool {
         if self.zoomed.is_some() {
             self.zoomed = None;
         } else {
@@ -210,7 +210,7 @@ impl Window {
     }
 
     /// Clear zoom if set. Returns true if it was zoomed.
-    pub fn clear_zoom(&mut self) -> bool {
+    pub const fn clear_zoom(&mut self) -> bool {
         self.zoomed.take().is_some()
     }
 
@@ -238,7 +238,7 @@ impl Window {
     /// Restore the persisted auto-named state (session restore). Distinct from
     /// `set_manual_name`: it does not touch `name` and may RE-enable auto for a
     /// window whose persisted name is a placeholder.
-    pub fn set_auto_named(&mut self, auto: bool) {
+    pub const fn set_auto_named(&mut self, auto: bool) {
         self.auto_named = auto;
     }
 
@@ -257,7 +257,7 @@ impl Window {
         {
             return n;
         }
-        self.shell_basename().unwrap_or_else(|| self.name.clone())
+        Self::shell_basename().unwrap_or_else(|| self.name.clone())
     }
 
     /// The derived name from the active pane: running command's first-token
@@ -273,14 +273,14 @@ impl Window {
         if let Some(cwd) = pane.with_screen(|s| s.cwd.clone()) {
             return Some(basename(&cwd));
         }
-        self.shell_basename()
+        Self::shell_basename()
     }
 
     /// Basename of the user's shell. There is no per-pane stored program name
     /// (the `SpawnSpec` is consumed at spawn), so for the shell rung we read
     /// `$SHELL` rather than add pane plumbing.
     // ponytail: $SHELL basename, no new pane field for the rarely-hit shell rung.
-    fn shell_basename(&self) -> Option<String> {
+    fn shell_basename() -> Option<String> {
         std::env::var("SHELL").ok().map(|s| basename(&s))
     }
 
@@ -292,12 +292,12 @@ impl Window {
         self.panes.iter()
     }
 
-    pub fn layout(&self) -> &LayoutTree {
+    pub const fn layout(&self) -> &LayoutTree {
         &self.layout
     }
 
     /// Mutable layout access for in-place ratio updates (drag-resize).
-    pub fn layout_mut(&mut self) -> &mut LayoutTree {
+    pub const fn layout_mut(&mut self) -> &mut LayoutTree {
         &mut self.layout
     }
 
@@ -478,7 +478,7 @@ impl Window {
         if self.active == old_slot {
             self.active = new_id;
         }
-        for p in self.focus_history.iter_mut() {
+        for p in &mut self.focus_history {
             if *p == old_slot {
                 *p = new_id;
             }
@@ -571,7 +571,7 @@ impl Window {
         if self.active == dead_id {
             self.active = new_pane_id;
         }
-        for p in self.focus_history.iter_mut() {
+        for p in &mut self.focus_history {
             if *p == dead_id {
                 *p = new_pane_id;
             }
@@ -598,38 +598,38 @@ impl Window {
     }
 
     /// Toggle monitor-activity; returns the new state.
-    pub fn toggle_monitor_activity(&mut self) -> bool {
+    pub const fn toggle_monitor_activity(&mut self) -> bool {
         self.monitor_activity = !self.monitor_activity;
         self.monitor_activity
     }
 
     /// Toggle monitor-bell; returns the new state.
-    pub fn toggle_monitor_bell(&mut self) -> bool {
+    pub const fn toggle_monitor_bell(&mut self) -> bool {
         self.monitor_bell = !self.monitor_bell;
         self.monitor_bell
     }
 
     /// Toggle monitor-command; returns the new state.
-    pub fn toggle_monitor_command(&mut self) -> bool {
+    pub const fn toggle_monitor_command(&mut self) -> bool {
         self.monitor_command = !self.monitor_command;
         self.monitor_command
     }
 
-    pub fn monitor_activity(&self) -> bool {
+    pub const fn monitor_activity(&self) -> bool {
         self.monitor_activity
     }
 
-    pub fn monitor_bell(&self) -> bool {
+    pub const fn monitor_bell(&self) -> bool {
         self.monitor_bell
     }
 
-    pub fn monitor_command(&self) -> bool {
+    pub const fn monitor_command(&self) -> bool {
         self.monitor_command
     }
 
     /// Set (or clear, with `None`) the silence threshold. Clearing also resets
     /// the sticky flag and the episode latch so a re-arm starts clean.
-    pub fn set_monitor_silence(&mut self, threshold: Option<Duration>) {
+    pub const fn set_monitor_silence(&mut self, threshold: Option<Duration>) {
         self.monitor_silence = threshold;
         if threshold.is_none() {
             self.silence = false;
@@ -637,26 +637,26 @@ impl Window {
         }
     }
 
-    pub fn monitor_silence(&self) -> Option<Duration> {
+    pub const fn monitor_silence(&self) -> Option<Duration> {
         self.monitor_silence
     }
 
-    pub fn activity_flag(&self) -> bool {
+    pub const fn activity_flag(&self) -> bool {
         self.activity
     }
 
-    pub fn bell_flag(&self) -> bool {
+    pub const fn bell_flag(&self) -> bool {
         self.bell
     }
 
     /// The sticky command-completion flag: `Some(true)` = `✓`, `Some(false)` =
     /// `✗`, `None` = none. Surfaced as `✓`/`✗` in the status window-list.
-    pub fn done_flag(&self) -> Option<bool> {
+    pub const fn done_flag(&self) -> Option<bool> {
         self.done
     }
 
     /// The sticky silence flag (`~`).
-    pub fn silence_flag(&self) -> bool {
+    pub const fn silence_flag(&self) -> bool {
         self.silence
     }
 
@@ -664,7 +664,7 @@ impl Window {
     /// silence FLAG but NOT the `silence_fired` episode latch: viewing a
     /// still-silent window must not let the next tick re-fire (a 1 Hz loop);
     /// only resuming output (`note_drain_output`) resets the latch.
-    pub fn clear_alerts(&mut self) {
+    pub const fn clear_alerts(&mut self) {
         self.activity = false;
         self.bell = false;
         self.done = None;
@@ -676,14 +676,14 @@ impl Window {
     /// false→true EDGE. The drain emits an alert message only on the edge, so
     /// a chatty pane (whose atomic re-arms every frame while the sticky flag
     /// merely stays true) is messaged once, not per frame.
-    pub fn set_activity(&mut self) -> bool {
+    pub const fn set_activity(&mut self) -> bool {
         let edge = !self.activity;
         self.activity = true;
         edge
     }
 
     /// Set the sticky bell flag; returns whether this set was a false→true edge.
-    pub fn set_bell(&mut self) -> bool {
+    pub const fn set_bell(&mut self) -> bool {
         let edge = !self.bell;
         self.bell = true;
         edge
@@ -741,7 +741,7 @@ impl Window {
     /// Returns whether this was a false→`Some` EDGE so the drain messages once
     /// per completion, not while the flag stays sticky.
     pub fn set_done(&mut self, exit: Option<i32>) -> bool {
-        let ok = exit.map(|c| c == 0).unwrap_or(true);
+        let ok = exit.is_none_or(|c| c == 0);
         let edge = self.done.is_none();
         self.done = Some(ok);
         edge
@@ -820,7 +820,7 @@ impl Window {
         Some(leaves[j])
     }
 
-    pub fn is_layout_empty(&self) -> bool {
+    pub const fn is_layout_empty(&self) -> bool {
         self.layout.is_empty()
     }
 
@@ -891,7 +891,7 @@ impl Window {
     }
 
     pub fn resize(&mut self, viewport: Rect) -> Result<(), DaemonError> {
-        for (id, pane) in self.panes.iter() {
+        for (id, pane) in &self.panes {
             // A zoomed pane fills the whole viewport regardless of its latent
             // layout rect; hidden panes still track their layout rect so an
             // un-zoom restores the split instantly at the correct size.

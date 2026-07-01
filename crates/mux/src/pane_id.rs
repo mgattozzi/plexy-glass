@@ -7,13 +7,13 @@ pub struct PaneId(pub u32);
 pub struct WindowId(pub u32);
 
 impl PaneId {
-    pub fn raw(self) -> u32 {
+    pub const fn raw(self) -> u32 {
         self.0
     }
 }
 
 impl WindowId {
-    pub fn raw(self) -> u32 {
+    pub const fn raw(self) -> u32 {
         self.0
     }
 }

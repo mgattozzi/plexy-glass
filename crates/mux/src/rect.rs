@@ -17,18 +17,18 @@ impl Rect {
         Self { row, col, rows, cols }
     }
 
-    pub fn contains(self, r: u16, c: u16) -> bool {
+    pub const fn contains(self, r: u16, c: u16) -> bool {
         r >= self.row
             && r < self.row.saturating_add(self.rows)
             && c >= self.col
             && c < self.col.saturating_add(self.cols)
     }
 
-    pub fn bottom_edge_row(self) -> u16 {
+    pub const fn bottom_edge_row(self) -> u16 {
         self.row.saturating_add(self.rows).saturating_sub(1)
     }
 
-    pub fn right_edge_col(self) -> u16 {
+    pub const fn right_edge_col(self) -> u16 {
         self.col.saturating_add(self.cols).saturating_sub(1)
     }
 
@@ -36,7 +36,7 @@ impl Rect {
     /// `ratio` is clamped to `[0.1, 0.9]`. Children are sized so they sum to the
     /// original (minus a 1-cell separator between them) so callers can paint a
     /// border on the separator row/col.
-    pub fn subdivide(self, dir: SplitDir, ratio: f32) -> (Rect, Rect) {
+    pub fn subdivide(self, dir: SplitDir, ratio: f32) -> (Self, Self) {
         let ratio = ratio.clamp(0.1, 0.9);
         match dir {
             SplitDir::Horizontal => {
@@ -47,18 +47,18 @@ impl Rect {
                     // invent a usable row here, a 0-row viewport must yield
                     // 0-row children, never a phantom 1-row rect that would sit
                     // outside the parent and desync rect_of from pane_at_coord.
-                    let first = Rect::new(self.row, self.col, self.rows, self.cols);
+                    let first = Self::new(self.row, self.col, self.rows, self.cols);
                     let second =
-                        Rect::new(self.row.saturating_add(self.rows), self.col, 0, self.cols);
+                        Self::new(self.row.saturating_add(self.rows), self.col, 0, self.cols);
                     return (first, second);
                 }
                 // Children stack top/bottom; one row reserved for the separator.
                 let usable = self.rows - 1;
-                let first_rows = ((usable as f32) * ratio).round() as u16;
+                let first_rows = (f32::from(usable) * ratio).round() as u16;
                 let first_rows = first_rows.clamp(1, usable.saturating_sub(1).max(1));
                 let second_rows = usable.saturating_sub(first_rows);
-                let first = Rect::new(self.row, self.col, first_rows, self.cols);
-                let second = Rect::new(
+                let first = Self::new(self.row, self.col, first_rows, self.cols);
+                let second = Self::new(
                     self.row.saturating_add(first_rows).saturating_add(1),
                     self.col,
                     second_rows,
@@ -71,18 +71,18 @@ impl Rect {
                     // Mirror of the Horizontal degenerate case: too narrow for two
                     // children + a separator. First takes the col(s); second is
                     // empty at the boundary. No invented column → no phantom rect.
-                    let first = Rect::new(self.row, self.col, self.rows, self.cols);
+                    let first = Self::new(self.row, self.col, self.rows, self.cols);
                     let second =
-                        Rect::new(self.row, self.col.saturating_add(self.cols), self.rows, 0);
+                        Self::new(self.row, self.col.saturating_add(self.cols), self.rows, 0);
                     return (first, second);
                 }
                 // Children sit side by side; one col reserved for the separator.
                 let usable = self.cols - 1;
-                let first_cols = ((usable as f32) * ratio).round() as u16;
+                let first_cols = (f32::from(usable) * ratio).round() as u16;
                 let first_cols = first_cols.clamp(1, usable.saturating_sub(1).max(1));
                 let second_cols = usable.saturating_sub(first_cols);
-                let first = Rect::new(self.row, self.col, self.rows, first_cols);
-                let second = Rect::new(
+                let first = Self::new(self.row, self.col, self.rows, first_cols);
+                let second = Self::new(
                     self.row,
                     self.col.saturating_add(first_cols).saturating_add(1),
                     self.rows,

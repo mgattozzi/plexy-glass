@@ -148,8 +148,7 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
     // Remainder after the verb, internal spaces preserved (for rename/switch).
     let rest = line
         .split_once(char::is_whitespace)
-        .map(|(_, r)| r.trim())
-        .unwrap_or("");
+        .map_or("", |(_, r)| r.trim());
 
     let no_args = |cmd: PromptCommand| {
         if args.is_empty() {
@@ -268,7 +267,7 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
         },
         "kill" => match args.as_slice() {
             [] => Ok(PromptCommand::KillPane),
-            ["win"] | ["window"] => Ok(PromptCommand::KillWindow),
+            ["win" | "window"] => Ok(PromptCommand::KillWindow),
             _ => Err(err("kill: expected nothing or 'win'")),
         },
         "focus" => {

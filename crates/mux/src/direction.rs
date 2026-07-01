@@ -21,10 +21,10 @@ pub enum SplitDir {
 }
 
 impl Direction {
-    pub fn axis(self) -> SplitDir {
+    pub const fn axis(self) -> SplitDir {
         match self {
-            Direction::Up | Direction::Down => SplitDir::Horizontal,
-            Direction::Left | Direction::Right => SplitDir::Vertical,
+            Self::Up | Self::Down => SplitDir::Horizontal,
+            Self::Left | Self::Right => SplitDir::Vertical,
         }
     }
 }

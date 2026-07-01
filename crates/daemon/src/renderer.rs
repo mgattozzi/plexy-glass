@@ -20,7 +20,7 @@ impl Renderer {
 
     /// Set this client's negotiated inline-graphics capabilities so the diff
     /// renderer emits only image protocols the client's terminal supports.
-    pub fn set_graphics_caps(&mut self, caps: plexy_glass_mux::GraphicsCaps) {
+    pub const fn set_graphics_caps(&mut self, caps: plexy_glass_mux::GraphicsCaps) {
         self.diff.set_graphics_caps(caps);
     }
 

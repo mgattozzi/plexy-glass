@@ -292,7 +292,7 @@ fn is_border(r: u16, c: u16, band: Rect, rects: &[Rect]) -> bool {
 /// Whether `(r, c)` lies on `rect`'s one-cell border ring, the cells of the
 /// frame box immediately surrounding the pane, corners included. A border cell
 /// in this ring belongs to the pane's frame and gets the active highlight.
-fn touches(r: u16, c: u16, rect: Rect) -> bool {
+const fn touches(r: u16, c: u16, rect: Rect) -> bool {
     let top = rect.row.saturating_sub(1);
     let bottom = rect.bottom_edge_row().saturating_add(1);
     let left = rect.col.saturating_sub(1);
@@ -300,7 +300,7 @@ fn touches(r: u16, c: u16, rect: Rect) -> bool {
     r >= top && r <= bottom && c >= left && c <= right
 }
 
-fn box_glyph(n: bool, s: bool, e: bool, w: bool) -> &'static str {
+const fn box_glyph(n: bool, s: bool, e: bool, w: bool) -> &'static str {
     match (n, s, e, w) {
         (true, true, true, true) => "\u{253c}",   // ┼
         (true, true, true, false) => "\u{251c}",  // ├
@@ -311,12 +311,10 @@ fn box_glyph(n: bool, s: bool, e: bool, w: bool) -> &'static str {
         (false, true, false, true) => "\u{2510}", // ┐
         (true, false, true, false) => "\u{2514}", // └
         (true, false, false, true) => "\u{2518}", // ┘
-        (true, true, false, false) => "\u{2502}", // │ (vertical, incl. dangling)
-        (true, false, false, false) => "\u{2502}",
-        (false, true, false, false) => "\u{2502}",
-        (false, false, true, true) => "\u{2500}", // ─ (horizontal, incl. dangling)
-        (false, false, true, false) => "\u{2500}",
-        (false, false, false, true) => "\u{2500}",
+        // │ (vertical, incl. dangling)
+        (_, true, false, false) | (true, false, false, false) => "\u{2502}",
+        // ─ (horizontal, incl. dangling)
+        (false, false, _, true) | (false, false, true, false) => "\u{2500}",
         (false, false, false, false) => " ",
     }
 }

@@ -1,6 +1,80 @@
 [workspace]
 members = ["crates/protocol", "crates/daemon", "crates/client", "crates/config", "crates/emulator", "crates/keys", "crates/mux", "crates/status"]
 
+# Strict, deny-by-default lints for the whole workspace (applied to
+# every crate via `[lints] workspace = true`). Runs over
+# `--workspace --all-targets`. `clippy::restriction` is deliberately NOT
+# enabled: it is opt-in-per-lint by design (it bundles
+# mutually-contradictory lints), so denying it wholesale is unusable.
+# Specific restriction lints can be added individually if wanted. Group
+# denies use priority = -1 so individual `allow`s below (priority 0)
+# win.
+[workspace.lints.rust]
+warnings = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+# Deliberate allow-list (priority 0 overrides the group denies above).
+# Each is a policy choice, not an oversight, the rest of the
+# pedantic/nursery/cargo groups stay deny. Everything the groups flag
+# beyond this list is FIXED in code.
+#
+# Terminal geometry casts between u16 (rows/cols/coords, bounded by the
+# grid) and usize (indices) are pervasive and safe by construction:
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+# Doc-requirement lints would demand `# Errors`/`# Panics`/`#[must_use]`
+# across most of the internal API of a single-binary app, not worth the
+# churn:
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+# Subjective naming/shape; the current forms are intentional:
+module_name_repetitions = "allow"
+similar_names = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"  # a few flag-heavy painter/layout fns are intentional
+too_many_lines = "allow"
+doc_markdown = "allow"
+# `cargo` group: transitive duplicate dep versions we don't control, and
+# per-crate publish metadata (license/description/keywords) on the
+# internal, path-only member crates that are never published
+# independently:
+multiple_crate_versions = "allow"
+cargo_common_metadata = "allow"
+# Nursery/pedantic style that is subjective or a deliberate local
+# pattern:
+option_if_let_else = "allow"       # map_or_else is not always clearer
+items_after_statements = "allow"   # helper items after stmts are intentional
+too_long_first_doc_paragraph = "allow"  # module docs are intentionally thorough
+many_single_char_names = "allow"   # geometry code uses r/c/x/y
+# Test assertions use `other => panic!("expected X, got {other:?}")` over
+# small enums to print the unexpected variant on failure, an informative
+# idiom, not a defect (naming the variant would drop the `{other:?}`
+# output):
+match_wildcard_for_single_variants = "allow"
+# The daemon's lock scoping is DELIBERATE (e.g. the WindowManager lock is
+# held across the whole compose pass for frame atomicity, and guards are
+# held in match scrutinees on purpose). These nursery lints would fight
+# that design and the lock-ordering the panic-supervision /
+# off-lock-clipboard work established:
+significant_drop_tightening = "allow"
+significant_drop_in_scrutinee = "allow"
+# Some handler/interface methods stay `async` for call-site uniformity
+# across the async daemon even when they don't currently await:
+unused_async = "allow"
+# By-value params are a deliberate ownership/API shape on hot-path
+# signatures (e.g. Pane::spawn takes its spec/config by value); and
+# `naive_bytecount` would push a `bytecount` dependency for what is
+# mostly test-only byte counting:
+needless_pass_by_value = "allow"
+naive_bytecount = "allow"
+
 # Profile for the nightly `cargo bolero … -e libfuzzer` deep runs only;
 # inert for normal builds/tests. Inherits `dev` to keep
 # debug-assertions + overflow-checks on, then opts for fuzz throughput
@@ -22,6 +96,9 @@ readme = "README.md"
 keywords = ["terminal", "multiplexer", "tmux", "tui", "cli"]
 categories = ["command-line-utilities"]
 authors = ["Michael Gattozzi <mgattozzi@variational.io>"]
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "plexy-glass"

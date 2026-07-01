@@ -87,7 +87,8 @@ impl KeyParser {
     }
 
     /// Build a parser whose decode is scoped to a negotiated protocol.
-    pub fn with_protocol(mut self, protocol: KeyboardProtocol) -> Self {
+    #[must_use]
+    pub const fn with_protocol(mut self, protocol: KeyboardProtocol) -> Self {
         self.protocol = protocol;
         self
     }
@@ -261,7 +262,7 @@ impl KeyParser {
         // generic tilde arm so `27` is not mistaken for a (nonexistent)
         // function-key number.
         if byte == b'~' && p0 == Some(27) {
-            return self.decode_modify_other_keys(params);
+            return Self::decode_modify_other_keys(params);
         }
         match (byte, p0, p1) {
             (b'A', None, None) => Some(KeyEvent::plain(Key::Arrow(Direction::Up))),
@@ -304,9 +305,7 @@ impl KeyParser {
         // param is 1-based; `.max(1)` only guards a malformed 0 (decode_xterm_mods
         // already maps both 0 and 1 to "no modifiers").
         let mods = params
-            .get(1)
-            .map(|p| decode_xterm_mods(p.primary().max(1)))
-            .unwrap_or_else(Modifiers::empty);
+            .get(1).map_or_else(Modifiers::empty, |p| decode_xterm_mods(p.primary().max(1)));
         let kind = match params.get(1).and_then(|p| p.sub_at(1)).unwrap_or(1) {
             2 => KeyEventKind::Repeat,
             3 => KeyEventKind::Release,
@@ -336,7 +335,7 @@ impl KeyParser {
     /// the encoder. Malformed (missing mods/code, non-mappable codepoint) →
     /// `None` (the caller's bail). Accepted in every protocol scope: the 27-form
     /// is the modifyOtherKeys wire form, and a permissive parser must accept it.
-    fn decode_modify_other_keys(&self, params: &[Param]) -> Option<KeyEvent> {
+    fn decode_modify_other_keys(params: &[Param]) -> Option<KeyEvent> {
         let mods = decode_xterm_mods(params.get(1)?.primary().max(1));
         let code = params.get(2)?.primary();
         kitty_key(code, mods)
@@ -367,7 +366,7 @@ impl KeyParser {
     }
 }
 
-pub(crate) fn decode_xterm_mods(raw: u32) -> Modifiers {
+pub const fn decode_xterm_mods(raw: u32) -> Modifiers {
     // Wire modifier param = 1 + bitset:
     //   1=shift 2=alt 4=ctrl 8=super 16=hyper 32=meta 64=caps_lock 128=num_lock
     let bits = (raw.saturating_sub(1) & 0xFF) as u8;
@@ -398,7 +397,7 @@ fn kitty_key(code: u32, mods: Modifiers) -> Option<KeyEvent> {
     char::from_u32(code).map(|c| KeyEvent::new(Key::Char(c), mods))
 }
 
-fn key_from_tilde(n: u32) -> Option<Key> {
+const fn key_from_tilde(n: u32) -> Option<Key> {
     match n {
         2 => Some(Key::Insert),
         3 => Some(Key::Delete),

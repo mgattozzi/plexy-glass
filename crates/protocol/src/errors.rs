@@ -49,6 +49,6 @@ pub enum CodecError {
 
 impl From<postcard::Error> for CodecError {
     fn from(err: postcard::Error) -> Self {
-        CodecError::Decode(err.to_string())
+        Self::Decode(err.to_string())
     }
 }

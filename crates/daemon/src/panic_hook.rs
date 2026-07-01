@@ -29,7 +29,7 @@ fn payload_str(payload: &(dyn std::any::Any + Send)) -> &str {
 
 /// Install the tracing-logging panic hook exactly once. Chains to the previous
 /// hook so a foregrounded daemon still gets the default stderr message too.
-pub(crate) fn install_panic_logging() {
+pub fn install_panic_logging() {
     INSTALLED.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {

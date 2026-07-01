@@ -86,7 +86,7 @@ impl DiffRenderer {
     }
 
     /// Set this client's negotiated graphics capabilities.
-    pub fn set_graphics_caps(&mut self, caps: GraphicsCaps) {
+    pub const fn set_graphics_caps(&mut self, caps: GraphicsCaps) {
         self.graphics = caps;
     }
 
@@ -453,7 +453,7 @@ impl DiffRenderer {
 }
 
 /// Do two cell rectangles overlap?
-fn rects_overlap(a: &PlacedRect, b: &PlacedRect) -> bool {
+const fn rects_overlap(a: &PlacedRect, b: &PlacedRect) -> bool {
     a.host_row < b.host_row.saturating_add(b.rows)
         && b.host_row < a.host_row.saturating_add(a.rows)
         && a.host_col < b.host_col.saturating_add(b.cols)
@@ -659,7 +659,7 @@ struct CellAttrs {
 }
 
 impl CellAttrs {
-    fn from_cell(c: &Cell) -> Self {
+    const fn from_cell(c: &Cell) -> Self {
         Self {
             fg: c.fg,
             bg: c.bg,
@@ -784,7 +784,7 @@ mod tests {
         let bytes = d.render(&v);
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.starts_with("\x1b[2J\x1b[H"), "expected initial clear: {s:?}");
-        assert!(s.contains("A"));
+        assert!(s.contains('A'));
     }
 
     #[test]
@@ -795,7 +795,7 @@ mod tests {
         let bytes = d.render(&v);
         let s = String::from_utf8_lossy(&bytes);
         assert!(
-            !s.contains("A"),
+            !s.contains('A'),
             "second render should not re-emit unchanged cells: {s:?}"
         );
     }
@@ -808,7 +808,7 @@ mod tests {
         let _ = d.render(&v1);
         let bytes = d.render(&v2);
         let s = String::from_utf8_lossy(&bytes);
-        assert!(s.contains("B"));
+        assert!(s.contains('B'));
         assert!(s.contains("\x1b[2;2H"), "expected CUP to row 2 col 2: {s:?}");
     }
 

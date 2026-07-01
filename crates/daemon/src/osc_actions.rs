@@ -94,16 +94,15 @@ pub async fn write_clipboard(payload: &[u8]) -> bool {
     };
 
     for (program, args) in candidates {
-        let child = match Command::new(program)
+        let Ok(child) = Command::new(program)
             .args(*args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => continue, // tool not present; try next
+        else {
+            continue; // tool not present; try next
         };
         // Bounded like read_clipboard: a wedged helper (stuck pbcopy/xclip) must
         // not stall the caller, since several sites await this directly in the
@@ -116,13 +115,9 @@ pub async fn write_clipboard(payload: &[u8]) -> bool {
             }
             let _ = child.wait().await;
         };
-        match tokio::time::timeout(std::time::Duration::from_secs(2), write_and_wait).await {
-            Ok(()) => return true,
-            Err(_) => {
-                tracing::warn!(program, "clipboard write timed out");
-                return false; // child killed on drop; don't multiply the stall
-            }
-        }
+        if tokio::time::timeout(std::time::Duration::from_secs(2), write_and_wait).await == Ok(()) { return true }
+        tracing::warn!(program, "clipboard write timed out");
+        return false; // child killed on drop; don't multiply the stall
     }
 
     tracing::warn!("no clipboard tool found (pbcopy/wl-copy/xclip/xsel)");
@@ -157,7 +152,7 @@ pub async fn read_clipboard() -> Vec<u8> {
             .output();
         match tokio::time::timeout(std::time::Duration::from_secs(2), fut).await {
             Ok(Ok(out)) if out.status.success() => return out.stdout,
-            Ok(_) => continue, // tool missing or non-zero: try the next one
+            Ok(_) => {} // tool missing or non-zero: try the next one
             Err(_) => {
                 // Timed out; the child is killed on drop. Don't try others, a wedged
                 // clipboard system shouldn't multiply the stall.
@@ -214,8 +209,7 @@ pub async fn click_to_position(
         // of overshooting by one per wide char.
         let (lo, hi) = (cursor.col.min(click_col), cursor.col.max(click_col));
         let count = row
-            .map(|r| graphemes_in_span(&r.cells, lo, hi))
-            .unwrap_or(usize::from(hi - lo));
+            .map_or_else(|| usize::from(hi - lo), |r| graphemes_in_span(&r.cells, lo, hi));
         Some((click_col > cursor.col, count))
     });
 

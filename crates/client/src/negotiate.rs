@@ -109,7 +109,7 @@ pub fn classify_graphics(reply: &[u8]) -> GraphicsCaps {
 /// detected by terminal fingerprint: `TERM_PROGRAM` naming a terminal that
 /// implements it (iTerm2 itself, or WezTerm).
 pub fn term_program_supports_iterm2(term_program: Option<&str>) -> bool {
-    matches!(term_program, Some("iTerm.app") | Some("WezTerm"))
+    matches!(term_program, Some("iTerm.app" | "WezTerm"))
 }
 
 /// True if `reply` contains a Kitty graphics OK response: an `\e_G` APC whose
@@ -247,7 +247,7 @@ pub fn read_probe_reply(fd: BorrowedFd<'_>, budget: Duration) -> Vec<u8> {
             revents: 0,
         };
         // SAFETY: single valid pollfd, count 1, finite non-negative timeout.
-        let rc = unsafe { libc::poll(&mut pfd, 1, ms) };
+        let rc = unsafe { libc::poll(&raw mut pfd, 1, ms) };
         if rc < 0 {
             // A signal (EINTR) is not a real error, so retry within the remaining
             // deadline rather than mis-classifying the terminal as Legacy. Any

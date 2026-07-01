@@ -23,36 +23,37 @@ const MAIN_RATIO: f32 = 0.6;
 
 impl LayoutPreset {
     /// Cycle order for `next_layout` (declaration order).
-    pub const ALL: [LayoutPreset; 5] = [
-        LayoutPreset::EvenHorizontal,
-        LayoutPreset::EvenVertical,
-        LayoutPreset::MainHorizontal,
-        LayoutPreset::MainVertical,
-        LayoutPreset::Tiled,
+    pub const ALL: [Self; 5] = [
+        Self::EvenHorizontal,
+        Self::EvenVertical,
+        Self::MainHorizontal,
+        Self::MainVertical,
+        Self::Tiled,
     ];
 
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
-            LayoutPreset::EvenHorizontal => "even-horizontal",
-            LayoutPreset::EvenVertical => "even-vertical",
-            LayoutPreset::MainHorizontal => "main-horizontal",
-            LayoutPreset::MainVertical => "main-vertical",
-            LayoutPreset::Tiled => "tiled",
+            Self::EvenHorizontal => "even-horizontal",
+            Self::EvenVertical => "even-vertical",
+            Self::MainHorizontal => "main-horizontal",
+            Self::MainVertical => "main-vertical",
+            Self::Tiled => "tiled",
         }
     }
 
-    pub fn parse(s: &str) -> Option<LayoutPreset> {
-        LayoutPreset::ALL.into_iter().find(|p| p.name() == s)
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.name() == s)
     }
 
     /// The next preset in the cycle, wrapping.
-    pub fn next(self) -> LayoutPreset {
+    #[must_use]
+    pub fn next(self) -> Self {
         // invariant: every variant is in ALL by construction
-        let idx = LayoutPreset::ALL
+        let idx = Self::ALL
             .iter()
             .position(|p| *p == self)
             .expect("variant present in ALL");
-        LayoutPreset::ALL[(idx + 1) % LayoutPreset::ALL.len()]
+        Self::ALL[(idx + 1) % Self::ALL.len()]
     }
 }
 

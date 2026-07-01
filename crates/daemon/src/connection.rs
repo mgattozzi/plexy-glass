@@ -227,44 +227,41 @@ where
 
     // Resolve or create the session. `session` is reassigned in place by
     // `switch_session` when the client switches to another session.
-    let mut session = match name {
-        Some(n) => match registry.get(&n).await {
-            Some(s) => s,
-            None if create_if_missing => {
-                let spec = cmd.unwrap_or_else(default_spawn_spec);
-                let cfg = Arc::clone(&config);
-                // `attach_or_create` restores from disk if a saved file exists.
-                match registry.attach_or_create(n.clone(), spec, size, cfg).await {
-                    Ok(s) => s,
-                    Err(DaemonError::Protocol(perr)) => {
-                        return send_msg(&mut writer, &ServerMsg::Error(perr)).await;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-            None => {
-                return send_msg(
-                    &mut writer,
-                    &ServerMsg::Error(ProtocolError::SessionNotFound { name: n }),
-                )
-                .await;
-            }
-        },
-        None => {
-            // No name means the default session "main": attach-or-create,
-            // deterministic regardless of what else is running. (The old
-            // sole-session fallback silently attached to a config-declared
-            // session when it was the only one.)
+    let mut session = if let Some(n) = name { match registry.get(&n).await {
+        Some(s) => s,
+        None if create_if_missing => {
             let spec = cmd.unwrap_or_else(default_spawn_spec);
             let cfg = Arc::clone(&config);
-            // `attach_or_create` restores "main" from disk if saved.
-            match registry.attach_or_create("main".into(), spec, size, cfg).await {
+            // `attach_or_create` restores from disk if a saved file exists.
+            match registry.attach_or_create(n.clone(), spec, size, cfg).await {
                 Ok(s) => s,
                 Err(DaemonError::Protocol(perr)) => {
                     return send_msg(&mut writer, &ServerMsg::Error(perr)).await;
                 }
                 Err(e) => return Err(e),
             }
+        }
+        None => {
+            return send_msg(
+                &mut writer,
+                &ServerMsg::Error(ProtocolError::SessionNotFound { name: n }),
+            )
+            .await;
+        }
+    } } else {
+        // No name means the default session "main": attach-or-create,
+        // deterministic regardless of what else is running. (The old
+        // sole-session fallback silently attached to a config-declared
+        // session when it was the only one.)
+        let spec = cmd.unwrap_or_else(default_spawn_spec);
+        let cfg = Arc::clone(&config);
+        // `attach_or_create` restores "main" from disk if saved.
+        match registry.attach_or_create("main".into(), spec, size, cfg).await {
+            Ok(s) => s,
+            Err(DaemonError::Protocol(perr)) => {
+                return send_msg(&mut writer, &ServerMsg::Error(perr)).await;
+            }
+            Err(e) => return Err(e),
         }
     };
 
@@ -384,7 +381,7 @@ where
             _ = &mut renderer_task => Wake::Stop,
             // The idle-flush fires only when armed (a lone ESC / partial CSI is
             // parked). When not armed the branch is disabled, never polled.
-            _ = &mut idle_flush, if armed => Wake::IdleFlush,
+            () = &mut idle_flush, if armed => Wake::IdleFlush,
             result = &mut read_fut => match result {
                 Ok(Some(f)) => Wake::Frame(f),
                 Ok(None) | Err(_) => Wake::Stop,
@@ -496,8 +493,7 @@ where
                 })
                 .await;
             }
-            ClientMsg::Detach => break,
-            ClientMsg::Shutdown => break,
+            ClientMsg::Detach | ClientMsg::Shutdown => break,
             ClientMsg::FocusIn => {
                 // Any-client-focused rule: emit focus-in only when the aggregate
                 // transitions from no-client-focused to some-client-focused. The
@@ -644,22 +640,20 @@ async fn dispatch_input_event(
                         let m = ctx.session.window_manager.lock().await;
                         m.active_window()
                             .active_pane()
-                            .map(|p| p.is_in_copy_mode())
-                            .unwrap_or(false)
+                            .is_some_and(super::pane::Pane::is_in_copy_mode)
                     };
                     let active_in_block_mode = {
                         let m = ctx.session.window_manager.lock().await;
                         m.active_window()
                             .active_pane()
-                            .map(|p| p.is_in_block_mode())
-                            .unwrap_or(false)
+                            .is_some_and(super::pane::Pane::is_in_block_mode)
                     };
                     if active_in_copy_mode {
                         let action = {
                             let m = ctx.session.window_manager.lock().await;
                             let pane_opt = m.active_window().active_pane();
                             pane_opt.and_then(|p| {
-                                let screen = p.with_screen(|s| s.clone());
+                                let screen = p.with_screen(std::clone::Clone::clone);
                                 p.with_copy_mode_mut(|state| {
                                     plexy_glass_mux::copy_mode::handle(
                                         &event_ke, state, &screen,
@@ -705,7 +699,7 @@ async fn dispatch_input_event(
                             let m = ctx.session.window_manager.lock().await;
                             let pane_opt = m.active_window().active_pane();
                             pane_opt.and_then(|p| {
-                                let screen = p.with_screen(|s| s.clone());
+                                let screen = p.with_screen(std::clone::Clone::clone);
                                 p.with_block_mode_mut(|state| {
                                     plexy_glass_mux::block_mode::handle(
                                         &event_ke, state, &screen,
@@ -807,10 +801,7 @@ async fn dispatch_input_event(
                         }
                     }
                 },
-                KeymapAction::Pending => {
-                    ctx.session.notify.notify_one();
-                }
-                KeymapAction::Cancel => {
+                KeymapAction::Pending | KeymapAction::Cancel => {
                     ctx.session.notify.notify_one();
                 }
             }
@@ -895,35 +886,31 @@ impl ClientCtx<'_> {
     /// not unique across sessions, applying the target's ids to the source
     /// would silently mutate the wrong session.
     async fn switch_session(&mut self, name: String) -> bool {
-        let target = match self.registry.get(&name).await {
-            Some(t) => t,
+        let target = if let Some(t) = self.registry.get(&name).await {
+            t
+        } else {
             // Not live: auto-create it if it's a declared template. The config
             // comes from the live session's own per-session snapshot (the
             // ClientCtx has no config field), and the build uses this client's
             // real size. Unknown-AND-undeclared names keep the existing error.
-            None => {
-                let config = self.session.config_snapshot();
-                match config.sessions.iter().find(|t| t.name == name) {
-                    Some(template) => {
-                        match self
-                            .registry
-                            .create_declared(template, Arc::clone(&config), self.size)
-                            .await
-                        {
-                            Ok(t) => t,
-                            Err(e) => {
-                                self.session
-                                    .set_status_error(format!("cannot switch to {name}: {e}"))
-                                    .await;
-                                return false;
-                            }
-                        }
-                    }
-                    None => {
-                        self.session.set_status_error(format!("no session: {name}")).await;
+            let config = self.session.config_snapshot();
+            if let Some(template) = config.sessions.iter().find(|t| t.name == name) {
+                match self
+                    .registry
+                    .create_declared(template, Arc::clone(&config), self.size)
+                    .await
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.session
+                            .set_status_error(format!("cannot switch to {name}: {e}"))
+                            .await;
                         return false;
                     }
                 }
+            } else {
+                self.session.set_status_error(format!("no session: {name}")).await;
+                return false;
             }
         };
         if target.name() == self.session.name() {
@@ -934,18 +921,15 @@ impl ClientCtx<'_> {
         let target_for_register = Arc::clone(&target);
         let size = self.size;
         let prefix_armed = Arc::clone(self.prefix_armed);
-        let new_handle = match tokio::task::spawn_blocking(move || {
+        let Ok(Ok(new_handle)) = tokio::task::spawn_blocking(move || {
             target_for_register.register_client(size, prefix_armed)
         })
         .await
-        {
-            Ok(Ok(h)) => h,
-            _ => {
-                self.session
-                    .set_status_error(format!("cannot switch to {name}"))
-                    .await;
-                return false;
-            }
+        else {
+            self.session
+                .set_status_error(format!("cannot switch to {name}"))
+                .await;
+            return false;
         };
         // Re-point the renderer (rebind + invalidate + full repaint).
         let _ = self.switch_tx.send(new_handle.frame_rx.clone());
@@ -1330,7 +1314,7 @@ impl ClientCtx<'_> {
     /// Perform a hint-mode pick: copy the span's text to the system clipboard
     /// and push it as a paste buffer (mirroring copy-mode yank), or open the
     /// span's URL/path in the system opener (fire-and-forget).
-    async fn dispatch_hint(&mut self, pick: plexy_glass_mux::HintPick) {
+    async fn dispatch_hint(&self, pick: plexy_glass_mux::HintPick) {
         match pick.action {
             plexy_glass_mux::HintAction::Copy => {
                 // Mirror the copy-mode yank path: system clipboard + paste buffer.
@@ -1356,7 +1340,7 @@ impl ClientCtx<'_> {
                     Err(_) => {
                         self.session
                             .set_status_error("couldn't open (no system opener)".into())
-                            .await
+                            .await;
                     }
                 }
             }
@@ -1492,7 +1476,7 @@ async fn run_connection_verb(
             let new_cfg = ctx.session.config_snapshot();
             let (km, skips) = plexy_glass_keys::build_keymap_with_skips(&new_cfg.keymap);
             *keymap = km;
-            let err_text = result.as_ref().err().map(|e| e.to_string());
+            let err_text = result.as_ref().err().map(std::string::ToString::to_string);
             let (severity, text) = reload_notice(err_text.as_deref(), skips.len());
             ctx.session.set_status_message(text, severity).await;
             ctx.session.notify.notify_one();
@@ -1643,21 +1627,18 @@ async fn resolve_session(
     registry: &Arc<SessionRegistry>,
     name: Option<String>,
 ) -> Result<Arc<Session>, String> {
-    match name {
-        Some(n) => registry.get(&n).await.ok_or_else(|| format!("no session \"{n}\"")),
-        None => {
-            let entries = registry.list().await;
-            match entries.as_slice() {
-                [] => Err("no sessions running".into()),
-                [only] => registry
-                    .get(&only.name)
-                    .await
-                    .ok_or_else(|| format!("no session \"{}\"", only.name)),
-                many => {
-                    let names =
-                        many.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", ");
-                    Err(format!("multiple sessions running: {names} — use -n"))
-                }
+    if let Some(n) = name { registry.get(&n).await.ok_or_else(|| format!("no session \"{n}\"")) } else {
+        let entries = registry.list().await;
+        match entries.as_slice() {
+            [] => Err("no sessions running".into()),
+            [only] => registry
+                .get(&only.name)
+                .await
+                .ok_or_else(|| format!("no session \"{}\"", only.name)),
+            many => {
+                let names =
+                    many.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", ");
+                Err(format!("multiple sessions running: {names} — use -n"))
             }
         }
     }
@@ -1787,19 +1768,17 @@ where
     // completion, not a failure; without this a finished command could be
     // misreported within one poll interval.
     let check = || {
-        pane.with_screen(|s| {
-            if s.blocks_completed > baseline {
+        pane.with_screen(|s| match s.blocks_completed.cmp(&baseline) {
+            std::cmp::Ordering::Greater => {
                 // Output is best-effort from surviving rows: the command
                 // may have cleared the screen (empty is fine).
                 let output = plexy_glass_mux::last_completed_block(s)
                     .map(|range| plexy_glass_mux::block_text(s, range))
                     .unwrap_or_default();
                 ExecTick::Done { exit: s.last_block_exit, output }
-            } else if s.blocks_completed < baseline {
-                ExecTick::Reset
-            } else {
-                ExecTick::Pending
             }
+            std::cmp::Ordering::Less => ExecTick::Reset,
+            std::cmp::Ordering::Equal => ExecTick::Pending,
         })
     };
 
@@ -1820,7 +1799,7 @@ where
                 }
                 _ => break refuse("run: pane child exited".into()),
             },
-            _ = &mut timeout_fut => match check() {
+            () = &mut timeout_fut => match check() {
                 ExecTick::Done { exit, output } => {
                     break ServerMsg::ExecDone { exit, output, timed_out: false };
                 }
@@ -1933,17 +1912,14 @@ async fn copy_last_output(session: &Arc<Session>, registry: &Arc<SessionRegistry
             })
         })
     };
-    match text {
-        Some(text) => {
-            let _ = crate::osc_actions::write_clipboard(text.as_bytes()).await;
-            registry.push_paste_buffer(text.into_bytes()).await;
-            session.set_status_ok("copied output of last command".into()).await;
-            true
-        }
-        None => {
-            session.set_status_info(NO_BLOCKS_MSG.into()).await;
-            false
-        }
+    if let Some(text) = text {
+        let _ = crate::osc_actions::write_clipboard(text.as_bytes()).await;
+        registry.push_paste_buffer(text.into_bytes()).await;
+        session.set_status_ok("copied output of last command".into()).await;
+        true
+    } else {
+        session.set_status_info(NO_BLOCKS_MSG.into()).await;
+        false
     }
 }
 
@@ -2203,14 +2179,13 @@ mod tests {
         let mut saw_output = false;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
         while tokio::time::Instant::now() < deadline {
-            let frame = match tokio::time::timeout(
+            let Ok(Ok(Some(frame))) = tokio::time::timeout(
                 std::time::Duration::from_millis(500),
                 Codec::read_frame(&mut cr),
             )
             .await
-            {
-                Ok(Ok(Some(f))) => f,
-                _ => break,
+            else {
+                break;
             };
             let msg: ServerMsg = postcard::from_bytes(&frame).unwrap();
             match msg {
@@ -2291,13 +2266,11 @@ mod tests {
                     {
                         return;
                     }
-                    if Instant::now() > deadline {
-                        panic!(
-                            "timed out: a={:?} b={:?} (want a={want_a} b={want_b})",
-                            clients_of(&entries, "a"),
-                            clients_of(&entries, "b")
-                        );
-                    }
+                    assert!(Instant::now() <= deadline, 
+                        "timed out: a={:?} b={:?} (want a={want_a} b={want_b})",
+                        clients_of(&entries, "a"),
+                        clients_of(&entries, "b")
+                    );
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             }
@@ -2331,7 +2304,7 @@ mod tests {
         // Config declares "dev" (a 2-pane split) but it is never pre-built.
         let cfg = Arc::new(
             plexy_glass_config::parse_config(
-                r##"session "dev" { window "w" { split vertical { pane; pane } } }"##,
+                r#"session "dev" { window "w" { split vertical { pane; pane } } }"#,
             )
             .unwrap(),
         );
@@ -2374,9 +2347,7 @@ mod tests {
                         assert_eq!(dev.panes, 2, "auto-built from the 2-pane template");
                         return;
                     }
-                    if Instant::now() > deadline {
-                        panic!("dev never auto-created + switched: {entries:?}");
-                    }
+                    assert!(Instant::now() <= deadline, "dev never auto-created + switched: {entries:?}");
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             }
@@ -2536,13 +2507,11 @@ mod tests {
                     {
                         return;
                     }
-                    if Instant::now() > deadline {
-                        panic!(
-                            "timed out: alpha={:?} beta={:?}",
-                            clients_of(&entries, "alpha"),
-                            clients_of(&entries, "beta")
-                        );
-                    }
+                    assert!(Instant::now() <= deadline, 
+                        "timed out: alpha={:?} beta={:?}",
+                        clients_of(&entries, "alpha"),
+                        clients_of(&entries, "beta")
+                    );
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             }
@@ -2618,13 +2587,11 @@ mod tests {
                     {
                         return;
                     }
-                    if Instant::now() > deadline {
-                        panic!(
-                            "timed out: alpha={:?} beta={:?}",
-                            clients_of(&entries, "alpha"),
-                            clients_of(&entries, "beta")
-                        );
-                    }
+                    assert!(Instant::now() <= deadline, 
+                        "timed out: alpha={:?} beta={:?}",
+                        clients_of(&entries, "alpha"),
+                        clients_of(&entries, "beta")
+                    );
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             }
@@ -3024,9 +2991,7 @@ mod tests {
             if entries.iter().find(|e| e.name == "alpha").map(|e| e.clients) == Some(1) {
                 break;
             }
-            if Instant::now() > deadline {
-                panic!("alpha never registered a client");
-            }
+            assert!(Instant::now() <= deadline, "alpha never registered a client");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
@@ -3239,7 +3204,7 @@ mod tests {
         // "dev" is declared in config but not running, so the refusal must not
         // depend on a live collision.
         let cfg = Arc::new(
-            plexy_glass_config::parse_config(r##"session "dev" { window "w" { pane } }"##)
+            plexy_glass_config::parse_config(r#"session "dev" { window "w" { pane } }"#)
                 .expect("declared-session config"),
         );
         let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
@@ -3425,9 +3390,7 @@ mod tests {
         // Wait for the session to exist.
         let deadline = Instant::now() + Duration::from_secs(5);
         while registry.get("main").await.is_none() {
-            if Instant::now() > deadline {
-                panic!("session never created");
-            }
+            assert!(Instant::now() <= deadline, "session never created");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
@@ -3465,9 +3428,7 @@ mod tests {
                             return;
                         }
                     }
-                    if Instant::now() > deadline {
-                        panic!("pane never showed {needle:?}");
-                    }
+                    assert!(Instant::now() <= deadline, "pane never showed {needle:?}");
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             }
@@ -3490,9 +3451,7 @@ mod tests {
             if registry.list_paste_buffers().await.len() == 1 {
                 break;
             }
-            if Instant::now() > deadline {
-                panic!("chooser delete did not drop the buffer count");
-            }
+            assert!(Instant::now() <= deadline, "chooser delete did not drop the buffer count");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
@@ -3645,9 +3604,7 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while registry.get("main").await.is_none() {
-            if Instant::now() > deadline {
-                panic!("session never created");
-            }
+            assert!(Instant::now() <= deadline, "session never created");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
@@ -3665,9 +3622,7 @@ mod tests {
             if !registry.list_paste_buffers().await.is_empty() {
                 break;
             }
-            if Instant::now() > deadline {
-                panic!("copy-mode yank did not push a paste buffer");
-            }
+            assert!(Instant::now() <= deadline, "copy-mode yank did not push a paste buffer");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
@@ -3731,9 +3686,7 @@ mod tests {
         // caller of update_monitor_flags).
         let deadline = Instant::now() + Duration::from_secs(5);
         while registry.get("bellmon").await.is_none() {
-            if Instant::now() > deadline {
-                panic!("session never created");
-            }
+            assert!(Instant::now() <= deadline, "session never created");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         {
@@ -3769,9 +3722,7 @@ mod tests {
             if flagged {
                 break;
             }
-            if Instant::now() > deadline {
-                panic!("the coordinator never flagged the background window's bell");
-            }
+            assert!(Instant::now() <= deadline, "the coordinator never flagged the background window's bell");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
@@ -3793,9 +3744,7 @@ mod tests {
             if cleared {
                 break;
             }
-            if Instant::now() > deadline {
-                panic!("bell flag did not clear after switching to the window");
-            }
+            assert!(Instant::now() <= deadline, "bell flag did not clear after switching to the window");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
@@ -3849,7 +3798,7 @@ mod tests {
                 let m = s.window_manager.lock().await;
                 if let Some(p) = m.active_window().active_pane() {
                     p.with_screen_mut(|sc| {
-                        sc.modes.insert(plexy_glass_emulator::Modes::FOCUS_EVENTS)
+                        sc.modes.insert(plexy_glass_emulator::Modes::FOCUS_EVENTS);
                     });
                     break;
                 }
@@ -4024,7 +3973,7 @@ mod tests {
                 let m = s.window_manager.lock().await;
                 if let Some(p) = m.active_window().active_pane() {
                     p.with_screen_mut(|sc| {
-                        sc.modes.insert(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES)
+                        sc.modes.insert(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES);
                     });
                     break;
                 }
@@ -4226,7 +4175,7 @@ mod tests {
                 let m = s.window_manager.lock().await;
                 for (_id, p) in m.active_window().panes() {
                     p.with_screen_mut(|sc| {
-                        sc.modes.insert(plexy_glass_emulator::Modes::FOCUS_EVENTS)
+                        sc.modes.insert(plexy_glass_emulator::Modes::FOCUS_EVENTS);
                     });
                 }
                 break;
@@ -4944,7 +4893,7 @@ mod tests {
         let (ok, message) = expect_command_result(reply);
         assert!(!ok);
         let msg = message.unwrap_or_default();
-        assert!(msg.contains("a") && msg.contains("b"), "ambiguity must list names: {msg}");
+        assert!(msg.contains('a') && msg.contains('b'), "ambiguity must list names: {msg}");
         assert!(msg.contains("multiple sessions"), "unexpected ambiguity text: {msg}");
     }
 

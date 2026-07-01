@@ -56,7 +56,7 @@ impl WindowManager {
                 let first_pane = self.alloc_pane_id();
                 let mut spec = self.default_spec.clone();
                 let home = self.session_cwd.clone();
-                spec.cwd = home.clone();
+                spec.cwd.clone_from(&home);
                 // Empty name → auto-named: the window derives its name from the
                 // active pane (running command → cwd → shell) until a manual
                 // rename pins it. See `Window::display_name`.
@@ -304,34 +304,25 @@ impl WindowManager {
                 let win = self.active_window_mut();
                 win.sync_input = !win.sync_input;
             }
-            Command::Detach | Command::Cancel => {}
-            Command::ReloadConfig => {
-                // Handled by serve_attach (needs registry access).
-            }
-            Command::CommandPrompt => {
-                // Opened at the connection layer (needs the live session list
-                // for Tab-completion); see serve_attach.
-            }
-            Command::ChooseSession => {
-                // Opened at the connection layer (needs the live session list);
-                // see serve_attach.
-            }
-            Command::ChooseTree => {
-                // Opened at the connection layer (needs the live session list);
-                // see serve_attach.
-            }
-            Command::History => {
-                // Opened at the connection layer (needs the registry to walk
-                // every session's blocks); see serve_attach.
-            }
-            Command::Hints => {
-                // Opened at the connection layer (scans the active pane's grid
-                // and builds hint targets); see serve_attach.
-            }
-            Command::PasteBuffer | Command::ChooseBuffer => {
-                // Handled at the connection layer (needs the registry's paste
-                // buffers); see serve_attach.
-            }
+            // No-op / placeholder arms. Detach and Cancel are genuine no-ops
+            // here (the connection loop acts on them). The rest are opened or
+            // handled at the connection layer, which has the registry /
+            // live-session-list / renderer-switch / paste-buffer / clipboard
+            // access that WindowManager lacks; see serve_attach /
+            // run_connection_verb. The arms exist only for match exhaustiveness;
+            // keep them listed.
+            Command::Detach
+            | Command::Cancel
+            | Command::ReloadConfig
+            | Command::CommandPrompt
+            | Command::ChooseSession
+            | Command::ChooseTree
+            | Command::History
+            | Command::Hints
+            | Command::PasteBuffer
+            | Command::ChooseBuffer
+            | Command::EnterBlockMode
+            | Command::CopyOutput => {}
             Command::EnterCopyMode => {
                 if let Some(pane) = self.active_window().active_pane() {
                     let (total_lines, pane_rows, start_line, start_col) = pane.with_screen(|s| {
@@ -407,11 +398,6 @@ impl WindowManager {
                     pane.set_scroll_offset(off, max);
                 }
             }
-            Command::EnterBlockMode | Command::CopyOutput => {
-                // Handled at the connection layer (needs the registry's paste
-                // buffers / clipboard, or the session for the no-blocks status
-                // message); see `serve_attach` / `run_connection_verb`.
-            }
         }
         self.notify.notify_one();
         Ok(())
@@ -424,7 +410,7 @@ impl WindowManager {
 /// cancel, and reload do not. The block verbs (`PrevPrompt`/`NextPrompt`/
 /// `CopyOutput`) are view-only, they scroll or read the zoomed pane itself,
 /// so ending zoom would be hostile (like wheel scrolling, which also keeps it).
-fn command_clears_zoom(cmd: &Command) -> bool {
+const fn command_clears_zoom(cmd: &Command) -> bool {
     matches!(
         cmd,
         Command::SplitV

@@ -38,7 +38,7 @@ status {
 
 #[test]
 fn invalid_widget_type_is_a_parse_error() {
-    let result = crate::parse_config(r##"status { left { not-a-widget } }"##);
+    let result = crate::parse_config(r"status { left { not-a-widget } }");
     assert!(result.is_err());
 }
 

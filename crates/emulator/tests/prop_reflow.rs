@@ -392,7 +392,7 @@ fn combining_marks_do_not_overflow_row_width(tc: TestCase) {
 
     // A row with combining marks: "a" + U+0301 (width 0 combining accent)
     // stored in the same cell (a single grapheme cluster).
-    let init_cols: u16 = n_chars as u16;
+    let init_cols: u16 = u16::from(n_chars);
     let mut cells: Vec<Cell> = (0..n_chars)
         .map(|_| Cell {
             grapheme: SmolStr::new("a\u{0301}"), // 'á' as a combining sequence

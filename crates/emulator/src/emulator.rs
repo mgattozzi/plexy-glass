@@ -25,7 +25,7 @@ impl Emulator {
 
     /// Relay the text-area pixel size from the client's terminal to the screen
     /// (for graphics scaling + `CSI` size-report answers).
-    pub fn set_pixel_area(&mut self, w: u16, h: u16) {
+    pub const fn set_pixel_area(&mut self, w: u16, h: u16) {
         self.screen.set_pixel_area(w, h);
     }
 
@@ -77,11 +77,11 @@ impl Emulator {
     }
 
 
-    pub fn screen(&self) -> &Screen {
+    pub const fn screen(&self) -> &Screen {
         &self.screen
     }
 
-    pub fn screen_mut(&mut self) -> &mut Screen {
+    pub const fn screen_mut(&mut self) -> &mut Screen {
         &mut self.screen
     }
 

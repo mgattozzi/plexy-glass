@@ -75,7 +75,7 @@ pub struct HostnameWidget {
 }
 
 impl HostnameWidget {
-    pub fn new(style: ResolvedStyle, interval: Option<Duration>, icon: SmolStr) -> Self {
+    pub const fn new(style: ResolvedStyle, interval: Option<Duration>, icon: SmolStr) -> Self {
         Self {
             style,
             interval,
@@ -88,7 +88,7 @@ impl HostnameWidget {
 #[async_trait]
 impl Widget for HostnameWidget {
     fn interval(&self) -> Option<Duration> {
-        self.interval.or(Some(Duration::from_secs(60)))
+        self.interval.or(Some(Duration::from_mins(1)))
     }
     async fn evaluate(&mut self, _ctx: &EvalContext<'_>) -> StyledText {
         if self.cached.is_none() {
