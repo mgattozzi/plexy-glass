@@ -1484,11 +1484,11 @@ async fn run_connection_verb(
         ConnVerb::Detach => return true,
         ConnVerb::Reload => {
             let result = ctx.registry.reload_config().await;
-            // Even on error the registry applied the built-in defaults
-            // everywhere, so the keymap rebuild must still happen. Rebuilding
-            // this Connection's keymap from the new config means the user who
-            // fired the reload sees binding changes immediately, and lets us
-            // report any bindings the new config dropped.
+            // Rebuild this Connection's keymap from the session's current config
+            // so the user who fired the reload sees binding changes immediately
+            // and we can report any dropped bindings. On a clean reload that's
+            // the freshly-swapped config; on a failed one it's the retained
+            // last-known-good (unchanged), so either way read it back and rebuild.
             let new_cfg = ctx.session.config_snapshot();
             let (km, skips) = plexy_glass_keys::build_keymap_with_skips(&new_cfg.keymap);
             *keymap = km;

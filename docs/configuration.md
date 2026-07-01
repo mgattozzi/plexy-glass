@@ -56,13 +56,14 @@ The file is KDL **v2**. The practical differences from v1 that bite people:
   immediately). It also **builds any newly-declared `session`** so it becomes
   attachable; live sessions are never rebuilt (see
   [Reload and switch](#reload-and-switch)).
-- **Error on reload**: the daemon does *not* keep the previous config. It
-  falls back to the built-in defaults everywhere, since we'd rather run on a
-  known-good config than on stale state. All three triggers surface the
-  error: `plexy-glass reload` prints `config reload error: …` to the shell,
-  and the in-session triggers (`Ctrl+a R`, `:reload`) show `reload failed: …`
-  in the status line (the daemon log also records it). Note that the same
-  message-fidelity limits apply: decode errors include line/column, and a raw
+- **Error on reload**: the daemon **keeps the last-known-good config**, so a
+  parse error leaves every live session's palette, status bar, and keybindings
+  exactly as they were, and it does *not* revert to the built-in defaults. All
+  three triggers surface the error: `plexy-glass reload` prints `config reload
+  error: …` and **exits non-zero** (so `reload && …` guards halt), and the
+  in-session triggers (`Ctrl+a R`, `:reload`) show `reload failed: …` in the
+  status line (the daemon log also records it). Note that the same
+  message-fidelity limits apply: decode errors include line/column, but a raw
   KDL syntax error gives only `Failed to parse KDL document`.
 
 Other top-level rules, all enforced by the decoder: unknown top-level nodes

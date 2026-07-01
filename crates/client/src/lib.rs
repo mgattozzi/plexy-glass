@@ -182,10 +182,10 @@ pub async fn client_reload_config() -> Result<(), ClientError> {
             println!("config reloaded");
             Ok(())
         }
-        ServerMsg::ConfigReloaded { error: Some(e) } => {
-            eprintln!("config reload error: {e}");
-            Ok(())
-        }
+        // A parse failure is a real failure: return Err so the process exits
+        // non-zero (honest-exit-code contract, matching cmd/send/run). The
+        // message is carried, not swallowed to stderr-with-exit-0.
+        ServerMsg::ConfigReloaded { error: Some(e) } => Err(ClientError::Reload(e)),
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
         other => Err(ClientError::Io(std::io::Error::other(format!(
             "unexpected reply from daemon: {other:?}"
@@ -194,8 +194,19 @@ pub async fn client_reload_config() -> Result<(), ClientError> {
 }
 
 /// Send `KillSession { name }` to the daemon and print the result.
+///
+/// Connect-only: killing a session must never *start* a daemon. With none
+/// running there is nothing to kill, so a connect failure prints the same
+/// "no daemon running" note as the bare `kill` path and exits 0.
 pub async fn client_kill_session(name: String) -> Result<(), ClientError> {
-    let reply = request_reply(Connect::Spawn, ClientMsg::KillSession { name }).await?;
+    let reply = match request_reply(Connect::Only, ClientMsg::KillSession { name }).await {
+        Ok(r) => r,
+        Err(ClientError::Connect { .. }) => {
+            println!("no daemon running");
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     match reply {
         ServerMsg::SessionKilled { name: n } => {
             println!("killed session: {n}");
@@ -427,7 +438,7 @@ pub async fn client_exec(
     let msg = ClientMsg::ExecCommand {
         session: name,
         text,
-        timeout_ms: timeout_secs.map(|s| s.saturating_mul(1000)),
+        timeout_ms: exec_timeout_ms(timeout_secs),
     };
     let reply = request_reply(Connect::Only, msg).await?;
     match reply {
@@ -470,6 +481,13 @@ pub async fn client_exec(
     }
 }
 
+/// Map `run --timeout SECS` to the wire `timeout_ms`. GNU-`timeout` semantics:
+/// `--timeout 0` means *no* limit (→ `None`), not "time out instantly". Absent
+/// `--timeout` is likewise `None`.
+fn exec_timeout_ms(timeout_secs: Option<u64>) -> Option<u64> {
+    timeout_secs.filter(|&s| s != 0).map(|s| s.saturating_mul(1000))
+}
+
 fn default_spawn_spec() -> SpawnSpec {
     let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     SpawnSpec { program, args: vec![], env: vec![], cwd: None }
@@ -491,4 +509,21 @@ fn spawn_sigwinch_task(tx: mpsc::Sender<plexy_glass_protocol::PtySize>, fd: std:
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exec_timeout_zero_means_no_limit() {
+        // No `--timeout` → no limit.
+        assert_eq!(exec_timeout_ms(None), None);
+        // `--timeout 0` → no limit (GNU-timeout semantics), NOT 0ms/instant.
+        assert_eq!(exec_timeout_ms(Some(0)), None);
+        // A real timeout converts seconds → millis.
+        assert_eq!(exec_timeout_ms(Some(5)), Some(5000));
+        // Saturates instead of overflowing.
+        assert_eq!(exec_timeout_ms(Some(u64::MAX)), Some(u64::MAX));
+    }
 }

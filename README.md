@@ -125,10 +125,10 @@ Other subcommands:
 | Command | What it does |
 |---|---|
 | `plexy-glass list` | List all running sessions |
-| `plexy-glass kill -n NAME` | Kill a single session by name |
+| `plexy-glass kill -n NAME` | Kill a single session by name (never spawns a daemon; prints `no daemon running` if none is up) |
 | `plexy-glass kill` | Stop this runtime dir's daemon |
 | `plexy-glass kill --all` | Stop every plexy-glass daemon for the current user |
-| `plexy-glass reload` | Reload `config.kdl` from the platform config dir |
+| `plexy-glass reload` | Reload `config.kdl` from the platform config dir (exits non-zero if the config fails to parse; the running config is left unchanged) |
 | `plexy-glass cmd [-n NAME] <LINE>...` | Run one or more command-prompt lines against a session |
 | `plexy-glass send [-n NAME] [--enter] <TEXT>...` | Type text into the focused pane (popup-aware) |
 | `plexy-glass capture [-n NAME]` | Print the focused pane's visible screen text (popup-aware) |

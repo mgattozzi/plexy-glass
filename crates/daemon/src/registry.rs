@@ -271,16 +271,36 @@ impl SessionRegistry {
     /// Re-read config from disk and apply to every session.
     ///
     /// The KDL loader (`plexy_glass_config::load_or_default`) returns
-    /// `(Config, Option<ConfigError>)`: even on a parse error we still get
-    /// the built-in default. This method propagates that default to every
-    /// live session (so the daemon prefers a known-good config to running
-    /// on stale state), then returns the parse error to the caller.
-    ///
-    /// Never panics mid-reload, each `Session::swap_config` is independent.
+    /// `(Config, Option<ConfigError>)`: on a parse/IO error the `Config` half is
+    /// the built-in default, which we must NOT apply (see [`Self::apply_reload`]
+    /// for the last-known-good retention).
     pub async fn reload_config(&self) -> Result<(), DaemonError> {
         let (new_config, err) = plexy_glass_config::load_or_default();
-        if let Some(e) = &err {
-            tracing::warn!(error = %e, "reload: parse error; using fallback");
+        self.apply_reload(new_config, err).await
+    }
+
+    /// Apply a freshly-loaded config to every live session, but only if it
+    /// loaded cleanly.
+    ///
+    /// On `Some(err)` the `new_config` is the built-in default (the loader's
+    /// error fallback), so applying it would silently wipe the running custom
+    /// palette/status/keymap. Instead we KEEP the last-known-good config (it
+    /// already lives in each session's own config slot, so "retaining" it is
+    /// simply not touching it), surface the error on the next attach, and
+    /// return `Err`. Only a clean reload swaps and clears the error.
+    ///
+    /// Never panics mid-reload; each `Session::swap_config` is independent.
+    /// Split out so the error-vs-clean branching is unit-testable without
+    /// depending on the platform config path.
+    async fn apply_reload(
+        &self,
+        new_config: plexy_glass_config::Config,
+        err: Option<plexy_glass_config::ConfigError>,
+    ) -> Result<(), DaemonError> {
+        if let Some(e) = err {
+            tracing::warn!(error = %e, "reload: parse error; keeping last-known-good config");
+            self.set_config_error(Some(e.to_string()));
+            return Err(DaemonError::from(e));
         }
         let new_config = Arc::new(new_config);
         {
@@ -298,13 +318,9 @@ impl SessionRegistry {
         // 24×80 default as boot (resized on the first attach).
         let reload_size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
         self.build_declared(&new_config, reload_size).await;
-        // A clean reload clears the error state; a failing one refreshes it (the
-        // daemon is still on defaults). Keeps the attach notice honest.
-        self.set_config_error(err.as_ref().map(|e| e.to_string()));
-        match err {
-            None => Ok(()),
-            Some(e) => Err(DaemonError::from(e)),
-        }
+        // A clean reload clears the error state.
+        self.set_config_error(None);
+        Ok(())
     }
 }
 
@@ -467,6 +483,51 @@ mod tests {
         assert_eq!(cfg_after.status.left.len(), expected.status.left.len());
         assert_eq!(cfg_after.status.right.len(), expected.status.right.len());
     }
+    /// A custom config marked with a recognizable `duration_threshold_ms`, so a
+    /// test can tell "kept my config" from "reverted to built-in default".
+    fn custom_cfg(threshold_ms: u32) -> Arc<plexy_glass_config::Config> {
+        let mut c = plexy_glass_config::built_in_default();
+        c.blocks.duration_threshold_ms = threshold_ms;
+        Arc::new(c)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_reload_keeps_last_known_good_config() {
+        let _g = crate::test_env::isolate();
+        let r = Arc::new(SessionRegistry::new());
+        // Session running a customized config.
+        let s = r.create("test".into(), spec(), size(), custom_cfg(999_999)).await.unwrap();
+        // A parse error: the loader hands back the built-in DEFAULT + `Some(err)`.
+        // Applying that default would wipe the custom config, which is the bug.
+        // The fix keeps the running config untouched.
+        let err = Some(plexy_glass_config::ConfigError::Kdl("line 3:1: boom".into()));
+        let result = r.apply_reload(plexy_glass_config::built_in_default(), err).await;
+        assert!(result.is_err(), "a broken reload reports failure");
+        assert_eq!(
+            s.config_snapshot().blocks.duration_threshold_ms,
+            999_999,
+            "custom config must survive a failed reload (not revert to default)"
+        );
+        assert!(r.has_config_error(), "the failure is surfaced on the next attach");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clean_reload_still_swaps_config() {
+        let _g = crate::test_env::isolate();
+        let r = Arc::new(SessionRegistry::new());
+        let s = r.create("test".into(), spec(), size(), custom_cfg(999_999)).await.unwrap();
+        // A legitimate reload (no error) must still apply the new config.
+        let mut good = plexy_glass_config::built_in_default();
+        good.blocks.duration_threshold_ms = 12_345;
+        r.apply_reload(good, None).await.unwrap();
+        assert_eq!(
+            s.config_snapshot().blocks.duration_threshold_ms,
+            12_345,
+            "a clean reload swaps in the new config"
+        );
+        assert!(!r.has_config_error(), "a clean reload clears any prior error");
+    }
+
     #[tokio::test]
     async fn rename_session_rekeys_map_and_live_name() {
         let _g = crate::test_env::isolate();

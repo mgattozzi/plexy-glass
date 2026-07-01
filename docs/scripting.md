@@ -261,9 +261,10 @@ and a command that exits 1 cleanly prints nothing on stderr from
 field, `run` prints the output, emits `run: shell integration reported no exit
 code` on stderr, and exits 0.
 
-**No default timeout.** Without `--timeout`, `run` waits indefinitely for the
-completion mark. Press `Ctrl-C` to abandon the wait (the command keeps running
-in the pane).
+**No default timeout.** Without `--timeout`, or with `--timeout 0` (GNU
+`timeout` semantics: `0` means *no limit*, not "time out instantly"), `run`
+waits indefinitely for the completion mark. Press `Ctrl-C` to abandon the wait
+(the command keeps running in the pane).
 
 ### `--json` — structured run output
 
@@ -347,6 +348,8 @@ run has no single answer (each pane has its own block counter and output).
 
 ## No auto-spawn
 
-These verbs need a daemon that's already running. If none is reachable they
-exit 1 immediately, and unlike `list` and `reload` they won't auto-spawn
-one.
+These verbs need a daemon that is already running. If none is reachable they
+exit 1 immediately (unlike `list` and `reload`, they never auto-spawn one).
+`kill` (including `kill -n <name>`) is likewise connect-only: with no daemon
+running it prints `no daemon running` rather than spawning one just to kill
+it.
