@@ -122,47 +122,45 @@ impl CopyMode {
         if (col as usize) >= cols {
             return;
         }
-        let on_word = cells
-            .get(col as usize)
-            .map(|c| crate::selection::is_word_char(c.grapheme.as_str()))
-            .unwrap_or(false);
-        if !on_word {
+        let is_word = |c: usize| {
+            cells
+                .get(c)
+                .is_some_and(|cell| crate::selection::is_word_char(cell.grapheme.as_str()))
+        };
+        let is_spacer = |c: usize| cells.get(c).is_some_and(|cell| cell.is_wide_spacer());
+        // A wide (CJK/emoji) grapheme occupies its cell plus a wide-spacer in the
+        // next column. A click on that spacer (the glyph's right half) targets the
+        // owning grapheme, and the outward walks must STEP OVER spacers, since
+        // treating a spacer as a non-word cell would collapse the selection or
+        // truncate the word at the first wide glyph. Mirrors selection.rs::word_at
+        // (the quick-select path).
+        let col = col as usize;
+        let col = if col > 0 && is_spacer(col) { col - 1 } else { col };
+        if !is_word(col) {
             return;
         }
         let mut start = col;
-        // Equivalent note (131:21, `> → >=`): `start >= 0` is always true for u16, but the
-        // extra iteration when start==0 checks index 65535 via wrapping sub, finds None →
-        // unwrap_or(false) → break; observable behavior is identical to `> 0`.
         while start > 0 {
-            let prev = start - 1;
-            if cells
-                .get(prev as usize)
-                .map(|c| crate::selection::is_word_char(c.grapheme.as_str()))
-                .unwrap_or(false)
-            {
-                start = prev;
+            let candidate = start - 1;
+            let grapheme = if candidate > 0 && is_spacer(candidate) { candidate - 1 } else { candidate };
+            if is_word(grapheme) {
+                start = grapheme;
             } else {
                 break;
             }
         }
-        let mut end = col;
-        // Equivalent note (144:34, `< → <=`): when end+1==cols (at the last column), the
-        // mutation does one extra iteration with next==cols; cells.get(cols) is None →
-        // unwrap_or(false) → break; observable behavior is identical to `< cols`.
-        while (end as usize) + 1 < cols {
-            let next = end + 1;
-            if cells
-                .get(next as usize)
-                .map(|c| crate::selection::is_word_char(c.grapheme.as_str()))
-                .unwrap_or(false)
-            {
-                end = next;
+        // Include the click grapheme's own trailing spacer, then walk right.
+        let mut end = if col + 1 < cols && is_spacer(col + 1) { col + 1 } else { col };
+        while end + 1 < cols {
+            let candidate = end + 1;
+            if is_word(candidate) {
+                end = if candidate + 1 < cols && is_spacer(candidate + 1) { candidate + 1 } else { candidate };
             } else {
                 break;
             }
         }
-        self.anchor = Some((line, start));
-        self.cursor = (line, end);
+        self.anchor = Some((line, start as u16));
+        self.cursor = (line, end as u16);
     }
 
     /// Expand cursor + anchor to span the entire line (col 0 → last non-blank).
@@ -1136,6 +1134,55 @@ mod tests {
         s.handle_mouse(&me, 2, &scr);
         assert_eq!(s.anchor, Some((0, 6)), "anchor must walk back to word start");
         assert_eq!(s.cursor.1, 10, "cursor must reach word end");
+    }
+
+    #[test]
+    fn mouse_double_click_on_wide_char_spacer_selects_word() {
+        // "中文": col0='中', col1=spacer, col2='文', col3=spacer. A double-click
+        // on col 1 (中's right half) must select the whole word, not nothing.
+        let scr = screen_with_lines(10, 30, &["中文"]);
+        let mut s = CopyMode::new(10, 10, 0, 0);
+        s.viewport_top = 0;
+        let me = mouse_ev(MouseKind::Press, MouseButton::Left, 0, 1);
+        s.handle_mouse(&me, 2, &scr);
+        assert_eq!(s.anchor, Some((0, 0)), "anchor at word start");
+        assert_eq!(s.cursor.1, 3, "cursor at word end (文's trailing spacer)");
+        // …and `y` yanks the non-empty word.
+        let action = handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
+        match action {
+            CopyModeAction::Yank(text) => assert_eq!(text, "中文"),
+            other => panic!("expected Yank, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mouse_double_click_on_wide_char_base_selects_word() {
+        // Clicking the base half (col 2 = 文) must select the same word.
+        let scr = screen_with_lines(10, 30, &["中文"]);
+        let mut s = CopyMode::new(10, 10, 0, 0);
+        s.viewport_top = 0;
+        let me = mouse_ev(MouseKind::Press, MouseButton::Left, 0, 2);
+        s.handle_mouse(&me, 2, &scr);
+        assert_eq!(s.anchor, Some((0, 0)));
+        assert_eq!(s.cursor.1, 3);
+    }
+
+    #[test]
+    fn mouse_double_click_left_walk_crosses_wide_spacer() {
+        // "ab中cd": a0 b1 中2 spacer3 c4 d5. Clicking 'd' (col 5) requires the
+        // backward walk to STEP OVER 中's spacer (col 3) to reach the word start.
+        let scr = screen_with_lines(10, 30, &["ab中cd"]);
+        let mut s = CopyMode::new(10, 10, 0, 0);
+        s.viewport_top = 0;
+        let me = mouse_ev(MouseKind::Press, MouseButton::Left, 0, 5);
+        s.handle_mouse(&me, 2, &scr);
+        assert_eq!(s.anchor, Some((0, 0)), "left walk crosses 中's spacer to word start");
+        assert_eq!(s.cursor.1, 5, "cursor at 'd'");
+        let action = handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
+        match action {
+            CopyModeAction::Yank(text) => assert_eq!(text, "ab中cd"),
+            other => panic!("expected Yank, got {other:?}"),
+        }
     }
 
     #[test]
