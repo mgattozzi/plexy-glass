@@ -307,6 +307,10 @@ impl Pane {
         });
 
         std::thread::spawn(move || {
+            // no-op on_panic: this body is panic-free by construction (no
+            // indexing/unwrap; fallible I/O returns early), so there is nothing
+            // to mark-dead beyond the panic hook's log. If fallible logic is ever
+            // added here, give it a mark-dead on_panic like the reader's.
             guard_thread("pane-writer", || {}, move || {
                 while let Some(chunk) = input_rx.blocking_recv() {
                     if let Err(e) = writer.write_all(&chunk) {
@@ -322,6 +326,10 @@ impl Pane {
         });
 
         std::thread::spawn(move || {
+            // no-op on_panic: this body is panic-free by construction (wait +
+            // send + join, `let _` on the join's Err), so there is nothing to
+            // mark-dead beyond the panic hook's log. If fallible logic is ever
+            // added here, give it a mark-dead on_panic like the reader's.
             guard_thread("pane-wait-child", || {}, move || {
                 let status = wait_child(&mut child);
                 let _ = exit_tx.send(Some(status));

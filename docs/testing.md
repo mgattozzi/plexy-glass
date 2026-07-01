@@ -52,8 +52,9 @@ Targets:
 - `parser_advance` (`crates/emulator/tests/fuzz_emulator.rs`): `Emulator::advance`
 - `mouse_consume` (`crates/mux/tests/fuzz_mouse.rs`): `MouseParser::consume`
 - `key_consume` (`crates/keys/tests/fuzz_keys.rs`): `KeyParser::consume`
-- `fuzz_compose` (`crates/mux/tests/fuzz_compositor.rs`): `compositor::compose`
-  over emulator-generated screens at arbitrary geometry/scroll
+- `fuzz_compose_does_not_panic` (`crates/mux/tests/fuzz_compositor.rs`):
+  `compositor::compose` over emulator-generated screens at arbitrary
+  geometry/scroll
 
 Deep, coverage-guided runs use **nightly** + `cargo-bolero`:
 

@@ -10,7 +10,9 @@ use plexy_glass_mux::{PaneDragRole, PaneId, PaneView, Rect, StatusPlacement, com
 #[test]
 fn fuzz_compose_does_not_panic() {
     bolero::check!().for_each(|bytes: &[u8]| {
-        // First 4 bytes pick geometry; the rest drive the emulator.
+        // A 4-byte header picks geometry; the stream (from byte 4) drives the
+        // emulator. bytes[0..=2] are rows/cols/scroll; bytes[3] is reserved for
+        // a future fuzzed dimension, so it's intentionally skipped for now.
         if bytes.len() < 4 {
             return;
         }
