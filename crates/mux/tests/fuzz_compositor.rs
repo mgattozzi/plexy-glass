@@ -1,0 +1,54 @@
+//! Fuzz `compositor::compose` over emulator-generated screens at arbitrary
+//! geometry. The compositor runs inside the render coordinator every frame,
+//! so this proves the geometry/scroll math is panic-free. Runs in the normal
+//! suite (DefaultEngine: replays the committed corpus/crashes + bounded
+//! generation); deep runs use `cargo +nightly bolero test`.
+
+use plexy_glass_emulator::Emulator;
+use plexy_glass_mux::{PaneDragRole, PaneId, PaneView, Rect, StatusPlacement, compositor::compose};
+
+#[test]
+fn fuzz_compose_does_not_panic() {
+    bolero::check!().for_each(|bytes: &[u8]| {
+        // First 4 bytes pick geometry; the rest drive the emulator.
+        if bytes.len() < 4 {
+            return;
+        }
+        let rows = (bytes[0] % 60).max(1) as u16;
+        let cols = (bytes[1] % 200).max(1) as u16;
+        let scroll = u32::from(bytes[2]);
+        let stream = &bytes[4..];
+
+        let mut emu = Emulator::new(rows, cols);
+        emu.advance(stream);
+        let screen = emu.screen();
+
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, rows, cols),
+            screen,
+            is_active: true,
+            scroll_offset: scroll,
+            copy_mode: None,
+            block_mode: None,
+            title: None,
+            marked: false,
+            drag_role: PaneDragRole::None,
+        };
+
+        // Must not panic for any input.
+        let _ = compose(
+            &[view],
+            (rows, cols),
+            None,
+            StatusPlacement::Bottom,
+            None,
+            None,
+            None,
+            None,
+            None,
+            plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61),
+            plexy_glass_mux::ChromeColors::ansi_default(),
+        );
+    });
+}
