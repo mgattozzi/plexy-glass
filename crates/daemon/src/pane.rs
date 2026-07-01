@@ -18,6 +18,20 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 use tracing::{debug, error};
 
+/// Run a per-pane thread body under `catch_unwind`. On panic, log it (the
+/// process panic hook also logs the location) and run `on_panic` (for the
+/// reader, that marks the pane dead so it doesn't silently stop draining its
+/// PTY). The body captures non-`UnwindSafe` channel handles, so we assert
+/// unwind-safety: on a caught panic the thread is exiting and its own state is
+/// discarded; any lock it poisoned is recovered by `LockExt::lock_recover`.
+fn guard_thread(name: &str, on_panic: impl FnOnce(), body: impl FnOnce()) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+    if result.is_err() {
+        error!(thread = name, "pane thread panicked; marking pane dead");
+        on_panic();
+    }
+}
+
 #[derive(Clone)]
 pub struct Pane {
     inner: Arc<Inner>,
@@ -122,6 +136,9 @@ impl Pane {
         // Capture an independent kill handle before the child is moved into
         // the detached wait thread below.
         let child_killer = child.clone_killer();
+        // A second killer clone for the reader thread so a reader panic can mark
+        // the pane dead (kill the child so wait_child unblocks and reaps).
+        let mut reader_killer = child.clone_killer();
 
         let (input_tx, mut input_rx) = mpsc::channel::<Bytes>(64);
         let (output_tx, _) = broadcast::channel::<Bytes>(256);
@@ -189,114 +206,136 @@ impl Pane {
             }
         });
 
+        let pipe_for_panic = Arc::clone(&pipe_for_reader);
+        let notify_for_panic = Arc::clone(&reader_notify_for_self);
         let reader_handle = std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => {
-                        debug!("pane reader EOF");
-                        // No more output can ever flow: close any pipe.
-                        crate::pipe::cancel_slot(
-                            &pipe_for_reader,
-                            crate::pipe::PipeCloseReason::PaneClosed,
-                        );
-                        // Final notify so the renderer can pick up any
-                        // unprocessed bytes before the connection tears down.
-                        reader_notify_for_self.notify_one();
-                        return;
-                    }
-                    Ok(n) => {
-                        let (replies, clip_writes, color_queries, belled) = {
-                            // invariant: emulator mutex held briefly to advance + drain.
-                            let mut e = emulator_for_reader.lock_recover();
-                            e.advance(&buf[..n]);
-                            (
-                                e.take_replies(),
-                                e.take_clipboard_writes(),
-                                e.take_color_queries(),
-                                e.take_bell(),
-                            )
-                        };
-                        let chunk = Bytes::copy_from_slice(&buf[..n]);
-                        let _ = output_tx_clone.send(chunk);
-                        // Set the monitoring signals BEFORE notify so the very next
-                        // coordinator frame (woken by this notify) drains them. A
-                        // one-shot bell would otherwise wait for an unrelated wake.
-                        activity_for_reader.store(true, Ordering::Relaxed);
-                        if belled {
-                            bell_for_reader.store(true, Ordering::Relaxed);
-                        }
-                        notify_for_reader.notify_one();
-                        // Re-interleave DA/DSR replies and deferred color replies
-                        // in the order the child emitted the queries (color replies
-                        // need the palette, so they were deferred to here). Only
-                        // lock config when there's actually a color query to format.
-                        let outbound = if color_queries.is_empty() {
-                            replies
-                        } else {
-                            // invariant: config mutex held briefly to clone the palette.
-                            let palette = {
-                                let cfg = config_for_reader.lock_recover();
-                                cfg.palette.clone()
-                            };
-                            merge_outbound(replies, color_queries, &palette)
-                        };
-                        for reply in outbound {
-                            match reply_tx.try_send(Bytes::from(reply)) {
-                                Ok(()) => {}
-                                Err(mpsc::error::TrySendError::Full(_)) => {
-                                    debug!("input channel full; dropping emulator reply");
+            guard_thread(
+                "pane-reader",
+                move || {
+                    // A reader panic leaves the pane no longer draining its PTY.
+                    // Mirror the EOF cleanup (close any pipe) and kill the child
+                    // so wait_child unblocks, reaps, and fires the death channel.
+                    crate::pipe::cancel_slot(
+                        &pipe_for_panic,
+                        crate::pipe::PipeCloseReason::PaneClosed,
+                    );
+                    let _ = reader_killer.kill();
+                    notify_for_panic.notify_one();
+                },
+                move || {
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match reader.read(&mut buf) {
+                            Ok(0) => {
+                                debug!("pane reader EOF");
+                                // No more output can ever flow: close any pipe.
+                                crate::pipe::cancel_slot(
+                                    &pipe_for_reader,
+                                    crate::pipe::PipeCloseReason::PaneClosed,
+                                );
+                                // Final notify so the renderer can pick up any
+                                // unprocessed bytes before the connection tears down.
+                                reader_notify_for_self.notify_one();
+                                return;
+                            }
+                            Ok(n) => {
+                                let (replies, clip_writes, color_queries, belled) = {
+                                    // invariant: emulator mutex held briefly to advance + drain.
+                                    let mut e = emulator_for_reader.lock_recover();
+                                    e.advance(&buf[..n]);
+                                    (
+                                        e.take_replies(),
+                                        e.take_clipboard_writes(),
+                                        e.take_color_queries(),
+                                        e.take_bell(),
+                                    )
+                                };
+                                let chunk = Bytes::copy_from_slice(&buf[..n]);
+                                let _ = output_tx_clone.send(chunk);
+                                // Set the monitoring signals BEFORE notify so the very next
+                                // coordinator frame (woken by this notify) drains them. A
+                                // one-shot bell would otherwise wait for an unrelated wake.
+                                activity_for_reader.store(true, Ordering::Relaxed);
+                                if belled {
+                                    bell_for_reader.store(true, Ordering::Relaxed);
                                 }
-                                Err(mpsc::error::TrySendError::Closed(_)) => {
-                                    debug!("input channel closed; stop forwarding replies");
-                                    break;
+                                notify_for_reader.notify_one();
+                                // Re-interleave DA/DSR replies and deferred color replies
+                                // in the order the child emitted the queries (color replies
+                                // need the palette, so they were deferred to here). Only
+                                // lock config when there's actually a color query to format.
+                                let outbound = if color_queries.is_empty() {
+                                    replies
+                                } else {
+                                    // invariant: config mutex held briefly to clone the palette.
+                                    let palette = {
+                                        let cfg = config_for_reader.lock_recover();
+                                        cfg.palette.clone()
+                                    };
+                                    merge_outbound(replies, color_queries, &palette)
+                                };
+                                for reply in outbound {
+                                    match reply_tx.try_send(Bytes::from(reply)) {
+                                        Ok(()) => {}
+                                        Err(mpsc::error::TrySendError::Full(_)) => {
+                                            debug!("input channel full; dropping emulator reply");
+                                        }
+                                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                                            debug!("input channel closed; stop forwarding replies");
+                                            break;
+                                        }
+                                    }
+                                }
+                                // clip writes are likewise non-blocking (drop on full):
+                                // the dedicated drain task may be slow behind pbcopy.
+                                for payload in clip_writes {
+                                    clip_tx.try_send(payload).ok();
                                 }
                             }
-                        }
-                        // clip writes are likewise non-blocking (drop on full):
-                        // the dedicated drain task may be slow behind pbcopy.
-                        for payload in clip_writes {
-                            clip_tx.try_send(payload).ok();
+                            Err(e) => {
+                                debug!(error = %e, "pane reader closed");
+                                crate::pipe::cancel_slot(
+                                    &pipe_for_reader,
+                                    crate::pipe::PipeCloseReason::PaneClosed,
+                                );
+                                return;
+                            }
                         }
                     }
-                    Err(e) => {
-                        debug!(error = %e, "pane reader closed");
-                        crate::pipe::cancel_slot(
-                            &pipe_for_reader,
-                            crate::pipe::PipeCloseReason::PaneClosed,
-                        );
+                },
+            );
+        });
+
+        std::thread::spawn(move || {
+            guard_thread("pane-writer", || {}, move || {
+                while let Some(chunk) = input_rx.blocking_recv() {
+                    if let Err(e) = writer.write_all(&chunk) {
+                        error!(error = %e, "pane writer error");
+                        return;
+                    }
+                    if let Err(e) = writer.flush() {
+                        error!(error = %e, "pane flush error");
                         return;
                     }
                 }
-            }
+            });
         });
 
         std::thread::spawn(move || {
-            while let Some(chunk) = input_rx.blocking_recv() {
-                if let Err(e) = writer.write_all(&chunk) {
-                    error!(error = %e, "pane writer error");
-                    return;
+            guard_thread("pane-wait-child", || {}, move || {
+                let status = wait_child(&mut child);
+                let _ = exit_tx.send(Some(status));
+                // Wait for the reader thread to drain any remaining PTY bytes
+                // (line-editor cleanup, final prompt erase, etc.) into the
+                // emulator before signaling death. Otherwise the connection
+                // might tear down the renderer while the host TTY is still in a
+                // mid-render state, leaving the user's host shell to need a
+                // keystroke before redrawing.
+                let _ = reader_handle.join();
+                if let Some(tx) = death_tx {
+                    let _ = tx.blocking_send(id);
                 }
-                if let Err(e) = writer.flush() {
-                    error!(error = %e, "pane flush error");
-                    return;
-                }
-            }
-        });
-
-        std::thread::spawn(move || {
-            let status = wait_child(&mut child);
-            let _ = exit_tx.send(Some(status));
-            // Wait for the reader thread to drain any remaining PTY bytes
-            // (line-editor cleanup, final prompt erase, etc.) into the
-            // emulator before signaling death. Otherwise the connection
-            // might tear down the renderer while the host TTY is still in a
-            // mid-render state, leaving the user's host shell to need a
-            // keystroke before redrawing.
-            let _ = reader_handle.join();
-            if let Some(tx) = death_tx {
-                let _ = tx.blocking_send(id);
-            }
+            });
         });
 
         Ok(Self {
@@ -696,6 +735,26 @@ mod tests {
 
     fn cfg() -> Arc<Config> {
         Arc::new(plexy_glass_config::built_in_default())
+    }
+
+    #[test]
+    fn guard_thread_runs_on_panic_handler_when_body_panics() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let fired = Arc::new(AtomicBool::new(false));
+        let f = Arc::clone(&fired);
+        guard_thread("test", move || f.store(true, Ordering::SeqCst), || panic!("boom"));
+        assert!(fired.load(Ordering::SeqCst), "on_panic must fire when body panics");
+    }
+
+    #[test]
+    fn guard_thread_skips_handler_on_clean_body() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let fired = Arc::new(AtomicBool::new(false));
+        let f = Arc::clone(&fired);
+        guard_thread("test", move || f.store(true, Ordering::SeqCst), || { /* clean */ });
+        assert!(!fired.load(Ordering::SeqCst), "on_panic must NOT fire on a clean body");
     }
 
     #[tokio::test]
