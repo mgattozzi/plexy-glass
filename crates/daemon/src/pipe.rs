@@ -17,6 +17,7 @@
 //! cancel watch; every await in the drain selects on it, so even a drain
 //! parked in a blocked stdin write observes the cancel promptly.
 
+use crate::LockExt;
 use crate::error::DaemonError;
 use crate::session::Session;
 use bytes::Bytes;
@@ -91,7 +92,7 @@ impl PipeHandle {
 /// arms). Idempotent: a second call finds the slot empty.
 pub fn cancel_slot(slot: &PipeSlot, reason: PipeCloseReason) -> bool {
     // invariant: pipe slot mutex held briefly; no await, no nested locks.
-    let taken = slot.lock().expect("pipe slot poisoned").take();
+    let taken = slot.lock_recover().take();
     match taken {
         Some(handle) => {
             handle.cancel(reason);
@@ -149,7 +150,7 @@ pub(crate) fn install_and_drain(
     let handle = PipeHandle { id, cancel_tx, pid: child.id() };
     let prev = {
         // invariant: pipe slot mutex held briefly; no await, no nested locks.
-        slot.lock().expect("pipe slot poisoned").replace(handle)
+        slot.lock_recover().replace(handle)
     };
     if let Some(prev) = prev {
         prev.cancel(PipeCloseReason::Replaced);
@@ -222,7 +223,7 @@ async fn drain(
     let _ = child.wait().await;
     {
         // invariant: pipe slot mutex held briefly; no await, no nested locks.
-        let mut guard = slot.lock().expect("pipe slot poisoned");
+        let mut guard = slot.lock_recover();
         if guard.as_ref().is_some_and(|h| h.id == id) {
             *guard = None;
         }

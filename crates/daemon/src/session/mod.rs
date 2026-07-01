@@ -4,6 +4,7 @@ mod coordinator;
 mod restore;
 
 use crate::{
+    LockExt,
     error::DaemonError,
     window_manager::{Severity, WindowManager},
 };
@@ -80,7 +81,7 @@ impl Session {
     /// hazard by construction.
     pub fn name(&self) -> String {
         // invariant: name mutex briefly held to clone the value out.
-        self.name.lock().expect("name mutex poisoned").clone()
+        self.name.lock_recover().clone()
     }
 
     /// Replace the live name. Only the registry's `rename_session` calls
@@ -88,7 +89,7 @@ impl Session {
     /// together.
     pub(crate) fn set_name(&self, new: String) {
         // invariant: name mutex briefly held to store the value.
-        *self.name.lock().expect("name mutex poisoned") = new;
+        *self.name.lock_recover() = new;
     }
 
     /// Snapshot the current active config Arc. Hot reload swaps the
@@ -96,14 +97,14 @@ impl Session {
     /// of the config rather than caching across awaits.
     pub fn config_snapshot(&self) -> Arc<plexy_glass_config::Config> {
         // invariant: config_slot mutex is held briefly; no .await holding the lock.
-        self.config_slot.lock().expect("config_slot poisoned").clone()
+        self.config_slot.lock_recover().clone()
     }
 
     /// Snapshot the current status engine Arc. Hot reload swaps the inner
     /// Arc when the status config changes.
     pub fn status_engine_snapshot(&self) -> Arc<plexy_glass_status::EngineInner> {
         // invariant: status_engine_slot mutex is held briefly; no .await holding the lock.
-        self.status_engine_slot.lock().expect("status_engine_slot poisoned").clone()
+        self.status_engine_slot.lock_recover().clone()
     }
 
     pub fn new(
@@ -149,7 +150,7 @@ impl Session {
         });
         let coord_handle = tokio::spawn(render_coordinator(Arc::clone(&session), frame_tx));
         // invariant: no other thread holds coordinator_handle at construction time
-        *session.coordinator_handle.lock().expect("coordinator lock poisoned") = Some(coord_handle);
+        *session.coordinator_handle.lock_recover() = Some(coord_handle);
 
         // Spawn the pane-death consumer; it owns the receiver end of the
         // death channel.
@@ -174,7 +175,7 @@ impl Session {
             }
         });
         // invariant: no other thread holds death_handle at construction time.
-        *session.death_handle.lock().expect("death handle lock poisoned") = Some(death_task);
+        *session.death_handle.lock_recover() = Some(death_task);
 
         // Spawn the status tick task. Capture a `Weak<Session>` so the task
         // doesn't keep the session alive on its own; when the registry
@@ -197,8 +198,7 @@ impl Session {
             },
         );
         // invariant: no other thread holds status_tick_handle at construction time
-        *session.status_tick_handle.lock().expect("status tick handle lock poisoned") =
-            Some(tick_handle);
+        *session.status_tick_handle.lock_recover() = Some(tick_handle);
 
         Ok(session)
     }
@@ -210,28 +210,13 @@ impl Session {
     /// Pane children are terminated separately via `terminate_panes`.
     pub fn begin_close(&self) {
         self.closing.store(true, Ordering::SeqCst);
-        if let Some(h) = self
-            .death_handle
-            .lock()
-            .expect("death handle lock poisoned")
-            .take()
-        {
+        if let Some(h) = self.death_handle.lock_recover().take() {
             h.abort();
         }
-        if let Some(h) = self
-            .status_tick_handle
-            .lock()
-            .expect("status tick handle lock poisoned")
-            .take()
-        {
+        if let Some(h) = self.status_tick_handle.lock_recover().take() {
             h.abort();
         }
-        if let Some(h) = self
-            .silence_tick_handle
-            .lock()
-            .expect("silence tick handle lock poisoned")
-            .take()
-        {
+        if let Some(h) = self.silence_tick_handle.lock_recover().take() {
             h.abort();
         }
         self.notify.notify_one();
@@ -899,10 +884,7 @@ impl Session {
     pub fn schedule_status_expiry_wake(self: &Arc<Self>) {
         let prior = {
             // invariant: status_msg_handle mutex held briefly; no .await holding the lock.
-            let mut slot = self
-                .status_msg_handle
-                .lock()
-                .expect("status_msg_handle poisoned");
+            let mut slot = self.status_msg_handle.lock_recover();
             slot.take()
         };
         if let Some(h) = prior {
@@ -921,10 +903,7 @@ impl Session {
             }
         });
         // invariant: status_msg_handle mutex held briefly; no .await holding the lock.
-        *self
-            .status_msg_handle
-            .lock()
-            .expect("status_msg_handle poisoned") = Some(handle);
+        *self.status_msg_handle.lock_recover() = Some(handle);
     }
 
     /// Spawn the silence tick task if `armed` and the task is not already
@@ -933,10 +912,7 @@ impl Session {
     /// session with no silence monitors). `armed` is read by the caller while
     /// it still holds the WM lock (`WindowManager::any_silence_monitored`).
     pub fn reconcile_silence_task(self: &Arc<Self>, armed: bool) {
-        let mut slot = self
-            .silence_tick_handle
-            .lock()
-            .expect("silence_tick_handle poisoned");
+        let mut slot = self.silence_tick_handle.lock_recover();
         match (armed, slot.is_some()) {
             (true, false) => {
                 let weak = Arc::downgrade(self);
@@ -1011,7 +987,7 @@ impl Session {
         // (1) Update the config slot first.
         {
             // invariant: config_slot mutex is held briefly; no .await holding the lock.
-            let mut slot = self.config_slot.lock().expect("config_slot poisoned");
+            let mut slot = self.config_slot.lock_recover();
             *slot = Arc::clone(&new_config);
         }
 
@@ -1026,10 +1002,7 @@ impl Session {
         // (2) Abort the old tick before spawning a new one.
         {
             // invariant: status_tick_handle mutex held briefly; no .await holding the lock.
-            let mut slot = self
-                .status_tick_handle
-                .lock()
-                .expect("status_tick_handle poisoned");
+            let mut slot = self.status_tick_handle.lock_recover();
             if let Some(old_tick) = slot.take() {
                 old_tick.abort();
             }
@@ -1038,10 +1011,7 @@ impl Session {
         // (3) Install the new engine.
         {
             // invariant: status_engine_slot mutex held briefly; no .await holding the lock.
-            let mut slot = self
-                .status_engine_slot
-                .lock()
-                .expect("status_engine_slot poisoned");
+            let mut slot = self.status_engine_slot.lock_recover();
             *slot = new_inner;
         }
 
@@ -1060,10 +1030,7 @@ impl Session {
         );
         {
             // invariant: status_tick_handle mutex held briefly; no .await holding the lock.
-            let mut slot = self
-                .status_tick_handle
-                .lock()
-                .expect("status_tick_handle poisoned");
+            let mut slot = self.status_tick_handle.lock_recover();
             *slot = Some(tick_handle);
         }
 
@@ -1164,44 +1131,19 @@ impl Drop for Session {
         // Abort the background tasks so they don't outlive the Session.
         // The status tick task captures Weak<Session>, so by the time we
         // reach Drop the only place that can revive the session is gone.
-        if let Some(handle) = self
-            .status_tick_handle
-            .lock()
-            .expect("status tick handle lock poisoned")
-            .take()
-        {
+        if let Some(handle) = self.status_tick_handle.lock_recover().take() {
             handle.abort();
         }
-        if let Some(handle) = self
-            .coordinator_handle
-            .lock()
-            .expect("coordinator handle lock poisoned")
-            .take()
-        {
+        if let Some(handle) = self.coordinator_handle.lock_recover().take() {
             handle.abort();
         }
-        if let Some(handle) = self
-            .death_handle
-            .lock()
-            .expect("death handle lock poisoned")
-            .take()
-        {
+        if let Some(handle) = self.death_handle.lock_recover().take() {
             handle.abort();
         }
-        if let Some(handle) = self
-            .status_msg_handle
-            .lock()
-            .expect("status msg handle lock poisoned")
-            .take()
-        {
+        if let Some(handle) = self.status_msg_handle.lock_recover().take() {
             handle.abort();
         }
-        if let Some(handle) = self
-            .silence_tick_handle
-            .lock()
-            .expect("silence tick handle lock poisoned")
-            .take()
-        {
+        if let Some(handle) = self.silence_tick_handle.lock_recover().take() {
             handle.abort();
         }
     }

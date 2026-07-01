@@ -3,6 +3,7 @@
 //! Cloning a `Pane` is cheap (shared `Arc<Inner>`); shared state is protected
 //! by Mutex/broadcast/mpsc/watch as before.
 
+use crate::LockExt;
 use crate::error::DaemonError;
 use bytes::Bytes;
 use plexy_glass_config::{Config, PaletteConfig};
@@ -207,9 +208,7 @@ impl Pane {
                     Ok(n) => {
                         let (replies, clip_writes, color_queries, belled) = {
                             // invariant: emulator mutex held briefly to advance + drain.
-                            let mut e = emulator_for_reader
-                                .lock()
-                                .expect("pane emulator mutex poisoned");
+                            let mut e = emulator_for_reader.lock_recover();
                             e.advance(&buf[..n]);
                             (
                                 e.take_replies(),
@@ -237,9 +236,7 @@ impl Pane {
                         } else {
                             // invariant: config mutex held briefly to clone the palette.
                             let palette = {
-                                let cfg = config_for_reader
-                                    .lock()
-                                    .expect("pane config mutex poisoned");
+                                let cfg = config_for_reader.lock_recover();
                                 cfg.palette.clone()
                             };
                             merge_outbound(replies, color_queries, &palette)
@@ -327,11 +324,7 @@ impl Pane {
     /// color queries use the new palette.
     pub fn update_config(&self, new: Arc<Config>) {
         // invariant: config mutex briefly held to swap the Arc.
-        let mut guard = self
-            .inner
-            .config
-            .lock()
-            .expect("pane config mutex poisoned");
+        let mut guard = self.inner.config.lock_recover();
         *guard = new;
     }
 
@@ -350,11 +343,7 @@ impl Pane {
     pub fn kill_child(&self) {
         crate::pipe::cancel_slot(&self.inner.pipe, crate::pipe::PipeCloseReason::PaneClosed);
         // invariant: child_killer mutex briefly held; kill never blocks.
-        let mut killer = self
-            .inner
-            .child_killer
-            .lock()
-            .expect("child_killer mutex poisoned");
+        let mut killer = self.inner.child_killer.lock_recover();
         let _ = killer.kill();
     }
 
@@ -373,14 +362,14 @@ impl Pane {
     /// Whether a pipe is currently installed on this pane.
     pub fn has_pipe(&self) -> bool {
         // invariant: pipe slot mutex held briefly; no await, no nested locks.
-        self.inner.pipe.lock().expect("pipe slot poisoned").is_some()
+        self.inner.pipe.lock_recover().is_some()
     }
 
     /// The running pipe consumer's pid, if a pipe is installed. Test
     /// observability for the kill/reap (no-zombie) assertions.
     pub fn pipe_pid(&self) -> Option<u32> {
         // invariant: pipe slot mutex held briefly; no await, no nested locks.
-        self.inner.pipe.lock().expect("pipe slot poisoned").as_ref().and_then(|h| h.pid())
+        self.inner.pipe.lock_recover().as_ref().and_then(|h| h.pid())
     }
 
     pub fn id(&self) -> PaneId {
@@ -400,13 +389,13 @@ impl Pane {
     /// The user-assigned pane name, if any (cloned out from under the lock).
     pub fn name(&self) -> Option<String> {
         // invariant: name mutex briefly held to clone the value out.
-        self.inner.name.lock().expect("name mutex poisoned").clone()
+        self.inner.name.lock_recover().clone()
     }
 
     /// Set (or clear, with `None`) the user-assigned pane name.
     pub fn set_name(&self, name: Option<String>) {
         // invariant: name mutex briefly held to store the value.
-        *self.inner.name.lock().expect("name mutex poisoned") = name;
+        *self.inner.name.lock_recover() = name;
     }
 
     pub async fn send_input(&self, bytes: Bytes) -> Result<(), DaemonError> {
@@ -424,22 +413,14 @@ impl Pane {
     pub fn resize(&self, size: PtySize) -> Result<(), DaemonError> {
         {
             // invariant: contended only by resize calls; brief hold.
-            let master = self
-                .inner
-                .master
-                .lock()
-                .expect("pane master mutex poisoned");
+            let master = self.inner.master.lock_recover();
             master
                 .resize(to_portable(size))
                 .map_err(|e| DaemonError::Io(std::io::Error::other(format!("resize: {e}"))))?;
         }
         {
             // invariant: emulator mutex contended only briefly.
-            let mut emu = self
-                .inner
-                .emulator
-                .lock()
-                .expect("pane emulator mutex poisoned");
+            let mut emu = self.inner.emulator.lock_recover();
             emu.resize(size.rows, size.cols);
             emu.set_pixel_area(size.pixel_width, size.pixel_height);
         }
@@ -465,11 +446,7 @@ impl Pane {
         F: FnOnce(&Screen) -> R,
     {
         // invariant: emulator mutex contended only briefly.
-        let emu = self
-            .inner
-            .emulator
-            .lock()
-            .expect("pane emulator mutex poisoned");
+        let emu = self.inner.emulator.lock_recover();
         f(emu.screen())
     }
 
@@ -484,7 +461,7 @@ impl Pane {
     where
         F: FnOnce(&mut plexy_glass_emulator::Screen) -> R,
     {
-        let mut emu = self.inner.emulator.lock().expect("pane emulator mutex poisoned");
+        let mut emu = self.inner.emulator.lock_recover();
         f(emu.screen_mut())
     }
 
@@ -515,7 +492,7 @@ impl Pane {
 
     pub fn scrollback_len(&self) -> u32 {
         // invariant: emulator mutex briefly held to read len.
-        let emu = self.inner.emulator.lock().expect("pane emulator mutex poisoned");
+        let emu = self.inner.emulator.lock_recover();
         emu.screen().scrollback.len() as u32
     }
 
@@ -529,16 +506,8 @@ impl Pane {
         // invariant: copy_mode mutex is only contended with the Connection's
         // brief checks; no async holding.
         // Block mode and copy mode are mutually exclusive on a pane.
-        *self
-            .inner
-            .block_mode
-            .lock()
-            .expect("pane block_mode mutex poisoned") = None;
-        let mut guard = self
-            .inner
-            .copy_mode
-            .lock()
-            .expect("pane copy_mode mutex poisoned");
+        *self.inner.block_mode.lock_recover() = None;
+        let mut guard = self.inner.copy_mode.lock_recover();
         *guard = Some(plexy_glass_mux::CopyMode::new(
             total_lines,
             pane_rows,
@@ -548,31 +517,19 @@ impl Pane {
     }
 
     pub fn exit_copy_mode(&self) {
-        let mut guard = self
-            .inner
-            .copy_mode
-            .lock()
-            .expect("pane copy_mode mutex poisoned");
+        let mut guard = self.inner.copy_mode.lock_recover();
         *guard = None;
     }
 
     pub fn is_in_copy_mode(&self) -> bool {
-        self.inner
-            .copy_mode
-            .lock()
-            .expect("pane copy_mode mutex poisoned")
-            .is_some()
+        self.inner.copy_mode.lock_recover().is_some()
     }
 
     pub fn with_copy_mode_mut<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&mut plexy_glass_mux::CopyMode) -> R,
     {
-        let mut guard = self
-            .inner
-            .copy_mode
-            .lock()
-            .expect("pane copy_mode mutex poisoned");
+        let mut guard = self.inner.copy_mode.lock_recover();
         guard.as_mut().map(f)
     }
 
@@ -580,11 +537,7 @@ impl Pane {
     where
         F: FnOnce(&plexy_glass_mux::CopyMode) -> R,
     {
-        let guard = self
-            .inner
-            .copy_mode
-            .lock()
-            .expect("pane copy_mode mutex poisoned");
+        let guard = self.inner.copy_mode.lock_recover();
         guard.as_ref().map(f)
     }
 
@@ -593,56 +546,30 @@ impl Pane {
     pub fn enter_block_mode(&self, state: plexy_glass_mux::BlockMode) {
         // invariant: both mode mutexes are only contended by the Connection's
         // brief checks; no async holding.
-        *self
-            .inner
-            .copy_mode
-            .lock()
-            .expect("pane copy_mode mutex poisoned") = None;
-        *self
-            .inner
-            .block_mode
-            .lock()
-            .expect("pane block_mode mutex poisoned") = Some(state);
+        *self.inner.copy_mode.lock_recover() = None;
+        *self.inner.block_mode.lock_recover() = Some(state);
     }
 
     pub fn exit_block_mode(&self) {
-        *self
-            .inner
-            .block_mode
-            .lock()
-            .expect("pane block_mode mutex poisoned") = None;
+        *self.inner.block_mode.lock_recover() = None;
     }
 
     pub fn is_in_block_mode(&self) -> bool {
-        self.inner
-            .block_mode
-            .lock()
-            .expect("pane block_mode mutex poisoned")
-            .is_some()
+        self.inner.block_mode.lock_recover().is_some()
     }
 
     pub fn with_block_mode_mut<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&mut plexy_glass_mux::BlockMode) -> R,
     {
-        self.inner
-            .block_mode
-            .lock()
-            .expect("pane block_mode mutex poisoned")
-            .as_mut()
-            .map(f)
+        self.inner.block_mode.lock_recover().as_mut().map(f)
     }
 
     pub fn with_block_mode<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&plexy_glass_mux::BlockMode) -> R,
     {
-        self.inner
-            .block_mode
-            .lock()
-            .expect("pane block_mode mutex poisoned")
-            .as_ref()
-            .map(f)
+        self.inner.block_mode.lock_recover().as_ref().map(f)
     }
 
     /// Notify the pane that its cell size has changed (called from
@@ -1172,12 +1099,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         // Drained queries shouldn't remain in the emulator. Mainly asserts no
         // panic + the drain path runs without leaving residue.
-        let pending = p
-            .inner
-            .emulator
-            .lock()
-            .expect("pane emulator mutex poisoned")
-            .take_color_queries();
+        let pending = p.inner.emulator.lock_recover().take_color_queries();
         assert!(pending.is_empty(), "expected no leftover color queries");
         let _ = p.send_input(Bytes::from_static(&[0x04])).await;
     }

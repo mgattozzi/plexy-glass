@@ -1,7 +1,7 @@
 //! Daemon-wide registry of named sessions.
 
 use crate::paste_buffers::PasteBufferStore;
-use crate::{error::DaemonError, session::Session};
+use crate::{LockExt, error::DaemonError, session::Session};
 use plexy_glass_mux::BufferEntry;
 use plexy_glass_protocol::{ProtocolError, PtySize, SessionEntry, SpawnSpec};
 use std::collections::HashMap;
@@ -49,18 +49,17 @@ impl SessionRegistry {
         self.welcome_pending.swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Record (or clear) the config-load error state. Best-effort on a poisoned
-    /// lock, a missed warning is better than a panic on the attach path.
+    /// Record (or clear) the config-load error state. Recovers a poisoned lock
+    /// rather than panicking on the attach path: the protected `Option` is
+    /// structurally valid after any panic, so the write still lands.
     pub fn set_config_error(&self, err: Option<String>) {
-        if let Ok(mut slot) = self.config_error.lock() {
-            *slot = err;
-        }
+        *self.config_error.lock_recover() = err;
     }
 
     /// Whether the running config is the fallback default because a load failed
     /// (boot or last reload). Drives the attach-time "config error" notice.
     pub fn has_config_error(&self) -> bool {
-        self.config_error.lock().map(|s| s.is_some()).unwrap_or(false)
+        self.config_error.lock_recover().is_some()
     }
 
     /// Push a new newest paste buffer (copy-mode yank).
