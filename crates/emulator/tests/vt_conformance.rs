@@ -425,3 +425,66 @@ fn decscusr_sets_cursor_shape() {
         assert_eq!(s.cursor.shape, *want, "DECSCUSR {input:?}");
     }
 }
+
+#[test]
+fn conformance_dec_special_graphics() {
+    check(&[
+        // ESC ( 0 designates G0 = DEC Special Graphics; l q q q k → box border.
+        // ESC ( B restores ASCII. `run` flushes the trailing grapheme.
+        Case {
+            name: "esc_open_0_box_drawing",
+            input: b"\x1b(0lqqqk\x1b(B",
+            cells: &[
+                (0, 0, Expect::Text("┌")),
+                (0, 1, Expect::Text("─")),
+                (0, 2, Expect::Text("─")),
+                (0, 3, Expect::Text("─")),
+                (0, 4, Expect::Text("┐")),
+            ],
+            ..BASE
+        },
+        // ESC ( B returns G0 to ASCII: the first `l` (special) is ┌, the second
+        // (after ESC ( B) is a literal 'l'.
+        Case {
+            name: "esc_open_B_restores_ascii",
+            input: b"\x1b(0l\x1b(Bl",
+            cells: &[(0, 0, Expect::Text("┌")), (0, 1, Expect::Text("l"))],
+            ..BASE
+        },
+        // SI/SO round-trip via G1: ESC ) 0 designates G1 = special graphics; SO
+        // (0x0E) shifts GL→G1 so `lqk` draws box glyphs; SI (0x0F) shifts GL→G0
+        // (ASCII) so the following `lqk` prints literally.
+        Case {
+            name: "si_so_round_trip_via_g1",
+            input: b"\x1b)0\x0elqk\x0flqk",
+            cells: &[
+                (0, 0, Expect::Text("┌")),
+                (0, 1, Expect::Text("─")),
+                (0, 2, Expect::Text("┐")),
+                (0, 3, Expect::Text("l")),
+                (0, 4, Expect::Text("q")),
+                (0, 5, Expect::Text("k")),
+            ],
+            ..BASE
+        },
+        // ASCII outside 0x60..=0x7e passes through unchanged under special
+        // graphics (digits/uppercase are not in the line-drawing range).
+        Case {
+            name: "ascii_below_range_passes_through",
+            input: b"\x1b(0A1 \x1b(B",
+            cells: &[
+                (0, 0, Expect::Text("A")),
+                (0, 1, Expect::Text("1")),
+                (0, 2, Expect::Text(" ")),
+            ],
+            ..BASE
+        },
+        // RIS (ESC c) resets the charset to ASCII: after RIS, `l` prints literally.
+        Case {
+            name: "ris_resets_charset",
+            input: b"\x1b(0\x1bcl",
+            cells: &[(0, 0, Expect::Text("l"))],
+            ..BASE
+        },
+    ]);
+}

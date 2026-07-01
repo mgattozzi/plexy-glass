@@ -46,6 +46,58 @@ pub enum ColorQuery {
     Cursor,
 }
 
+/// A charset designated into a G-set (G0/G1). Only the two sets box-drawing
+/// TUIs need: plain ASCII and the DEC Special Graphics / line-drawing set
+/// (`ESC ( 0` / `ESC ) 0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Charset {
+    Ascii,
+    DecSpecialGraphics,
+}
+
+/// VT100 DEC Special Graphics (line-drawing) set: maps a GL byte in
+/// `0x60..=0x7e` to its Unicode glyph. Canonical table, matching xterm's `acsc`
+/// and st/alacritty/wezterm; the box-drawing subset (`jklmnqtuvwx`) is the
+/// load-bearing part. Bytes outside the range have no entry (return `None`) and
+/// print unchanged, so ASCII digits/letters/space are untouched even under this
+/// charset.
+fn dec_special_graphic(byte: u8) -> Option<&'static str> {
+    Some(match byte {
+        b'`' => "◆", // U+25C6 black diamond
+        b'a' => "▒", // U+2592 medium shade (checkerboard)
+        b'b' => "␉", // U+2409 symbol for HT
+        b'c' => "␌", // U+240C symbol for FF
+        b'd' => "␍", // U+240D symbol for CR
+        b'e' => "␊", // U+240A symbol for LF
+        b'f' => "°", // U+00B0 degree
+        b'g' => "±", // U+00B1 plus-minus
+        b'h' => "␤", // U+2424 symbol for NL
+        b'i' => "␋", // U+240B symbol for VT
+        b'j' => "┘", // U+2518 lower-right corner
+        b'k' => "┐", // U+2510 upper-right corner
+        b'l' => "┌", // U+250C upper-left corner
+        b'm' => "└", // U+2514 lower-left corner
+        b'n' => "┼", // U+253C crossing lines
+        b'o' => "⎺", // U+23BA scan line 1
+        b'p' => "⎻", // U+23BB scan line 3
+        b'q' => "─", // U+2500 horizontal line (scan line 5)
+        b'r' => "⎼", // U+23BC scan line 7
+        b's' => "⎽", // U+23BD scan line 9
+        b't' => "├", // U+251C left tee
+        b'u' => "┤", // U+2524 right tee
+        b'v' => "┴", // U+2534 bottom tee
+        b'w' => "┬", // U+252C top tee
+        b'x' => "│", // U+2502 vertical line
+        b'y' => "≤", // U+2264 less-than-or-equal
+        b'z' => "≥", // U+2265 greater-than-or-equal
+        b'{' => "π", // U+03C0 pi
+        b'|' => "≠", // U+2260 not-equal
+        b'}' => "£", // U+00A3 pound
+        b'~' => "·", // U+00B7 middle dot
+        _ => return None,
+    })
+}
+
 
 #[derive(Clone)]
 pub struct Screen {
@@ -139,6 +191,14 @@ pub struct Screen {
     /// `CSI Ps b`). Set on the print path, cleared by cursor moves / newlines /
     /// resets per ECMA-48 (a control before REP makes it undefined → no-op).
     last_graphic: Option<Box<str>>,
+    /// Charset designated into G0 (`ESC ( 0` = special graphics, `ESC ( B` =
+    /// ASCII). Default ASCII. Reset to default by RIS (Screen rebuild) + DECSTR.
+    charset_g0: Charset,
+    /// Charset designated into G1 (`ESC ) 0` / `ESC ) B`). Default ASCII.
+    charset_g1: Charset,
+    /// Which G-set GL currently maps to: `false` = G0 (SI / default),
+    /// `true` = G1 (SO). Toggled by the SI/SO C0 controls.
+    charset_shift_out: bool,
 }
 
 impl Screen {
@@ -178,7 +238,15 @@ impl Screen {
             image_id_seq: 0x8000_0000, // synthesized ids; high to avoid child collisions
             image_gen: 0,
             last_graphic: None,
+            charset_g0: Charset::Ascii,
+            charset_g1: Charset::Ascii,
+            charset_shift_out: false,
         }
+    }
+
+    /// The charset GL currently maps to (G1 when shifted out, else G0).
+    fn active_charset(&self) -> Charset {
+        if self.charset_shift_out { self.charset_g1 } else { self.charset_g0 }
     }
 
     /// Handle a captured Kitty-graphics APC (`framed` = `ESC _ G … ESC \`).
@@ -516,6 +584,14 @@ impl Screen {
 
     /// Place one grapheme at the cursor, respecting wide-char and autowrap.
     pub fn put_grapheme(&mut self, cluster: &str) {
+        // DEC Special Graphics: a single GL byte in 0x60..=0x7e maps to a
+        // line-drawing glyph before it is written. Everything else (multi-byte
+        // clusters, ASCII outside the range, or the ASCII charset) is verbatim.
+        let cluster = match (self.active_charset(), cluster.as_bytes()) {
+            (Charset::DecSpecialGraphics, [b]) => dec_special_graphic(*b).unwrap_or(cluster),
+            _ => cluster,
+        };
+
         let w = cluster.width() as u16;
 
         // Zero-width: attach to the previous cell (left of cursor on this row,
@@ -730,6 +806,8 @@ impl Screen {
                 self.cursor.col = 0;
                 self.cursor.pending_wrap = false;
             }
+            0x0E => self.charset_shift_out = true,  // SO (shift out): GL → G1
+            0x0F => self.charset_shift_out = false, // SI (shift in): GL → G0
             _ => {
                 tracing::trace!(byte, "unhandled C0 control");
             }
@@ -1228,6 +1306,9 @@ impl Screen {
         self.cursor.underline_style = crate::attrs::UnderlineStyle::None;
         self.cursor.pending_wrap = false;
         self.saved_cursor = None;
+        self.charset_g0 = Charset::Ascii;
+        self.charset_g1 = Charset::Ascii;
+        self.charset_shift_out = false;
     }
 
     /// DECRQM (`\e[?Ps$p` private / `\e[Ps$p` ANSI). Reply `\e[?Ps;Pm$y`
@@ -1514,6 +1595,22 @@ impl Screen {
                 self.decaln();
             } else {
                 tracing::trace!(byte, "unhandled ESC # sequence");
+            }
+            return;
+        }
+        // Charset designation: `ESC ( F` sets G0, `ESC ) F` sets G1. Only the two
+        // designators box-drawing TUIs use matter: `0` (DEC special graphics)
+        // and `B` (ASCII); any other final char falls through to the trace.
+        if let [slot @ (b'(' | b')')] = intermediates {
+            let charset = match byte {
+                b'0' => Some(Charset::DecSpecialGraphics),
+                b'B' => Some(Charset::Ascii),
+                _ => None,
+            };
+            match charset {
+                Some(cs) if *slot == b'(' => self.charset_g0 = cs,
+                Some(cs) => self.charset_g1 = cs,
+                None => tracing::trace!(?intermediates, byte, "unhandled charset designator"),
             }
             return;
         }
