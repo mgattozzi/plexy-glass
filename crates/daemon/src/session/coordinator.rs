@@ -19,6 +19,20 @@ struct OwnedPane {
     name: Option<String>,
 }
 
+/// Run the synchronous `compose` under `catch_unwind`. A panic in the pure
+/// mux geometry must not kill the session's render pump, so we log and skip
+/// the frame (the process panic hook records the location). See the
+/// terminal-trust-hardening spec, Phase 1.
+fn catch_compose(f: impl FnOnce() -> VirtualScreen) -> Option<VirtualScreen> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(frame) => Some(frame),
+        Err(_) => {
+            tracing::error!("compositor panicked; skipping frame");
+            None
+        }
+    }
+}
+
 pub(super) async fn render_coordinator(
     session: Arc<Session>,
     frame_tx: watch::Sender<Arc<VirtualScreen>>,
@@ -52,7 +66,7 @@ pub(super) async fn render_coordinator(
         // under the WM guard, and `Session::set_status_message`, which would,
         // deadlocks here because it re-locks the WM).
         let monitor_drain;
-        let frame = {
+        let frame: Option<VirtualScreen> = {
             let mut m = session.window_manager.lock().await;
             if m.is_empty() {
                 let host = m.host_size();
@@ -334,19 +348,21 @@ pub(super) async fn render_coordinator(
                 }
             });
 
-            plexy_glass_mux::compositor::compose(
-                &views,
-                (host.rows, host.cols),
-                Some(&status),
-                placement,
-                selection.as_ref(),
-                overlay_view.as_ref(),
-                message_view,
-                popup_view.as_ref(),
-                block_colors.as_ref(),
-                block_select,
-                chrome,
-            )
+            catch_compose(|| {
+                plexy_glass_mux::compositor::compose(
+                    &views,
+                    (host.rows, host.cols),
+                    Some(&status),
+                    placement,
+                    selection.as_ref(),
+                    overlay_view.as_ref(),
+                    message_view,
+                    popup_view.as_ref(),
+                    block_colors.as_ref(),
+                    block_select,
+                    chrome,
+                )
+            })
         };
         // The WM lock is released; if the drain set an alert message, schedule
         // its TTL-expiry repaint wake now (see `update_monitor_flags`).
@@ -372,7 +388,9 @@ pub(super) async fn render_coordinator(
                 }
             }
         }
-        let _ = frame_tx.send(Arc::new(frame));
+        if let Some(frame) = frame {
+            let _ = frame_tx.send(Arc::new(frame));
+        }
     }
     session.closing.store(true, Ordering::SeqCst);
     // frame_tx drops here; subscribers will see frame_rx.changed() return Err
@@ -760,6 +778,18 @@ mod tests {
 
     fn binding(keys: &str, command: &str) -> KeymapBinding {
         KeymapBinding { keys: keys.into(), command: command.into() }
+    }
+
+    #[test]
+    fn catch_compose_returns_some_on_success() {
+        let vs = catch_compose(|| VirtualScreen::blank(2, 2));
+        assert!(vs.is_some());
+    }
+
+    #[test]
+    fn catch_compose_returns_none_on_panic() {
+        let vs = catch_compose(|| panic!("compose blew up"));
+        assert!(vs.is_none(), "a compose panic must yield None, not propagate");
     }
 
     #[test]
