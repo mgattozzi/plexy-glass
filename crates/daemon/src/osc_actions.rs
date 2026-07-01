@@ -26,6 +26,30 @@ pub(crate) fn copied_message(text: &str) -> String {
     }
 }
 
+/// Pick the status message + severity for a clipboard yank given whether the OS
+/// clipboard write actually landed. On failure the message is honest
+/// ("clipboard unavailable") instead of a false "copied"; when the text was also
+/// pushed to a paste buffer (`paste_fallback`), it points the user at `Ctrl+a ]`.
+/// Shared by every yank site (copy-mode Enter, block-mode, copy-mode mouse,
+/// mouse-drag release) so the honesty is decided in one tested place.
+pub(crate) fn yank_status(
+    wrote: bool,
+    text: &str,
+    paste_fallback: bool,
+) -> (String, crate::window_manager::Severity) {
+    use crate::window_manager::Severity;
+    if wrote {
+        (copied_message(text), Severity::Success)
+    } else if paste_fallback {
+        (
+            "clipboard unavailable — paste with Ctrl+a ]".to_string(),
+            Severity::Warn,
+        )
+    } else {
+        ("clipboard unavailable".to_string(), Severity::Warn)
+    }
+}
+
 /// Shell out to the system default URL opener. macOS: `open`. Linux:
 /// `xdg-open`. Returns `Err` when the opener binary can't be spawned (e.g. a
 /// headless box with no `xdg-open`), so the caller can surface an honest "no
@@ -236,6 +260,23 @@ mod tests {
         let msg = copied_message(&long);
         assert!(msg.starts_with("copied \"") && msg.ends_with("…\""));
         assert!(msg.len() < long.len() + 12, "should be truncated");
+    }
+
+    #[test]
+    fn yank_status_is_honest_about_clipboard_failure() {
+        use crate::window_manager::Severity;
+        // Success: reports the copied text regardless of paste_fallback.
+        let (msg, sev) = yank_status(true, "hi", true);
+        assert_eq!(sev, Severity::Success);
+        assert_eq!(msg, "copied \"hi\"");
+        // Failure with a paste-buffer fallback: warn + point at Ctrl+a ].
+        let (msg, sev) = yank_status(false, "hi", true);
+        assert_eq!(sev, Severity::Warn);
+        assert_eq!(msg, "clipboard unavailable — paste with Ctrl+a ]");
+        // Failure with no fallback (mouse paths): warn, no false paste promise.
+        let (msg, sev) = yank_status(false, "hi", false);
+        assert_eq!(sev, Severity::Warn);
+        assert_eq!(msg, "clipboard unavailable");
     }
 
     #[tokio::test]

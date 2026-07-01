@@ -47,6 +47,15 @@ impl WindowManager {
     /// (Rule 0: modal popup, see docs/superpowers/specs/2026-06-09-popup-panes-design.md;
     /// then docs/superpowers/specs/2026-05-22-full-mouse-design.md §6).
     pub async fn handle_mouse(&mut self, event: MouseEvent) -> Result<(), DaemonError> {
+        // Overlay isolation: an open modal overlay (rename / help / picker /
+        // choose-tree / history / hints) owns ALL input, mouse included. Keys,
+        // Bytes and Paste are already discarded while an overlay is open (see
+        // connection.rs dispatch_input_event); the mouse path used to leak
+        // through and let a status-bar click detach or a wheel scroll the pane
+        // behind the modal. Root-cause guard at the top covers every caller.
+        if self.overlay().is_some() {
+            return Ok(());
+        }
         // Rule 0: a floating popup owns the mouse entirely while open. A click
         // in the box interior is forwarded to the child (translated to interior
         // coordinates) when it enabled mouse reporting; everything else (border,
@@ -86,6 +95,15 @@ impl WindowManager {
         // drag in progress still consumes everything, including moves that
         // stray onto the status row.
         if self.resize_drag.is_none() && self.is_status_bar_row(event.row) {
+            // A pane-swap drag whose button releases over the status bar aborts
+            // cleanly: the status-row check sits ahead of the pane_drag rule, so
+            // without this the Release is swallowed and pane_drag stays stuck,
+            // and the next plain click would then complete a phantom swap.
+            if self.pane_drag.is_some() && matches!(event.kind, MouseKind::Release) {
+                self.pane_drag = None;
+                self.notify.notify_one();
+                return Ok(());
+            }
             return self.handle_status_bar_event(event).await;
         }
         // Everything below addresses panes/borders, which live in the layout's
@@ -412,12 +430,15 @@ impl WindowManager {
                     self.notify.notify_one();
                 }
                 CopyModeAction::Yank(text) => {
-                    let msg = crate::osc_actions::copied_message(&text);
-                    tokio::spawn(async move {
-                        let _ = crate::osc_actions::write_clipboard(text.as_bytes()).await;
-                    });
+                    // Await the write so the message is honest: a failed clipboard
+                    // must not flash "✓ copied". No paste-buffer fallback here (the
+                    // WM has no registry), so the failure message doesn't promise
+                    // Ctrl+a ]. Fast on the common no-tool path; only a wedged
+                    // helper hits the 2s bound (see write_clipboard).
+                    let wrote = crate::osc_actions::write_clipboard(text.as_bytes()).await;
+                    let (msg, sev) = crate::osc_actions::yank_status(wrote, &text, false);
                     pane.exit_copy_mode();
-                    self.set_status_message(msg, Severity::Success);
+                    self.set_status_message(msg, sev);
                     self.notify.notify_one();
                 }
             }
@@ -489,10 +510,23 @@ impl WindowManager {
             .rect_of(pane_id, viewport)
             .unwrap_or(viewport);
         if let Some(pane) = self.active_window().pane(pane_id).cloned() {
+            // Motion gating: ?9/?1000 report only press/release. Only ?1002
+            // (MOUSE_BTN_EVENT) and ?1003 (MOUSE_ANY) enable motion tracking, so a
+            // drag over a click-only child must NOT emit motion reports it never
+            // asked for. Press/Release/Wheel always pass through.
+            let modes = pane.with_screen(|s| s.modes);
+            if matches!(event.kind, MouseKind::Move)
+                && !modes.intersects(
+                    plexy_glass_emulator::Modes::MOUSE_BTN_EVENT
+                        | plexy_glass_emulator::Modes::MOUSE_ANY,
+                )
+            {
+                return Ok(());
+            }
             let mut local = event;
             local.row = event.row.saturating_sub(rect.row);
             local.col = event.col.saturating_sub(rect.col);
-            let encoding = pane.with_screen(|s| mouse_encoding_for(s.modes));
+            let encoding = mouse_encoding_for(modes);
             let bytes = encode_for_child(local, encoding);
             let _ = pane.send_input(bytes::Bytes::from(bytes)).await;
         }
@@ -662,9 +696,19 @@ impl WindowManager {
             })
         });
         if let Some(url) = url {
-            tokio::spawn(async move {
-                let _ = crate::osc_actions::open_url(&url).await;
-            });
+            // Await the opener (not fire-and-forget) so a missing system opener
+            // becomes a visible message instead of a silent no-op, mirroring the
+            // hint-mode Open action (connection.rs dispatch_hint). `open_url` only
+            // spawns the opener (it doesn't wait for it to finish), so this stays
+            // cheap under the WM lock.
+            match crate::osc_actions::open_url(&url).await {
+                Ok(()) => self.set_status_message(format!("opening {url}"), Severity::Info),
+                Err(_) => self.set_status_message(
+                    "couldn't open (no system opener)".to_string(),
+                    Severity::Error,
+                ),
+            }
+            self.notify.notify_one();
             return Ok(());
         }
 
@@ -759,23 +803,23 @@ impl WindowManager {
             }
             return Ok(());
         }
-        let mut copied: Option<String> = None;
-        if let Some(pane) = self.active_window().pane(sel.source_pane) {
+        let text = self.active_window().pane(sel.source_pane).and_then(|pane| {
             // Map the viewport-relative selection through the pane's current
             // scroll position so a selection made while scrolled back copies the
             // highlighted scrollback, not the live grid underneath it.
             let scroll_offset = pane.scroll_offset();
             let text =
                 pane.with_screen(|s| extract_text(&sel, s, s.active.num_rows(), scroll_offset));
-            if !text.is_empty() {
-                copied = Some(crate::osc_actions::copied_message(&text));
-                tokio::spawn(async move {
-                    let _ = crate::osc_actions::write_clipboard(text.as_bytes()).await;
-                });
-            }
-        }
-        if let Some(msg) = copied {
-            self.set_status_message(msg, Severity::Success);
+            (!text.is_empty()).then_some(text)
+        });
+        if let Some(text) = text {
+            // Await the write and report honestly: a failed clipboard must not
+            // claim "✓ copied". This drag-select path has no paste-buffer fallback
+            // (the WM has no registry), so the failure message says only
+            // "clipboard unavailable".
+            let wrote = crate::osc_actions::write_clipboard(text.as_bytes()).await;
+            let (msg, sev) = crate::osc_actions::yank_status(wrote, &text, false);
+            self.set_status_message(msg, sev);
             self.notify.notify_one();
         }
         Ok(())

@@ -70,7 +70,7 @@ where
         ClientMsg::SendInput { session, bytes } => {
             let (ok, message) = match resolve_session(&registry, session).await {
                 Err(msg) => (false, Some(msg)),
-                Ok(sess) => match sess.handle_input_bytes(&bytes).await {
+                Ok(sess) => match sess.handle_input_bytes(&bytes, false).await {
                     Ok(()) => (true, None),
                     Err(e) => (false, Some(e.to_string())),
                 },
@@ -679,9 +679,13 @@ async fn dispatch_input_event(
                                 ctx.session.notify.notify_one();
                             }
                             Some(plexy_glass_mux::CopyModeAction::Yank(text)) => {
-                                let _ =
+                                let wrote =
                                     crate::osc_actions::write_clipboard(text.as_bytes()).await;
-                                let msg = crate::osc_actions::copied_message(&text);
+                                // Honest message: a failed clipboard write must not
+                                // claim "✓ copied". The text is still in the paste
+                                // buffer, so the warn points at Ctrl+a ].
+                                let (msg, sev) =
+                                    crate::osc_actions::yank_status(wrote, &text, true);
                                 // Also push a paste buffer (before re-taking the
                                 // WM lock, so the registry await isn't held under it).
                                 ctx.registry.push_paste_buffer(text.into_bytes()).await;
@@ -691,8 +695,8 @@ async fn dispatch_input_event(
                                         p.exit_copy_mode();
                                     }
                                 }
-                                // `set_status_ok` notifies + schedules the TTL wake.
-                                ctx.session.set_status_ok(msg).await;
+                                // `set_status_message` notifies + schedules the TTL wake.
+                                ctx.session.set_status_message(msg, sev).await;
                             }
                             None => {}
                         }
@@ -721,12 +725,15 @@ async fn dispatch_input_event(
                                 ctx.session.notify.notify_one();
                             }
                             Some(plexy_glass_mux::BlockModeAction::Yank(text)) => {
-                                let _ =
+                                let wrote =
                                     crate::osc_actions::write_clipboard(text.as_bytes()).await;
-                                let msg = crate::osc_actions::copied_message(&text);
+                                // Honest message (see copy-mode yank above); the
+                                // text is in the paste buffer, so warn points there.
+                                let (msg, sev) =
+                                    crate::osc_actions::yank_status(wrote, &text, true);
                                 // STAY in block mode (unlike copy mode's yank).
                                 ctx.registry.push_paste_buffer(text.into_bytes()).await;
-                                ctx.session.set_status_ok(msg).await;
+                                ctx.session.set_status_message(msg, sev).await;
                             }
                             Some(plexy_glass_mux::BlockModeAction::ReRun(cmd)) => {
                                 // Inject command + Enter directly into the pane
@@ -828,7 +835,7 @@ async fn dispatch_input_event(
                 m.overlay().is_some()
             };
             if !overlay_active {
-                let _ = ctx.session.handle_input_bytes(&bs).await;
+                let _ = ctx.session.handle_input_bytes(&bs, false).await;
             }
         }
     }
@@ -2092,29 +2099,13 @@ async fn load_buffer(registry: &Arc<SessionRegistry>, path: &str) -> Result<Stri
     Ok(format!("loaded {disp} ({n} bytes)"))
 }
 
-/// Send `content` to the input-target pane (the popup's child while one is
-/// open, otherwise the active pane, via `WindowManager::input_target_pane`),
-/// wrapping in bracketed-paste markers when THAT pane has the mode on. The
-/// gate and `handle_input_bytes` resolve the same target, so the mode that
-/// decides the wrapping is always the receiving pane's. Shared by
-/// `InputEvent::Paste`, `Ctrl+a ]`, and the choose-buffer paste action.
+/// Send `content` to the input target as a PASTE: `handle_input_bytes` wraps it
+/// in bracketed-paste markers per receiving pane (each target's own `?2004`),
+/// so under sync-panes a paste is bracketed correctly for every pane instead of
+/// once from the active one. Shared by `InputEvent::Paste`, `Ctrl+a ]`, and the
+/// choose-buffer paste action.
 async fn paste_bytes(session: &Arc<Session>, content: Vec<u8>) {
-    let want_bracketed = {
-        let manager = session.window_manager.lock().await;
-        manager
-            .input_target_pane()
-            .is_some_and(|p| p.wants_bracketed_paste())
-    };
-    let payload = if want_bracketed { wrap_paste(&content) } else { content };
-    let _ = session.handle_input_bytes(&payload).await;
-}
-
-fn wrap_paste(inner: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(inner.len() + 12);
-    out.extend_from_slice(b"\x1b[200~");
-    out.extend_from_slice(inner);
-    out.extend_from_slice(b"\x1b[201~");
-    out
+    let _ = session.handle_input_bytes(&content, true).await;
 }
 
 fn default_spawn_spec() -> SpawnSpec {
@@ -2136,7 +2127,7 @@ mod tests {
     #[test]
     fn wrap_paste_wraps_with_bracketed_paste_escapes() {
         let inner = b"hello world";
-        let wrapped = wrap_paste(inner);
+        let wrapped = crate::session::wrap_bracketed_paste(inner);
         assert_eq!(wrapped.as_slice(), b"\x1b[200~hello world\x1b[201~");
     }
 
@@ -2172,7 +2163,7 @@ mod tests {
 
     #[test]
     fn wrap_paste_empty_input() {
-        let wrapped = wrap_paste(b"");
+        let wrapped = crate::session::wrap_bracketed_paste(b"");
         assert_eq!(wrapped.as_slice(), b"\x1b[200~\x1b[201~");
     }
 

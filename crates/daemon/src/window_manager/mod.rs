@@ -249,6 +249,19 @@ impl WindowManager {
         self.pane_drag.as_ref().map(|d| (d.source, d.target))
     }
 
+    /// Clear every in-flight mouse gesture (selection / resize / tab / pane
+    /// drag). Shared by `open_popup` (a popup swallows the in-flight Release) and
+    /// client teardown (a gone client never sends its Release); either way the
+    /// gesture must not linger and fire an unintended swap/resize/reorder on the
+    /// NEXT click. Deliberately leaves `click_history` (multi-click timing is
+    /// self-expiring and target-scoped, so a stale entry can't cross-fire).
+    pub fn reset_mouse_gestures(&mut self) {
+        self.selection = None;
+        self.resize_drag = None;
+        self.tab_drag = None;
+        self.pane_drag = None;
+    }
+
     /// Record the physical status-bar row (or `None` to disable status-bar
     /// click routing) and the pane band's vertical offset (`0` for a bottom
     /// bar, `1` for a top bar). Called by the render coordinator each frame so
@@ -734,10 +747,7 @@ impl WindowManager {
         self.close_popup();
         // Rule 0 will swallow the in-flight Release once the popup is open, so
         // an active drag/selection would freeze and bite after close. Drop them.
-        self.resize_drag = None;
-        self.tab_drag = None;
-        self.pane_drag = None;
-        self.selection = None;
+        self.reset_mouse_gestures();
         let title = command.unwrap_or_else(|| "popup".to_string());
         self.popup = Some(crate::popup::Popup { pane, title });
         self.notify.notify_one();

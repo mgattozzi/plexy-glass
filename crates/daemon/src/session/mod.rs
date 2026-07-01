@@ -422,6 +422,14 @@ impl Session {
             let mut clients = self.clients.blocking_lock();
             clients.retain(|c| c.client_id != client_id);
         }
+        // Drop any in-flight mouse gesture left by the departing client: an
+        // Alt-press that starts a pane/tab/resize drag (or a selection) whose
+        // Release never arrives (kill -9, dropped connection) would otherwise
+        // stay latched on the session-shared WindowManager and fire an
+        // unintended swap/reorder/resize on the next client's plain click.
+        // Mirrors open_popup's reset. Taken AFTER releasing the clients guard
+        // (never hold clients while acquiring window_manager, see effective_size).
+        self.window_manager.blocking_lock().reset_mouse_gestures();
         self.recompute_size_and_notify();
     }
 
@@ -468,7 +476,7 @@ impl Session {
         }
     }
 
-    pub async fn handle_input_bytes(&self, bytes: &[u8]) -> Result<(), DaemonError> {
+    pub async fn handle_input_bytes(&self, bytes: &[u8], is_paste: bool) -> Result<(), DaemonError> {
         // Resolve the target panes under the lock, send after dropping it.
         // Three cases: a floating popup is modal (input goes to its child,
         // never the layout panes, sync-panes included); otherwise sync-panes
@@ -489,7 +497,18 @@ impl Session {
             }
         };
         for pane in targets {
-            pane.send_input(bytes::Bytes::copy_from_slice(bytes)).await.ok();
+            // Bracketed-paste wrapping is a PER-PANE decision: `?2004` is
+            // per-emulator, and sync-panes can fan a paste to panes with
+            // divergent modes (a shell at a bracketing prompt beside a `cat`).
+            // Decide the wrap per target from its OWN mode, not once from the
+            // active pane, otherwise a sibling gets literal `[200~`/`[201~`, or
+            // (worse) an unwrapped multi-line paste auto-executes line by line.
+            let payload = if is_paste && pane.wants_bracketed_paste() {
+                bytes::Bytes::from(wrap_bracketed_paste(bytes))
+            } else {
+                bytes::Bytes::copy_from_slice(bytes)
+            };
+            pane.send_input(payload).await.ok();
         }
         self.notify.notify_one();
         Ok(())
@@ -1070,6 +1089,18 @@ impl Session {
     }
 }
 
+/// Wrap `inner` in bracketed-paste markers (`\e[200~ … \e[201~`) so an inner
+/// app can tell a paste from typed input. The wrap decision is per-pane and made
+/// in `handle_input_bytes`' fan-out (a sync-panes paste can target panes with
+/// divergent `?2004` state), so this only builds the bytes.
+pub(crate) fn wrap_bracketed_paste(inner: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(inner.len() + 12);
+    out.extend_from_slice(b"\x1b[200~");
+    out.extend_from_slice(inner);
+    out.extend_from_slice(b"\x1b[201~");
+    out
+}
+
 /// Pick the encode target for a pane from its negotiated state. Precedence per
 /// the spec: Kitty flags > modifyOtherKeys level > Legacy.
 pub(crate) fn select_target(
@@ -1456,7 +1487,7 @@ mod tests {
             let m = s.window_manager.lock().await;
             m.popup().unwrap().pane.subscribe_output()
         };
-        s.handle_input_bytes(b"popup_gets_this\n").await.unwrap();
+        s.handle_input_bytes(b"popup_gets_this\n", false).await.unwrap();
         // cat echoes what it reads; the bytes must surface on the POPUP pane.
         let mut seen: Vec<u8> = Vec::new();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1850,7 +1881,7 @@ mod tests {
             cwd: None,
         };
         let s = Session::new("test".into(), spec, size(), cfg()).unwrap();
-        s.handle_input_bytes(b"hello\n").await.unwrap();
+        s.handle_input_bytes(b"hello\n", false).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let m = s.window_manager.lock().await;
         let pane = m.active_window().active_pane().unwrap();
@@ -1880,7 +1911,7 @@ mod tests {
         s.handle_command(plexy_glass_mux::Command::SplitV).await.unwrap();
         s.handle_command(plexy_glass_mux::Command::ToggleSyncPanes).await.unwrap();
         // Broadcast input to both panes.
-        s.handle_input_bytes(b"hello\n").await.unwrap();
+        s.handle_input_bytes(b"hello\n", false).await.unwrap();
         // Give children time to echo.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let m = s.window_manager.lock().await;
@@ -1905,6 +1936,110 @@ mod tests {
                 let _ = p.send_input(bytes::Bytes::from_static(&[0x04])).await;
             }
         }
+    }
+
+    // #16: under sync-panes, bracketed-paste wrapping is decided PER receiving
+    // pane from its own ?2004, not once from the active pane. The sibling with
+    // ?2004 ON must get the `\e[200~…\e[201~` markers; the active pane with ?2004
+    // OFF must get the raw payload.
+    #[tokio::test]
+    async fn sync_paste_brackets_each_pane_by_its_own_mode() {
+        let _g = crate::test_env::isolate();
+        let cat = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let s = Session::new("test".into(), cat, size(), cfg()).unwrap();
+        // Make the split pane a cat too (splits spawn default_spec, not `cat`).
+        {
+            let mut m = s.window_manager.lock().await;
+            m.set_default_program("/bin/cat");
+        }
+        s.handle_command(plexy_glass_mux::Command::SplitV).await.unwrap();
+        s.handle_command(plexy_glass_mux::Command::ToggleSyncPanes).await.unwrap();
+
+        // PaneId(0) = sibling: ?2004 ON. PaneId(1) = active: ?2004 OFF.
+        let (sib, act) = {
+            let m = s.window_manager.lock().await;
+            let sib = m.active_window().pane(PaneId(0)).cloned().unwrap();
+            let act = m.active_window().pane(PaneId(1)).cloned().unwrap();
+            (sib, act)
+        };
+        sib.with_screen_mut(|sc| sc.modes.insert(plexy_glass_emulator::Modes::BRACKETED_PASTE));
+        assert!(sib.wants_bracketed_paste() && !act.wants_bracketed_paste());
+        let mut sib_rx = sib.subscribe_output();
+        let mut act_rx = act.subscribe_output();
+
+        // Paste (is_paste = true) fans out to both, wrapped per-pane.
+        s.handle_input_bytes(b"foobar", true).await.unwrap();
+
+        async fn drain(rx: &mut tokio::sync::broadcast::Receiver<bytes::Bytes>) -> Vec<u8> {
+            let mut out = Vec::new();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+            loop {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let step = (deadline - now).min(std::time::Duration::from_millis(150));
+                match tokio::time::timeout(step, rx.recv()).await {
+                    Ok(Ok(c)) => out.extend_from_slice(&c),
+                    Ok(Err(_)) => break,
+                    Err(_) if !out.is_empty() => break,
+                    Err(_) => {}
+                }
+            }
+            out
+        }
+        let sib_out = drain(&mut sib_rx).await;
+        let act_out = drain(&mut act_rx).await;
+        let has = |h: &[u8], n: &[u8]| h.windows(n.len()).any(|w| w == n);
+        assert!(has(&sib_out, b"200~"), "sibling (?2004 on) must get the paste markers: {sib_out:?}");
+        assert!(!has(&act_out, b"200~"), "active (?2004 off) must get the raw paste: {act_out:?}");
+
+        let _ = sib.send_input(bytes::Bytes::from_static(&[0x04])).await;
+        let _ = act.send_input(bytes::Bytes::from_static(&[0x04])).await;
+    }
+
+    // #4: a client that tears down mid-gesture (Release never sent) must not
+    // leave an in-flight pane drag latched on the session-shared WindowManager.
+    // deregister_client clears it, so the next client's plain click can't
+    // complete a phantom swap.
+    #[tokio::test]
+    async fn deregister_client_clears_stuck_pane_drag() {
+        use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
+        let _g = crate::test_env::isolate();
+        let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
+        s.handle_command(plexy_glass_mux::Command::SplitV).await.unwrap();
+        // Alt-press inside pane 0 → default drag-modifier is Alt → pane drag begins.
+        let (r, c) = {
+            let m = s.window_manager.lock().await;
+            let vp = m.viewport();
+            let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
+            (r0.row + r0.rows / 2, r0.col + r0.cols / 2)
+        };
+        s.handle_mouse(MouseEvent {
+            kind: MouseKind::Press,
+            button: MouseButton::Left,
+            modifiers: MouseModifiers { shift: false, alt: true, ctrl: false },
+            row: r,
+            col: c,
+        })
+        .await
+        .unwrap();
+        assert!(
+            s.window_manager.lock().await.pane_drag_roles().is_some(),
+            "premise: pane drag started"
+        );
+        // Client teardown (id need not exist, the retain is a no-op and the reset runs).
+        let s2 = Arc::clone(&s);
+        tokio::task::spawn_blocking(move || s2.deregister_client(999)).await.unwrap();
+        assert!(
+            s.window_manager.lock().await.pane_drag_roles().is_none(),
+            "deregister_client must clear the stuck pane drag"
+        );
     }
 
     #[tokio::test]
@@ -2405,7 +2540,7 @@ mod tests {
         assert!(active_pane(&s).await.has_pipe(), "pipe installed on the target pane");
 
         // Output produced AFTER pipe start flows to the consumer verbatim.
-        s.handle_input_bytes(b"pipe_needle\n").await.unwrap();
+        s.handle_input_bytes(b"pipe_needle\n", false).await.unwrap();
         let f = file.clone();
         assert!(
             crate::test_env::poll_until(std::time::Duration::from_secs(10), move || {
@@ -2443,7 +2578,7 @@ mod tests {
         assert_ne!(pid1, pid2, "slot holds the new consumer");
 
         // Post-replace output reaches only the new consumer.
-        s.handle_input_bytes(b"second_needle\n").await.unwrap();
+        s.handle_input_bytes(b"second_needle\n", false).await.unwrap();
         let f2c = f2.clone();
         assert!(
             crate::test_env::poll_until(std::time::Duration::from_secs(10), move || {
@@ -2542,7 +2677,7 @@ mod tests {
             .unwrap();
         let pid = pane.pipe_pid().expect("consumer pid");
         // Trigger the flood now that the pipe is attached.
-        s.handle_input_bytes(b"go\n").await.unwrap();
+        s.handle_input_bytes(b"go\n", false).await.unwrap();
         // Wait until the flood has fully flowed through the pane (the marker
         // prints after it), so the drain is parked mid-write.
         let pane_for_poll = pane.clone();
@@ -2686,7 +2821,7 @@ mod tests {
         // as pane output, which the pipe streams to the consumer unchanged.
         // `needle\n` is appended so the final grapheme is flushed from the
         // emulator's buffer before the assertion.
-        s.handle_input_bytes(b"\x1b[1mbold\x1b[0mneedle\n").await.unwrap();
+        s.handle_input_bytes(b"\x1b[1mbold\x1b[0mneedle\n", false).await.unwrap();
 
         let f = file.clone();
         assert!(

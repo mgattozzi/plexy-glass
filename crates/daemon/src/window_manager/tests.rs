@@ -3767,3 +3767,188 @@ fn severity_maps_to_palette_key_and_tier_glyph() {
     assert_eq!(Severity::Info.glyph(GlyphTier::Ascii), "i");
     assert_eq!(Severity::Warn.glyph(GlyphTier::Ascii), "!");
 }
+
+// ── Bug-audit 2026-07-01 fixes ──────────────────────────────────────────────
+
+// #6: an open modal overlay owns ALL input, so a mouse event (here a status-bar
+// Detach click) must be swallowed, not leak through to detach the client.
+#[tokio::test]
+async fn overlay_swallows_mouse_events() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    m.set_status_layout(Some(23), 0);
+    m.set_status_hits(vec![plexy_glass_status::StatusHit {
+        col_range: 0..8,
+        action: plexy_glass_status::ClickAction::Detach,
+    }]);
+    m.handle_command(Command::ShowHelp).unwrap();
+    assert!(m.overlay().is_some(), "premise: overlay open");
+    m.handle_mouse(mev(MouseKind::Press, 23, 2, false)).await.unwrap();
+    assert!(!m.detach_requested, "overlay must swallow the status-bar Detach click");
+}
+
+// #4: reset_mouse_gestures clears every in-flight gesture (here a pane drag and
+// a selection), so a departing client / opening popup can't leave one latched.
+#[tokio::test]
+async fn reset_mouse_gestures_clears_in_flight_drag() {
+    let mut m = make_two_pane_manager().await;
+    let vp = m.viewport();
+    let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
+    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, true)).await.unwrap();
+    assert!(m.pane_drag_roles().is_some(), "premise: pane drag started");
+    m.reset_mouse_gestures();
+    assert!(m.pane_drag_roles().is_none(), "reset clears the pane drag");
+    assert!(m.selection().is_none() && m.dragging_window_idx().is_none());
+}
+
+// #4: a pane-swap drag whose Release lands on the status-bar row aborts cleanly,
+// so pane_drag must be cleared, not left stuck (the next plain click would else
+// complete a phantom swap).
+#[tokio::test]
+async fn pane_drag_release_on_status_row_aborts() {
+    let mut m = make_two_pane_manager().await;
+    m.set_status_layout(Some(23), 0);
+    let vp = m.viewport();
+    let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
+    let before = m.active_window().layout().dfs_leaves();
+    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, true)).await.unwrap();
+    assert!(m.pane_drag_roles().is_some(), "premise: pane drag started");
+    // Release over the status-bar row → abort, no swap, drag cleared.
+    m.handle_mouse(mev(MouseKind::Release, 23, 5, false)).await.unwrap();
+    assert_eq!(m.pane_drag_roles(), None, "drag cleared on status-row release");
+    assert_eq!(m.active_window().layout().dfs_leaves(), before, "no swap on abort");
+}
+
+// #17: a drag over a click-only child (?1000, no ?1002/?1003) must NOT forward
+// motion reports the child never asked for. Press/Release still pass through.
+#[tokio::test]
+async fn motion_not_forwarded_to_click_only_child() {
+    use bytes::Bytes;
+    use plexy_glass_emulator::Modes;
+
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(), // `/bin/cat` echoes what it receives
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    let pane = m.active_window().pane(PaneId(0)).cloned().unwrap();
+    // Click-only reporting: ?1000 + ?1006 (SGR), NO motion mode.
+    pane.with_screen_mut(|s| {
+        s.modes.insert(Modes::MOUSE_BTN);
+        s.modes.insert(Modes::MOUSE_SGR);
+    });
+    let mut rx = pane.subscribe_output();
+    // Press (forwarded), Move (must be dropped), Release (forwarded).
+    m.handle_mouse(mev(MouseKind::Press, 4, 6, false)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Move, 4, 9, false)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Release, 4, 9, false)).await.unwrap();
+
+    let mut out = Vec::new();
+    let deadline = Instant::now() + Duration::from_millis(1200);
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match tokio::time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await
+        {
+            Ok(Ok(c)) => out.extend_from_slice(&c),
+            Ok(Err(_)) => break,
+            Err(_) if !out.is_empty() => break,
+            Err(_) => {}
+        }
+    }
+    let s = String::from_utf8_lossy(&out);
+    // Press at pane-local (3,5) → SGR `ESC[<0;6;4M`; motion drag → code 32
+    // `ESC[<32;9;4M`. Match the numeric tails (cat may render the ESC[< prefix
+    // in caret notation, as the sibling forwarded-mouse test does). The motion
+    // report must be absent; the press must be present.
+    assert!(!s.contains("32;9;4"), "motion must not reach a click-only child, got {s:?}");
+    assert!(s.contains("0;6;4M"), "press should be forwarded, got {s:?}");
+    let _ = pane.send_input(Bytes::from_static(&[0x04])).await;
+}
+
+// #17 (sibling): a motion mode (?1002) present → motion IS forwarded.
+#[tokio::test]
+async fn motion_forwarded_to_motion_tracking_child() {
+    use bytes::Bytes;
+    use plexy_glass_emulator::Modes;
+
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    let pane = m.active_window().pane(PaneId(0)).cloned().unwrap();
+    pane.with_screen_mut(|s| {
+        s.modes.insert(Modes::MOUSE_BTN_EVENT); // `?1002` motion tracking
+        s.modes.insert(Modes::MOUSE_SGR);
+    });
+    let mut rx = pane.subscribe_output();
+    m.handle_mouse(mev(MouseKind::Press, 4, 6, false)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Move, 4, 9, false)).await.unwrap();
+    let mut out = Vec::new();
+    let deadline = Instant::now() + Duration::from_millis(1200);
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match tokio::time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await
+        {
+            Ok(Ok(c)) => out.extend_from_slice(&c),
+            Ok(Err(_)) => break,
+            Err(_) if !out.is_empty() => break,
+            Err(_) => {}
+        }
+    }
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("32;9;4"), "motion must reach a ?1002 child, got {s:?}");
+    let _ = pane.send_input(Bytes::from_static(&[0x04])).await;
+}
+
+// #20: clicking an OSC 8 hyperlink with no system opener sets a visible error
+// message instead of a silent no-op.
+#[tokio::test]
+async fn osc8_click_without_opener_reports_error() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    let pane = m.active_window().pane(PaneId(0)).cloned().unwrap();
+    // Paint a hyperlinked cell at pane-local (0,0).
+    pane.with_screen_mut(|s| {
+        let id = s.hyperlinks.intern("https://example.com");
+        s.active.rows[0].cells[0].hyperlink_id = id;
+    });
+    // Stub PATH empty so `open`/`xdg-open` can't spawn → open_url returns Err.
+    let old = std::env::var("PATH").unwrap_or_default();
+    let dir = tempfile::tempdir().unwrap();
+    // SAFETY: nextest runs each test in its own process.
+    unsafe { std::env::set_var("PATH", dir.path()) };
+    // Physical (1,1) → pane-local (0,0) (viewport frame inset, no status bar).
+    m.handle_mouse(mev(MouseKind::Press, 1, 1, false)).await.unwrap();
+    unsafe { std::env::set_var("PATH", old) };
+    assert_eq!(m.active_severity(), Severity::Error);
+    assert_eq!(m.take_active_message(), Some("couldn't open (no system opener)"));
+}
