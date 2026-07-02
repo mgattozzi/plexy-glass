@@ -1,10 +1,15 @@
 //! Owns all windows for one attached client.
 
+use crate::declared;
+use crate::pane::Pane;
+use crate::popup::{self, Popup};
+use crate::window::CompletionEvent;
 use crate::{error::DaemonError, window::Window};
 use mouse::{ClickHistory, PaneDrag, ResizeDrag, TabDrag};
 use plexy_glass_mux::{Overlay, PaneId, Rect, Selection, SplitDir, WindowId};
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use plexy_glass_config::GlyphTier;
+use std::io::Error;
 use std::sync::Arc;
 use std::time::Duration;
 // See window.rs: tokio::time::Instant is used so unit tests with
@@ -78,7 +83,7 @@ pub struct PendingNotification {
     pub window_index: usize,
     pub window_name: String,
     pub is_active_window: bool,
-    pub event: crate::window::CompletionEvent,
+    pub event: CompletionEvent,
 }
 
 /// Outcome of one [`WindowManager::update_monitor_flags`] drain.
@@ -169,7 +174,7 @@ pub struct WindowManager {
     marked_pane: Option<PaneId>,
     /// The floating popup pane (transient, modal, never in any layout tree),
     /// or `None`. See `crate::popup`.
-    popup: Option<crate::popup::Popup>,
+    popup: Option<Popup>,
 }
 
 /// Maximum retained command-prompt history entries.
@@ -208,7 +213,7 @@ impl WindowManager {
             // re-launch that command for every `new-window`/`split`. Inherit the
             // session's base env, but always run the default shell.
             default_spec: SpawnSpec {
-                program: crate::declared::default_shell(),
+                program: declared::default_shell(),
                 args: Vec::new(),
                 env: first_spec.env,
                 cwd: None,
@@ -620,11 +625,11 @@ impl WindowManager {
         let win = self
             .windows
             .get_mut(window_idx)
-            .ok_or_else(|| DaemonError::Io(std::io::Error::other(format!("window {window_idx} missing"))))?;
+            .ok_or_else(|| DaemonError::Io(Error::other(format!("window {window_idx} missing"))))?;
         let leaves = win.layout().dfs_leaves();
         let target_pane = *leaves
             .get(target_dfs_idx as usize)
-            .ok_or_else(|| DaemonError::Io(std::io::Error::other(format!("dfs idx {target_dfs_idx} out of range"))))?;
+            .ok_or_else(|| DaemonError::Io(Error::other(format!("dfs idx {target_dfs_idx} out of range"))))?;
         win.split_at(
             target_pane,
             dir,
@@ -666,7 +671,7 @@ impl WindowManager {
     }
 
     /// The floating popup, if open.
-    pub const fn popup(&self) -> Option<&crate::popup::Popup> {
+    pub const fn popup(&self) -> Option<&Popup> {
         self.popup.as_ref()
     }
 
@@ -679,7 +684,7 @@ impl WindowManager {
     /// active pane. This is THE definition of "where user input goes", so
     /// keep every input-routing decision (byte routing, paste bracketing,
     /// focus events, …) on it so they cannot disagree about the target.
-    pub fn input_target_pane(&self) -> Option<&crate::pane::Pane> {
+    pub fn input_target_pane(&self) -> Option<&Pane> {
         match &self.popup {
             Some(p) => Some(&p.pane),
             None => self.active_window().active_pane(),
@@ -691,9 +696,9 @@ impl WindowManager {
     /// behind `popup_cwd` (active pane) and pipe-pane (the input TARGET pane,
     /// which is the popup's pane while one is open), one definition so the
     /// two cannot drift.
-    pub fn pane_cwd(&self, pane: &crate::pane::Pane) -> Option<String> {
+    pub fn pane_cwd(&self, pane: &Pane) -> Option<String> {
         pane.with_screen(|s| s.cwd.clone())
-            .and_then(|url| crate::popup::osc7_to_path(&url))
+            .and_then(|url| popup::osc7_to_path(&url))
             .or_else(|| self.active_window().home_cwd.clone())
     }
 
@@ -731,9 +736,9 @@ impl WindowManager {
             env: self.default_spec.env.clone(),
             cwd: self.popup_cwd(),
         };
-        let size = crate::popup::popup_pty_size(plexy_glass_mux::popup_rect(self.viewport()));
+        let size = popup::popup_pty_size(plexy_glass_mux::popup_rect(self.viewport()));
         let id = self.alloc_pane_id();
-        let pane = crate::pane::Pane::spawn(
+        let pane = Pane::spawn(
             id,
             spec,
             size,
@@ -748,7 +753,7 @@ impl WindowManager {
         // an active drag/selection would freeze and bite after close. Drop them.
         self.reset_mouse_gestures();
         let title = command.unwrap_or_else(|| "popup".to_string());
-        self.popup = Some(crate::popup::Popup { pane, title });
+        self.popup = Some(Popup { pane, title });
         self.notify.notify_one();
         Ok(())
     }
@@ -982,7 +987,7 @@ impl WindowManager {
         }
         if let Some(p) = &self.popup {
             p.pane
-                .resize(crate::popup::popup_pty_size(plexy_glass_mux::popup_rect(viewport)))?;
+                .resize(popup::popup_pty_size(plexy_glass_mux::popup_rect(viewport)))?;
         }
         self.notify.notify_one();
         Ok(())

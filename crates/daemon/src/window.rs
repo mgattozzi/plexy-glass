@@ -4,14 +4,19 @@ use crate::{error::DaemonError, pane::Pane};
 use plexy_glass_mux::{
     CloseOutcome, LayoutError, LayoutTree, PaneId, Rect, SplitDir, SplitPosition, WindowId,
 };
+use plexy_glass_mux::blocks;
 use plexy_glass_protocol::{PtySize, SpawnSpec};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::env;
+use std::io::Error;
+use std::sync::Arc;
 use std::time::Duration;
 // `tokio::time::Instant` is used for `last_output` so that tokio's mock-time
 // clock (`start_paused = true` / `time::advance`) controls silence-threshold
 // checks in unit tests without real wall-clock sleeps. Production behaviour is
 // unchanged: `tokio::time::Instant::now()` delegates to the real clock when
 // mock-time is off.
+use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
 /// Upper bound on retained focus-history entries (see `Window::record_focus`).
@@ -126,9 +131,10 @@ impl Window {
         self.cell_px = cell_px;
     }
 
-    // Window construction needs the full set of plumbing arguments; bundling
-    // them into a struct would obscure the call sites and complicate borrows.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "window construction needs the full set of plumbing arguments; bundling them into a struct would obscure the call sites and complicate borrows"
+    )]
     pub fn spawn_first(
         id: WindowId,
         name: String,
@@ -136,9 +142,9 @@ impl Window {
         spec: SpawnSpec,
         rect: Rect,
         cell_px: (u16, u16),
-        output_notify: std::sync::Arc<tokio::sync::Notify>,
-        death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
-        config: std::sync::Arc<plexy_glass_config::Config>,
+        output_notify: Arc<Notify>,
+        death_tx: Option<mpsc::Sender<PaneId>>,
+        config: Arc<plexy_glass_config::Config>,
     ) -> Result<Self, DaemonError> {
         let size = pane_pty_size(rect, cell_px);
         let pane = Pane::spawn(first_pane_id, spec, size, output_notify, death_tx, config)?;
@@ -265,7 +271,7 @@ impl Window {
     /// is no active pane.
     fn compute_auto_name(&self) -> Option<String> {
         let pane = self.active_pane()?;
-        if let Some(cmd) = pane.with_screen(plexy_glass_mux::blocks::running_command)
+        if let Some(cmd) = pane.with_screen(blocks::running_command)
             && let Some(tok) = cmd.split_whitespace().next()
         {
             return Some(basename(tok));
@@ -281,7 +287,7 @@ impl Window {
     /// `$SHELL` rather than add pane plumbing.
     // ponytail: $SHELL basename, no new pane field for the rarely-hit shell rung.
     fn shell_basename() -> Option<String> {
-        std::env::var("SHELL").ok().map(|s| basename(&s))
+        env::var("SHELL").ok().map(|s| basename(&s))
     }
 
     pub fn pane(&self, id: PaneId) -> Option<&Pane> {
@@ -303,17 +309,19 @@ impl Window {
 
     /// Split the active pane in `dir`. The new pane appears After the existing
     /// one and becomes active.
-    // Same rationale as `spawn_first`, this is pane-creation plumbing.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "same rationale as spawn_first — pane-creation plumbing"
+    )]
     pub fn split(
         &mut self,
         dir: SplitDir,
         new_pane_id: PaneId,
         spec: SpawnSpec,
         viewport: Rect,
-        output_notify: std::sync::Arc<tokio::sync::Notify>,
-        death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
-        config: std::sync::Arc<plexy_glass_config::Config>,
+        output_notify: Arc<Notify>,
+        death_tx: Option<mpsc::Sender<PaneId>>,
+        config: Arc<plexy_glass_config::Config>,
     ) -> Result<(), DaemonError> {
         self.split_at(
             self.active,
@@ -330,7 +338,10 @@ impl Window {
     /// Like `split`, but splits an arbitrary `target_pane_id` instead of the
     /// active one. The active pane stays the same. Used by declared-template
     /// builds to rebuild a layout depth-first.
-    #[allow(clippy::too_many_arguments)] // pane id + split geometry + spawn deps
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "pane id + split geometry + spawn deps"
+    )]
     pub fn split_at(
         &mut self,
         target_pane_id: PaneId,
@@ -338,17 +349,17 @@ impl Window {
         new_pane_id: PaneId,
         spec: SpawnSpec,
         viewport: Rect,
-        output_notify: std::sync::Arc<tokio::sync::Notify>,
-        death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
-        config: std::sync::Arc<plexy_glass_config::Config>,
+        output_notify: Arc<Notify>,
+        death_tx: Option<mpsc::Sender<PaneId>>,
+        config: Arc<plexy_glass_config::Config>,
     ) -> Result<(), DaemonError> {
         self.layout
             .split(target_pane_id, dir, new_pane_id, SplitPosition::After)
-            .map_err(|e| DaemonError::Io(std::io::Error::other(format!("layout: {e}"))))?;
+            .map_err(|e| DaemonError::Io(Error::other(format!("layout: {e}"))))?;
         let rect = self
             .layout
             .rect_of(new_pane_id, viewport)
-            .ok_or_else(|| DaemonError::Io(std::io::Error::other("new pane rect missing")))?;
+            .ok_or_else(|| DaemonError::Io(Error::other("new pane rect missing")))?;
         let size = pane_pty_size(rect, self.cell_px);
         let pane = match Pane::spawn(new_pane_id, spec, size, output_notify, death_tx, config) {
             Ok(p) => p,
@@ -501,7 +512,7 @@ impl Window {
         let id = pane.id();
         self.layout
             .split(target, dir, id, SplitPosition::After)
-            .map_err(|e| DaemonError::Io(std::io::Error::other(format!("layout: {e}"))))?;
+            .map_err(|e| DaemonError::Io(Error::other(format!("layout: {e}"))))?;
         // Seed the block baseline from the incoming pane's live counter (see
         // install_in_slot) so a moved pane never replays a completion as a
         // spurious alert in its new window.
@@ -528,7 +539,10 @@ impl Window {
     /// Returns `Err` ONLY when the fresh shell fails to spawn, in which case
     /// nothing is mutated (the dead pane is still in place) so the caller can
     /// fall back to closing the slot.
-    #[allow(clippy::too_many_arguments)] // spawn plumbing, mirrors split_at
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "spawn plumbing, mirrors split_at"
+    )]
     pub fn respawn_pane_as_shell(
         &mut self,
         dead_id: PaneId,
@@ -536,16 +550,16 @@ impl Window {
         program: String,
         env: Vec<(String, String)>,
         viewport: Rect,
-        output_notify: std::sync::Arc<tokio::sync::Notify>,
-        death_tx: Option<tokio::sync::mpsc::Sender<PaneId>>,
-        config: std::sync::Arc<plexy_glass_config::Config>,
+        output_notify: Arc<Notify>,
+        death_tx: Option<mpsc::Sender<PaneId>>,
+        config: Arc<plexy_glass_config::Config>,
     ) -> Result<(), DaemonError> {
         // Fallible, pre-commit work first: resolve the dead slot's rect and
         // spawn the replacement. If either fails, the window is untouched.
         let rect = self
             .layout
             .rect_of(dead_id, viewport)
-            .ok_or_else(|| DaemonError::Io(std::io::Error::other("respawn: dead pane rect missing")))?;
+            .ok_or_else(|| DaemonError::Io(Error::other("respawn: dead pane rect missing")))?;
         let size = pane_pty_size(rect, self.cell_px);
         let spec = SpawnSpec {
             program,
@@ -773,7 +787,7 @@ impl Window {
         record_flag: bool,
     ) -> (Option<CompletionEvent>, Option<Option<i32>>) {
         // Prune baselines for panes that no longer exist (break/swap/kill).
-        let live: std::collections::HashSet<PaneId> = self.layout.panes().into_iter().collect();
+        let live: HashSet<PaneId> = self.layout.panes().into_iter().collect();
         self.block_baselines.retain(|id, _| live.contains(id));
 
         let mut event: Option<CompletionEvent> = None;
@@ -783,9 +797,9 @@ impl Window {
                 let evt = CompletionEvent {
                     exit: s.last_block_exit,
                     duration_ms: s.last_block_duration,
-                    command: plexy_glass_mux::blocks::last_completed_block(s)
-                        .and_then(|(start, _)| plexy_glass_mux::blocks::prompt_at_or_above(s, start))
-                        .and_then(|prompt| plexy_glass_mux::blocks::block_command_line(s, prompt)),
+                    command: blocks::last_completed_block(s)
+                        .and_then(|(start, _)| blocks::prompt_at_or_above(s, start))
+                        .and_then(|prompt| blocks::block_command_line(s, prompt)),
                 };
                 (s.blocks_completed, evt)
             });
@@ -926,13 +940,14 @@ fn basename(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env;
 
-    fn notify() -> std::sync::Arc<tokio::sync::Notify> {
-        std::sync::Arc::new(tokio::sync::Notify::new())
+    fn notify() -> Arc<Notify> {
+        Arc::new(Notify::new())
     }
 
-    fn cfg() -> std::sync::Arc<plexy_glass_config::Config> {
-        std::sync::Arc::new(plexy_glass_config::built_in_default())
+    fn cfg() -> Arc<plexy_glass_config::Config> {
+        Arc::new(plexy_glass_config::built_in_default())
     }
 
     fn shell_spec() -> SpawnSpec {
@@ -950,7 +965,7 @@ mod tests {
     #[tokio::test]
     async fn display_name_prefers_manual_then_falls_back() {
         // `isolate()` pins `SHELL=/bin/sh` so `shell_basename` is deterministic.
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let viewport = Rect::new(0, 0, 24, 80);
         let mut w = Window::spawn_first(
             WindowId(0),

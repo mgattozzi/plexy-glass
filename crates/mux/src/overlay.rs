@@ -6,6 +6,10 @@
 
 use crate::command_prompt::{self, Completion};
 use crate::{Direction, Key, KeyEvent, Modifiers};
+use crate::buffer::BufferPickerState;
+use crate::hint::HintState;
+use crate::history::HistoryState;
+use crate::tree::TreeState;
 
 /// What a rename overlay targets. The concrete window/pane is resolved by the
 /// daemon at open time, not stored here.
@@ -74,17 +78,17 @@ pub enum Overlay {
     /// drives it via `crate::tree::handle_tree` directly (not through
     /// `overlay::handle`), because its actions are cross-session and need
     /// the registry; the state lives here so the compositor can render it.
-    Tree(crate::tree::TreeState),
+    Tree(TreeState),
     /// The choose-buffer overlay. Driven by `crate::buffer::handle_buffers` at the
     /// daemon layer (its actions need the registry's paste buffers).
-    BufferPicker(crate::buffer::BufferPickerState),
+    BufferPicker(BufferPickerState),
     /// The structured history palette. Driven by `crate::history::handle_history`
     /// at the daemon layer (the jump is cross-session and needs the registry).
-    History(crate::history::HistoryState),
+    History(HistoryState),
     /// Hint mode: labelled spans in the focused pane. Driven by
     /// `crate::hint::handle_hint` at the daemon layer (commit needs the
     /// clipboard + registry).
-    Hint(crate::hint::HintState),
+    Hint(HintState),
     /// The one-time welcome modal (first ever attach). A static info box, and any
     /// key dismisses it. Content is built at render time from config (the resolved
     /// prefix + config path), like the help overlay.

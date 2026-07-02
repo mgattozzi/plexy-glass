@@ -3,6 +3,9 @@
 
 use crate::{Direction, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseKind};
 use plexy_glass_emulator::Screen;
+use crate::blocks;
+use crate::selection;
+use std::mem;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchSpan {
@@ -122,7 +125,7 @@ impl CopyMode {
         let is_word = |c: usize| {
             cells
                 .get(c)
-                .is_some_and(|cell| crate::selection::is_word_char(cell.grapheme.as_str()))
+                .is_some_and(|cell| selection::is_word_char(cell.grapheme.as_str()))
         };
         let is_spacer = |c: usize| cells.get(c).is_some_and(plexy_glass_emulator::Cell::is_wide_spacer);
         // A wide (CJK/emoji) grapheme occupies its cell plus a wide-spacer in the
@@ -276,13 +279,13 @@ pub fn handle(event: &KeyEvent, state: &mut CopyMode, screen: &Screen) -> CopyMo
             state.cursor.1 = cols.saturating_sub(1);
         }
         (m, Key::Char('[')) if m.is_empty() => {
-            if let Some(line) = crate::blocks::prev_prompt_line(screen, state.cursor.0) {
+            if let Some(line) = blocks::prev_prompt_line(screen, state.cursor.0) {
                 state.cursor = (line, 0);
                 ensure_visible(state);
             }
         }
         (m, Key::Char(']')) if m.is_empty() => {
-            if let Some(line) = crate::blocks::next_prompt_line(screen, state.cursor.0) {
+            if let Some(line) = blocks::next_prompt_line(screen, state.cursor.0) {
                 state.cursor = (line, 0);
                 ensure_visible(state);
             }
@@ -290,7 +293,7 @@ pub fn handle(event: &KeyEvent, state: &mut CopyMode, screen: &Screen) -> CopyMo
         (m, Key::Char('o')) if m.is_empty() => {
             // Select the current block's output region; `y` then yanks it.
             if let Some((start, end)) =
-                crate::blocks::block_output_range(screen, state.cursor.0)
+                blocks::block_output_range(screen, state.cursor.0)
             {
                 state.anchor = Some((start, 0));
                 state.cursor = (end, cols.saturating_sub(1));
@@ -411,7 +414,7 @@ fn handle_search_prompt(
 ) -> CopyModeAction {
     match (event.mods, event.key) {
         (m, Key::Enter) if m.is_empty() => {
-            state.search.query = std::mem::take(&mut state.search.prompt_buf);
+            state.search.query = mem::take(&mut state.search.prompt_buf);
             state.search.prompt_active = false;
             if state.search.query.is_empty() {
                 state.search.matches.clear();

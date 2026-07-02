@@ -1,5 +1,6 @@
 use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
 use async_trait::async_trait;
+use nix::unistd;
 use smol_str::SmolStr;
 use std::time::Duration;
 
@@ -92,7 +93,7 @@ impl Widget for HostnameWidget {
     }
     async fn evaluate(&mut self, _ctx: &EvalContext<'_>) -> StyledText {
         if self.cached.is_none() {
-            let name = nix::unistd::gethostname()
+            let name = unistd::gethostname()
                 .ok()
                 .and_then(|s| s.into_string().ok())
                 .unwrap_or_default();

@@ -6,6 +6,8 @@
 //! Also provides verb-name completion used by the command overlay.
 
 use crate::{Direction, SplitDir};
+use std::error::Error;
+use std::fmt;
 
 /// Which pane `focus` targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,13 +97,13 @@ pub enum PromptCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError(pub String);
 
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl std::error::Error for ParseError {}
+impl Error for ParseError {}
 
 /// Static verb names, sorted, for Tab-completion of the first token.
 pub const VERBS: &[&str] = &[

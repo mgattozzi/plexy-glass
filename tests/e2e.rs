@@ -11,9 +11,15 @@
 
 use assert_cmd::cargo::CommandCargoExt;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use std::fs::{self, Permissions};
 use std::io::Write;
-use std::path::Path;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
+use std::slice::Iter;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 /// The isolated environment for one e2e test: the env vars handed to every
@@ -30,7 +36,7 @@ struct TestEnv {
     vars: Vec<(String, String)>,
 }
 
-impl std::ops::Deref for TestEnv {
+impl Deref for TestEnv {
     type Target = [(String, String)];
     fn deref(&self) -> &Self::Target {
         &self.vars
@@ -39,7 +45,7 @@ impl std::ops::Deref for TestEnv {
 
 impl<'a> IntoIterator for &'a TestEnv {
     type Item = &'a (String, String);
-    type IntoIter = std::slice::Iter<'a, (String, String)>;
+    type IntoIter = Iter<'a, (String, String)>;
     fn into_iter(self) -> Self::IntoIter {
         self.vars.iter()
     }
@@ -50,7 +56,7 @@ impl Drop for TestEnv {
         // `kill` with no `-n` shuts the daemon down (not a session). Best-effort
         // and bounded by the client's own SIGTERM/SIGKILL timeouts; if no daemon
         // ever spawned it just prints "no daemon running".
-        if let Ok(mut cmd) = std::process::Command::cargo_bin("plexy-glass") {
+        if let Ok(mut cmd) = Command::cargo_bin("plexy-glass") {
             cmd.arg("kill");
             for (k, v) in &self.vars {
                 cmd.env(k, v);
@@ -62,13 +68,13 @@ impl Drop for TestEnv {
 
 fn isolate_dirs(tmp: &tempfile::TempDir) -> TestEnv {
     let xdg = tmp.path().join("xdg");
-    std::fs::create_dir_all(&xdg).unwrap();
+    fs::create_dir_all(&xdg).unwrap();
     let state = tmp.path().join("state");
-    std::fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&state).unwrap();
     let home = tmp.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&home).unwrap();
     let xdg_config = tmp.path().join("xdg-config");
-    std::fs::create_dir_all(&xdg_config).unwrap();
+    fs::create_dir_all(&xdg_config).unwrap();
     TestEnv {
         vars: vec![
             ("XDG_RUNTIME_DIR".into(), xdg.to_string_lossy().into_owned()),
@@ -112,15 +118,15 @@ fn isolate_dirs(tmp: &tempfile::TempDir) -> TestEnv {
 /// real config.
 fn write_config(env: &TestEnv, body: &str) {
     if let Some((_, xdg)) = env.iter().find(|(k, _)| k == "XDG_CONFIG_HOME") {
-        let cfg_dir = std::path::PathBuf::from(xdg).join("plexy-glass");
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(cfg_dir.join("config.kdl"), body).unwrap();
+        let cfg_dir = PathBuf::from(xdg).join("plexy-glass");
+        fs::create_dir_all(&cfg_dir).unwrap();
+        fs::write(cfg_dir.join("config.kdl"), body).unwrap();
     }
     if let Some((_, home)) = env.iter().find(|(k, _)| k == "HOME") {
         let cfg_dir =
-            std::path::PathBuf::from(home).join("Library/Application Support/plexy-glass");
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(cfg_dir.join("config.kdl"), body).unwrap();
+            PathBuf::from(home).join("Library/Application Support/plexy-glass");
+        fs::create_dir_all(&cfg_dir).unwrap();
+        fs::write(cfg_dir.join("config.kdl"), body).unwrap();
     }
 }
 
@@ -147,9 +153,9 @@ struct TestSession {
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     /// Owns the PTY fd; kept alive so `resize` works and the reader stays valid.
     master: Box<dyn portable_pty::MasterPty + Send>,
-    writer: Box<dyn std::io::Write + Send>,
+    writer: Box<dyn Write + Send>,
     buf: Arc<Mutex<Vec<u8>>>,
-    _reader: std::thread::JoinHandle<()>,
+    _reader: thread::JoinHandle<()>,
 }
 
 struct TestSessionBuilder<'e> {
@@ -162,7 +168,7 @@ struct TestSessionBuilder<'e> {
 impl TestSessionBuilder<'_> {
     /// Override the argv (default `["attach"]`); e.g. `["attach", "-n", "foo"]`.
     fn args(mut self, args: &[&str]) -> Self {
-        self.args = args.iter().map(std::string::ToString::to_string).collect();
+        self.args = args.iter().map(ToString::to_string).collect();
         self
     }
 
@@ -188,12 +194,12 @@ impl TestSessionBuilder<'_> {
                     Err(e) => {
                         attempt += 1;
                         assert!(attempt <= 20, "openpty failed after {attempt} retries: {e}");
-                        std::thread::sleep(Duration::from_millis(50 * u64::from(attempt)));
+                        thread::sleep(Duration::from_millis(50 * u64::from(attempt)));
                     }
                 }
             }
         };
-        let bin = std::process::Command::cargo_bin("plexy-glass").expect("binary built");
+        let bin = Command::cargo_bin("plexy-glass").expect("binary built");
         let mut builder = CommandBuilder::new(bin.get_program());
         for a in &self.args {
             builder.arg(a);
@@ -211,7 +217,7 @@ impl TestSessionBuilder<'_> {
         let mut reader = master.try_clone_reader().expect("clone reader");
         let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
         let buf_rd = Arc::clone(&buf);
-        let reader_handle = std::thread::spawn(move || {
+        let reader_handle = thread::spawn(move || {
             use std::io::Read;
             let mut chunk = [0u8; 4096];
             loop {
@@ -286,7 +292,7 @@ impl TestSession {
             if Instant::now() >= deadline {
                 return false;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -311,7 +317,7 @@ impl TestSession {
             if Instant::now() >= deadline {
                 return false;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -356,15 +362,15 @@ impl TestSession {
             return true;
         };
         let pid = child.process_id();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
             let _ = child.wait();
             let _ = tx.send(());
         });
         let exited = rx.recv_timeout(timeout).is_ok();
         if !exited && let Some(pid) = pid {
             // SIGKILL by pid; the waiter thread then reaps via its `wait()`.
-            let _ = std::process::Command::new("kill")
+            let _ = Command::new("kill")
                 .args(["-9", &pid.to_string()])
                 .status();
         }
@@ -392,7 +398,7 @@ fn wait_for_file_exists(path: &Path, timeout: Duration) -> bool {
         if Instant::now() >= deadline {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -400,13 +406,13 @@ fn wait_for_file_exists(path: &Path, timeout: Duration) -> bool {
 fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        if std::fs::read_to_string(path).unwrap_or_default().contains(needle) {
+        if fs::read_to_string(path).unwrap_or_default().contains(needle) {
             return true;
         }
         if Instant::now() >= deadline {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -547,7 +553,7 @@ fn esc_cancels_overlay_and_paste_does_not_leak_on_legacy_client() {
     // capture these keys (no shell echo); once closed, the shell echoes it.
     sess.send(b"\x1b");
     // Give the idle-flush (30ms) + repaint a margin, then drive the shell.
-    std::thread::sleep(Duration::from_millis(150));
+    thread::sleep(Duration::from_millis(150));
     let before = sess.buffer_len();
     sess.send_str("echo ESC_CLOSED_TREE\n");
     assert!(
@@ -584,7 +590,7 @@ fn esc_cancels_overlay_and_paste_does_not_leak_on_legacy_client() {
     let before_paste = sess.buffer_len();
     sess.send(b"\x1b[200~LEAKED_PASTE_MARKER\n\x1b[201~");
     // Ample time for an (incorrect) forward + shell echo, then assert absence.
-    std::thread::sleep(Duration::from_millis(400));
+    thread::sleep(Duration::from_millis(400));
     assert!(
         !sess.wait_for_from(before_paste, b"LEAKED_PASTE_MARKER", Duration::from_millis(1)),
         "a paste leaked to the shell behind an open overlay. raw: {}",
@@ -622,11 +628,11 @@ fn osc8_hyperlink_click_invokes_opener() {
 
     // Stub `open` that writes its arg to the log and exits.
     let stub_dir = tmp.path().join("stubs");
-    std::fs::create_dir_all(&stub_dir).unwrap();
+    fs::create_dir_all(&stub_dir).unwrap();
     let stub_path = stub_dir.join("open");
-    std::fs::write(&stub_path, format!("#!/bin/sh\nprintf '%s' \"$1\" >> {}\n", log.display())).unwrap();
+    fs::write(&stub_path, format!("#!/bin/sh\nprintf '%s' \"$1\" >> {}\n", log.display())).unwrap();
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&stub_path, Permissions::from_mode(0o755)).unwrap();
 
     let mut sess = TestSession::builder(&env).path_prepend(&stub_dir).start();
     assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
@@ -638,7 +644,7 @@ fn osc8_hyperlink_click_invokes_opener() {
 
     // The opener fires asynchronously (fork/exec of the stub); poll the log.
     if wait_for_file_exists(&log, Duration::from_secs(2)) {
-        let contents = std::fs::read_to_string(&log).unwrap_or_default();
+        let contents = fs::read_to_string(&log).unwrap_or_default();
         assert!(
             contents.contains("https://example.com"),
             "stub invoked but with wrong URL: {contents:?}"
@@ -656,11 +662,11 @@ fn selection_drag_copies_to_clipboard() {
     let log = tmp.path().join("clipboard.log");
 
     let stub_dir = tmp.path().join("stubs");
-    std::fs::create_dir_all(&stub_dir).unwrap();
+    fs::create_dir_all(&stub_dir).unwrap();
     let stub_path = stub_dir.join("pbcopy");
-    std::fs::write(&stub_path, format!("#!/bin/sh\ncat > {}\n", log.display())).unwrap();
+    fs::write(&stub_path, format!("#!/bin/sh\ncat > {}\n", log.display())).unwrap();
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&stub_path, Permissions::from_mode(0o755)).unwrap();
 
     let mut sess = TestSession::builder(&env).path_prepend(&stub_dir).start();
     assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
@@ -676,7 +682,7 @@ fn selection_drag_copies_to_clipboard() {
 
     // `pbcopy`'s fork/exec is async, so poll the clipboard log.
     if wait_for_file_exists(&log, Duration::from_secs(2)) {
-        let contents = std::fs::read_to_string(&log).unwrap_or_default();
+        let contents = fs::read_to_string(&log).unwrap_or_default();
         assert!(
             contents.contains("SELECTME") || contents.contains("echo"),
             "expected selected text in clipboard log, got: {contents:?}"
@@ -721,7 +727,7 @@ fn osc7_cwd_inherited_on_split_renders_pwd() {
     // warmup: the daemon consuming the OSC 7 cwd update has no observable marker
     // (it's internal pane state, not echoed), so wait briefly before splitting
     // so the new pane inherits the reported cwd.
-    std::thread::sleep(Duration::from_millis(250));
+    thread::sleep(Duration::from_millis(250));
     sess.send_prefix(b'v'); // split vertical
     let _ = sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)); // split landed
     sess.send_str("pwd\n");
@@ -765,7 +771,7 @@ fn new_and_list_show_named_session() {
     assert!(sess.wait_ready("foo", Duration::from_secs(5)), "named session never rendered");
 
     // `plexy-glass list` doesn't need a PTY.
-    let list_out = std::process::Command::cargo_bin("plexy-glass")
+    let list_out = Command::cargo_bin("plexy-glass")
         .unwrap()
         .arg("list")
         .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -797,7 +803,7 @@ fn kill_session_removes_it_from_list() {
     drop(sess);
 
     // Kill the session by name.
-    let kill_out = std::process::Command::cargo_bin("plexy-glass")
+    let kill_out = Command::cargo_bin("plexy-glass")
         .unwrap()
         .arg("kill")
         .arg("-n")
@@ -815,7 +821,7 @@ fn kill_session_removes_it_from_list() {
     }
 
     // List should no longer show the killed session.
-    let list_out = std::process::Command::cargo_bin("plexy-glass")
+    let list_out = Command::cargo_bin("plexy-glass")
         .unwrap()
         .arg("list")
         .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -854,7 +860,7 @@ fn kill_is_scoped_to_current_runtime_dir() {
     drop(sess_b);
 
     // Kill A's daemon only.
-    let _ = std::process::Command::cargo_bin("plexy-glass")
+    let _ = Command::cargo_bin("plexy-glass")
         .unwrap()
         .arg("kill")
         .envs(env_a.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -863,7 +869,7 @@ fn kill_is_scoped_to_current_runtime_dir() {
         .expect("kill a");
 
     // B's daemon must still be alive: its session lists.
-    let list_b = std::process::Command::cargo_bin("plexy-glass")
+    let list_b = Command::cargo_bin("plexy-glass")
         .unwrap()
         .arg("list")
         .envs(env_b.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -889,7 +895,7 @@ fn smart_attach_creates_main_when_zero_sessions() {
     sess.send_prefix(b'd'); // detach
     drop(sess);
 
-    let list_out = std::process::Command::cargo_bin("plexy-glass")
+    let list_out = Command::cargo_bin("plexy-glass")
         .unwrap()
         .arg("list")
         .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -967,7 +973,7 @@ fn custom_prefix_retargets_bindings() {
             if Instant::now() >= deadline {
                 return false;
             }
-            std::thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(50));
         }
     };
 
@@ -1142,7 +1148,7 @@ session "fresh" {
     );
 
     // Reload from a second process; build_declared runs for the new name.
-    let out = std::process::Command::cargo_bin("plexy-glass")
+    let out = Command::cargo_bin("plexy-glass")
         .unwrap()
         .arg("reload")
         .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -1162,7 +1168,7 @@ session "fresh" {
             if Instant::now() >= deadline {
                 break false;
             }
-            std::thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(50));
         }
     };
     assert!(listed, "reload never built the newly-declared session 'fresh'");
@@ -1227,14 +1233,14 @@ fn copy_mode_navigates_and_yanks() {
     // Stub `pbcopy` to capture the yanked content to a file.
     let log = tmp.path().join("clipboard.log");
     let stub_dir = tmp.path().join("stubs");
-    std::fs::create_dir_all(&stub_dir).unwrap();
+    fs::create_dir_all(&stub_dir).unwrap();
     let stub_path = stub_dir.join("pbcopy");
-    std::fs::write(
+    fs::write(
         &stub_path,
         format!("#!/bin/sh\ncat > {}\n", log.display()),
     )
     .unwrap();
-    std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&stub_path, Permissions::from_mode(0o755)).unwrap();
 
     let mut sess = TestSession::builder(&env).path_prepend(&stub_dir).start();
     assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
@@ -1248,11 +1254,11 @@ fn copy_mode_navigates_and_yanks() {
     // small fixed warmups remain between keystrokes (the final clipboard.log is
     // the real, polled signal).
     sess.send_prefix(b'['); // enter copy mode
-    std::thread::sleep(Duration::from_millis(150)); // warmup: no copy-mode marker
+    thread::sleep(Duration::from_millis(150)); // warmup: no copy-mode marker
     sess.send(b"g"); // jump to top
-    std::thread::sleep(Duration::from_millis(100)); // warmup
+    thread::sleep(Duration::from_millis(100)); // warmup
     sess.send(b"/COPY_MODE_TARGET\n"); // search
-    std::thread::sleep(Duration::from_millis(200)); // warmup: search has no marker
+    thread::sleep(Duration::from_millis(200)); // warmup: search has no marker
     sess.send(b"v"); // begin selection
     sess.send_repeat(b"l", 20); // extend
     sess.send(b"y"); // yank → pbcopy stub
@@ -1260,7 +1266,7 @@ fn copy_mode_navigates_and_yanks() {
     if !wait_for_file_contains(&log, "COPY_MODE_TARGET", Duration::from_secs(3)) {
         eprintln!(
             "note: clipboard log missing target — fail-soft. log: {:?}",
-            std::fs::read_to_string(&log).unwrap_or_default()
+            fs::read_to_string(&log).unwrap_or_default()
         );
     }
 }
@@ -1286,7 +1292,7 @@ status {
     write_config(&env, body);
 
     // Issue `plexy-glass reload` from a second process.
-    let _ = std::process::Command::cargo_bin("plexy-glass")
+    let _ = Command::cargo_bin("plexy-glass")
         .unwrap()
         .arg("reload")
         .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -1342,7 +1348,7 @@ fn kill_from_second_connection_ends_attached_session() {
     sess.send_prefix(b'v'); // split → in-memory structural change
 
     // Kill from a SECOND connection while run1 is still attached.
-    let out = std::process::Command::cargo_bin("plexy-glass")
+    let out = Command::cargo_bin("plexy-glass")
         .unwrap()
         .arg("kill")
         .arg("-n")
@@ -1619,7 +1625,7 @@ fn popup_does_not_survive_detach() {
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut deregistered = false;
     while Instant::now() < deadline {
-        let out = std::process::Command::cargo_bin("plexy-glass")
+        let out = Command::cargo_bin("plexy-glass")
             .unwrap()
             .arg("list")
             .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -1634,7 +1640,7 @@ fn popup_does_not_survive_detach() {
             deregistered = true;
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
     }
     assert!(deregistered, "daemon never deregistered the dropped client");
     // Reattach with a fresh client (fresh output buffer).
@@ -1717,8 +1723,8 @@ fn next_layout_cycles_without_breaking_input() {
 
 /// Run a `plexy-glass` CLI verb against the test env; returns (status, stdout,
 /// stderr).
-fn run_cli(env: &TestEnv, args: &[&str]) -> (std::process::ExitStatus, String, String) {
-    let out = std::process::Command::cargo_bin("plexy-glass")
+fn run_cli(env: &TestEnv, args: &[&str]) -> (ExitStatus, String, String) {
+    let out = Command::cargo_bin("plexy-glass")
         .unwrap()
         .args(args)
         .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -1785,7 +1791,7 @@ fn cli_capture_reads_pane() {
             captured = true;
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
     }
     assert!(
         captured,
@@ -1876,7 +1882,7 @@ fn cli_buffer_set_save_load_paste_round_trips() {
         stdout.contains("saved buffer0"),
         "save must name the buffer it wrote: {stdout}"
     );
-    assert_eq!(std::fs::read(&out).unwrap(), b"hello world");
+    assert_eq!(fs::read(&out).unwrap(), b"hello world");
 
     // `load-buffer` pushes a new newest buffer (`buffer1`).
     let (status, stdout, stderr) =
@@ -1913,7 +1919,7 @@ fn cli_buffer_set_save_load_paste_round_trips() {
             pasted = true;
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
     }
     assert!(
         pasted,
@@ -1963,7 +1969,7 @@ fn cross_window_swap_pane_exchanges_panes() {
             if Instant::now() >= deadline {
                 break false;
             }
-            std::thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(50));
         }
     };
     assert!(
@@ -1989,7 +1995,7 @@ fn cross_window_swap_pane_exchanges_panes() {
     // re-appears as the highlighted entry). A brief liveness probe via capture
     // would also work, but watching the status bar is simpler and avoids the
     // need for a shell that responds in the `tail` pane.
-    std::thread::sleep(Duration::from_millis(200));
+    thread::sleep(Duration::from_millis(200));
 
     // Headless swap-pane: the marked pane (window 2) swaps into window 1's slot.
     let (status, _stdout, stderr) = run_cli(&env, &["cmd", "swap-pane"]);
@@ -2005,7 +2011,7 @@ fn cross_window_swap_pane_exchanges_panes() {
             w1_ok = true;
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
     }
     assert!(
         w1_ok,
@@ -2029,7 +2035,7 @@ fn cross_window_swap_pane_exchanges_panes() {
             w2_ok = true;
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
     }
     assert!(
         w2_ok,
@@ -2114,7 +2120,7 @@ fn capture_last_command_returns_block_output() {
             marks_set = true;
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
     }
     assert!(marks_set, "OUT_LN_1 never appeared in plain capture (marks not set). pane: {}", sess.snapshot_str());
 
@@ -2129,7 +2135,7 @@ fn capture_last_command_returns_block_output() {
             last_cmd_ok = true;
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
     }
     assert!(last_cmd_ok, "capture --last-command never succeeded. pane: {}", sess.snapshot_str());
     assert!(
@@ -2436,7 +2442,7 @@ fn prev_prompt_and_next_prompt_scroll_viewport() {
                 gone = true;
                 break;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(100));
         }
         gone
     };
@@ -2552,26 +2558,26 @@ fn copy_mode_bracket_o_y_yanks_block_output() {
     // Enter copy mode: prefix [ (0x01 then '[').
     sess.send_prefix(b'['); // enters copy mode
     // Brief warmup: no observable marker for copy-mode entry.
-    std::thread::sleep(Duration::from_millis(150));
+    thread::sleep(Duration::from_millis(150));
 
     // `[` in copy mode = jump to previous PROMPT_START line. Starting from the
     // live bottom (cursor initialised there by CopyMode::new), this jumps to
     // the YNEXT prompt (from the D+A row), then one more `[` reaches YPROMPT.
     // We press `[` twice to ensure we land at the first block's prompt.
     sess.send(b"[");
-    std::thread::sleep(Duration::from_millis(80));
+    thread::sleep(Duration::from_millis(80));
     sess.send(b"[");
-    std::thread::sleep(Duration::from_millis(80));
+    thread::sleep(Duration::from_millis(80));
 
     // `o` selects the output region (anchor = `OUTPUT_START`, cursor = block end).
     sess.send(b"o");
-    std::thread::sleep(Duration::from_millis(80));
+    thread::sleep(Duration::from_millis(80));
 
     // `y` yanks the selection and exits copy mode. The text is pushed onto
     // the paste-buffer stack (`registry.push_paste_buffer`).
     sess.send(b"y");
     // Wait briefly for the yank to process and copy mode to exit.
-    std::thread::sleep(Duration::from_millis(200));
+    thread::sleep(Duration::from_millis(200));
 
     // Paste the top buffer (prefix ]) into the cat child.
     sess.send_prefix(b']');
@@ -2811,9 +2817,9 @@ fn capital_letter_reaches_kitty_flags5_pane_as_text() {
     // `cat` is up once our probe text round-trips. The marker is
     // quote-concatenated so the contiguous form appears only via `cat`'s
     // output echo.
-    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + Duration::from_secs(8);
     let mut ready = false;
-    while std::time::Instant::now() < deadline {
+    while Instant::now() < deadline {
         sess.send_str("WARM_");
         sess.send_str("UP\n");
         if sess.wait_for(b"WARM_UP", Duration::from_millis(500)) {
@@ -2866,7 +2872,7 @@ fn seed_prompt_mark(env: &TestEnv, sess: &TestSession) {
             seeded = true;
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
     }
     assert!(seeded, "SEEDPROMPT never appeared in capture (mark not seeded). pane: {}", sess.snapshot_str());
 }
@@ -3032,7 +3038,7 @@ fn run_busy_pane_refused() {
             busy_set = true;
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
     }
     assert!(busy_set, "MIDFLIGHT never appeared (C mark not set). pane: {}", sess.snapshot_str());
 
@@ -3088,7 +3094,7 @@ fn capture_last_command_json_returns_structured_object() {
             parsed = Some(v);
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
     }
     let v = parsed.unwrap_or_else(|| {
         panic!("capture --last-command --json never returned exit 7. pane: {}", sess.snapshot_str())
@@ -3323,7 +3329,7 @@ fn choose_tree_filter_and_rename_session() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut list_ok = false;
     while Instant::now() < deadline {
-        let list_out = std::process::Command::cargo_bin("plexy-glass")
+        let list_out = Command::cargo_bin("plexy-glass")
             .unwrap()
             .arg("list")
             .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -3335,7 +3341,7 @@ fn choose_tree_filter_and_rename_session() {
             list_ok = true;
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
     }
     assert!(list_ok, "list must show 'zeta' not 'beta'. raw: {}", main_sess.snapshot_str());
 
@@ -3375,7 +3381,7 @@ fn cli_pipe_pane_streams_then_stops() {
     assert!(
         wait_for_file_contains(&log, "PIPE_NEEDLE", Duration::from_secs(10)),
         "pipe file never received the executed pane output. file: {:?}, pty: {}",
-        std::fs::read_to_string(&log).ok(),
+        fs::read_to_string(&log).ok(),
         sess.snapshot_str()
     );
 
@@ -3389,10 +3395,10 @@ fn cli_pipe_pane_streams_then_stops() {
     // have quiesced, so a later growth can only come from a live pipe.
     let settled_len = {
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut last = std::fs::metadata(&log).map_or(0, |m| m.len());
+        let mut last = fs::metadata(&log).map_or(0, |m| m.len());
         loop {
-            std::thread::sleep(Duration::from_millis(200));
-            let now = std::fs::metadata(&log).map_or(0, |m| m.len());
+            thread::sleep(Duration::from_millis(200));
+            let now = fs::metadata(&log).map_or(0, |m| m.len());
             if now == last || Instant::now() >= deadline {
                 break now;
             }
@@ -3412,16 +3418,16 @@ fn cli_pipe_pane_streams_then_stops() {
         sess.snapshot_str()
     );
     // Give a stopped-but-buggy pipe a chance to (wrongly) write before checking.
-    std::thread::sleep(Duration::from_millis(500));
+    thread::sleep(Duration::from_millis(500));
 
-    let after_len = std::fs::metadata(&log).map_or(0, |m| m.len());
+    let after_len = fs::metadata(&log).map_or(0, |m| m.len());
     assert_eq!(
         after_len, settled_len,
         "file grew after the pipe was stopped (pipe did not stop). \
          settled={settled_len}, after={after_len}, contents: {:?}",
-        std::fs::read_to_string(&log).ok()
+        fs::read_to_string(&log).ok()
     );
-    let contents = std::fs::read_to_string(&log).unwrap_or_default();
+    let contents = fs::read_to_string(&log).unwrap_or_default();
     assert!(
         !contents.contains("AFTER_STOP"),
         "post-stop output leaked into the pipe file: {contents:?}"

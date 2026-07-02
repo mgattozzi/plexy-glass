@@ -5,6 +5,8 @@
 
 use crate::LockExt;
 use crate::error::DaemonError;
+use crate::osc_actions;
+use crate::pipe::{self, PipeCloseReason, PipeHandle, PipeSlot};
 use bytes::Bytes;
 use plexy_glass_config::{Config, PaletteConfig};
 use plexy_glass_emulator::{ColorQuery, Emulator, Screen};
@@ -12,9 +14,13 @@ use plexy_glass_status::Rgb;
 use plexy_glass_mux::PaneId;
 use plexy_glass_protocol::{ExitStatus, PtySize, SpawnSpec};
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize as PortablePtySize};
-use std::io::{Read, Write};
+use std::env;
+use std::io::{Error, Read, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 use tracing::{debug, error};
 
@@ -25,7 +31,7 @@ use tracing::{debug, error};
 /// unwind-safety: on a caught panic the thread is exiting and its own state is
 /// discarded; any lock it poisoned is recovered by `LockExt::lock_recover`.
 fn guard_thread(name: &str, on_panic: impl FnOnce(), body: impl FnOnce()) {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+    let result = panic::catch_unwind(AssertUnwindSafe(body));
     if result.is_err() {
         error!(thread = name, "pane thread panicked; marking pane dead");
         on_panic();
@@ -69,7 +75,7 @@ struct Inner {
     /// The pipe-pane slot (one pipe per pane, see `crate::pipe`). Shared as its
     /// own `Arc` so the drain task and the reader thread hold it WITHOUT
     /// keeping the whole pane (and its broadcast sender) alive.
-    pipe: crate::pipe::PipeSlot,
+    pipe: PipeSlot,
     /// When true, this pane's death drops to an interactive `$SHELL` in the
     /// same layout slot instead of closing the window (see
     /// `WindowManager::handle_pane_death`). Computed once at spawn as
@@ -106,10 +112,10 @@ impl Pane {
                     Ok(p) => break p,
                     Err(_) if attempt < 5 => {
                         attempt += 1;
-                        std::thread::sleep(std::time::Duration::from_millis(10 * attempt));
+                        thread::sleep(Duration::from_millis(10 * attempt));
                     }
                     Err(e) => {
-                        return Err(DaemonError::Io(std::io::Error::other(format!(
+                        return Err(DaemonError::Io(Error::other(format!(
                             "openpty: {e}"
                         ))));
                     }
@@ -143,7 +149,7 @@ impl Pane {
         let mut child = pair
             .slave
             .spawn_command(cmd)
-            .map_err(|e| DaemonError::Io(std::io::Error::other(format!("spawn: {e}"))))?;
+            .map_err(|e| DaemonError::Io(Error::other(format!("spawn: {e}"))))?;
         drop(pair.slave);
         // Capture an independent kill handle before the child is moved into
         // the detached wait thread below.
@@ -159,11 +165,11 @@ impl Pane {
         let mut reader = pair
             .master
             .try_clone_reader()
-            .map_err(|e| DaemonError::Io(std::io::Error::other(format!("clone reader: {e}"))))?;
+            .map_err(|e| DaemonError::Io(Error::other(format!("clone reader: {e}"))))?;
         let mut writer = pair
             .master
             .take_writer()
-            .map_err(|e| DaemonError::Io(std::io::Error::other(format!("take writer: {e}"))))?;
+            .map_err(|e| DaemonError::Io(Error::other(format!("take writer: {e}"))))?;
         let master = pair.master;
 
         // XTGETTCAP `TN` must report the `$TERM` the child actually inherits.
@@ -175,7 +181,7 @@ impl Pane {
             .iter()
             .find(|(k, _)| k == "TERM")
             .map(|(_, v)| v.clone())
-            .or_else(|| std::env::var("TERM").ok())
+            .or_else(|| env::var("TERM").ok())
             .unwrap_or_else(|| "xterm-256color".to_string());
         let mut emu = Emulator::new(size.rows, size.cols);
         emu.screen_mut().set_term(child_term);
@@ -192,7 +198,7 @@ impl Pane {
         // Pipe-pane slot; the reader thread closes any pipe on EOF/Err (the
         // natural child-exit teardown path, which never goes through
         // `kill_child`).
-        let pipe: crate::pipe::PipeSlot = Arc::new(Mutex::new(None));
+        let pipe: PipeSlot = Arc::new(Mutex::new(None));
         let pipe_for_reader = Arc::clone(&pipe);
 
         let output_tx_clone = output_tx.clone();
@@ -211,25 +217,25 @@ impl Pane {
         let reader_notify_for_self = Arc::clone(&output_notify);
         let config_for_reader = Arc::clone(&config_slot);
 
-        let (clip_tx, mut clip_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (clip_tx, mut clip_rx) = mpsc::channel::<Vec<u8>>(16);
         tokio::spawn(async move {
             while let Some(payload) = clip_rx.recv().await {
-                let _ = crate::osc_actions::write_clipboard(&payload).await;
+                let _ = osc_actions::write_clipboard(&payload).await;
             }
         });
 
         let pipe_for_panic = Arc::clone(&pipe_for_reader);
         let notify_for_panic = Arc::clone(&reader_notify_for_self);
-        let reader_handle = std::thread::spawn(move || {
+        let reader_handle = thread::spawn(move || {
             guard_thread(
                 "pane-reader",
                 move || {
                     // A reader panic leaves the pane no longer draining its PTY.
                     // Mirror the EOF cleanup (close any pipe) and kill the child
                     // so wait_child unblocks, reaps, and fires the death channel.
-                    crate::pipe::cancel_slot(
+                    pipe::cancel_slot(
                         &pipe_for_panic,
-                        crate::pipe::PipeCloseReason::PaneClosed,
+                        PipeCloseReason::PaneClosed,
                     );
                     let _ = reader_killer.kill();
                     notify_for_panic.notify_one();
@@ -241,9 +247,9 @@ impl Pane {
                             Ok(0) => {
                                 debug!("pane reader EOF");
                                 // No more output can ever flow: close any pipe.
-                                crate::pipe::cancel_slot(
+                                pipe::cancel_slot(
                                     &pipe_for_reader,
-                                    crate::pipe::PipeCloseReason::PaneClosed,
+                                    PipeCloseReason::PaneClosed,
                                 );
                                 // Final notify so the renderer can pick up any
                                 // unprocessed bytes before the connection tears down.
@@ -306,9 +312,9 @@ impl Pane {
                             }
                             Err(e) => {
                                 debug!(error = %e, "pane reader closed");
-                                crate::pipe::cancel_slot(
+                                pipe::cancel_slot(
                                     &pipe_for_reader,
-                                    crate::pipe::PipeCloseReason::PaneClosed,
+                                    PipeCloseReason::PaneClosed,
                                 );
                                 return;
                             }
@@ -318,7 +324,7 @@ impl Pane {
             );
         });
 
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             // no-op on_panic: this body is panic-free by construction (no
             // indexing/unwrap; fallible I/O returns early), so there is nothing
             // to mark-dead beyond the panic hook's log. If fallible logic is ever
@@ -337,7 +343,7 @@ impl Pane {
             });
         });
 
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             // no-op on_panic: this body is panic-free by construction (wait +
             // send + join, `let _` on the join's Err), so there is nothing to
             // mark-dead beyond the panic hook's log. If fallible logic is ever
@@ -408,7 +414,7 @@ impl Pane {
     /// `kill_pane_child`) and the synchronous-close paths (`close_pane` via
     /// Ctrl+a x, `close_active_window` via Ctrl+a &).
     pub fn kill_child(&self) {
-        crate::pipe::cancel_slot(&self.inner.pipe, crate::pipe::PipeCloseReason::PaneClosed);
+        pipe::cancel_slot(&self.inner.pipe, PipeCloseReason::PaneClosed);
         // invariant: child_killer mutex briefly held; kill never blocks.
         let mut killer = self.inner.child_killer.lock_recover();
         let _ = killer.kill();
@@ -416,14 +422,14 @@ impl Pane {
 
     /// The pipe-pane slot (an `Arc` clone, safe for the drain task to hold
     /// without keeping the pane alive).
-    pub(crate) fn pipe_slot(&self) -> crate::pipe::PipeSlot {
+    pub(crate) fn pipe_slot(&self) -> PipeSlot {
         Arc::clone(&self.inner.pipe)
     }
 
     /// Stop a running pipe (cancel + the drain kills/reaps the consumer).
     /// Returns whether a pipe was running.
-    pub fn stop_pipe(&self, reason: crate::pipe::PipeCloseReason) -> bool {
-        crate::pipe::cancel_slot(&self.inner.pipe, reason)
+    pub fn stop_pipe(&self, reason: PipeCloseReason) -> bool {
+        pipe::cancel_slot(&self.inner.pipe, reason)
     }
 
     /// Whether a pipe is currently installed on this pane.
@@ -436,7 +442,7 @@ impl Pane {
     /// observability for the kill/reap (no-zombie) assertions.
     pub fn pipe_pid(&self) -> Option<u32> {
         // invariant: pipe slot mutex held briefly; no await, no nested locks.
-        self.inner.pipe.lock_recover().as_ref().and_then(super::pipe::PipeHandle::pid)
+        self.inner.pipe.lock_recover().as_ref().and_then(PipeHandle::pid)
     }
 
     pub fn id(&self) -> PaneId {
@@ -470,7 +476,7 @@ impl Pane {
             .input_tx
             .send(bytes)
             .await
-            .map_err(|_| DaemonError::Io(std::io::Error::other("pane input channel closed")))
+            .map_err(|_| DaemonError::Io(Error::other("pane input channel closed")))
     }
 
     pub fn subscribe_output(&self) -> broadcast::Receiver<Bytes> {
@@ -483,7 +489,7 @@ impl Pane {
             let master = self.inner.master.lock_recover();
             master
                 .resize(to_portable(size))
-                .map_err(|e| DaemonError::Io(std::io::Error::other(format!("resize: {e}"))))?;
+                .map_err(|e| DaemonError::Io(Error::other(format!("resize: {e}"))))?;
         }
         {
             // invariant: emulator mutex contended only briefly.
@@ -498,7 +504,7 @@ impl Pane {
         let mut rx = self.inner.exit_rx.clone();
         // Err only if the sender (the child-exit watch) dropped without a
         // value; the old loop returned Unknown in that case, so match it.
-        match rx.wait_for(std::option::Option::is_some).await {
+        match rx.wait_for(Option::is_some).await {
             Ok(s) => s.unwrap_or(ExitStatus::Unknown),
             Err(_) => ExitStatus::Unknown,
         }
@@ -750,6 +756,7 @@ mod tests {
     use super::*;
     use plexy_glass_mux::PaneId;
     use tokio::sync::Notify;
+    use tokio::time::{self, Instant};
 
     fn size() -> PtySize {
         PtySize {
@@ -799,8 +806,8 @@ mod tests {
         assert!(exit.borrow().is_none(), "child should still be running");
         p.kill_child();
         // exit_rx flips to Some once the wait thread observes the child dying.
-        let res = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            exit.wait_for(std::option::Option::is_some).await
+        let res = time::timeout(Duration::from_secs(5), async {
+            exit.wait_for(Option::is_some).await
         })
         .await;
         assert!(res.is_ok(), "child did not exit within 5s after kill_child");
@@ -890,9 +897,9 @@ mod tests {
         // exits almost immediately, so its output can be broadcast (and lost)
         // before a subscriber attaches. The screen retains the rendered output
         // regardless of subscription timing, so it is the race-free signal.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(3);
         let mut found = false;
-        while tokio::time::Instant::now() < deadline {
+        while Instant::now() < deadline {
             let row0 = pane.with_screen(|s| {
                 (0..s.active.num_cols())
                     .filter_map(|c| {
@@ -906,11 +913,11 @@ mod tests {
                 found = true;
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            time::sleep(Duration::from_millis(50)).await;
         }
         assert!(found, "emulator screen never showed 'hello'");
 
-        let status = tokio::time::timeout(std::time::Duration::from_secs(2), pane.wait())
+        let status = time::timeout(Duration::from_secs(2), pane.wait())
             .await
             .expect("pane.wait");
         assert!(matches!(status, ExitStatus::Code(0)), "got {status:?}");
@@ -933,10 +940,10 @@ mod tests {
             .unwrap();
 
         let mut got = Vec::new();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while tokio::time::Instant::now() < deadline {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
             if let Ok(Ok(chunk)) =
-                tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+                time::timeout(Duration::from_millis(200), rx.recv()).await
             {
                 got.extend_from_slice(&chunk);
             }
@@ -955,7 +962,7 @@ mod tests {
             .send_input(Bytes::from_static(&[0x04]))
             .await
             .unwrap();
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
+        let _ = time::timeout(Duration::from_secs(2), session.wait()).await;
     }
 
     #[tokio::test]
@@ -973,19 +980,19 @@ mod tests {
         // cat echoes its input; the BEL byte makes the emulator flag a bell.
         p.send_input(Bytes::from_static(b"hi\x07\n")).await.unwrap();
 
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(3);
         let mut saw_activity = false;
         let mut saw_bell = false;
-        while tokio::time::Instant::now() < deadline && !(saw_activity && saw_bell) {
+        while Instant::now() < deadline && !(saw_activity && saw_bell) {
             saw_activity |= p.take_activity();
             saw_bell |= p.take_bell();
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
         assert!(saw_activity, "output set the activity signal");
         assert!(saw_bell, "the echoed BEL set the bell signal");
 
         p.send_input(Bytes::from_static(&[0x04])).await.unwrap(); // Ctrl-D → exit
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), p.wait()).await;
+        let _ = time::timeout(Duration::from_secs(2), p.wait()).await;
     }
 
     #[tokio::test]
@@ -998,9 +1005,9 @@ mod tests {
         };
         let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
         // Wait for the child to exit so the PTY has flushed.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
+        let _ = time::timeout(Duration::from_secs(2), session.wait()).await;
         // Give the reader thread a beat to drain.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(100)).await;
 
         let saw_hello = session.with_screen(|screen| {
             (0..screen.rows()).any(|r| {
@@ -1042,7 +1049,7 @@ mod tests {
             .send_input(Bytes::from_static(&[0x04]))
             .await
             .unwrap();
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
+        let _ = time::timeout(Duration::from_secs(2), session.wait()).await;
     }
 
     #[tokio::test]
@@ -1109,8 +1116,8 @@ mod tests {
             cwd: None,
         };
         let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.wait()).await;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _ = time::timeout(Duration::from_secs(2), session.wait()).await;
+        time::sleep(Duration::from_millis(100)).await;
 
         let bold = session.with_screen(|screen| {
             use plexy_glass_emulator::Attrs;
@@ -1160,7 +1167,6 @@ mod tests {
 
     #[tokio::test]
     async fn color_query_path_does_not_panic() {
-        use std::time::Duration;
         let spec = SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -1182,7 +1188,7 @@ mod tests {
         p.send_input(Bytes::copy_from_slice(b"\x1b]11;?\x07"))
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        time::sleep(Duration::from_millis(300)).await;
         // Drained queries shouldn't remain in the emulator. Mainly asserts no
         // panic + the drain path runs without leaving residue.
         let pending = p.inner.emulator.lock_recover().take_color_queries();

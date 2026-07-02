@@ -612,7 +612,7 @@ pub fn block_text(screen: &Screen, (start, end): (u32, u32)) -> String {
         let trimmed = text.trim_end();
         lines.push(trimmed.to_string());
     }
-    while lines.last().is_some_and(std::string::String::is_empty) {
+    while lines.last().is_some_and(String::is_empty) {
         lines.pop();
     }
     lines.join("\n")
@@ -1201,7 +1201,7 @@ mod tests {
             b"\x1b]133;A\x07$ run\r\n\x1b]133;C\x07working",
         );
         let status = viewport_block_status(&s, 0, 4);
-        assert!(status.iter().all(std::option::Option::is_none), "running block → all None");
+        assert!(status.iter().all(Option::is_none), "running block → all None");
     }
 
     /// D without exit code → None (completed but unknown).
@@ -1339,7 +1339,7 @@ mod tests {
         );
         // Alt screen is active → all None regardless.
         let status = viewport_block_status(&s, 0, 4);
-        assert!(status.iter().all(std::option::Option::is_none), "alt screen → all None");
+        assert!(status.iter().all(Option::is_none), "alt screen → all None");
     }
 
     /// Rows before the first prompt → None.
@@ -1365,7 +1365,7 @@ mod tests {
         let s = two_blocks();
         // top = 1000 (beyond total_lines = 8)
         let status = viewport_block_status(&s, 1000, 4);
-        assert!(status.iter().all(std::option::Option::is_none), "top past total → all None");
+        assert!(status.iter().all(Option::is_none), "top past total → all None");
     }
 
     /// D on the prompt's own row (D;0 + A on line 0, no surviving prior block):
@@ -1377,7 +1377,7 @@ mod tests {
         // one. Block 1 (prompt at line 0) has no D strictly after it → running → None.
         let s = screen_from(4, 20, b"\x1b]133;D;0\x07\x1b]133;A\x07$ a\r\nrunning");
         let status = viewport_block_status(&s, 0, 4);
-        assert!(status.iter().all(std::option::Option::is_none),
+        assert!(status.iter().all(Option::is_none),
             "D on prompt's own row excluded from that block → all None");
     }
 
@@ -1387,7 +1387,7 @@ mod tests {
         let s = screen_from(4, 20, b"\x1b]133;A\x07$ cmd");
         // total_lines = 4; top = 4 → at end → all None
         let status = viewport_block_status(&s, 4, 4);
-        assert!(status.iter().all(std::option::Option::is_none), "top at total_lines → all None");
+        assert!(status.iter().all(Option::is_none), "top at total_lines → all None");
     }
 
     // ── pane_at_prompt tests ─────────────────────────────────────────────────

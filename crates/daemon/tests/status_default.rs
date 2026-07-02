@@ -7,6 +7,9 @@ use plexy_glass_daemon::Session;
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
+use tokio::task;
+use tokio::time;
 
 fn spec() -> SpawnSpec {
     SpawnSpec {
@@ -28,7 +31,7 @@ async fn default_status_includes_session_name() {
 
     // Register a client so the coordinator knows the effective size.
     let s2 = Arc::clone(&s);
-    let _h = tokio::task::spawn_blocking(move || {
+    let _h = task::spawn_blocking(move || {
         s2.register_client(size(), Arc::new(AtomicBool::new(false)))
     })
     .await
@@ -38,7 +41,7 @@ async fn default_status_includes_session_name() {
     // Wait for the coordinator to publish at least one frame after registration.
     let mut rx = s.frame_rx_template.clone();
     s.notify.notify_one();
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx.changed()).await;
+    let _ = time::timeout(Duration::from_secs(2), rx.changed()).await;
     let frame = rx.borrow_and_update().clone();
 
     // Read the bottom row as text.

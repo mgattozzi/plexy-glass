@@ -3,6 +3,8 @@
 use crate::error::DaemonError;
 use plexy_glass_mux::{DiffRenderer, VirtualScreen};
 use plexy_glass_protocol::{Codec, ServerMsg};
+use std::future;
+use std::io::Error;
 use std::sync::Arc;
 use tokio::io::AsyncWrite;
 use tokio::sync::{mpsc, watch};
@@ -51,7 +53,7 @@ impl Renderer {
                     if switch_open {
                         switch_rx.recv().await
                     } else {
-                        std::future::pending().await
+                        future::pending().await
                     }
                 } => {
                     match maybe {
@@ -88,7 +90,7 @@ impl Renderer {
     {
         let msg = ServerMsg::Output(bytes::Bytes::from(bytes));
         let payload = postcard::to_allocvec(&msg)
-            .map_err(|e| DaemonError::Io(std::io::Error::other(format!("encode: {e}"))))?;
+            .map_err(|e| DaemonError::Io(Error::other(format!("encode: {e}"))))?;
         Codec::write_frame(writer, &payload).await?;
         Ok(())
     }
@@ -104,6 +106,7 @@ impl Default for Renderer {
 mod tests {
     use super::*;
     use plexy_glass_emulator::Cell;
+    use tokio::io;
     use tokio::io::AsyncRead;
 
     fn screen_with(ch: &str) -> Arc<VirtualScreen> {
@@ -131,7 +134,7 @@ mod tests {
         let (switch_tx, switch_rx) = mpsc::unbounded_channel();
         // The renderer writes to `server_sock`; we read its output from the
         // opposite duplex endpoint `client_sock`.
-        let (server_sock, mut client_sock) = tokio::io::duplex(64 * 1024);
+        let (server_sock, mut client_sock) = io::duplex(64 * 1024);
 
         let task = tokio::spawn(async move {
             let _ = Renderer::new().run(rx_a, switch_rx, server_sock).await;
@@ -153,7 +156,7 @@ mod tests {
     async fn dropping_switch_sender_does_not_end_renderer() {
         let (tx_a, rx_a) = watch::channel(screen_with("A"));
         let (switch_tx, switch_rx) = mpsc::unbounded_channel();
-        let (server_sock, mut client_sock) = tokio::io::duplex(64 * 1024);
+        let (server_sock, mut client_sock) = io::duplex(64 * 1024);
 
         let task = tokio::spawn(async move {
             let _ = Renderer::new().run(rx_a, switch_rx, server_sock).await;

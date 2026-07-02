@@ -1,6 +1,7 @@
 //! VTE-backed ANSI parser. Delivers callbacks via the `ScreenOps` trait so the
 //! parser can be unit-tested independently of `Screen`.
 
+use std::mem;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Operations the parser invokes on a screen-like sink. `Screen` will impl this.
@@ -164,7 +165,7 @@ impl Parser {
         if self.pending.is_empty() {
             return;
         }
-        let buf = std::mem::take(&mut self.pending);
+        let buf = mem::take(&mut self.pending);
         for cluster in buf.graphemes(true) {
             screen.put_grapheme(cluster);
         }
@@ -180,7 +181,7 @@ impl Default for Parser {
 /// Move accumulated vte-bound bytes into a `Run` segment.
 fn flush_run(segs: &mut Vec<Seg>, run: &mut Vec<u8>) {
     if !run.is_empty() {
-        segs.push(Seg::Run(std::mem::take(run)));
+        segs.push(Seg::Run(mem::take(run)));
     }
 }
 
@@ -254,7 +255,7 @@ impl<S: ScreenOps> Performer<'_, S> {
         if self.pending.is_empty() {
             return;
         }
-        let buf = std::mem::take(self.pending);
+        let buf = mem::take(self.pending);
         for cluster in buf.graphemes(true) {
             self.screen.put_grapheme(cluster);
         }
@@ -332,6 +333,7 @@ impl<S: ScreenOps> vte::Perform for Performer<'_, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::iter;
 
     /// A captured DCS dispatch: (intermediates, action, params, payload).
     type DcsRecord = (Vec<u8>, u8, Vec<Vec<u16>>, Vec<u8>);
@@ -449,7 +451,7 @@ mod tests {
         // truncated, not grown unbounded, and still dispatch exactly once.
         const DCS_CAP: usize = 4 * 1024 * 1024;
         let mut input = Vec::from(&b"\x1bP+q"[..]);
-        input.extend(std::iter::repeat_n(b'a', DCS_CAP + 100));
+        input.extend(iter::repeat_n(b'a', DCS_CAP + 100));
         input.extend_from_slice(b"\x1b\\");
         let s = drive(&input);
         assert_eq!(s.dcs.len(), 1, "one DCS dispatched");
@@ -517,7 +519,7 @@ mod tests {
         let payload_size: usize = 1_200_000;
         let mut input = Vec::with_capacity(payload_size + 8);
         input.extend_from_slice(b"\x1b_G");
-        input.extend(std::iter::repeat_n(b'A', payload_size));
+        input.extend(iter::repeat_n(b'A', payload_size));
         input.extend_from_slice(b"\x1b\\");
         let s = drive(&input);
         assert_eq!(s.graphics.len(), 1, "graphics APC must be captured");

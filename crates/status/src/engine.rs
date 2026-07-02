@@ -1,4 +1,4 @@
-use crate::widget::{StyledText, Widget};
+use crate::widget::{Segment, StyledText, Widget};
 use crate::widgets::{
     AttachedClientsWidget, BatteryWidget, CpuLoadWidget, CwdWidget, GitBranchWidget,
     HostnameWidget, MemoryWidget, PrefixIndicatorWidget, SeparatorWidget, SessionWidget,
@@ -8,9 +8,13 @@ use crate::resolve_style;
 use crate::GlyphSet;
 use plexy_glass_config::{PaletteConfig, StatusConfig, WidgetSpec};
 use smol_str::SmolStr;
+use std::future::Future;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
+use tokio::task::JoinHandle;
+use tokio::time;
 
 #[derive(Debug, Clone)]
 pub struct WindowSummary {
@@ -209,15 +213,15 @@ impl StatusEngine {
     /// be aborted by the owner on session shutdown.
     pub fn spawn_tick_task<F, Fut>(
         &self,
-        notify: std::sync::Arc<tokio::sync::Notify>,
+        notify: Arc<Notify>,
         snapshot_ctx: F,
-    ) -> tokio::task::JoinHandle<()>
+    ) -> JoinHandle<()>
     where
         F: Fn() -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = SnapshotCtx> + Send,
+        Fut: Future<Output = SnapshotCtx> + Send,
     {
         let inner = Arc::clone(&self.inner);
-        let snapshot_ctx = std::sync::Arc::new(snapshot_ctx);
+        let snapshot_ctx = Arc::new(snapshot_ctx);
         tokio::spawn(async move {
             loop {
                 // Awaited (not a blocking call): the snapshot closure may take
@@ -229,11 +233,11 @@ impl StatusEngine {
                 notify.notify_one();
                 match next_deadline {
                     Some(deadline) => {
-                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                        time::sleep_until(time::Instant::from_std(deadline)).await;
                     }
                     None => {
                         // No interval-driven widgets at all, so we sleep on the default refresh.
-                        tokio::time::sleep(inner.refresh()).await;
+                        time::sleep(inner.refresh()).await;
                     }
                 }
             }
@@ -315,14 +319,14 @@ impl EngineInner {
 
 #[derive(Debug, Clone)]
 pub struct SegmentSnapshot {
-    pub left: Vec<Vec<crate::widget::Segment>>,
-    pub middle: Vec<Vec<crate::widget::Segment>>,
-    pub right: Vec<Vec<crate::widget::Segment>>,
+    pub left: Vec<Vec<Segment>>,
+    pub middle: Vec<Vec<Segment>>,
+    pub right: Vec<Vec<Segment>>,
 }
 
 impl SegmentSnapshot {
     /// Iterate every segment across all three zones in paint order.
-    pub fn iter_segments(&self) -> impl Iterator<Item = &crate::widget::Segment> {
+    pub fn iter_segments(&self) -> impl Iterator<Item = &Segment> {
         self.left
             .iter()
             .chain(self.middle.iter())
@@ -375,7 +379,7 @@ pub enum ClickAction {
 /// translates to viewport-absolute columns when it paints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusHit {
-    pub col_range: std::ops::Range<u16>,
+    pub col_range: Range<u16>,
     pub action: ClickAction,
 }
 
@@ -405,14 +409,14 @@ mod tests {
         // often (the default right cluster has CpuLoad, which carries one).
         for w in &mut cfg.status.right {
             if let plexy_glass_config::WidgetSpec::CpuLoad { interval, .. } = w {
-                *interval = Some(std::time::Duration::from_millis(100));
+                *interval = Some(Duration::from_millis(100));
             }
         }
         let engine = StatusEngine::new(&cfg.status, &cfg.palette, &GlyphSet::UNICODE);
-        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
-        let counter = std::sync::Arc::new(AtomicUsize::new(0));
-        let counter_inc = std::sync::Arc::clone(&counter);
-        let n2 = std::sync::Arc::clone(&notify);
+        let notify = Arc::new(Notify::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_inc = Arc::clone(&counter);
+        let n2 = Arc::clone(&notify);
         tokio::spawn(async move {
             for _ in 0..10 {
                 n2.notified().await;
@@ -433,7 +437,7 @@ mod tests {
             }
         };
         let handle = engine.spawn_tick_task(notify, snapshot_ctx);
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        time::sleep(Duration::from_millis(600)).await;
         handle.abort();
         assert!(
             counter.load(Ordering::SeqCst) >= 3,

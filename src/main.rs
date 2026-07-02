@@ -1,3 +1,5 @@
+use std::process;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -144,10 +146,10 @@ async fn main() -> anyhow::Result<()> {
         Subcommands::Cmd { name, lines } => {
             match plexy_glass_client::client_run_commands(name, lines).await {
                 Ok(true) => {}
-                Ok(false) => std::process::exit(1),
+                Ok(false) => process::exit(1),
                 Err(e) => {
                     eprintln!("plexy-glass: {e}");
-                    std::process::exit(1);
+                    process::exit(1);
                 }
             }
         }
@@ -158,10 +160,10 @@ async fn main() -> anyhow::Result<()> {
             }
             match plexy_glass_client::client_send_input(name, bytes).await {
                 Ok(true) => {}
-                Ok(false) => std::process::exit(1),
+                Ok(false) => process::exit(1),
                 Err(e) => {
                     eprintln!("plexy-glass: {e}");
-                    std::process::exit(1);
+                    process::exit(1);
                 }
             }
         }
@@ -173,10 +175,10 @@ async fn main() -> anyhow::Result<()> {
             };
             match result {
                 Ok(true) => {}
-                Ok(false) => std::process::exit(1),
+                Ok(false) => process::exit(1),
                 Err(e) => {
                     eprintln!("plexy-glass: {e}");
-                    std::process::exit(1);
+                    process::exit(1);
                 }
             }
         }
@@ -185,16 +187,16 @@ async fn main() -> anyhow::Result<()> {
                 // 0 falls through to the normal `Ok(())` return; any other code
                 // (command exit passthrough, 124 timeout, 1 refusal) exits now.
                 Ok(0) => {}
-                Ok(code) => std::process::exit(code),
+                Ok(code) => process::exit(code),
                 Err(e) => {
                     eprintln!("plexy-glass: {e}");
-                    std::process::exit(1);
+                    process::exit(1);
                 }
             }
         }
         Subcommands::ShellIntegration { shell } => if let Some(snippet) = plexy_glass_client::shell_integration_snippet(&shell) { print!("{snippet}") } else {
             eprintln!("plexy-glass: unknown shell {shell:?} (try bash, zsh, fish, or nu)");
-            std::process::exit(1);
+            process::exit(1);
         },
         Subcommands::Daemon(args) => {
             plexy_glass_daemon::run(args).await?;

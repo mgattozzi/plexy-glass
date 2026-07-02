@@ -10,6 +10,8 @@
 //! `NotPaste` so the caller can feed them through other parsers
 //! (mouse, key).
 
+use std::mem;
+
 #[derive(Debug, Clone)]
 pub enum PasteParseOutput {
     /// Byte was consumed as part of an in-progress sequence or paste content.
@@ -119,7 +121,7 @@ impl PasteParser {
                 if byte == b'~' {
                     // Closer complete, emit the paste.
                     self.held.clear();
-                    let buffer = std::mem::take(&mut self.buffer);
+                    let buffer = mem::take(&mut self.buffer);
                     self.state = State::Idle;
                     self.truncated = false;
                     PasteParseOutput::Paste(buffer)
@@ -162,7 +164,7 @@ impl PasteParser {
         if !self.is_pending_open() {
             return None;
         }
-        let out = std::mem::take(&mut self.held);
+        let out = mem::take(&mut self.held);
         self.state = State::Idle;
         Some(PasteParseOutput::NotPaste(out))
     }
@@ -196,14 +198,14 @@ impl PasteParser {
     /// Bail from a partial open sequence: emit held + current byte as
     /// `NotPaste` and return to `Idle`.
     fn bail_open(&mut self, byte: u8) -> PasteParseOutput {
-        let mut out = std::mem::take(&mut self.held);
+        let mut out = mem::take(&mut self.held);
         out.push(byte);
         self.state = State::Idle;
         PasteParseOutput::NotPaste(out)
     }
 
     fn flush_held_into_buffer(&mut self) {
-        for b in std::mem::take(&mut self.held) {
+        for b in mem::take(&mut self.held) {
             self.push_content(b);
         }
     }

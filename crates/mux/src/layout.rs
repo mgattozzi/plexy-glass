@@ -10,6 +10,9 @@ use crate::{
     rect::Rect,
 };
 use thiserror::Error;
+use crate::direction::Direction;
+use crate::preset::{self, LayoutPreset};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LayoutNode {
@@ -132,16 +135,16 @@ impl LayoutTree {
     /// Replace the tree with `preset` arranged over `panes` (order matters:
     /// for the main-* presets the FIRST pane takes the main slot). Empty
     /// `panes` is a no-op; a single pane becomes a bare Leaf.
-    pub fn apply_preset(&mut self, preset: crate::preset::LayoutPreset, panes: &[PaneId]) {
+    pub fn apply_preset(&mut self, preset: LayoutPreset, panes: &[PaneId]) {
         if panes.is_empty() {
             return;
         }
         debug_assert!(
-            panes.iter().collect::<std::collections::HashSet<_>>().len() == panes.len(),
+            panes.iter().collect::<HashSet<_>>().len() == panes.len(),
             "apply_preset requires unique PaneIds (duplicates would violate the \
              one-leaf-per-pane tree invariant)"
         );
-        self.root = Some(crate::preset::build(preset, panes));
+        self.root = Some(preset::build(preset, panes));
     }
 
     /// Overwrite split ratios in preorder (root, then the first subtree, then
@@ -178,9 +181,8 @@ impl LayoutTree {
         &self,
         pane: PaneId,
         viewport: Rect,
-        dir: crate::direction::Direction,
+        dir: Direction,
     ) -> Option<PaneId> {
-        use crate::direction::Direction;
         let src = self.rect_of(pane, viewport)?;
         let panes: Vec<(PaneId, Rect)> = self
             .panes()
@@ -794,8 +796,6 @@ mod tests {
         assert_eq!(t.close(PaneId(99)), CloseOutcome::NotPresent);
         assert_eq!(t.panes(), vec![PaneId(0)]);
     }
-
-    use crate::direction::Direction;
 
     fn build_two_pane_vertical() -> LayoutTree {
         let mut t = LayoutTree::single(PaneId(0));

@@ -1,5 +1,7 @@
 //! Mouse event types, ANSI-SGR parser, and child-forwarding encoder.
 
+use std::mem;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseButton {
     Left,
@@ -181,7 +183,7 @@ impl MouseParser {
     /// parser, so flushing the key parser alone would never see it. Returns the
     /// held bytes (empty when idle).
     pub fn flush(&mut self) -> Vec<u8> {
-        let bytes = std::mem::take(&mut self.held);
+        let bytes = mem::take(&mut self.held);
         self.reset_state();
         bytes
     }
@@ -195,7 +197,7 @@ impl MouseParser {
     /// Drain held into `BailedBytes` and reset state. Use when the current
     /// byte is already in `held`.
     fn bail_already_pushed(&mut self) -> MouseParseAction {
-        let bytes = std::mem::take(&mut self.held);
+        let bytes = mem::take(&mut self.held);
         self.reset_state();
         MouseParseAction::BailedBytes(bytes)
     }

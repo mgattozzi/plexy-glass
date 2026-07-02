@@ -1,7 +1,9 @@
 use super::{Severity, WindowManager};
 use crate::{error::DaemonError, window::Window};
+use plexy_glass_mux::blocks;
 use plexy_glass_mux::{Command, SplitDir, WindowId};
 use std::sync::Arc;
+use std::time::Duration;
 
 impl WindowManager {
     pub fn handle_command(&mut self, cmd: Command) -> Result<(), DaemonError> {
@@ -253,7 +255,7 @@ impl WindowManager {
                 );
             }
             Command::SetMonitorSilence(secs) => {
-                let threshold = secs.map(std::time::Duration::from_secs);
+                let threshold = secs.map(Duration::from_secs);
                 self.active_window_mut().set_monitor_silence(threshold);
                 self.set_status_message(
                     match secs {
@@ -369,11 +371,11 @@ impl WindowManager {
                     // top line and the offset that lands it exactly at the top.
                     let target = pane.with_screen(|s| {
                         let rows = s.active.num_rows();
-                        let top = plexy_glass_mux::blocks::scroll_line_at(s, rows, offset, 0);
+                        let top = blocks::scroll_line_at(s, rows, offset, 0);
                         plexy_glass_mux::prev_prompt_line(s, top).map(|t| {
                             (
-                                plexy_glass_mux::blocks::scroll_offset_for_top(s, rows, t),
-                                plexy_glass_mux::blocks::max_scroll_offset(s, rows),
+                                blocks::scroll_offset_for_top(s, rows, t),
+                                blocks::max_scroll_offset(s, rows),
                             )
                         })
                     });
@@ -388,12 +390,12 @@ impl WindowManager {
                     let offset = pane.scroll_offset();
                     let (off, max) = pane.with_screen(|s| {
                         let rows = s.active.num_rows();
-                        let top = plexy_glass_mux::blocks::scroll_line_at(s, rows, offset, 0);
+                        let top = blocks::scroll_line_at(s, rows, offset, 0);
                         // Past the newest prompt, or one already in the live view
                         // (offset_for_top saturates to 0), snaps to live.
                         let off = plexy_glass_mux::next_prompt_line(s, top)
-                            .map_or(0, |t| plexy_glass_mux::blocks::scroll_offset_for_top(s, rows, t));
-                        (off, plexy_glass_mux::blocks::max_scroll_offset(s, rows))
+                            .map_or(0, |t| blocks::scroll_offset_for_top(s, rows, t));
+                        (off, blocks::max_scroll_offset(s, rows))
                     });
                     pane.set_scroll_offset(off, max);
                 }

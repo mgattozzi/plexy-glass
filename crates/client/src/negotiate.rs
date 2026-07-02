@@ -4,6 +4,7 @@
 //! inverse.
 
 use plexy_glass_protocol::{GraphicsCaps, NegotiatedKbd};
+use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::{Duration, Instant};
 
@@ -252,7 +253,7 @@ pub fn read_probe_reply(fd: BorrowedFd<'_>, budget: Duration) -> Vec<u8> {
             // A signal (EINTR) is not a real error, so retry within the remaining
             // deadline rather than mis-classifying the terminal as Legacy. Any
             // other poll error ends the probe.
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
             break;
@@ -265,7 +266,7 @@ pub fn read_probe_reply(fd: BorrowedFd<'_>, budget: Duration) -> Vec<u8> {
         // We never close `raw` here, so the borrow outlives the read.
         let n = unsafe { libc::read(raw, chunk.as_mut_ptr().cast(), chunk.len()) };
         if n < 0 {
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
             break; // other read error

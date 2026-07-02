@@ -5,7 +5,10 @@
 //! Without this, daemon panics are completely invisible. See the
 //! terminal-trust-hardening spec, Phase 1.
 
+use std::any::Any;
+use std::panic;
 use std::sync::Once;
+use std::thread;
 
 static INSTALLED: Once = Once::new();
 
@@ -17,7 +20,7 @@ fn format_panic(thread: &str, location: Option<String>, message: &str) -> String
 }
 
 /// Extract the human string from a panic payload (`&str` or `String`).
-fn payload_str(payload: &(dyn std::any::Any + Send)) -> &str {
+fn payload_str(payload: &(dyn Any + Send)) -> &str {
     if let Some(s) = payload.downcast_ref::<&str>() {
         s
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -31,9 +34,9 @@ fn payload_str(payload: &(dyn std::any::Any + Send)) -> &str {
 /// hook so a foregrounded daemon still gets the default stderr message too.
 pub fn install_panic_logging() {
     INSTALLED.call_once(|| {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let thread = std::thread::current();
+        let previous = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            let thread = thread::current();
             let name = thread.name().unwrap_or("unnamed").to_string();
             let location = info.location().map(|l| format!("{}:{}", l.file(), l.line()));
             let message = payload_str(info.payload());

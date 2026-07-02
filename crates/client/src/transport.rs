@@ -1,9 +1,14 @@
 use crate::error::ClientError;
+use nix::libc;
+use std::env;
+use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
+use tokio::time;
 use tracing::{debug, info};
 
 /// Connect to the daemon socket without spawning one if absent.
@@ -32,7 +37,7 @@ pub async fn connect_or_spawn(socket: &Path) -> Result<UnixStream, ClientError> 
 
     spawn_daemon()?;
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(2);
     let mut delay = Duration::from_millis(20);
     loop {
         match UnixStream::connect(socket).await {
@@ -40,11 +45,11 @@ pub async fn connect_or_spawn(socket: &Path) -> Result<UnixStream, ClientError> 
                 info!("connected to spawned daemon");
                 return Ok(s);
             }
-            Err(e) if std::time::Instant::now() >= deadline => {
+            Err(e) if Instant::now() >= deadline => {
                 return Err(ClientError::Connect { path: socket.to_path_buf(), source: e });
             }
             Err(_) => {
-                tokio::time::sleep(delay).await;
+                time::sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_millis(200));
             }
         }
@@ -52,28 +57,28 @@ pub async fn connect_or_spawn(socket: &Path) -> Result<UnixStream, ClientError> 
 }
 
 fn spawn_daemon() -> Result<(), ClientError> {
-    let exe = std::env::current_exe().map_err(ClientError::Io)?;
-    let mut cmd = std::process::Command::new(exe);
+    let exe = env::current_exe().map_err(ClientError::Io)?;
+    let mut cmd = Command::new(exe);
     let stderr = plexy_glass_daemon::RuntimePaths::for_current_user()
         .ok()
         .and_then(|p| {
-            std::fs::OpenOptions::new()
+            OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&p.log_file)
                 .ok()
-        }).map_or_else(std::process::Stdio::null, std::process::Stdio::from);
+        }).map_or_else(Stdio::null, Stdio::from);
     cmd.arg("daemon")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
         .stderr(stderr);
     // SAFETY: setsid is async-signal-safe and called only in the child between
     // fork and exec. We do not touch any shared state from the closure.
     unsafe {
         cmd.pre_exec(|| {
             // Detach: new session so we are not in the client's pgrp.
-            if nix::libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
             }
             Ok(())
         });

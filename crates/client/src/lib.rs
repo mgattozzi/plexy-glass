@@ -15,11 +15,18 @@ pub use pump::{handshake_spawn, pump};
 pub use transport::{connect_only, connect_or_spawn, default_socket_path};
 pub use tty::{HostTty, current_size};
 
+use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
     ClientHello, ClientMsg, Codec, PROTOCOL_VERSION, ServerMsg, SpawnSpec, client_handshake,
     client_handshake_with,
 };
-use std::os::fd::AsFd;
+use std::env;
+use std::io;
+use std::os::fd::{AsFd, OwnedFd};
+use std::process;
+use std::time::Duration;
+use tokio::io as tokio_io;
+use tokio::signal::unix;
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -37,35 +44,35 @@ pub async fn run(
 ) -> Result<(), ClientError> {
     let socket = default_socket_path()?;
     let stream = connect_or_spawn(&socket).await?;
-    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (mut reader, mut writer) = tokio_io::split(stream);
 
-    let stdin = tokio::io::stdin();
+    let stdin = tokio_io::stdin();
     let stdin_fd = stdin.as_fd();
     let mut tty_guard = HostTty::enter_raw(stdin_fd)?;
 
     // --- Negotiation phase (runs in raw mode, before the dumb pump) ---
     use std::io::Write as _;
-    let mut stdout = std::io::stdout();
+    let mut stdout = io::stdout();
     // Probe the outer terminal for Kitty / XTVERSION support.
     let _ = stdout.write_all(negotiate::PROBE);
     let _ = stdout.flush();
     // Read whatever the terminal replies within a short window. We read raw from
     // the fd (the async stdin reader is not yet spawned), so a non-answering
     // terminal can't hang us.
-    let probe_reply = negotiate::read_probe_reply(stdin_fd, std::time::Duration::from_millis(120));
+    let probe_reply = negotiate::read_probe_reply(stdin_fd, Duration::from_millis(120));
     let kbd = negotiate::classify(&probe_reply);
     // `PLEXY_FORCE_KITTY` forces Kitty graphics caps on regardless of the probe,
     // a test hook so the e2e harness (whose PTY can't answer the graphics
     // query) can exercise the full image render path. No effect unless set.
-    let mut graphics = if std::env::var_os("PLEXY_FORCE_KITTY").is_some() {
+    let mut graphics = if env::var_os("PLEXY_FORCE_KITTY").is_some() {
         plexy_glass_protocol::GraphicsCaps { kitty: true, sixel: false, iterm2: false }
     } else {
         negotiate::classify_graphics(&probe_reply)
     };
     // iTerm2 isn't probeable via escapes, so detect it from the environment (or a
     // `PLEXY_FORCE_ITERM2` test hook) and OR it into the negotiated caps.
-    if std::env::var_os("PLEXY_FORCE_ITERM2").is_some()
-        || negotiate::term_program_supports_iterm2(std::env::var("TERM_PROGRAM").ok().as_deref())
+    if env::var_os("PLEXY_FORCE_ITERM2").is_some()
+        || negotiate::term_program_supports_iterm2(env::var("TERM_PROGRAM").ok().as_deref())
     {
         graphics.iterm2 = true;
     }
@@ -91,7 +98,7 @@ pub async fn run(
     tty::set_enabled_caps(caps);
     tty::install_emergency_restore(stdin_fd, tty_guard.original_termios());
 
-    let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
+    let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
     let hello = ClientHello { version: PROTOCOL_VERSION, term, kbd, graphics };
     let server_hello = client_handshake_with(&mut reader, &mut writer, hello).await?;
     info!(daemon_pid = server_hello.daemon_pid, ?kbd, "connected to daemon");
@@ -115,8 +122,8 @@ pub async fn run(
     let owned_fd = stdin.as_fd().try_clone_to_owned().map_err(ClientError::Io)?;
     spawn_sigwinch_task(resize_tx, owned_fd);
 
-    let stdout = tokio::io::stdout();
-    let stdin_for_pump = tokio::io::stdin();
+    let stdout = tokio_io::stdout();
+    let stdin_for_pump = tokio_io::stdin();
     // Once `pump` has read stdin, `tokio::io::stdin()` has spawned an internal
     // blocking read thread that never finishes (the PTY stdin has no further
     // input and is not closed), so dropping the runtime would HANG waiting for
@@ -131,7 +138,7 @@ pub async fn run(
             info!(error = %e, "session ended with error");
             let _ = tty_guard.restore();
             eprintln!("plexy-glass: {e}");
-            std::process::exit(1);
+            process::exit(1);
         }
     };
     info!(?exit_status, "session ended");
@@ -140,7 +147,7 @@ pub async fn run(
         plexy_glass_protocol::ExitStatus::Code(c) => c,
         _ => 0,
     };
-    std::process::exit(code);
+    process::exit(code);
 }
 
 /// How the request/reply scaffold opens its connection.
@@ -160,18 +167,18 @@ async fn request_reply(connect: Connect, msg: ClientMsg) -> Result<ServerMsg, Cl
         Connect::Spawn => connect_or_spawn(&socket).await?,
         Connect::Only => connect_only(&socket).await?,
     };
-    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (mut reader, mut writer) = tokio_io::split(stream);
     client_handshake(&mut reader, &mut writer).await?;
 
     let payload = postcard::to_allocvec(&msg)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
+        .map_err(|e| CodecError::Encode(e.to_string()))?;
     Codec::write_frame(&mut writer, &payload).await?;
 
     let frame = Codec::read_frame(&mut reader)
         .await?
-        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before reply")))?;
+        .ok_or_else(|| ClientError::Io(io::Error::other("daemon closed before reply")))?;
     postcard::from_bytes(&frame)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()).into())
+        .map_err(|e| CodecError::Decode(e.to_string()).into())
 }
 
 /// Send `ReloadConfig` to the daemon and print the result.
@@ -187,7 +194,7 @@ pub async fn client_reload_config() -> Result<(), ClientError> {
         // message is carried, not swallowed to stderr-with-exit-0.
         ServerMsg::ConfigReloaded { error: Some(e) } => Err(ClientError::Reload(e)),
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(std::io::Error::other(format!(
+        other => Err(ClientError::Io(io::Error::other(format!(
             "unexpected reply from daemon: {other:?}"
         )))),
     }
@@ -213,7 +220,7 @@ pub async fn client_kill_session(name: String) -> Result<(), ClientError> {
             Ok(())
         }
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(std::io::Error::other(format!(
+        other => Err(ClientError::Io(io::Error::other(format!(
             "unexpected reply from daemon: {other:?}"
         )))),
     }
@@ -244,7 +251,7 @@ async fn list_sessions_inline() -> Result<Vec<plexy_glass_protocol::SessionEntry
     match reply {
         ServerMsg::SessionList { entries } => Ok(entries),
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(std::io::Error::other(format!(
+        other => Err(ClientError::Io(io::Error::other(format!(
             "unexpected reply from daemon: {other:?}"
         )))),
     }
@@ -292,7 +299,7 @@ pub async fn client_run_commands(
             }
             ServerMsg::Error(e) => return Err(ClientError::DaemonError(e)),
             other => {
-                return Err(ClientError::Io(std::io::Error::other(format!(
+                return Err(ClientError::Io(io::Error::other(format!(
                     "unexpected reply from daemon: {other:?}"
                 ))));
             }
@@ -329,7 +336,7 @@ pub async fn client_send_input(
             Ok(false)
         }
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(std::io::Error::other(format!(
+        other => Err(ClientError::Io(io::Error::other(format!(
             "unexpected reply from daemon: {other:?}"
         )))),
     }
@@ -364,7 +371,7 @@ pub async fn client_capture(name: Option<String>, last_command: bool) -> Result<
             Ok(false)
         }
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(std::io::Error::other(format!(
+        other => Err(ClientError::Io(io::Error::other(format!(
             "unexpected reply from daemon: {other:?}"
         )))),
     }
@@ -403,7 +410,7 @@ pub async fn client_capture_block(name: Option<String>) -> Result<bool, ClientEr
             Ok(false)
         }
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(std::io::Error::other(format!(
+        other => Err(ClientError::Io(io::Error::other(format!(
             "unexpected reply from daemon: {other:?}"
         )))),
     }
@@ -472,7 +479,7 @@ pub async fn client_exec(
             Ok(1)
         }
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(std::io::Error::other(format!(
+        other => Err(ClientError::Io(io::Error::other(format!(
             "unexpected reply from daemon: {other:?}"
         )))),
     }
@@ -486,14 +493,14 @@ fn exec_timeout_ms(timeout_secs: Option<u64>) -> Option<u64> {
 }
 
 fn default_spawn_spec() -> SpawnSpec {
-    let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let program = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     SpawnSpec { program, args: vec![], env: vec![], cwd: None }
 }
 
-fn spawn_sigwinch_task(tx: mpsc::Sender<plexy_glass_protocol::PtySize>, fd: std::os::fd::OwnedFd) {
+fn spawn_sigwinch_task(tx: mpsc::Sender<plexy_glass_protocol::PtySize>, fd: OwnedFd) {
     tokio::spawn(async move {
-        let Ok(mut sig) = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::window_change(),
+        let Ok(mut sig) = unix::signal(
+            unix::SignalKind::window_change(),
         ) else {
             return;
         };

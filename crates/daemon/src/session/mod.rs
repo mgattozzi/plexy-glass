@@ -6,16 +6,20 @@ mod restore;
 use crate::{
     LockExt,
     error::DaemonError,
-    window_manager::{Severity, WindowManager},
+    osc_actions,
+    pane::Pane,
+    pipe,
+    window_manager::{STATUS_TTL, Severity, WindowManager},
 };
 use coordinator::render_coordinator;
 use plexy_glass_mux::{PaneId, VirtualScreen, WindowId};
 use plexy_glass_protocol::{NegotiatedKbd, ProtocolError, PtySize, SessionEntry, SpawnSpec};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
-use std::time::SystemTime;
+use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::time::{Duration, SystemTime};
 use tokio::sync::{mpsc, watch, Mutex, Notify};
-use tokio::task::JoinHandle;
+use tokio::task::{self, JoinHandle};
+use tokio::time;
 
 pub struct ClientHandle {
     pub client_id: u64,
@@ -54,7 +58,7 @@ pub struct Session {
     pub death_tx: mpsc::Sender<PaneId>,
     pub closing: AtomicBool,
     next_client_id: AtomicU64,
-    coordinator_handle: StdMutex<Option<tokio::task::AbortHandle>>,
+    coordinator_handle: StdMutex<Option<task::AbortHandle>>,
     status_engine_slot: StdMutex<Arc<plexy_glass_status::EngineInner>>,
     status_tick_handle: StdMutex<Option<JoinHandle<()>>>,
     config_slot: StdMutex<Arc<plexy_glass_config::Config>>,
@@ -62,7 +66,7 @@ pub struct Session {
     /// on death_rx.recv()), so teardown must abort it explicitly, since Drop
     /// can never run while it holds the Arc. The task's `JoinHandle` is owned
     /// by a watcher (`supervise_core`) that escalates to teardown on panic.
-    death_handle: StdMutex<Option<tokio::task::AbortHandle>>,
+    death_handle: StdMutex<Option<task::AbortHandle>>,
     /// One-shot wake that repaints an expired status-line message away. Aborted
     /// and replaced each time a new message is set, and aborted on `Drop`.
     status_msg_handle: StdMutex<Option<JoinHandle<()>>>,
@@ -482,7 +486,7 @@ impl Session {
         // never the layout panes, sync-panes included); otherwise sync-panes
         // fans out to every layout pane; otherwise the single input target
         // (= the active pane; see `WindowManager::input_target_pane`).
-        let targets: Vec<crate::pane::Pane> = {
+        let targets: Vec<Pane> = {
             let manager = self.window_manager.lock().await;
             if !manager.has_popup() && manager.active_window().sync_input {
                 let win = manager.active_window();
@@ -541,7 +545,7 @@ impl Session {
         // `\e[?996n` query answers the real preference; collect the ?2031
         // subscribers, then send the unsolicited notification off-lock (the
         // send awaits a bounded channel, see `handle_key_event`).
-        let subscribers: Vec<crate::pane::Pane> = {
+        let subscribers: Vec<Pane> = {
             let manager = self.window_manager.lock().await;
             let mut subs = Vec::new();
             for win in manager.windows() {
@@ -662,7 +666,7 @@ impl Session {
         // window-manager lock across that await stalls the whole session behind
         // one pane whose child stopped draining its PTY. Mirrors
         // handle_input_bytes / handle_popup_key_event.
-        let sends: Vec<(crate::pane::Pane, Vec<u8>)> = {
+        let sends: Vec<(Pane, Vec<u8>)> = {
             let manager = self.window_manager.lock().await;
             let win = manager.active_window();
             if win.sync_input {
@@ -836,7 +840,7 @@ impl Session {
                 let msg = {
                     let m = self.window_manager.lock().await;
                     let Some(pane) = m.input_target_pane() else {
-                        return Ok(Some(crate::pipe::MSG_NO_PIPE.to_string()));
+                        return Ok(Some(pipe::MSG_NO_PIPE.to_string()));
                     };
                     match cmd {
                         Some(line) => {
@@ -845,7 +849,7 @@ impl Session {
                             // ACTIVE pane's), which silently diverges
                             // whenever a popup owns input.
                             let cwd = m.pane_cwd(pane);
-                            crate::pipe::start_pipe(
+                            pipe::start_pipe(
                                 pane,
                                 Arc::downgrade(self),
                                 &shell,
@@ -855,10 +859,10 @@ impl Session {
                             format!("pipe-pane → {line}")
                         }
                         None => {
-                            if pane.stop_pipe(crate::pipe::PipeCloseReason::Stopped) {
-                                crate::pipe::MSG_STOPPED.to_string()
+                            if pane.stop_pipe(pipe::PipeCloseReason::Stopped) {
+                                pipe::MSG_STOPPED.to_string()
                             } else {
-                                crate::pipe::MSG_NO_PIPE.to_string()
+                                pipe::MSG_NO_PIPE.to_string()
                             }
                         }
                     }
@@ -932,8 +936,8 @@ impl Session {
         let handle = tokio::spawn(async move {
             // Sleep just past the TTL so the message is definitely expired when
             // the wake-driven recompose runs and clears it.
-            tokio::time::sleep(
-                crate::window_manager::STATUS_TTL + std::time::Duration::from_millis(50),
+            time::sleep(
+                STATUS_TTL + Duration::from_millis(50),
             )
             .await;
             if let Some(s) = weak.upgrade() {
@@ -991,8 +995,8 @@ impl Session {
         // message on re-lock. Mirrors the release→await→re-lock pattern the
         // connection.rs copy-mode / block-mode yank sites use.
         if let Some(text) = yanked {
-            let wrote = crate::osc_actions::write_clipboard(text.as_bytes()).await;
-            let (msg, sev) = crate::osc_actions::yank_status(wrote, &text, false);
+            let wrote = osc_actions::write_clipboard(text.as_bytes()).await;
+            let (msg, sev) = osc_actions::yank_status(wrote, &text, false);
             {
                 let mut manager = self.window_manager.lock().await;
                 manager.set_status_message(msg, sev);
@@ -1177,7 +1181,7 @@ fn reencode_input(
 /// Legacy pane is down-converted rather than forwarded verbatim. The decision
 /// itself lives in the pure `reencode_input` helper (unit-tested directly).
 fn encode_for_pane(
-    pane: &crate::pane::Pane,
+    pane: &Pane,
     event: &plexy_glass_mux::KeyEvent,
     raw_bytes: &[u8],
     client_kbd: NegotiatedKbd,
@@ -1199,8 +1203,8 @@ fn encode_for_pane(
 /// endpoints. See the terminal-trust-hardening spec, Phase 1.
 async fn supervise_core(
     name: &'static str,
-    weak: std::sync::Weak<Session>,
-    handle: tokio::task::JoinHandle<()>,
+    weak: Weak<Session>,
+    handle: task::JoinHandle<()>,
 ) {
     match handle.await {
         Ok(()) => {} // clean end (closing / empty); nothing to do
@@ -1246,9 +1250,9 @@ impl Drop for Session {
 /// session produces no per-tick render churn. Exits when the session is dropped
 /// or `closing`; the handle is also aborted on the last `monitor-silence`
 /// disarm (`reconcile_silence_task`) and on teardown.
-async fn silence_tick_loop(weak: std::sync::Weak<Session>) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+async fn silence_tick_loop(weak: Weak<Session>) {
+    let mut interval = time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
         let Some(session) = weak.upgrade() else { return };
@@ -1338,6 +1342,17 @@ mod tests {
     use super::*;
     use plexy_glass_protocol::SpawnSpec;
     use std::sync::atomic::Ordering;
+    use crate::renderer::Renderer;
+    use crate::test_env;
+    use nix::sys::signal;
+    use nix::unistd::Pid;
+    use std::env;
+    use std::fs;
+    use std::path::Path;
+    use std::time::Instant;
+    use tokio::io;
+    use tokio::net::UnixStream;
+    use tokio::sync::broadcast;
 
     fn spec() -> SpawnSpec {
         SpawnSpec {
@@ -1358,7 +1373,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_construct_succeeds() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).expect("construct session");
         assert_eq!(s.name(), "main");
         assert!(!s.closing.load(Ordering::SeqCst));
@@ -1366,12 +1381,12 @@ mod tests {
 
     #[tokio::test]
     async fn supervise_core_escalates_to_teardown_on_panic() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let session =
             Session::new("s".into(), spec(), size(), cfg()).expect("construct session");
         // A task that panics immediately.
         let h = tokio::spawn(async { panic!("core task died") });
-        supervise_core("test-core", std::sync::Arc::downgrade(&session), h).await;
+        supervise_core("test-core", Arc::downgrade(&session), h).await;
         assert!(
             session.closing.load(Ordering::SeqCst),
             "a panicked core task must escalate to begin_close (closing=true)"
@@ -1380,7 +1395,7 @@ mod tests {
 
     #[tokio::test]
     async fn silence_tick_task_is_armed_only() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         use plexy_glass_mux::Command;
         let s = Session::new("sil".into(), spec(), size(), cfg()).unwrap();
         // No silence monitors → no tick task running.
@@ -1404,7 +1419,7 @@ mod tests {
 
     #[tokio::test]
     async fn organic_death_of_last_silence_window_disarms_tick() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         use plexy_glass_mux::Command;
         let s = Session::new("sild".into(), spec(), size(), cfg()).unwrap();
         // A second window so killing the monitored one doesn't end the session.
@@ -1421,9 +1436,9 @@ mod tests {
         // Organic death of W1's last pane (Ctrl+D): the death consumer removes
         // the window and must reconcile the now-pointless silence tick.
         s.death_tx.send(w1_pane).await.unwrap();
-        let disarmed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let disarmed = time::timeout(Duration::from_secs(2), async {
             while s.silence_tick_handle.lock().unwrap().is_some() {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await;
@@ -1435,7 +1450,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_prompt_command_applies_effects() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         use plexy_glass_mux::{Direction, PromptCommand};
         let s = Session::new("pc".into(), spec(), size(), cfg()).unwrap();
 
@@ -1479,7 +1494,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn prompt_popup_maps_to_open_and_close() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("t-popup-prompt".into(), spec(), size(), cfg()).unwrap();
         s.handle_prompt_command(plexy_glass_mux::PromptCommand::Popup(Some("sleep 600".into())))
             .await
@@ -1494,7 +1509,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn input_bytes_route_to_popup_when_open() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("t-popup-input".into(), spec(), size(), cfg()).unwrap();
         s.handle_command(plexy_glass_mux::Command::OpenPopup { command: Some("cat".into()) })
             .await
@@ -1506,10 +1521,10 @@ mod tests {
         s.handle_input_bytes(b"popup_gets_this\n", false).await.unwrap();
         // cat echoes what it reads; the bytes must surface on the POPUP pane.
         let mut seen: Vec<u8> = Vec::new();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        while tokio::time::Instant::now() < deadline {
+        let deadline = time::Instant::now() + Duration::from_secs(5);
+        while time::Instant::now() < deadline {
             if let Ok(Ok(chunk)) =
-                tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+                time::timeout(Duration::from_millis(200), rx.recv()).await
             {
                 seen.extend_from_slice(&chunk);
                 if seen.windows(15).any(|w| w == b"popup_gets_this") {
@@ -1527,7 +1542,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn focus_events_route_to_popup_when_open() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("t-popup-focus".into(), spec(), size(), cfg()).unwrap();
         s.handle_command(plexy_glass_mux::Command::OpenPopup { command: Some("cat".into()) })
             .await
@@ -1553,10 +1568,10 @@ mod tests {
                 || buf.windows(caret.len()).any(|w| w == caret)
         };
         let mut seen: Vec<u8> = Vec::new();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        while tokio::time::Instant::now() < deadline {
+        let deadline = time::Instant::now() + Duration::from_secs(5);
+        while time::Instant::now() < deadline {
             if let Ok(Ok(chunk)) =
-                tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+                time::timeout(Duration::from_millis(200), rx.recv()).await
             {
                 seen.extend_from_slice(&chunk);
                 if hit(&seen) {
@@ -1576,7 +1591,7 @@ mod tests {
     // scenario the tick task hits) must succeed and return real state.
     #[tokio::test(flavor = "multi_thread")]
     async fn build_snapshot_ctx_works_from_spawned_task() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("snapctx".into(), spec(), size(), cfg()).unwrap();
         let s2 = Arc::clone(&s);
         let ctx = tokio::spawn(async move { build_snapshot_ctx(&s2).await })
@@ -1588,7 +1603,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_snapshot_ctx_surfaces_window_alert_flags() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("snapalert".into(), spec(), size(), cfg()).unwrap();
         {
             // Add a second window and flag it (the WindowManager's sticky flags
@@ -1607,9 +1622,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_entry_reports_one_window_one_pane_zero_clients() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
-        let entry = tokio::task::spawn_blocking(move || s.list_entry()).await.unwrap();
+        let entry = task::spawn_blocking(move || s.list_entry()).await.unwrap();
         assert_eq!(entry.name, "main");
         assert_eq!(entry.windows, 1);
         assert_eq!(entry.panes, 1);
@@ -1618,7 +1633,7 @@ mod tests {
 
     #[tokio::test]
     async fn tree_snapshot_reports_windows_and_panes() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("snap".into(), spec(), size(), cfg()).unwrap();
         {
             // Split the first window so it has two panes, then add a window.
@@ -1645,7 +1660,7 @@ mod tests {
     #[tokio::test]
     async fn history_snapshot_enumerates_blocks_newest_first() {
         use plexy_glass_emulator::RowMark;
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("hist".into(), cat_spec(), size(), cfg()).unwrap();
         {
             let m = s.window_manager.lock().await;
@@ -1693,10 +1708,10 @@ mod tests {
         // One client reports real pixels, another reports 0 (no pixel support).
         // The aggregate pixel dims must come from the real reporter, not collapse
         // to 0, otherwise children couldn't scale graphics on the real terminal.
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("pxagg".into(), spec(), size(), cfg()).unwrap();
         let s2 = Arc::clone(&s);
-        tokio::task::spawn_blocking(move || {
+        task::spawn_blocking(move || {
             s2.register_client(
                 PtySize { rows: 24, cols: 80, pixel_width: 1600, pixel_height: 960 },
                 Arc::new(AtomicBool::new(false)),
@@ -1706,7 +1721,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let s2 = Arc::clone(&s);
-        tokio::task::spawn_blocking(move || {
+        task::spawn_blocking(move || {
             s2.register_client(
                 PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
                 Arc::new(AtomicBool::new(false)),
@@ -1716,17 +1731,17 @@ mod tests {
         .unwrap()
         .unwrap();
         let s2 = Arc::clone(&s);
-        let eff = tokio::task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+        let eff = task::spawn_blocking(move || s2.effective_size()).await.unwrap();
         assert_eq!((eff.pixel_width, eff.pixel_height), (1600, 960), "real pixels survive");
         assert_eq!((eff.rows, eff.cols), (24, 80));
     }
 
     #[tokio::test]
     async fn register_then_effective_size_matches_single_client() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         let s2 = Arc::clone(&s);
-        let h = tokio::task::spawn_blocking(move || {
+        let h = task::spawn_blocking(move || {
             s2.register_client(
                 PtySize { rows: 10, cols: 30, pixel_width: 0, pixel_height: 0 },
                 Arc::new(AtomicBool::new(false)),
@@ -1736,20 +1751,20 @@ mod tests {
         .unwrap()
         .unwrap();
         let s2 = Arc::clone(&s);
-        let eff = tokio::task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+        let eff = task::spawn_blocking(move || s2.effective_size()).await.unwrap();
         assert_eq!((eff.rows, eff.cols), (10, 30));
         let s2 = Arc::clone(&s);
         let cid = h.client_id;
-        tokio::task::spawn_blocking(move || s2.deregister_client(cid)).await.unwrap();
+        task::spawn_blocking(move || s2.deregister_client(cid)).await.unwrap();
     }
 
     #[tokio::test]
     async fn focus_aggregates_across_clients_any_focused() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         // Any-client-focused: the pane is focused iff at least one client is.
         let s = Session::new("focusagg".into(), spec(), size(), cfg()).unwrap();
         let s2 = Arc::clone(&s);
-        let a = tokio::task::spawn_blocking(move || {
+        let a = task::spawn_blocking(move || {
             s2.register_client(
                 PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
                 Arc::new(AtomicBool::new(false)),
@@ -1759,7 +1774,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let s2 = Arc::clone(&s);
-        let b = tokio::task::spawn_blocking(move || {
+        let b = task::spawn_blocking(move || {
             s2.register_client(
                 PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
                 Arc::new(AtomicBool::new(false)),
@@ -1780,12 +1795,12 @@ mod tests {
 
     #[tokio::test]
     async fn client_attention_tracks_focus_reporting_for_notifications() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("attn".into(), spec(), size(), cfg()).unwrap();
         // Detached: nobody attached.
         assert_eq!(s.client_attention().await, (0, false, false));
         let s2 = Arc::clone(&s);
-        let a = tokio::task::spawn_blocking(move || {
+        let a = task::spawn_blocking(move || {
             s2.register_client(
                 PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
                 Arc::new(AtomicBool::new(false)),
@@ -1807,7 +1822,7 @@ mod tests {
 
     #[tokio::test]
     async fn any_prefix_armed_aggregates_across_clients() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         // Any-client-armed: the prefix indicator shows iff at least one
         // attached client's keymap prefix is mid-chord.
         let s = Session::new("prefixagg".into(), spec(), size(), cfg()).unwrap();
@@ -1815,13 +1830,13 @@ mod tests {
         let flag_b = Arc::new(AtomicBool::new(false));
         let s2 = Arc::clone(&s);
         let fa = Arc::clone(&flag_a);
-        let _a = tokio::task::spawn_blocking(move || s2.register_client(size(), fa))
+        let _a = task::spawn_blocking(move || s2.register_client(size(), fa))
             .await
             .unwrap()
             .unwrap();
         let s2 = Arc::clone(&s);
         let fb = Arc::clone(&flag_b);
-        let b = tokio::task::spawn_blocking(move || s2.register_client(size(), fb))
+        let b = task::spawn_blocking(move || s2.register_client(size(), fb))
             .await
             .unwrap()
             .unwrap();
@@ -1841,16 +1856,16 @@ mod tests {
         flag_b.store(true, Ordering::SeqCst);
         let s2 = Arc::clone(&s);
         let cid_b = b.client_id;
-        tokio::task::spawn_blocking(move || s2.deregister_client(cid_b)).await.unwrap();
+        task::spawn_blocking(move || s2.deregister_client(cid_b)).await.unwrap();
         assert!(!s.any_prefix_armed().await);
     }
 
     #[tokio::test]
     async fn smallest_client_wins() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         let s2 = Arc::clone(&s);
-        let a = tokio::task::spawn_blocking(move || {
+        let a = task::spawn_blocking(move || {
             s2.register_client(
                 PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
                 Arc::new(AtomicBool::new(false)),
@@ -1860,7 +1875,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let s2 = Arc::clone(&s);
-        let b = tokio::task::spawn_blocking(move || {
+        let b = task::spawn_blocking(move || {
             s2.register_client(
                 PtySize { rows: 10, cols: 30, pixel_width: 0, pixel_height: 0 },
                 Arc::new(AtomicBool::new(false)),
@@ -1870,26 +1885,26 @@ mod tests {
         .unwrap()
         .unwrap();
         let s2 = Arc::clone(&s);
-        let eff = tokio::task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+        let eff = task::spawn_blocking(move || s2.effective_size()).await.unwrap();
         assert_eq!((eff.rows, eff.cols), (10, 30));
         let s2 = Arc::clone(&s);
         let cid_b = b.client_id;
-        tokio::task::spawn_blocking(move || s2.deregister_client(cid_b)).await.unwrap();
+        task::spawn_blocking(move || s2.deregister_client(cid_b)).await.unwrap();
         let s2 = Arc::clone(&s);
-        let eff2 = tokio::task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+        let eff2 = task::spawn_blocking(move || s2.effective_size()).await.unwrap();
         assert_eq!((eff2.rows, eff2.cols), (24, 80));
         let s2 = Arc::clone(&s);
         let cid_a = a.client_id;
-        tokio::task::spawn_blocking(move || s2.deregister_client(cid_a)).await.unwrap();
+        task::spawn_blocking(move || s2.deregister_client(cid_a)).await.unwrap();
         // No clients left → effective_size falls back to the WM host size.
         let s2 = Arc::clone(&s);
-        let eff_none = tokio::task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+        let eff_none = task::spawn_blocking(move || s2.effective_size()).await.unwrap();
         assert_eq!((eff_none.rows, eff_none.cols), (24, 80), "no-clients fallback to host size");
     }
 
     #[tokio::test]
     async fn handle_input_bytes_sends_to_active_pane() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let spec = SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -1898,7 +1913,7 @@ mod tests {
         };
         let s = Session::new("test".into(), spec, size(), cfg()).unwrap();
         s.handle_input_bytes(b"hello\n", false).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        time::sleep(Duration::from_millis(200)).await;
         let m = s.window_manager.lock().await;
         let pane = m.active_window().active_pane().unwrap();
         let saw = pane.with_screen(|screen| {
@@ -1914,7 +1929,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_input_bytes_broadcasts_when_sync_active() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let spec = SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -1928,7 +1943,7 @@ mod tests {
         // Broadcast input to both panes.
         s.handle_input_bytes(b"hello\n", false).await.unwrap();
         // Give children time to echo.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        time::sleep(Duration::from_millis(300)).await;
         let m = s.window_manager.lock().await;
         let win = m.active_window();
         let panes = win.layout().panes();
@@ -1958,7 +1973,7 @@ mod tests {
     // OFF must get the raw payload.
     #[tokio::test]
     async fn sync_paste_brackets_each_pane_by_its_own_mode() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let cat = SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -1989,16 +2004,16 @@ mod tests {
         // Paste (is_paste = true) fans out to both, wrapped per-pane.
         s.handle_input_bytes(b"foobar", true).await.unwrap();
 
-        async fn drain(rx: &mut tokio::sync::broadcast::Receiver<bytes::Bytes>) -> Vec<u8> {
+        async fn drain(rx: &mut broadcast::Receiver<bytes::Bytes>) -> Vec<u8> {
             let mut out = Vec::new();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+            let deadline = Instant::now() + Duration::from_millis(1500);
             loop {
-                let now = std::time::Instant::now();
+                let now = Instant::now();
                 if now >= deadline {
                     break;
                 }
-                let step = (deadline - now).min(std::time::Duration::from_millis(150));
-                match tokio::time::timeout(step, rx.recv()).await {
+                let step = (deadline - now).min(Duration::from_millis(150));
+                match time::timeout(step, rx.recv()).await {
                     Ok(Ok(c)) => out.extend_from_slice(&c),
                     Ok(Err(_)) => break,
                     Err(_) if !out.is_empty() => break,
@@ -2024,7 +2039,7 @@ mod tests {
     #[tokio::test]
     async fn deregister_client_clears_stuck_pane_drag() {
         use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         s.handle_command(plexy_glass_mux::Command::SplitV).await.unwrap();
         // Alt-press inside pane 0 → default drag-modifier is Alt → pane drag begins.
@@ -2049,7 +2064,7 @@ mod tests {
         );
         // Client teardown (id need not exist, the retain is a no-op and the reset runs).
         let s2 = Arc::clone(&s);
-        tokio::task::spawn_blocking(move || s2.deregister_client(999)).await.unwrap();
+        task::spawn_blocking(move || s2.deregister_client(999)).await.unwrap();
         assert!(
             s.window_manager.lock().await.pane_drag_roles().is_none(),
             "deregister_client must clear the stuck pane drag"
@@ -2067,7 +2082,7 @@ mod tests {
     #[tokio::test]
     async fn mouse_drag_yank_sets_honest_message_off_lock() {
         use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         let (pane, r0) = {
             let m = s.window_manager.lock().await;
@@ -2114,11 +2129,11 @@ mod tests {
 
     #[tokio::test]
     async fn closing_session_refuses_register() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
         s.closing.store(true, Ordering::SeqCst);
         let s2 = Arc::clone(&s);
-        let result = tokio::task::spawn_blocking(move || {
+        let result = task::spawn_blocking(move || {
             s2.register_client(size(), Arc::new(AtomicBool::new(false)))
         })
         .await
@@ -2128,12 +2143,12 @@ mod tests {
 
     #[tokio::test]
     async fn coordinator_publishes_initial_frame() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("test".into(), spec(), size(), cfg()).unwrap();
         let mut rx = s.frame_rx_template.clone();
         s.notify.notify_one();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
+        let result = time::timeout(
+            Duration::from_secs(1),
             rx.changed(),
         )
         .await;
@@ -2142,7 +2157,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn coordinator_emits_tail_frame_when_last_pane_dies() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         // An EMPTY-args pane (interactive-shell semantics) that exits on its own:
         // `/bin/echo` with no args prints a newline and exits. It must CLOSE the
         // window on death; a command pane (non-empty args) would instead drop to
@@ -2156,19 +2171,19 @@ mod tests {
         let s = Session::new("test".into(), spec, size(), cfg()).unwrap();
         // Wait up to 5s for the session to close (echo exits, then the death consumer
         // reports it, then the coordinator observes is_empty and sets closing=true).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while std::time::Instant::now() < deadline {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
             if s.closing.load(Ordering::SeqCst) {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            time::sleep(Duration::from_millis(100)).await;
         }
         assert!(s.closing.load(Ordering::SeqCst), "session did not converge to closing");
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_single_pane() {
         use plexy_glass_config::{PaneNode, PaneTemplate, SessionTemplate, WindowTemplate};
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let tmpl = SessionTemplate {
             name: "dev".into(),
             cwd: None,
@@ -2201,7 +2216,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_split_and_multiwindow() {
         use plexy_glass_config::{PaneNode, PaneTemplate, SessionTemplate, SplitDirection, WindowTemplate};
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let pane = |c: Option<&str>| {
             PaneNode::Leaf(PaneTemplate {
                 command: c.map(str::to_string),
@@ -2252,7 +2267,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_window_cwd_seeds_first_pane() {
         use plexy_glass_config::{PaneNode, PaneTemplate, SessionTemplate, WindowTemplate};
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let pane = |cwd: Option<&str>| PaneNode::Leaf(PaneTemplate {
             command: None,
             cwd: cwd.map(str::to_string),
@@ -2298,7 +2313,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_two_way_default_is_fifty_fifty() {
         // Regression: a 2-way default split stays 50/50 (byte-identical to v1).
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let cfg = build_cfg(r#"session "s" { window "w" { split vertical { pane; pane } } }"#);
         let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
         {
@@ -2318,7 +2333,7 @@ mod tests {
     async fn build_from_template_flat_three_way_default_is_even() {
         // INTENTIONAL v2 change: a flat 3-way default builds 33/33/33, not v1's
         // 50/25/25 right-lean cascade.
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let cfg = build_cfg(r#"session "s" { window "w" { split vertical { pane; pane; pane } } }"#);
         let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
         {
@@ -2340,7 +2355,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_two_to_one_ratio_honored() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let cfg = build_cfg(
             r#"session "s" { window "w" { split vertical { pane ratio=2; pane ratio=1 } } }"#,
         );
@@ -2367,7 +2382,7 @@ mod tests {
     async fn build_from_template_nested_split_outer_weight_ignores_inner_leaf_count() {
         // outer { pane ratio=2; split horizontal ratio=1 { pane; pane } }
         // The outer split is 2:1 regardless of the inner split's 2 leaves.
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let cfg = build_cfg(
             r#"session "s" { window "w" { split vertical { pane ratio=2; split horizontal ratio=1 { pane; pane } } } }"#,
         );
@@ -2394,7 +2409,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_active_window_and_pane_selected() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let cfg = build_cfg(
             r#"session "s" {
                 window "a" { pane }
@@ -2420,14 +2435,14 @@ mod tests {
         // are still INHERITED from the daemon environment (overlay, not wipe,
         // the env_clear removal). The pane command writes $FOO/$PATH/$TERM to a
         // file we then read back.
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("env.txt");
         let out_str = out.to_str().unwrap();
         // Ensure TERM is set in the daemon environment for the inheritance check.
         // SAFETY: single-threaded test setup before any pane spawn reads it.
         unsafe {
-            std::env::set_var("TERM", "xterm-test-term");
+            env::set_var("TERM", "xterm-test-term");
         }
         // The pane command writes FOO/PATH/TERM as separate lines (built with
         // newline echoes, no literal `\n` in the KDL string value, which KDL
@@ -2440,13 +2455,13 @@ mod tests {
         );
         let cfg = build_cfg(&kdl);
         let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
-        let wrote = crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
-            std::fs::read_to_string(&out)
+        let wrote = test_env::poll_until(Duration::from_secs(10), || {
+            fs::read_to_string(&out)
                 .is_ok_and(|b| b.contains("FOO=") && b.contains("PATH=") && b.contains("TERM="))
         })
         .await;
         assert!(wrote, "pane command never wrote the env file");
-        let body = std::fs::read_to_string(&out).unwrap();
+        let body = fs::read_to_string(&out).unwrap();
         assert!(body.contains("FOO=bar"), "declared env reached the child: {body:?}");
         assert!(
             body.lines().any(|l| l.starts_with("PATH=") && l.len() > "PATH=".len()),
@@ -2479,22 +2494,22 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn kill_closes_split_unix_socket_to_client() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("sp".into(), spec(), size(), cfg()).unwrap();
-        let handle = tokio::task::block_in_place(|| {
+        let handle = task::block_in_place(|| {
             s.register_client(size(), Arc::new(AtomicBool::new(false)))
         })
         .unwrap();
         let frame_rx = handle.frame_rx.clone();
 
         // Real bidirectional socket, split exactly like serve_attach does.
-        let (client_sock, server_sock) = tokio::net::UnixStream::pair().unwrap();
-        let (mut server_read, server_write) = tokio::io::split(server_sock);
+        let (client_sock, server_sock) = UnixStream::pair().unwrap();
+        let (mut server_read, server_write) = io::split(server_sock);
 
-        let renderer = crate::renderer::Renderer::new();
+        let renderer = Renderer::new();
         // No session switch in this test; keep the sender alive so the switch
         // arm simply never fires.
-        let (_switch_tx, switch_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_switch_tx, switch_rx) = mpsc::unbounded_channel();
         let mut renderer_task = tokio::spawn(async move {
             let _ = renderer.run(frame_rx, switch_rx, server_write).await;
         });
@@ -2518,11 +2533,11 @@ mod tests {
         s.begin_close();
         s.terminate_panes().await;
 
-        let (mut cr, mut cw) = tokio::io::split(client_sock);
+        let (mut cr, mut cw) = io::split(client_sock);
         // Keep a writer so we don't close our own side prematurely.
         let _ = cw.write_all(b"").await;
         let mut buf = vec![0u8; 64 * 1024];
-        let got_eof = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let got_eof = time::timeout(Duration::from_secs(3), async {
             loop {
                 match cr.read(&mut buf).await {
                     Ok(0) | Err(_) => break true,
@@ -2540,7 +2555,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn begin_close_drops_frame_tx_so_clients_detach() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("fx".into(), spec(), size(), cfg()).unwrap();
         // A client's renderer watches this; when the coordinator drops
         // frame_tx, changed() returns Err and the renderer (hence client)
@@ -2549,7 +2564,7 @@ mod tests {
         s.begin_close();
         s.terminate_panes().await;
         // The frame channel must close (all senders dropped) promptly.
-        let closed = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let closed = time::timeout(Duration::from_secs(3), async {
             loop {
                 if frame_rx.changed().await.is_err() {
                     break;
@@ -2562,7 +2577,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn begin_close_is_idempotent() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("bc".into(), spec(), size(), cfg()).unwrap();
         s.begin_close();
         s.begin_close(); // idempotent: must not panic
@@ -2576,7 +2591,7 @@ mod tests {
     /// `kill -0` semantics: a zombie still counts as alive until reaped, so
     /// `!pid_alive` asserts killed AND reaped (no zombie).
     fn pid_alive(pid: u32) -> bool {
-        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
+        signal::kill(Pid::from_raw(pid as i32), None).is_ok()
     }
 
     /// A pane spec whose child is `cat`: it echoes input back as pane OUTPUT,
@@ -2585,14 +2600,14 @@ mod tests {
         SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None }
     }
 
-    async fn active_pane(s: &Arc<Session>) -> crate::pane::Pane {
+    async fn active_pane(s: &Arc<Session>) -> Pane {
         let m = s.window_manager.lock().await;
         m.active_window().active_pane().cloned().expect("active pane")
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pipe_pane_streams_subsequent_output_to_consumer() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("t-pipe-happy".into(), cat_spec(), size(), cfg()).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("pipe.out");
@@ -2611,8 +2626,8 @@ mod tests {
         s.handle_input_bytes(b"pipe_needle\n", false).await.unwrap();
         let f = file.clone();
         assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), move || {
-                std::fs::read_to_string(&f).unwrap_or_default().contains("pipe_needle")
+            test_env::poll_until(Duration::from_secs(10), move || {
+                fs::read_to_string(&f).unwrap_or_default().contains("pipe_needle")
             })
             .await,
             "consumer file never received the pane output"
@@ -2622,7 +2637,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pipe_pane_replace_kills_old_consumer() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("t-pipe-replace".into(), cat_spec(), size(), cfg()).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let f1 = tmp.path().join("one.out");
@@ -2638,7 +2653,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || !pid_alive(pid1))
+            test_env::poll_until(Duration::from_secs(10), || !pid_alive(pid1))
                 .await,
             "old consumer survived (or zombied) after replace"
         );
@@ -2649,14 +2664,14 @@ mod tests {
         s.handle_input_bytes(b"second_needle\n", false).await.unwrap();
         let f2c = f2.clone();
         assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), move || {
-                std::fs::read_to_string(&f2c).unwrap_or_default().contains("second_needle")
+            test_env::poll_until(Duration::from_secs(10), move || {
+                fs::read_to_string(&f2c).unwrap_or_default().contains("second_needle")
             })
             .await,
             "new consumer never received post-replace output"
         );
         assert!(
-            !std::fs::read_to_string(&f1).unwrap_or_default().contains("second_needle"),
+            !fs::read_to_string(&f1).unwrap_or_default().contains("second_needle"),
             "replaced consumer kept receiving output"
         );
         s.terminate_panes().await;
@@ -2664,7 +2679,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pipe_pane_stop_clears_and_double_stop_reports_none() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("t-pipe-stop".into(), cat_spec(), size(), cfg()).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("stop.out");
@@ -2684,7 +2699,7 @@ mod tests {
         assert_eq!(msg.as_deref(), Some(MSG_STOPPED));
         assert!(!pane.has_pipe(), "stop clears the slot synchronously");
         assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || !pid_alive(pid))
+            test_env::poll_until(Duration::from_secs(10), || !pid_alive(pid))
                 .await,
             "stopped consumer survived (or zombied)"
         );
@@ -2693,7 +2708,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pipe_pane_consumer_exit_clears_slot_and_reports() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("t-pipe-exit".into(), cat_spec(), size(), cfg()).unwrap();
         // A consumer that exits immediately without reading.
         s.handle_prompt_command(PromptCommand::PipePane(Some("true".into())))
@@ -2701,12 +2716,12 @@ mod tests {
             .unwrap();
         let pane = active_pane(&s).await;
         assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || !pane.has_pipe())
+            test_env::poll_until(Duration::from_secs(10), || !pane.has_pipe())
                 .await,
             "slot never cleared after the consumer exited"
         );
         assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+            test_env::poll_until(Duration::from_secs(10), || {
                 let Ok(mut m) = s.window_manager.try_lock() else { return false };
                 m.take_active_message() == Some(MSG_CONSUMER_EXITED)
             })
@@ -2723,7 +2738,7 @@ mod tests {
     // the consumer, no zombie left behind.
     #[tokio::test(flavor = "multi_thread")]
     async fn pipe_pane_pane_kill_reaps_never_reading_consumer() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let spec = SpawnSpec {
             program: "/bin/sh".into(),
             args: vec![
@@ -2750,7 +2765,7 @@ mod tests {
         // prints after it), so the drain is parked mid-write.
         let pane_for_poll = pane.clone();
         assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(15), move || {
+            test_env::poll_until(Duration::from_secs(15), move || {
                 pane_for_poll.with_screen(|scr| {
                     (0..scr.rows()).any(|r| {
                         let row: String = scr.active.rows[r as usize]
@@ -2770,7 +2785,7 @@ mod tests {
 
         pane.kill_child();
         assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || !pid_alive(pid))
+            test_env::poll_until(Duration::from_secs(10), || !pid_alive(pid))
                 .await,
             "consumer survived (or zombied) after pane kill — kill_child must close the pipe"
         );
@@ -2787,7 +2802,7 @@ mod tests {
     // which iterates every pane and calls kill_child() on each.
     #[tokio::test(flavor = "multi_thread")]
     async fn pipe_pane_kill_pane_cmd_cancels_consumer() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("t-pipe-killpane".into(), cat_spec(), size(), cfg()).unwrap();
         let pane = active_pane(&s).await;
         s.handle_prompt_command(PromptCommand::PipePane(Some("exec sleep 1000".into())))
@@ -2796,7 +2811,7 @@ mod tests {
         let pid = pane.pipe_pid().expect("consumer pid");
         // Wait until the pipe's drain task is actually running (slot occupied).
         assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(5), || pane.has_pipe())
+            test_env::poll_until(Duration::from_secs(5), || pane.has_pipe())
                 .await,
             "pipe never attached"
         );
@@ -2808,7 +2823,7 @@ mod tests {
 
         // Consumer must be killed AND reaped (kill -0 fails once the zombie is gone).
         assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+            test_env::poll_until(Duration::from_secs(10), || {
                 !pid_alive(pid)
             })
             .await,
@@ -2826,7 +2841,7 @@ mod tests {
     // whole).
     #[tokio::test(flavor = "multi_thread")]
     async fn pipe_pane_kill_window_cmd_cancels_consumer() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("t-pipe-killwin".into(), cat_spec(), size(), cfg()).unwrap();
 
         // Start a pipe on the first window's pane before opening a second
@@ -2837,7 +2852,7 @@ mod tests {
             .unwrap();
         let pid = pane_w0.pipe_pid().expect("consumer pid");
         assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(5), || {
+            test_env::poll_until(Duration::from_secs(5), || {
                 pane_w0.has_pipe()
             })
             .await,
@@ -2854,7 +2869,7 @@ mod tests {
 
         // Consumer must be killed AND reaped.
         assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), || {
+            test_env::poll_until(Duration::from_secs(10), || {
                 !pid_alive(pid)
             })
             .await,
@@ -2874,7 +2889,7 @@ mod tests {
     // text (which would contain "bold" without the SGR escape sequences).
     #[tokio::test(flavor = "multi_thread")]
     async fn pipe_pane_streams_raw_bytes_not_rendered_text() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("t-pipe-raw".into(), cat_spec(), size(), cfg()).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("raw.out");
@@ -2893,8 +2908,8 @@ mod tests {
 
         let f = file.clone();
         assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), move || {
-                std::fs::read(&f).unwrap_or_default().contains(&0x1b_u8)
+            test_env::poll_until(Duration::from_secs(10), move || {
+                fs::read(&f).unwrap_or_default().contains(&0x1b_u8)
             })
             .await,
             "pipe output file must contain a raw ESC byte (0x1b); \
@@ -2908,7 +2923,7 @@ mod tests {
     // diverge exactly when a popup is open.
     #[tokio::test(flavor = "multi_thread")]
     async fn pipe_pane_consumer_spawns_at_popup_cwd_when_popup_owns_input() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let s = Session::new("t-pipe-cwd".into(), cat_spec(), size(), cfg()).unwrap();
         let active_dir = tempfile::tempdir().unwrap();
         let popup_dir = tempfile::tempdir().unwrap();
@@ -2942,15 +2957,15 @@ mod tests {
         .unwrap();
         let out_c = out.clone();
         assert!(
-            crate::test_env::poll_until(std::time::Duration::from_secs(10), move || {
-                std::fs::read_to_string(&out_c).is_ok_and(|t| !t.trim().is_empty())
+            test_env::poll_until(Duration::from_secs(10), move || {
+                fs::read_to_string(&out_c).is_ok_and(|t| !t.trim().is_empty())
             })
             .await,
             "consumer never wrote its cwd"
         );
-        let got = std::fs::read_to_string(&out).unwrap();
+        let got = fs::read_to_string(&out).unwrap();
         assert_eq!(
-            std::path::Path::new(got.trim()),
+            Path::new(got.trim()),
             popup_real.as_path(),
             "consumer must spawn at the POPUP (input target) pane's cwd"
         );

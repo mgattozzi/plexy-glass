@@ -5,6 +5,8 @@
 //! returns the buffered bytes verbatim so callers can pass them through to the
 //! shell.
 
+use std::mem;
+
 use plexy_glass_mux::{Direction, Key, KeyEvent, KeyEventKind, Modifiers};
 
 #[derive(Debug, Clone)]
@@ -113,7 +115,7 @@ impl KeyParser {
 
     pub fn flush(&mut self) -> Option<KeyParseOutput> {
         if self.state == State::SawEsc {
-            let bytes = std::mem::take(&mut self.buf);
+            let bytes = mem::take(&mut self.buf);
             self.reset_state();
             return Some(KeyParseOutput::Event {
                 event: KeyEvent::plain(Key::Escape),
@@ -141,7 +143,7 @@ impl KeyParser {
                 self.emit_simple(Key::Char(byte as char), Modifiers::empty())
             }
             _ => {
-                let bytes = std::mem::take(&mut self.buf);
+                let bytes = mem::take(&mut self.buf);
                 self.reset_state();
                 KeyParseOutput::Bytes(bytes)
             }
@@ -159,7 +161,7 @@ impl KeyParser {
                 KeyParseOutput::Pending
             }
             byte if (0x20..=0x7e).contains(&byte) => {
-                let bytes = std::mem::take(&mut self.buf);
+                let bytes = mem::take(&mut self.buf);
                 self.reset_state();
                 KeyParseOutput::Event {
                     event: KeyEvent::new(Key::Char(byte as char), Modifiers::ALT),
@@ -235,16 +237,16 @@ impl KeyParser {
             b'D' => KeyEvent::plain(Key::Arrow(Direction::Left)),
             _ => return self.bail(),
         };
-        let bytes = std::mem::take(&mut self.buf);
+        let bytes = mem::take(&mut self.buf);
         self.reset_state();
         KeyParseOutput::Event { event, bytes }
     }
 
     fn dispatch_csi(&mut self, byte: u8) -> KeyParseOutput {
-        let params = std::mem::take(&mut self.params);
+        let params = mem::take(&mut self.params);
         match self.decode_csi(byte, &params) {
             Some(event) => {
-                let bytes = std::mem::take(&mut self.buf);
+                let bytes = mem::take(&mut self.buf);
                 self.reset_state();
                 KeyParseOutput::Event { event, bytes }
             }
@@ -342,7 +344,7 @@ impl KeyParser {
     }
 
     fn emit_simple(&mut self, key: Key, mods: Modifiers) -> KeyParseOutput {
-        let bytes = std::mem::take(&mut self.buf);
+        let bytes = mem::take(&mut self.buf);
         self.reset_state();
         KeyParseOutput::Event {
             event: KeyEvent::new(key, mods),
@@ -351,7 +353,7 @@ impl KeyParser {
     }
 
     fn bail(&mut self) -> KeyParseOutput {
-        let bytes = std::mem::take(&mut self.buf);
+        let bytes = mem::take(&mut self.buf);
         self.reset_state();
         KeyParseOutput::Bytes(bytes)
     }

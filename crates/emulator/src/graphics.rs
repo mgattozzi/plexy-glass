@@ -7,7 +7,9 @@
 //! bytes.
 
 use std::collections::{HashMap, VecDeque};
+use std::str;
 use std::sync::Arc;
+use base64::engine::general_purpose::STANDARD;
 
 /// Wire image format (Kitty `f=` key).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,7 +205,7 @@ pub fn parse_command(framed: &[u8]) -> Option<GraphicsCommand> {
     for kv in params.split(|&b| b == b',') {
         let mut it = kv.splitn(2, |&b| b == b'=');
         let (Some(k), Some(v)) = (it.next(), it.next()) else { continue };
-        let val = std::str::from_utf8(v).unwrap_or("");
+        let val = str::from_utf8(v).unwrap_or("");
         match k {
             b"a" => cmd.action = v.first().copied().unwrap_or(b't'),
             b"i" => cmd.id = val.parse().ok(),
@@ -359,7 +361,7 @@ pub fn iterm_dimensions(args: &str, b64: &str) -> Option<(u32, u32)> {
     // Decode a prefix of the base64 (enough for the file header) and read it.
     use base64::Engine as _;
     let prefix: String = b64.chars().filter(|c| !c.is_whitespace()).take(16384).collect();
-    let bytes = base64::engine::general_purpose::STANDARD.decode(prefix.as_bytes()).ok()?;
+    let bytes = STANDARD.decode(prefix.as_bytes()).ok()?;
     png_dimensions(&bytes).or_else(|| jpeg_dimensions(&bytes))
 }
 
@@ -519,7 +521,7 @@ mod tests {
         png.extend_from_slice(&30u32.to_be_bytes());
         png.extend_from_slice(&40u32.to_be_bytes());
         use base64::Engine as _;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let b64 = STANDARD.encode(&png);
         assert_eq!(iterm_dimensions("inline=1", &b64), Some((30, 40)));
     }
 

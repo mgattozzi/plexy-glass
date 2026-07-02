@@ -74,6 +74,14 @@ unused_async = "allow"
 # mostly test-only byte counting:
 needless_pass_by_value = "allow"
 naive_bytecount = "allow"
+# Individually-enabled `restriction` lints (the group as a whole stays
+# off, it is opt-in per lint by design). These enforce house style
+# mechanically:
+absolute_paths = "deny"                  # use-imports, never fully-qualified inline paths
+dbg_macro = "deny"                        # no leftover dbg!()
+todo = "deny"                             # no todo!()
+unimplemented = "deny"                    # no unimplemented!()
+allow_attributes_without_reason = "deny"  # every #[allow] carries reason = "…"
 
 # Profile for the nightly `cargo bolero … -e libfuzzer` deep runs only;
 # inert for normal builds/tests. Inherits `dev` to keep

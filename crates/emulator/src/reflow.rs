@@ -262,7 +262,7 @@ mod tests {
         Row {
             cells: cells.iter().map(|s| cell(s)).collect(),
             wrap_origin: origin,
-            mark: crate::grid::RowMark::default(),
+            mark: RowMark::default(),
         }
     }
 
@@ -314,7 +314,7 @@ mod tests {
             rows: vec![Row {
                 cells: vec![cell("あ"), Cell::wide_spacer()],
                 wrap_origin: WrapOrigin::Hard,
-                mark: crate::grid::RowMark::default(),
+                mark: RowMark::default(),
             }],
         };
         let mut sb = Scrollback::with_cap(100);
@@ -371,7 +371,7 @@ mod tests {
                     Cell::default(),
                 ],
                 wrap_origin: WrapOrigin::Hard,
-                mark: crate::grid::RowMark::default(),
+                mark: RowMark::default(),
             }],
         };
         let mut sb = Scrollback::with_cap(100);
@@ -394,7 +394,7 @@ mod tests {
             rows: vec![Row {
                 cells: vec![cell("a"), cell("好"), Cell::wide_spacer(), Cell::default()],
                 wrap_origin: WrapOrigin::Hard,
-                mark: crate::grid::RowMark::default(),
+                mark: RowMark::default(),
             }],
         };
         let mut sb = Scrollback::with_cap(100);

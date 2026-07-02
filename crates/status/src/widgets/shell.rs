@@ -1,7 +1,10 @@
 use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
 use async_trait::async_trait;
 use smol_str::SmolStr;
+use std::process::Stdio;
 use std::time::Duration;
+use tokio::process::Command;
+use tokio::time;
 
 const OUTPUT_CAP: usize = 200;
 
@@ -19,18 +22,18 @@ impl Widget for ShellWidget {
         self.interval.or(Some(Duration::from_secs(5)))
     }
     async fn evaluate(&mut self, _ctx: &EvalContext<'_>) -> StyledText {
-        let mut cmd = tokio::process::Command::new(&self.command);
+        let mut cmd = Command::new(&self.command);
         cmd.args(&self.args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             // kill_on_drop: on timeout the `output()` future is dropped, but
             // without this the child lives on (reparented to PID 1, holding
             // its stdout pipe), and a hanging command respawns every refresh
             // interval, accumulating orphan processes without bound.
             .kill_on_drop(true);
 
-        let result = tokio::time::timeout(self.timeout, cmd.output()).await;
+        let result = time::timeout(self.timeout, cmd.output()).await;
         let text = match result {
             Ok(Ok(o)) if o.status.success() => {
                 let s = String::from_utf8_lossy(&o.stdout).trim().to_string();

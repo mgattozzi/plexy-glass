@@ -15,9 +15,16 @@
 //! and rewrites the pidfile.
 
 use crate::error::ClientError;
+use nix::errno::Errno;
+use nix::sys::signal::{self, Signal};
+use nix::unistd::{self, Pid};
 use plexy_glass_daemon::RuntimePaths;
+use std::fs;
 use std::io;
+use std::path::Path;
+use std::process::{self, Command};
 use std::time::{Duration, Instant};
+use tokio::time;
 use tracing::info;
 
 const GRACE_PERIOD: Duration = Duration::from_secs(2);
@@ -84,8 +91,8 @@ async fn terminate(pids: Vec<i32>, paths: &RuntimePaths) -> Result<KillOutcome, 
     let total = pids.len();
     info!(count = total, "sending SIGTERM to plexy-glass daemon process(es)");
     for pid in &pids {
-        let nix_pid = nix::unistd::Pid::from_raw(*pid);
-        let _ = nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGTERM);
+        let nix_pid = Pid::from_raw(*pid);
+        let _ = signal::kill(nix_pid, Signal::SIGTERM);
     }
 
     let mut alive: Vec<i32> = pids;
@@ -93,7 +100,7 @@ async fn terminate(pids: Vec<i32>, paths: &RuntimePaths) -> Result<KillOutcome, 
     while Instant::now() < deadline && !alive.is_empty() {
         alive.retain(|&p| is_alive(p));
         if !alive.is_empty() {
-            tokio::time::sleep(POLL_INTERVAL).await;
+            time::sleep(POLL_INTERVAL).await;
         }
     }
 
@@ -101,16 +108,16 @@ async fn terminate(pids: Vec<i32>, paths: &RuntimePaths) -> Result<KillOutcome, 
     if force_killed {
         info!(stragglers = alive.len(), "sending SIGKILL to remaining daemons");
         for pid in &alive {
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(*pid),
-                nix::sys::signal::Signal::SIGKILL,
+            let _ = signal::kill(
+                Pid::from_raw(*pid),
+                Signal::SIGKILL,
             );
         }
         let kill_deadline = Instant::now() + Duration::from_millis(500);
         while Instant::now() < kill_deadline && !alive.is_empty() {
             alive.retain(|&p| is_alive(p));
             if !alive.is_empty() {
-                tokio::time::sleep(POLL_INTERVAL).await;
+                time::sleep(POLL_INTERVAL).await;
             }
         }
     }
@@ -125,9 +132,9 @@ async fn terminate(pids: Vec<i32>, paths: &RuntimePaths) -> Result<KillOutcome, 
 
 /// Read a daemon PID from `pidfile`. Returns `None` if the file is missing or
 /// unparseable (the daemon writes `"{pid}\n"` after binding).
-fn read_pidfile(pidfile: &std::path::Path) -> Option<i32> {
-    let me = std::process::id() as i32;
-    std::fs::read_to_string(pidfile)
+fn read_pidfile(pidfile: &Path) -> Option<i32> {
+    let me = process::id() as i32;
+    fs::read_to_string(pidfile)
         .ok()
         .and_then(|s| s.trim().parse::<i32>().ok())
         .filter(|&p| p != me)
@@ -136,9 +143,9 @@ fn read_pidfile(pidfile: &std::path::Path) -> Option<i32> {
 /// Return the PIDs of every plexy-glass daemon process owned by the current
 /// UID, excluding our own process.
 fn find_all_daemons() -> Result<Vec<i32>, ClientError> {
-    let uid = nix::unistd::getuid().as_raw();
-    let me = std::process::id() as i32;
-    let output = std::process::Command::new("pgrep")
+    let uid = unistd::getuid().as_raw();
+    let me = process::id() as i32;
+    let output = Command::new("pgrep")
         .arg("-u")
         .arg(uid.to_string())
         .arg("-f")
@@ -162,21 +169,21 @@ fn is_alive(pid: i32) -> bool {
     // straggler would spin out the full grace/SIGKILL windows and mislabel the
     // outcome as ForceKilled for a process we never signalled.
     !matches!(
-        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
-        Err(nix::errno::Errno::ESRCH | nix::errno::Errno::EPERM)
+        signal::kill(Pid::from_raw(pid), None),
+        Err(Errno::ESRCH | Errno::EPERM)
     )
 }
 
 fn cleanup(paths: &RuntimePaths) {
-    let _ = std::fs::remove_file(&paths.socket);
-    let _ = std::fs::remove_file(&paths.pidfile);
+    let _ = fs::remove_file(&paths.socket);
+    let _ = fs::remove_file(&paths.pidfile);
     // Leave daemon.lock alone, a future daemon will reuse it. Removing it
     // would race with a starting daemon that's about to flock it.
 }
 
 fn cleanup_socket_only(paths: &RuntimePaths) {
     // No matching processes; still scrub any orphaned socket file.
-    let _ = std::fs::remove_file(&paths.socket);
+    let _ = fs::remove_file(&paths.socket);
 }
 
 #[cfg(test)]
@@ -200,13 +207,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("daemon.pid");
         // Foreign PID with trailing newline → Some after trim.
-        std::fs::write(&f, "12345\n").unwrap();
+        fs::write(&f, "12345\n").unwrap();
         assert_eq!(read_pidfile(&f), Some(12345));
         // Our own PID → None (self-exclusion guard).
-        std::fs::write(&f, format!("{}\n", std::process::id())).unwrap();
+        fs::write(&f, format!("{}\n", process::id())).unwrap();
         assert_eq!(read_pidfile(&f), None);
         // Garbage → None.
-        std::fs::write(&f, "not-a-pid").unwrap();
+        fs::write(&f, "not-a-pid").unwrap();
         assert_eq!(read_pidfile(&f), None);
         // Missing → None.
         assert_eq!(read_pidfile(&dir.path().join("nope.pid")), None);
@@ -214,7 +221,7 @@ mod tests {
 
     #[test]
     fn is_alive_classifies_self_and_impossible_pid() {
-        assert!(is_alive(std::process::id() as i32), "our own process is alive");
+        assert!(is_alive(process::id() as i32), "our own process is alive");
         assert!(!is_alive(i32::MAX), "an impossible PID is not alive (ESRCH)");
     }
 }

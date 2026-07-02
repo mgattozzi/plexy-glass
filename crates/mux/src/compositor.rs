@@ -2,7 +2,7 @@
 //! and an optional status-bar row.
 
 use crate::{
-    blocks::{self, FoldProjection, block_status_at, viewport_block_status},
+    blocks::{self, BlockLineStatus, FoldProjection, block_status_at, viewport_block_status},
     borders::{self, BlockBorderColors},
     pane_id::PaneId,
     rect::Rect,
@@ -11,6 +11,13 @@ use crate::{
 };
 use plexy_glass_emulator::{Attrs, Screen, display_width};
 use std::collections::HashMap;
+use crate::buffer::BufferPickerState;
+use crate::hint::HintState;
+use crate::history::HistoryState;
+use crate::overlay::{PickerEntry, picker_filtered_indices};
+use crate::selection::Selection;
+use crate::tree::TreeState;
+use crate::virtual_screen::{VisiblePlacement, VisibleVirtualPlacement};
 
 /// Resolved render colors for hint mode (built from `cfg.hints`).
 #[derive(Debug, Clone, Copy)]
@@ -156,7 +163,7 @@ pub enum OverlayView<'a> {
     /// An fzf-style session picker: a centered box with a filter line and the
     /// filtered session rows, the selected one highlighted.
     SessionPicker {
-        entries: &'a [crate::overlay::PickerEntry],
+        entries: &'a [PickerEntry],
         filter: &'a str,
         selected: usize,
     },
@@ -164,18 +171,18 @@ pub enum OverlayView<'a> {
     /// box with depth-indented rows, the current-path nodes marked, the selected
     /// row highlighted, and a mode-dependent footer (navigate / confirm-kill /
     /// rename).
-    Tree { state: &'a crate::tree::TreeState },
+    Tree { state: &'a TreeState },
     /// The choose-buffer overlay: a centered box listing paste buffers
     /// (`name: preview`), the selected one highlighted.
-    Buffer { state: &'a crate::buffer::BufferPickerState },
+    Buffer { state: &'a BufferPickerState },
     /// The structured history palette: a centered box with a filter line and one
     /// row per matching command block (status glyph, duration, `session/window`
     /// provenance, command), the selected row highlighted.
-    History { state: &'a crate::history::HistoryState },
+    History { state: &'a HistoryState },
     /// Hint mode: labels painted over the dimmed pane, one per still-matching
     /// target. No box, the labels float directly on the pane content.
     Hint {
-        state: &'a crate::hint::HintState,
+        state: &'a HintState,
         colors: HintColors,
     },
     /// The one-time welcome modal: a centered box of pre-built lines (greeting,
@@ -212,7 +219,7 @@ pub struct MessageView<'a> {
 /// (a deliberate, theme-agnostic selection cue).
 #[derive(Clone, Copy)]
 pub struct ChromeColors {
-    pub rings: crate::borders::RingColors,
+    pub rings: borders::RingColors,
     pub overlay_border: plexy_glass_emulator::Color,
     pub overlay_title: plexy_glass_emulator::Color,
     pub overlay_footer: plexy_glass_emulator::Color,
@@ -226,7 +233,7 @@ impl ChromeColors {
     pub const fn ansi_default() -> Self {
         use plexy_glass_emulator::Color;
         Self {
-            rings: crate::borders::RingColors::ansi_default(),
+            rings: borders::RingColors::ansi_default(),
             overlay_border: Color::Default,
             overlay_title: Color::Default,
             overlay_footer: Color::Default,
@@ -237,13 +244,13 @@ impl ChromeColors {
 
 // One optional layer per frame element (status/selection/overlay/message/
 // popup/blocks); a params struct would just rename the same positions.
-#[allow(clippy::too_many_arguments)] // optional frame layers; a params struct would just rename them
+#[allow(clippy::too_many_arguments, reason = "optional frame layers; a params struct would just rename them")]
 pub fn compose(
     panes: &[PaneView<'_>],
     host_size: (u16, u16),
     status: Option<&StatusLine>,
     placement: StatusPlacement,
-    selection: Option<&crate::selection::Selection>,
+    selection: Option<&Selection>,
     overlay: Option<&OverlayView<'_>>,
     message: Option<MessageView<'_>>,
     popup: Option<&PopupView<'_>>,
@@ -295,8 +302,8 @@ pub fn compose(
                 continue;
             }
             let Some(line) = ctx.line_at(r) else { continue };
-            let Some(row) = crate::blocks::row_at(view.screen, line) else { continue };
-            let dim = !ctx.proj.is_identity() && crate::blocks::is_folded_command_line(view.screen, line);
+            let Some(row) = blocks::row_at(view.screen, line) else { continue };
+            let dim = !ctx.proj.is_identity() && blocks::is_folded_command_line(view.screen, line);
             let cells = row.cells.as_slice();
             for c in 0..max_c {
                 if view.rect.col.saturating_add(c) >= host_cols {
@@ -428,7 +435,7 @@ pub fn compose(
         // rows with no governing prompt) gets DIM on its content cells.
         for r in 0..view.rect.rows {
             let Some(line) = ctx.line_at(r) else { continue };
-            let is_match = crate::blocks::prompt_at_or_above(view.screen, line)
+            let is_match = blocks::prompt_at_or_above(view.screen, line)
                 .is_some_and(|p| filter.matches.contains(&p));
             if is_match {
                 continue;
@@ -478,7 +485,7 @@ pub fn compose(
             // top line; block extents map into visible space through `ctx.proj`.
             let ctx = &fold_ctx[&v.id];
             let top = ctx.top_visible;
-            let block_rows: Vec<Option<crate::blocks::BlockLineStatus>> = if blocks.is_none() {
+            let block_rows: Vec<Option<BlockLineStatus>> = if blocks.is_none() {
                 vec![]
             } else if ctx.proj.is_identity() {
                 // No folds: the single-pass scan (display row r == unified top+r).
@@ -498,13 +505,13 @@ pub fn compose(
                 if v.rect.rows == 0 || v.screen.alt.is_some() {
                     return None;
                 }
-                let (u_start, u_end_full) = crate::blocks::block_extent(v.screen, bm.selected);
+                let (u_start, u_end_full) = blocks::block_extent(v.screen, bm.selected);
                 // A folded selected block's bracket spans only its visible command
                 // rows (the output is collapsed).
-                let folded = crate::blocks::row_at(v.screen, bm.selected)
+                let folded = blocks::row_at(v.screen, bm.selected)
                     .is_some_and(|r| r.mark.is_folded());
                 let u_end = if folded {
-                    crate::blocks::foldable_output(v.screen, bm.selected)
+                    blocks::foldable_output(v.screen, bm.selected)
                         .map_or(u_end_full, |(out_start, _)| out_start.saturating_sub(1))
                 } else {
                     u_end_full
@@ -558,21 +565,21 @@ pub fn compose(
                 continue;
             }
             let Some(line) = ctx.line_at(r) else { continue };
-            if !crate::blocks::is_command_row(v.screen, line) {
+            if !blocks::is_command_row(v.screen, line) {
                 continue;
             }
             // The block this command row belongs to (its prompt-start line).
-            let prompt_line = crate::blocks::prompt_at_or_above(v.screen, line).unwrap_or(line);
-            let folded = crate::blocks::row_at(v.screen, prompt_line)
+            let prompt_line = blocks::prompt_at_or_above(v.screen, line).unwrap_or(line);
+            let folded = blocks::row_at(v.screen, prompt_line)
                 .is_some_and(|row| row.mark.is_folded());
             let status = block_status_at(v.screen, prompt_line);
             // Fold summary part: folded blocks only (unchanged logic).
             let summary = if folded {
-                crate::blocks::foldable_output(v.screen, prompt_line).map(|(start, end)| {
+                blocks::foldable_output(v.screen, prompt_line).map(|(start, end)| {
                     let n = end - start + 1;
                     let glyph = match status {
-                        Some(crate::blocks::BlockLineStatus::Ok) => " ✓",
-                        Some(crate::blocks::BlockLineStatus::Failed) => " ✗",
+                        Some(BlockLineStatus::Ok) => " ✓",
+                        Some(BlockLineStatus::Failed) => " ✗",
                         None => "",
                     };
                     format!("▸ {n} lines{glyph}")
@@ -582,10 +589,10 @@ pub fn compose(
             };
             // Duration part: gated by the threshold, suppressed in copy mode.
             let dur = duration_on
-                .then(|| crate::blocks::closing_duration(v.screen, prompt_line))
+                .then(|| blocks::closing_duration(v.screen, prompt_line))
                 .flatten()
                 .filter(|&ms| ms >= threshold.unwrap_or(u32::MAX))
-                .map(crate::blocks::format_duration);
+                .map(blocks::format_duration);
             let annotation = match (summary, dur) {
                 (Some(s), Some(d)) => format!("{s} · {d}"),
                 (Some(s), None) => s,
@@ -613,8 +620,8 @@ pub fn compose(
             // Color the annotation with the block's ok/fail color when known.
             if let (Some(bc), Some(st)) = (blocks, status) {
                 let color = match st {
-                    crate::blocks::BlockLineStatus::Ok => bc.ok,
-                    crate::blocks::BlockLineStatus::Failed => bc.fail,
+                    BlockLineStatus::Ok => bc.ok,
+                    BlockLineStatus::Failed => bc.fail,
                 };
                 for c in start_col..pane_right {
                     if let Some(cell) = screen.cell_mut(host_row, c) {
@@ -647,13 +654,13 @@ pub fn compose(
             }
             let ctx = &fold_ctx[&v.id];
             let Some(top_line) = ctx.line_at(0) else { continue };
-            let Some(prompt) = crate::blocks::prompt_at_or_above(v.screen, top_line) else {
+            let Some(prompt) = blocks::prompt_at_or_above(v.screen, top_line) else {
                 continue;
             };
             if prompt >= top_line {
                 continue; // the command row itself is visible at the top
             }
-            let Some(cmd) = crate::blocks::block_command_line(v.screen, prompt) else {
+            let Some(cmd) = blocks::block_command_line(v.screen, prompt) else {
                 continue;
             };
             let host_row = pane_row_offset + v.rect.row;
@@ -669,9 +676,9 @@ pub fn compose(
             // Right-aligned duration on the header (same overlap guard as inline).
             if let Some(ms) = blocks
                 .and_then(|b| b.duration_threshold_ms)
-                .and_then(|t| crate::blocks::closing_duration(v.screen, prompt).filter(|&ms| ms >= t))
+                .and_then(|t| blocks::closing_duration(v.screen, prompt).filter(|&ms| ms >= t))
             {
-                let d = crate::blocks::format_duration(ms);
+                let d = blocks::format_duration(ms);
                 let dw = display_width(&d);
                 if pane_right > v.rect.col + dw {
                     let start_col = pane_right - dw;
@@ -691,7 +698,7 @@ pub fn compose(
     // since a Kitty source rect can't crop around an arbitrary floating box. The
     // seq is folded with the pane id so per-Screen counters can't collide.
     if overlay.is_none() && popup.is_none() {
-        let mut placements: Vec<crate::virtual_screen::VisiblePlacement> = Vec::new();
+        let mut placements: Vec<VisiblePlacement> = Vec::new();
         for v in panes {
             if v.screen.alt.is_some() || v.screen.placements.is_empty() {
                 continue;
@@ -736,7 +743,7 @@ pub fn compose(
                 let (src_y, src_h) = crop_axis(img.pixel_h, p.rows, rows_off, vis_rows);
                 let (src_x, src_w) = crop_axis(img.pixel_w, p.cols, 0, vis_cols);
                 let key = (u64::from(v.id.0) << 40) | (p.seq & ((1u64 << 40) - 1));
-                placements.push(crate::virtual_screen::VisiblePlacement {
+                placements.push(VisiblePlacement {
                     key,
                     image_id: host_image_id(v.id.0, p.image_id),
                     placement_id: p.placement_id,
@@ -765,7 +772,7 @@ pub fn compose(
         // diff), so we only surface the image data to transmit once + the box to
         // emit. Raw id is kept (the placeholder cells reference it). No viewport
         // clipping; the placeholder cells are clipped by the cell copy.
-        let mut virtual_placements: Vec<crate::virtual_screen::VisibleVirtualPlacement> = Vec::new();
+        let mut virtual_placements: Vec<VisibleVirtualPlacement> = Vec::new();
         for v in panes {
             if v.screen.alt.is_some() || v.screen.virtual_placements.is_empty() {
                 continue;
@@ -775,7 +782,7 @@ pub fn compose(
                     continue;
                 };
                 let key = (u64::from(v.id.0) << 40) | (vp.seq & ((1u64 << 40) - 1));
-                virtual_placements.push(crate::virtual_screen::VisibleVirtualPlacement {
+                virtual_placements.push(VisibleVirtualPlacement {
                     key,
                     image_id: vp.image_id,
                     placement_id: vp.placement_id,
@@ -859,7 +866,7 @@ pub fn compose(
         && let Some(filter) = &bm.filter
         && filter.prompt_active
     {
-        let total = crate::blocks::all_prompt_lines(active.screen).len();
+        let total = blocks::all_prompt_lines(active.screen).len();
         let prompt_row = pane_row_offset + active.rect.row + active.rect.rows.saturating_sub(1);
         let text = format!("filter: {} ({}/{})", filter.query, filter.matches.len(), total);
         put_str(
@@ -985,7 +992,7 @@ fn filter_match_spans(
     let total = screen.scrollback.rows().len() as u32 + u32::from(screen.active.num_rows());
     let span = display_width(&q).max(1);
     for line in lo..hi.min(total) {
-        let Some(row) = crate::blocks::row_at(screen, line) else { continue };
+        let Some(row) = blocks::row_at(screen, line) else { continue };
         // Build the line's lowercased text + a column map (byte offset → grid
         // column), keyed on the SAME lowercased text the byte offsets index into.
         let mut line_text = String::new();
@@ -1107,7 +1114,7 @@ fn paint_overlay(
 /// differs. Painted with empty attrs (no reverse), matching every caller.
 // ponytail: box geometry (rect) + title/footer + theme; a struct would just
 // rename the same transient call-site args.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "box geometry, colors, and text; no natural param grouping")]
 fn draw_box(
     screen: &mut VirtualScreen,
     row0: u16,
@@ -1148,7 +1155,7 @@ fn draw_box(
 /// bodies are otherwise identical.
 // ponytail: 8 grid-geometry args (box interior rect + scroll window + selection);
 // a wrapper struct would be pure transient call-site noise (cf. `compose`'s allow).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "row list, geometry, colors, and selection state; no natural param grouping")]
 fn paint_selectable_rows(
     screen: &mut VirtualScreen,
     rows: &[String],
@@ -1281,10 +1288,10 @@ fn paint_welcome(
 /// keep the selection visible.
 // ponytail: filter/selection state + box geometry + theme; a struct would just
 // rename the same transient call-site args.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "entries, geometry, colors, and filter/selection state; no natural param grouping")]
 fn paint_session_picker(
     screen: &mut VirtualScreen,
-    entries: &[crate::overlay::PickerEntry],
+    entries: &[PickerEntry],
     filter: &str,
     selected: usize,
     pane_row_offset: u16,
@@ -1295,7 +1302,7 @@ fn paint_session_picker(
     let title = " Sessions ";
     let footer = " \u{2191}/\u{2193} select \u{b7} enter switch \u{b7} esc cancel ";
     let empty_msg = "(no matching sessions)";
-    let filtered = crate::overlay::picker_filtered_indices(entries, filter);
+    let filtered = picker_filtered_indices(entries, filter);
     let rows: Vec<String> = filtered
         .iter()
         .map(|&i| {
@@ -1359,7 +1366,7 @@ fn paint_session_picker(
 /// REVERSE, scrolled to keep the selection visible. Mirrors the session picker.
 fn paint_history(
     screen: &mut VirtualScreen,
-    state: &crate::history::HistoryState,
+    state: &HistoryState,
     pane_row_offset: u16,
     pane_area_rows: u16,
     cols: u16,
@@ -1378,7 +1385,7 @@ fn paint_history(
                 Some(_) => '\u{2717}', // ✗
                 None => ' ',
             };
-            let dur = e.duration.map(crate::blocks::format_duration).unwrap_or_default();
+            let dur = e.duration.map(blocks::format_duration).unwrap_or_default();
             format!("{glyph} {dur:<6} {}/{}  {}", e.session, e.window_idx, e.command)
         })
         .collect();
@@ -1438,7 +1445,7 @@ fn paint_history(
 /// (`label_fg` on `label_bg`).
 fn paint_hint(
     screen: &mut VirtualScreen,
-    state: &crate::hint::HintState,
+    state: &HintState,
     colors: HintColors,
     pane_row_offset: u16,
     rect: Rect,
@@ -1498,7 +1505,7 @@ fn paint_hint(
 /// attrs). Returns the column just past the last grapheme.
 // ponytail: 8 cell-paint args (grid coord + text + fg/bg/attrs + clip); a
 // struct would be transient call-site ceremony (cf. `compose`'s allow).
-#[allow(clippy::too_many_arguments)] // 8 cell-paint args: grid coord, text, fg, bg, attrs, clip; no grouping
+#[allow(clippy::too_many_arguments, reason = "8 cell-paint args: grid coord, text, fg, bg, attrs, clip — no natural grouping")]
 fn put_colored(
     screen: &mut VirtualScreen,
     row: u16,
@@ -1539,7 +1546,7 @@ fn put_colored(
 /// hint in navigate mode when a filter is active).
 fn paint_tree(
     screen: &mut VirtualScreen,
-    state: &crate::tree::TreeState,
+    state: &TreeState,
     pane_row_offset: u16,
     pane_area_rows: u16,
     cols: u16,
@@ -1627,7 +1634,7 @@ fn paint_tree(
 /// selected row REVERSE, scrolled to keep the selection visible.
 fn paint_buffers(
     screen: &mut VirtualScreen,
-    state: &crate::buffer::BufferPickerState,
+    state: &BufferPickerState,
     pane_row_offset: u16,
     pane_area_rows: u16,
     cols: u16,
@@ -1695,7 +1702,7 @@ fn paint_popup(
     pane_row_offset: u16,
     pane_area_rows: u16,
     cols: u16,
-    blocks: Option<&crate::borders::BlockBorderColors>,
+    blocks: Option<&BlockBorderColors>,
 ) {
     let rect = popup.rect;
     if rect.rows < 3 || rect.cols < 3 {
@@ -1756,11 +1763,11 @@ fn paint_popup(
             }
             let Some(cell) = screen.cell_mut(border_row, border_col) else { continue };
             match status {
-                crate::blocks::BlockLineStatus::Ok => {
+                BlockLineStatus::Ok => {
                     cell.fg = colors.ok;
                     // Glyph stays │ (or whatever border_glyph placed there).
                 }
-                crate::blocks::BlockLineStatus::Failed => {
+                BlockLineStatus::Failed => {
                     cell.fg = colors.fail;
                     // Replace a plain vertical │ with the half-block ▐.
                     if cell.grapheme.as_str() == "\u{2502}" {
@@ -1999,6 +2006,10 @@ const fn rgb_to_color(rgb: plexy_glass_status::Rgb) -> plexy_glass_emulator::Col
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::BufferEntry;
+    use crate::history::HistoryEntry;
+    use crate::tree::{NodeKey, TreeMode, TreeNode};
+    use std::iter;
     use plexy_glass_emulator::{Emulator, RowMark};
 
     fn pane(emu: &mut Emulator, bytes: &[u8]) {
@@ -2150,7 +2161,6 @@ mod tests {
 
     #[test]
     fn selection_overlay_sets_reverse_attr() {
-        use crate::selection::Selection;
         use plexy_glass_emulator::Attrs;
         let mut e = Emulator::new(4, 6);
         pane(&mut e, b"hello ");
@@ -2221,7 +2231,7 @@ mod tests {
 
     #[test]
     fn hint_labels_paint_in_the_focused_pane_not_at_screen_origin() {
-        use crate::hint::{HintKind, HintState, HintTarget};
+        use crate::hint::{HintKind, HintTarget};
         // Two side-by-side 4x3 panes; the RIGHT one (rect.col = 4) is focused.
         let mut left = Emulator::new(4, 3);
         let mut right = Emulator::new(4, 3);
@@ -2863,8 +2873,8 @@ mod tests {
         assert!(!vs.cursor_visible, "welcome overlay hides the pane cursor");
     }
 
-    fn picker_view(name: &str, label: &str, current: bool) -> crate::overlay::PickerEntry {
-        crate::overlay::PickerEntry { name: name.into(), label: label.into(), is_current: current }
+    fn picker_view(name: &str, label: &str, current: bool) -> PickerEntry {
+        PickerEntry { name: name.into(), label: label.into(), is_current: current }
     }
 
     #[test]
@@ -3017,8 +3027,8 @@ mod tests {
         depth: u8,
         label: &str,
         is_current: bool,
-    ) -> crate::tree::TreeNode {
-        crate::tree::TreeNode {
+    ) -> TreeNode {
+        TreeNode {
             session: session.into(),
             window: window.map(crate::WindowId),
             pane: pane.map(crate::PaneId),
@@ -3047,7 +3057,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let state = crate::tree::TreeState {
+        let state = TreeState {
             nodes: vec![
                 tree_node("main", None, None, 0, "main — 1 win, 2 panes", true),
                 tree_node("main", Some(0), None, 1, "1: shell", true),
@@ -3119,7 +3129,7 @@ mod tests {
             drag_role: PaneDragRole::None,
         };
         let mk = |session: &str, cmd: &str, exit: Option<i32>, dur: Option<u32>, line: u32| {
-            crate::history::HistoryEntry {
+            HistoryEntry {
                 session: session.into(),
                 window: crate::WindowId(0),
                 window_idx: 2,
@@ -3131,7 +3141,7 @@ mod tests {
                 haystack: cmd.to_lowercase(),
             }
         };
-        let state = crate::history::HistoryState {
+        let state = HistoryState {
             entries: vec![
                 mk("api", "docker compose up", Some(0), Some(2300), 10),
                 mk("web", "cargo test", Some(1), Some(45_000), 4),
@@ -3188,10 +3198,10 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let state = crate::buffer::BufferPickerState {
+        let state = BufferPickerState {
             entries: vec![
-                crate::buffer::BufferEntry { name: "buffer1".into(), preview: "hello".into() },
-                crate::buffer::BufferEntry { name: "buffer0".into(), preview: "world".into() },
+                BufferEntry { name: "buffer1".into(), preview: "hello".into() },
+                BufferEntry { name: "buffer0".into(), preview: "world".into() },
             ],
             selected: 1,
         };
@@ -3230,7 +3240,7 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let state = crate::buffer::BufferPickerState { entries: vec![], selected: 0 };
+        let state = BufferPickerState { entries: vec![], selected: 0 };
         let ov = OverlayView::Buffer { state: &state };
         let vs = compose(&[view], (10, 50), None, StatusPlacement::Bottom, None, Some(&ov), None, None, None, plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61), ChromeColors::ansi_default());
         let mut text = String::new();
@@ -3288,10 +3298,10 @@ mod tests {
             marked: false,
             drag_role: PaneDragRole::None,
         };
-        let state = crate::tree::TreeState {
+        let state = TreeState {
             nodes: vec![tree_node("main", Some(0), None, 1, "1: shell", false)],
             selected: 0,
-            mode: crate::tree::TreeMode::ConfirmKill,
+            mode: TreeMode::ConfirmKill,
             ..Default::default()
         };
         let ov = OverlayView::Tree { state: &state };
@@ -3306,7 +3316,7 @@ mod tests {
     }
 
     /// Compose the tree overlay over a blank pane and return the frame text.
-    fn tree_frame(state: &crate::tree::TreeState, rows: u16, cols: u16) -> String {
+    fn tree_frame(state: &TreeState, rows: u16, cols: u16) -> String {
         let mut e = Emulator::new(rows, cols);
         pane(&mut e, b"x ");
         let view = PaneView {
@@ -3332,7 +3342,7 @@ mod tests {
         text
     }
 
-    fn tree_v2_nodes() -> Vec<crate::tree::TreeNode> {
+    fn tree_v2_nodes() -> Vec<TreeNode> {
         vec![
             tree_node("main", None, None, 0, "main — 1 win, 2 panes", true),
             tree_node("main", Some(0), None, 1, "1: shell", true),
@@ -3343,9 +3353,9 @@ mod tests {
 
     #[test]
     fn tree_overlay_hides_collapsed_rows() {
-        let state = crate::tree::TreeState {
+        let state = TreeState {
             nodes: tree_v2_nodes(),
-            collapsed: std::iter::once(crate::tree::NodeKey::Session("main".into())).collect(),
+            collapsed: iter::once(NodeKey::Session("main".into())).collect(),
             ..Default::default()
         };
         let text = tree_frame(&state, 12, 50);
@@ -3356,10 +3366,10 @@ mod tests {
 
     #[test]
     fn tree_overlay_filter_mode_footer() {
-        let state = crate::tree::TreeState {
+        let state = TreeState {
             nodes: tree_v2_nodes(),
             selected: 1,
-            mode: crate::tree::TreeMode::Filter,
+            mode: TreeMode::Filter,
             filter: "she".into(),
             ..Default::default()
         };
@@ -3370,7 +3380,7 @@ mod tests {
 
     #[test]
     fn tree_overlay_navigate_footer_flags_active_filter() {
-        let state = crate::tree::TreeState {
+        let state = TreeState {
             nodes: tree_v2_nodes(),
             selected: 1,
             filter: "shell".into(),
@@ -3975,7 +3985,7 @@ mod tests {
     /// of the popup is at col 10, rows 3..=8 (pane_row_offset=0, rect.row=2, rows=8).
     fn compose_with_popup(
         popup_screen: &plexy_glass_emulator::Screen,
-        blocks: Option<&crate::borders::BlockBorderColors>,
+        blocks: Option<&BlockBorderColors>,
     ) -> VirtualScreen {
         let mut bg = Emulator::new(12, 40);
         bg.advance(b"x ");
@@ -4434,7 +4444,7 @@ mod tests {
     fn dump_frame(vs: &VirtualScreen, attrs: bool) -> String {
         let mut text: Vec<String> = (0..vs.rows).map(|r| composed_row(vs, r)).collect();
         if !attrs {
-            while text.last().is_some_and(std::string::String::is_empty) {
+            while text.last().is_some_and(String::is_empty) {
                 text.pop();
             }
             return text.join("\n");
@@ -4705,7 +4715,7 @@ mod tests {
         );
         e.advance(b"\x1b[m");
         let mut screen = e.screen().clone();
-        crate::blocks::set_block_folded(&mut screen, 0, true); // fold "$ one"'s output
+        blocks::set_block_folded(&mut screen, 0, true); // fold "$ one"'s output
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
         let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         // Command row kept (with a right-aligned fold summary); out1/out2
@@ -4728,7 +4738,7 @@ mod tests {
         let vs0 = compose(&[v0], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert_eq!(vs0.placements.len(), 1, "image visible before folding");
         // Fold the image's block → the image hides.
-        crate::blocks::set_block_folded(&mut screen, 0, true);
+        blocks::set_block_folded(&mut screen, 0, true);
         let v1 = plain_view(&screen, Rect::new(0, 0, 8, 40));
         let vs1 = compose(&[v1], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         assert!(vs1.placements.is_empty(), "image inside a folded block is hidden");
@@ -4744,7 +4754,7 @@ mod tests {
         );
         e.advance(b"\x1b[m");
         let mut screen = e.screen().clone();
-        crate::blocks::set_block_folded(&mut screen, 0, true);
+        blocks::set_block_folded(&mut screen, 0, true);
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
         let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         let row0 = composed_row(&vs, 0);
@@ -4763,7 +4773,7 @@ mod tests {
         );
         e.advance(b"\x1b[m");
         let mut s = e.screen().clone();
-        crate::blocks::set_block_folded(&mut s, 0, true);
+        blocks::set_block_folded(&mut s, 0, true);
         s
     }
 
@@ -4798,7 +4808,7 @@ mod tests {
         e.advance(bytes.as_bytes());
         e.advance(b"\x1b[m");
         let mut screen = e.screen().clone();
-        crate::blocks::set_block_folded(&mut screen, 0, true);
+        blocks::set_block_folded(&mut screen, 0, true);
         let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
         let vs = compose(&[view], (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR, ChromeColors::ansi_default());
         let row0 = composed_row(&vs, 0);
@@ -4819,7 +4829,7 @@ mod tests {
             ChromeColors::ansi_default(),
         );
         let mut folded = screen;
-        crate::blocks::set_block_folded(&mut folded, 0, true);
+        blocks::set_block_folded(&mut folded, 0, true);
         let vs1 = compose(
             &[plain_view(&folded, Rect::new(0, 0, 8, 40))],
             (8, 40), None, StatusPlacement::Bottom, None, None, None, None, None, TEST_COLOR,
@@ -5138,7 +5148,7 @@ mod tests {
         // `display_row` returns None when `r == rows` (one past the last valid row).
         // The `< → <=` mutation at line 78 would return Some(rows) instead of None,
         // causing an out-of-bounds paint in the compositor.
-        let proj = crate::blocks::FoldProjection::identity(10);
+        let proj = FoldProjection::identity(10);
         let ctx = FoldCtx { proj, top_visible: 2 };
         // Line at unified 4 → visible 4, r = 4 - 2 = 2.
         assert_eq!(ctx.display_row(4, 3), Some(2), "r=2 < rows=3 → in viewport");

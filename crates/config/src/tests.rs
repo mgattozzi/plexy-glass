@@ -1,4 +1,6 @@
 use super::*;
+use std::fs;
+use std::path::Path;
 
 #[test]
 fn built_in_default_has_expected_shape() {
@@ -13,7 +15,7 @@ fn built_in_default_has_expected_shape() {
 fn load_from_path_with_minimal_kdl() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.kdl");
-    std::fs::write(
+    fs::write(
         &path,
         r##"
 palette { fg "#ffffff"; bg "#000000" }
@@ -26,7 +28,7 @@ status {
 "##,
     )
     .unwrap();
-    let cfg = crate::load::load_from_path(&path).expect("parse");
+    let cfg = load_from_path(&path).expect("parse");
     assert_eq!(cfg.palette.entries.get("fg").map(String::as_str), Some("#ffffff"));
     assert_eq!(cfg.status.refresh.as_secs(), 10);
     assert_eq!(cfg.status.right.len(), 1);
@@ -52,7 +54,7 @@ fn kanagawa_dragon_palette_has_expected_keys() {
 
 #[test]
 fn load_from_nonexistent_path_returns_error() {
-    let result = crate::load::load_from_path(std::path::Path::new("/nonexistent/x.kdl"));
+    let result = load_from_path(Path::new("/nonexistent/x.kdl"));
     assert!(result.is_err());
 }
 

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::io;
 use thiserror::Error;
 
 /// Errors carried inside `ServerMsg::Error`. Clients can observe these,
@@ -40,7 +41,7 @@ pub enum CodecError {
     #[error("connection closed before full frame was read")]
     UnexpectedEof,
     #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
     #[error("postcard decode error: {0}")]
     Decode(String),
     #[error("postcard encode error: {0}")]

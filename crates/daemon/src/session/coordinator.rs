@@ -1,9 +1,15 @@
 //! Render coordinator and related helpers extracted from `session.rs`.
 
 use super::Session;
-use plexy_glass_mux::VirtualScreen;
+use crate::window_manager::{PendingNotification, Severity};
+use plexy_glass_mux::{VirtualScreen, compositor};
+use std::collections::HashMap;
+use std::panic;
+use std::process::Stdio;
 use std::sync::{Arc, atomic::Ordering};
+use tokio::process::Command;
 use tokio::sync::watch;
+use tokio::time;
 
 /// Per-pane data captured under the window-manager lock, owned so the borrowed
 /// `PaneView`s handed to the compositor don't keep the lock held during
@@ -24,7 +30,7 @@ struct OwnedPane {
 /// the frame (the process panic hook records the location). See the
 /// terminal-trust-hardening spec, Phase 1.
 fn catch_compose(f: impl FnOnce() -> VirtualScreen) -> Option<VirtualScreen> {
-    if let Ok(frame) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) { Some(frame) } else {
+    if let Ok(frame) = panic::catch_unwind(panic::AssertUnwindSafe(f)) { Some(frame) } else {
         tracing::error!("compositor panicked; skipping frame");
         None
     }
@@ -42,7 +48,7 @@ pub(super) async fn render_coordinator(
         session.notify.notified().await;
         // Debounce a few notifications.
         let n = Arc::clone(&session.notify);
-        let _ = tokio::time::timeout(DEBOUNCE, async move {
+        let _ = time::timeout(DEBOUNCE, async move {
             loop {
                 n.notified().await;
             }
@@ -106,11 +112,11 @@ pub(super) async fn render_coordinator(
                     owned.push(OwnedPane {
                         id,
                         rect,
-                        screen: pane.with_screen(std::clone::Clone::clone),
+                        screen: pane.with_screen(Clone::clone),
                         is_active: id == active_id,
                         scroll: pane.scroll_offset(),
-                        copy_mode: pane.with_copy_mode(std::clone::Clone::clone),
-                        block_mode: pane.with_block_mode(std::clone::Clone::clone),
+                        copy_mode: pane.with_copy_mode(Clone::clone),
+                        block_mode: pane.with_block_mode(Clone::clone),
                         name: pane.name(),
                     });
                 }
@@ -139,7 +145,7 @@ pub(super) async fn render_coordinator(
             let popup_owned: Option<(plexy_glass_emulator::Screen, String, plexy_glass_mux::Rect)> =
                 m.popup().map(|p| {
                     (
-                        p.pane.with_screen(std::clone::Clone::clone),
+                        p.pane.with_screen(Clone::clone),
                         p.title.clone(),
                         plexy_glass_mux::popup_rect(m.viewport()),
                     )
@@ -265,7 +271,7 @@ pub(super) async fn render_coordinator(
             // Transient status-line message (cleared lazily here when expired);
             // peek the severity before taking the text so it can be styled.
             let message_severity = m.active_severity();
-            let message: Option<(String, crate::window_manager::Severity)> = m
+            let message: Option<(String, Severity)> = m
                 .take_active_message()
                 .map(|t| (t.to_string(), message_severity));
 
@@ -345,7 +351,7 @@ pub(super) async fn render_coordinator(
             });
 
             catch_compose(|| {
-                plexy_glass_mux::compositor::compose(
+                compositor::compose(
                     &views,
                     (host.rows, host.cols),
                     Some(&status),
@@ -402,7 +408,7 @@ fn should_notify(enabled: bool, min_ms: u32, duration_ms: Option<u32>, attended:
 
 /// Notification body: `"✓ cargo build · exit 0 · 2m03s"` (command best-effort;
 /// falls back to the window when the command can't be extracted).
-fn notification_body(p: &crate::window_manager::PendingNotification) -> String {
+fn notification_body(p: &PendingNotification) -> String {
     use plexy_glass_mux::blocks::format_duration;
     let dur = p.event.duration_ms.map(format_duration).unwrap_or_default();
     let glyph = match p.event.exit {
@@ -456,11 +462,11 @@ fn notification_argv(macos: bool, title: &str, body: &str) -> (&'static str, Vec
 /// it can't leave a zombie. Not called by tests (it would pop a real toast).
 fn notify_desktop(title: String, body: String) {
     let (program, args) = notification_argv(cfg!(target_os = "macos"), &title, &body);
-    match tokio::process::Command::new(program)
+    match Command::new(program)
         .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
     {
         Ok(mut child) => {
@@ -494,7 +500,7 @@ fn substitute_prefix_token(keys: &str, prefix: &str) -> String {
 fn build_help_lines(config: &plexy_glass_config::Config) -> Vec<(String, String)> {
     fn upsert(
         ordered: &mut Vec<(String, String)>,
-        index: &mut std::collections::HashMap<String, usize>,
+        index: &mut HashMap<String, usize>,
         keys: &str,
         command: &str,
     ) {
@@ -509,7 +515,7 @@ fn build_help_lines(config: &plexy_glass_config::Config) -> Vec<(String, String)
     let km = &config.keymap;
     let prefix = &km.prefix;
     let mut ordered: Vec<(String, String)> = Vec::new();
-    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
     if km.inherit_defaults {
         for b in plexy_glass_config::built_in_keymap().bindings {
             let resolved = substitute_prefix_token(&b.keys, prefix);
@@ -694,7 +700,7 @@ pub(super) fn chrome_colors(cfg: &plexy_glass_config::Config) -> plexy_glass_mux
 /// match the built-in kanagawa-dragon palette (crates/config/src/default.rs).
 pub(super) fn message_colors(
     cfg: &plexy_glass_config::Config,
-    severity: crate::window_manager::Severity,
+    severity: Severity,
 ) -> (plexy_glass_emulator::Color, plexy_glass_emulator::Color) {
     use crate::window_manager::Severity;
     let resolve = |name: &str, def: (u8, u8, u8)| {
@@ -821,7 +827,7 @@ mod tests {
     #[test]
     fn notification_body_formats_command_exit_duration() {
         use crate::window::CompletionEvent;
-        let p = crate::window_manager::PendingNotification {
+        let p = PendingNotification {
             window_index: 1,
             window_name: "api".into(),
             is_active_window: false,
@@ -837,7 +843,7 @@ mod tests {
         assert!(body.contains("45s"), "duration: {body:?}");
         assert!(body.contains('\u{2717}'), "fail glyph: {body:?}");
         // No command → window fallback.
-        let p2 = crate::window_manager::PendingNotification {
+        let p2 = PendingNotification {
             event: CompletionEvent { command: None, ..p.event.clone() },
             ..p
         };

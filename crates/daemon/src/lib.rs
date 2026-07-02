@@ -1,5 +1,11 @@
 //! plexy-glass daemon.
 
+use std::fs::OpenOptions;
+use std::process;
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
+
 /// Crate-wide serialization for tests that mutate process-global env vars
 /// (notably `XDG_STATE_HOME` for the persist/session/registry suites).
 ///
@@ -7,7 +13,7 @@
 /// serialize across modules, so concurrent tests could clobber each other's
 /// `XDG_STATE_HOME` and read the wrong session directory.
 #[cfg(test)]
-pub(crate) static STATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static STATE_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Per-test `XDG_STATE_HOME` isolation.
 ///
@@ -18,6 +24,12 @@ pub(crate) static STATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new((
 /// reads/writes the user's *real* state dir.
 #[cfg(test)]
 pub(crate) mod test_env {
+    use std::env;
+    use std::ffi::OsString;
+    use std::sync::{MutexGuard, PoisonError};
+    use std::time::{Duration, Instant};
+    use tokio::time;
+
     /// Holds the crate-wide env lock, points `XDG_STATE_HOME` at a fresh
     /// tempdir, pins `SHELL` to `/bin/sh`, and restores the previous values
     /// on drop.
@@ -32,9 +44,9 @@ pub(crate) mod test_env {
     /// Session/registry, no guard) pin via
     /// `WindowManager::set_default_program` instead.
     pub struct EnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        old_xdg: Option<std::ffi::OsString>,
-        old_shell: Option<std::ffi::OsString>,
+        _lock: MutexGuard<'static, ()>,
+        old_xdg: Option<OsString>,
+        old_shell: Option<OsString>,
         _tmp: tempfile::TempDir,
     }
 
@@ -43,19 +55,19 @@ pub(crate) mod test_env {
         // restored the env vars during unwind.
         let lock = super::STATE_ENV_LOCK
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
-        let old_xdg = std::env::var_os("XDG_STATE_HOME");
-        let old_shell = std::env::var_os("SHELL");
+        let old_xdg = env::var_os("XDG_STATE_HOME");
+        let old_shell = env::var_os("SHELL");
         // SAFETY: env mutation is guarded by `STATE_ENV_LOCK`, held for the
         // lifetime of the guard.
         unsafe {
-            std::env::set_var("XDG_STATE_HOME", tmp.path());
-            std::env::set_var("SHELL", "/bin/sh");
+            env::set_var("XDG_STATE_HOME", tmp.path());
+            env::set_var("SHELL", "/bin/sh");
             // Suppress the one-time welcome modal so it can't intercept
             // overlay/screen assertions in attach-based tests (every test wants
             // it off; the var is test-only and never set in production).
-            std::env::set_var("PLEXY_GLASS_NO_WELCOME", "1");
+            env::set_var("PLEXY_GLASS_NO_WELCOME", "1");
         }
         EnvGuard { _lock: lock, old_xdg, old_shell, _tmp: tmp }
     }
@@ -65,12 +77,12 @@ pub(crate) mod test_env {
             // SAFETY: `STATE_ENV_LOCK` is held for `self`'s lifetime.
             unsafe {
                 match &self.old_xdg {
-                    Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-                    None => std::env::remove_var("XDG_STATE_HOME"),
+                    Some(v) => env::set_var("XDG_STATE_HOME", v),
+                    None => env::remove_var("XDG_STATE_HOME"),
                 }
                 match &self.old_shell {
-                    Some(v) => std::env::set_var("SHELL", v),
-                    None => std::env::remove_var("SHELL"),
+                    Some(v) => env::set_var("SHELL", v),
+                    None => env::remove_var("SHELL"),
                 }
             }
         }
@@ -86,10 +98,10 @@ pub(crate) mod test_env {
     /// prove absence, so keep a short fixed sleep there and mark it with a
     /// comment.
     pub async fn poll_until(
-        deadline: std::time::Duration,
+        deadline: Duration,
         mut cond: impl FnMut() -> bool,
     ) -> bool {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         loop {
             if cond() {
                 return true;
@@ -97,7 +109,7 @@ pub(crate) mod test_env {
             if start.elapsed() >= deadline {
                 return false;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
@@ -140,13 +152,14 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
     // Logs are already initialized by the top-level binary when foregrounded.
     if !args.foreground {
         use tracing_subscriber::Layer;
+        use tracing_subscriber::fmt;
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        let file = std::fs::OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&paths.log_file)?;
-        let layer = tracing_subscriber::fmt::layer()
+        let layer = fmt::layer()
             .with_writer(file)
             .with_ansi(false)
             .with_target(true)
@@ -166,14 +179,14 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
     if let Some(e) = &cfg_err {
         tracing::warn!(error = %e, "config load error; using built-in default");
     }
-    let config = std::sync::Arc::new(config);
+    let config = Arc::new(config);
 
     let listener = listener::Listener::bind(paths)?;
-    let daemon_pid = std::process::id();
-    let registry = std::sync::Arc::new(SessionRegistry::new());
+    let daemon_pid = process::id();
+    let registry = Arc::new(SessionRegistry::new());
     // Surface a boot config error on the next attach (it would otherwise only
     // reach the log). Cleared by the first clean reload.
-    registry.set_config_error(cfg_err.as_ref().map(std::string::ToString::to_string));
+    registry.set_config_error(cfg_err.as_ref().map(ToString::to_string));
 
     // Build config-declared default sessions eagerly (Feature B). A failure to
     // build one is logged and skipped, so it never blocks the accept loop. The
@@ -194,8 +207,8 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
                 continue;
             }
         };
-        let registry = std::sync::Arc::clone(&registry);
-        let config = std::sync::Arc::clone(&config);
+        let registry = Arc::clone(&registry);
+        let config = Arc::clone(&config);
         tokio::spawn(async move {
             if let Err(e) = connection::serve(stream, daemon_pid, registry, config).await {
                 error!(error = %e, "connection ended with error");

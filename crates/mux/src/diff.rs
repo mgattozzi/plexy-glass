@@ -4,6 +4,7 @@
 use crate::virtual_screen::{VirtualScreen, VisiblePlacement};
 use plexy_glass_emulator::{Attrs, Cell, Color, UnderlineStyle};
 use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::Entry;
 use std::fmt::Write as _;
 
 /// Which inline-graphics protocols the *outer* terminal of a given client
@@ -423,7 +424,7 @@ impl DiffRenderer {
                 emit_transmit_bytes(out, vp.image_id, vp.format.kitty_f(), vp.pixel_w, vp.pixel_h, &vp.data_b64);
                 self.transmitted_virtual.insert(vp.image_id, vp.generation);
             }
-            if let std::collections::hash_map::Entry::Vacant(slot) = self.virtual_placed.entry(vp.key) {
+            if let Entry::Vacant(slot) = self.virtual_placed.entry(vp.key) {
                 // Omit c=/r= when 0 (the placeholder cells define the extent).
                 let _ = write!(out, "\x1b_Ga=p,U=1,i={},p={}", vp.image_id, vp.placement_id);
                 if vp.cols > 0 {
@@ -762,6 +763,7 @@ fn apply_sgr_delta(out: &mut String, prev: &CellAttrs, cell: &Cell) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use crate::virtual_screen::VisibleVirtualPlacement;
     use smol_str::SmolStr;
 
@@ -1017,7 +1019,7 @@ mod tests {
             src_y: 0,
             src_w: 30,
             src_h: 40,
-            data_b64: std::sync::Arc::from(&b"QUJD"[..]),
+            data_b64: Arc::from(&b"QUJD"[..]),
             host_row,
             host_col,
             rows: 2,
@@ -1104,7 +1106,7 @@ mod tests {
         render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
         let mut p = vp(1, 7, 1, 2, 3);
         p.generation = 2;
-        p.data_b64 = std::sync::Arc::from(&b"WFla"[..]);
+        p.data_b64 = Arc::from(&b"WFla"[..]);
         let s = render_str(&mut d, &frame_with(vec![p]));
         assert!(s.contains("a=t"), "changed content re-transmits id 7: {s:?}");
     }
@@ -1116,7 +1118,7 @@ mod tests {
         // sends it.
         let mut d = kitty_renderer();
         let mut empty = vp(1, 7, 1, 2, 3);
-        empty.data_b64 = std::sync::Arc::from(&b""[..]);
+        empty.data_b64 = Arc::from(&b""[..]);
         let s = render_str(&mut d, &frame_with(vec![empty]));
         assert!(!s.contains("\x1b_G"), "no graphics for an empty-data image: {s:?}");
         let s2 = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
@@ -1288,7 +1290,7 @@ mod tests {
             format: plexy_glass_emulator::ImageFormat::Png,
             pixel_w: 30,
             pixel_h: 40,
-            data_b64: std::sync::Arc::from(&b"QUJD"[..]),
+            data_b64: Arc::from(&b"QUJD"[..]),
             rows: 2,
             cols: 3,
         }
@@ -1325,7 +1327,7 @@ mod tests {
     fn sixel_vp(key: u64, host_row: u16, host_col: u16) -> VisiblePlacement {
         let mut p = vp(key, 7, 1, host_row, host_col);
         p.protocol = plexy_glass_emulator::ImageProtocol::Sixel;
-        p.data_b64 = std::sync::Arc::from(&b"0q\"1;1;10;20~~~"[..]);
+        p.data_b64 = Arc::from(&b"0q\"1;1;10;20~~~"[..]);
         p
     }
 
@@ -1423,8 +1425,8 @@ mod tests {
     fn iterm_vp(key: u64, host_row: u16, host_col: u16) -> VisiblePlacement {
         let mut p = vp(key, 7, 1, host_row, host_col);
         p.protocol = plexy_glass_emulator::ImageProtocol::Iterm2;
-        p.iterm_args = Some(std::sync::Arc::from("inline=1;width=10px"));
-        p.data_b64 = std::sync::Arc::from(&b"QUJD"[..]);
+        p.iterm_args = Some(Arc::from("inline=1;width=10px"));
+        p.data_b64 = Arc::from(&b"QUJD"[..]);
         p
     }
 
@@ -1484,7 +1486,7 @@ mod tests {
         render_str(&mut d, &frame_with_virtual(vec![vvp(1, 7)]));
         let mut vp = vvp(1, 7);
         vp.generation = 2;
-        vp.data_b64 = std::sync::Arc::from(&b"WFla"[..]);
+        vp.data_b64 = Arc::from(&b"WFla"[..]);
         let s = render_str(&mut d, &frame_with_virtual(vec![vp]));
         assert!(s.contains("a=t"), "changed content re-transmits the virtual image: {s:?}");
     }
@@ -1493,7 +1495,7 @@ mod tests {
     fn empty_data_virtual_placement_neither_transmits_nor_places() {
         let mut d = kitty_renderer();
         let mut vp = vvp(1, 7);
-        vp.data_b64 = std::sync::Arc::from(&b""[..]);
+        vp.data_b64 = Arc::from(&b""[..]);
         let s = render_str(&mut d, &frame_with_virtual(vec![vp]));
         assert!(!s.contains("\x1b_G"), "no transmit/place for an empty-data virtual placement: {s:?}");
         // A later real-data frame still works (raw-id cache not poisoned).
@@ -1542,7 +1544,7 @@ mod tests {
             src_y: 0,
             src_w: 30,
             src_h: 40,
-            data_b64: std::sync::Arc::from(&b"QUJD"[..]),
+            data_b64: Arc::from(&b"QUJD"[..]),
             host_row: 0,
             host_col: 0,
             rows,

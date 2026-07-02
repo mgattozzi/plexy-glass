@@ -4,6 +4,11 @@ use plexy_glass_mux::{
     MouseKind, PickerEntry, TreeAction, TreeNode,
 };
 use crate::window_manager::OverlayKeyResult;
+use crate::{declared, test_env};
+use plexy_glass_mux::blocks;
+use std::env;
+use tokio::sync::broadcast;
+use tokio::time;
 
 fn spec() -> SpawnSpec {
     SpawnSpec {
@@ -53,7 +58,7 @@ async fn new_window_default_spec_is_shell_not_first_command() {
         cfg(),
     )
     .unwrap();
-    assert_eq!(m.default_spec.program, crate::declared::default_shell());
+    assert_eq!(m.default_spec.program, declared::default_shell());
     assert_ne!(m.default_spec.program, "/bin/cat");
     assert!(m.default_spec.args.is_empty());
 }
@@ -233,7 +238,7 @@ async fn click_release_on_cursor_row_repositions_without_a_mark() {
     use bytes::Bytes;
     use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
 
-    async fn read_for(rx: &mut tokio::sync::broadcast::Receiver<Bytes>, ms: u64) -> Vec<u8> {
+    async fn read_for(rx: &mut broadcast::Receiver<Bytes>, ms: u64) -> Vec<u8> {
         let mut out = Vec::new();
         let deadline = Instant::now() + Duration::from_millis(ms);
         loop {
@@ -242,7 +247,7 @@ async fn click_release_on_cursor_row_repositions_without_a_mark() {
                 break;
             }
             let step = (deadline - now).min(Duration::from_millis(150));
-            match tokio::time::timeout(step, rx.recv()).await {
+            match time::timeout(step, rx.recv()).await {
                 Ok(Ok(chunk)) => out.extend_from_slice(&chunk),
                 Ok(Err(_)) => break,          // channel closed or lagged
                 Err(_) if !out.is_empty() => break, // idle after data → done
@@ -498,7 +503,7 @@ async fn forwarded_mouse_uses_pane_local_coords() {
         if now >= deadline {
             break;
         }
-        match tokio::time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await
+        match time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await
         {
             Ok(Ok(c)) => out.extend_from_slice(&c),
             Ok(Err(_)) => break,
@@ -942,14 +947,14 @@ async fn prev_prompt_lands_target_at_top_under_a_fold() {
             push(Some(RowMark::PROMPT_START)); // 3
             push(Some(RowMark::OUTPUT_START)); // 4
             push(Some(RowMark::PROMPT_START)); // 5
-            plexy_glass_mux::blocks::set_block_folded(s, 0, true); // hide unified 1,2
+            blocks::set_block_folded(s, 0, true); // hide unified 1,2
         });
         // Scroll so block1's prompt (unified 3) is at the top.
         let (off, max) = pane.with_screen(|s| {
             let r = s.active.num_rows();
             (
-                plexy_glass_mux::blocks::scroll_offset_for_top(s, r, 3),
-                plexy_glass_mux::blocks::max_scroll_offset(s, r),
+                blocks::scroll_offset_for_top(s, r, 3),
+                blocks::max_scroll_offset(s, r),
             )
         });
         pane.set_scroll_offset(off, max);
@@ -958,7 +963,7 @@ async fn prev_prompt_lands_target_at_top_under_a_fold() {
         let p = m.active_window().active_pane().unwrap();
         let off = p.scroll_offset();
         p.with_screen(|s| {
-            plexy_glass_mux::blocks::scroll_line_at(s, s.active.num_rows(), off, 0)
+            blocks::scroll_line_at(s, s.active.num_rows(), off, 0)
         })
     };
     assert_eq!(top_line(&m), 3, "setup: block1 prompt at the top");
@@ -987,10 +992,10 @@ async fn fold_via_block_mode_dispatch_persists_after_exit() {
         s.active.rows[1].mark.set(RowMark::OUTPUT_START);
         s.active.rows[3].mark.set(RowMark::PROMPT_START);
     });
-    let screen = pane.with_screen(std::clone::Clone::clone);
+    let screen = pane.with_screen(Clone::clone);
     pane.enter_block_mode(plexy_glass_mux::BlockMode::new_for(&screen, 24).unwrap());
     // Apply the fold exactly as the connection dispatch does.
-    pane.with_screen_mut(|s| plexy_glass_mux::blocks::toggle_block_fold(s, 0));
+    pane.with_screen_mut(|s| blocks::toggle_block_fold(s, 0));
     assert!(pane.with_screen(|s| s.active.rows[0].mark.is_folded()), "block folded");
     // Leaving block mode must NOT clear the fold, that's the whole point.
     pane.exit_block_mode();
@@ -1531,7 +1536,7 @@ fn command_spec() -> SpawnSpec {
 /// command exits: it respawns an interactive `$SHELL` in the same slot.
 #[tokio::test]
 async fn command_pane_death_respawns_shell_in_place() {
-    let _g = crate::test_env::isolate();
+    let _g = test_env::isolate();
     let mut m = WindowManager::new(
         command_spec(), // `PaneId(0)` runs a command → respawn-on-exit
         PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
@@ -1569,7 +1574,7 @@ async fn command_pane_death_respawns_shell_in_place() {
 /// its window on exit, so no behavior change for interactive panes.
 #[tokio::test]
 async fn shell_pane_death_still_closes_window() {
-    let _g = crate::test_env::isolate();
+    let _g = test_env::isolate();
     let mut m = WindowManager::new(
         spec(), // `/bin/cat`, empty args → interactive shell semantics
         PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
@@ -1591,7 +1596,7 @@ async fn shell_pane_death_still_closes_window() {
 /// closes normally, no infinite respawn loop.
 #[tokio::test]
 async fn respawn_is_single_shot() {
-    let _g = crate::test_env::isolate();
+    let _g = test_env::isolate();
     let mut m = WindowManager::new(
         command_spec(),
         PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
@@ -1613,7 +1618,7 @@ async fn respawn_is_single_shot() {
 /// is untouched (scope = any command pane, not only a window's sole pane).
 #[tokio::test]
 async fn command_split_pane_death_respawns_only_its_slot() {
-    let _g = crate::test_env::isolate();
+    let _g = test_env::isolate();
     let mut m = WindowManager::new(
         spec(), // `PaneId(0)`: interactive shell
         PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
@@ -1655,7 +1660,7 @@ async fn command_split_pane_death_respawns_only_its_slot() {
 /// command exits: the window survives with an interactive shell.
 #[tokio::test]
 async fn command_session_survives_command_exit() {
-    let _g = crate::test_env::isolate();
+    let _g = test_env::isolate();
     let mut m = WindowManager::new(
         command_spec(),
         PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
@@ -1675,7 +1680,7 @@ async fn command_session_survives_command_exit() {
 /// is still occupied), rather than leaving a dangling reference or clearing it.
 #[tokio::test]
 async fn respawn_repoints_marked_pane_to_new_shell() {
-    let _g = crate::test_env::isolate();
+    let _g = test_env::isolate();
     let mut m = WindowManager::new(
         command_spec(), // `PaneId(0)`: command pane, active
         PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
@@ -2377,7 +2382,7 @@ async fn update_monitor_flags_sets_background_activity_then_clears_on_switch() {
             break;
         }
         assert!(Instant::now() <= deadline, "background activity never flagged");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        time::sleep(Duration::from_millis(20)).await;
     }
     assert!(!m.active_window().activity_flag(), "the current window is never flagged");
     // Switching to the flagged window clears it on the next update.
@@ -2417,7 +2422,7 @@ async fn update_monitor_flags_sets_background_bell_from_a_real_bel() {
             break;
         }
         assert!(Instant::now() <= deadline, "background bell never flagged window 1");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        time::sleep(Duration::from_millis(20)).await;
     }
     assert!(!m.active_window().bell_flag(), "the current window is never bell-flagged");
 }
@@ -2442,7 +2447,7 @@ async fn drive_until_alert(m: &mut WindowManager, bg_idx: usize) -> Option<Strin
         if Instant::now() > deadline {
             return None;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -2477,7 +2482,7 @@ async fn activity_in_active_window_emits_no_message() {
     // alert (`update_monitor_flags` returns false → no alert message set).
     for _ in 0..5 {
         assert!(!m.update_monitor_flags().alert_edge, "active window emits no alert message");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        time::sleep(Duration::from_millis(20)).await;
     }
     assert!(!m.active_window().activity_flag(), "active window is never flagged");
 }
@@ -2501,7 +2506,7 @@ async fn activity_does_not_re_message_while_sticky() {
             .await
             .unwrap();
         assert!(!m.update_monitor_flags().alert_edge, "no re-message while the flag stays sticky");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -2712,7 +2717,7 @@ async fn silence_edge_in_background_window_flags_and_messages() {
     // Before the threshold elapses: no edge. start_paused = true means no real
     // time has passed yet (tokio::time::Instant::now() has not advanced).
     assert!(!m.check_silence_alerts(), "no silence before the threshold");
-    tokio::time::advance(Duration::from_millis(120)).await;
+    time::advance(Duration::from_millis(120)).await;
     assert!(m.check_silence_alerts(), "silence edge fires past the threshold");
     assert_eq!(m.take_active_message(), Some("silence in window 2 (build)"));
     assert!(m.windows()[1].silence_flag(), "the ~ flag is set");
@@ -2724,7 +2729,7 @@ async fn silence_edge_in_background_window_flags_and_messages() {
 async fn silence_active_window_never_fires() {
     let mut m = mk_mgr(); // window 0, active
     m.active_window_mut().set_monitor_silence(Some(Duration::from_millis(50)));
-    tokio::time::advance(Duration::from_millis(90)).await;
+    time::advance(Duration::from_millis(90)).await;
     // The active window is excluded (else an idle active window flickers 1 Hz).
     assert!(!m.check_silence_alerts(), "active window never silence-fires");
     assert!(!m.active_window().silence_flag());
@@ -2736,7 +2741,7 @@ async fn silence_output_resets_timer_and_latch() {
     m.new_window_with_spec(spec(), "build".into()).unwrap(); // window 1, active
     m.windows_mut()[1].set_monitor_silence(Some(Duration::from_millis(80)));
     m.handle_command(Command::SelectWindow(0)).unwrap();
-    tokio::time::advance(Duration::from_millis(120)).await;
+    time::advance(Duration::from_millis(120)).await;
     assert!(m.check_silence_alerts(), "first silence episode fires");
     let _ = m.take_active_message();
     // Output resumes: refresh `last_output` + reset the latch.
@@ -2744,7 +2749,7 @@ async fn silence_output_resets_timer_and_latch() {
     // Right after output, no silence (timer reset) and no re-fire.
     assert!(!m.check_silence_alerts(), "output reset the timer");
     // A NEW silence episode after output resumes can fire again.
-    tokio::time::advance(Duration::from_millis(120)).await;
+    time::advance(Duration::from_millis(120)).await;
     assert!(m.check_silence_alerts(), "a new silence episode after output re-fires");
     assert_eq!(m.take_active_message(), Some("silence in window 2 (build)"));
 }
@@ -2755,7 +2760,7 @@ async fn silence_viewing_clears_flag_but_not_latch() {
     m.new_window_with_spec(spec(), "build".into()).unwrap(); // window 1, active
     m.windows_mut()[1].set_monitor_silence(Some(Duration::from_millis(80)));
     m.handle_command(Command::SelectWindow(0)).unwrap();
-    tokio::time::advance(Duration::from_millis(120)).await;
+    time::advance(Duration::from_millis(120)).await;
     assert!(m.check_silence_alerts(), "silence fires");
     let _ = m.take_active_message();
     assert!(m.windows()[1].silence_flag());
@@ -2776,7 +2781,7 @@ async fn silence_disable_clears_flag_and_threshold() {
     m.new_window_with_spec(spec(), "build".into()).unwrap();
     m.windows_mut()[1].set_monitor_silence(Some(Duration::from_millis(60)));
     m.handle_command(Command::SelectWindow(0)).unwrap();
-    tokio::time::advance(Duration::from_millis(100)).await;
+    time::advance(Duration::from_millis(100)).await;
     assert!(m.check_silence_alerts());
     let _ = m.take_active_message();
     assert!(m.windows()[1].silence_flag());
@@ -3885,7 +3890,7 @@ async fn motion_not_forwarded_to_click_only_child() {
         if now >= deadline {
             break;
         }
-        match tokio::time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await
+        match time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await
         {
             Ok(Ok(c)) => out.extend_from_slice(&c),
             Ok(Err(_)) => break,
@@ -3933,7 +3938,7 @@ async fn motion_forwarded_to_motion_tracking_child() {
         if now >= deadline {
             break;
         }
-        match tokio::time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await
+        match time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await
         {
             Ok(Ok(c)) => out.extend_from_slice(&c),
             Ok(Err(_)) => break,
@@ -3966,13 +3971,13 @@ async fn osc8_click_without_opener_reports_error() {
         s.active.rows[0].cells[0].hyperlink_id = id;
     });
     // Stub PATH empty so `open`/`xdg-open` can't spawn → open_url returns Err.
-    let old = std::env::var("PATH").unwrap_or_default();
+    let old = env::var("PATH").unwrap_or_default();
     let dir = tempfile::tempdir().unwrap();
     // SAFETY: nextest runs each test in its own process.
-    unsafe { std::env::set_var("PATH", dir.path()) };
+    unsafe { env::set_var("PATH", dir.path()) };
     // Physical (1,1) → pane-local (0,0) (viewport frame inset, no status bar).
     m.handle_mouse(mev(MouseKind::Press, 1, 1, false)).await.unwrap();
-    unsafe { std::env::set_var("PATH", old) };
+    unsafe { env::set_var("PATH", old) };
     assert_eq!(m.active_severity(), Severity::Error);
     assert_eq!(m.take_active_message(), Some("couldn't open (no system opener)"));
 }

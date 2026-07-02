@@ -1,7 +1,10 @@
 use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
 use async_trait::async_trait;
 use smol_str::SmolStr;
+use std::process::Stdio;
 use std::time::Duration;
+use tokio::process::Command;
+use tokio::time;
 
 pub struct GitBranchWidget {
     pub style: ResolvedStyle,
@@ -44,14 +47,14 @@ impl Widget for GitBranchWidget {
         // resize, and teardown in the session indefinitely. 2s matches
         // `read_clipboard`'s bound; on timeout the dropped future kills the
         // child and we render empty, same as a non-repo cwd.
-        let fut = tokio::process::Command::new("git")
+        let fut = Command::new("git")
             .args(["-C", path, "symbolic-ref", "--short", "HEAD"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             .kill_on_drop(true)
             .output();
-        let output = tokio::time::timeout(Duration::from_secs(2), fut).await;
+        let output = time::timeout(Duration::from_secs(2), fut).await;
         match output {
             Ok(Ok(o)) if o.status.success() => {
                 let branch_raw = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -70,6 +73,10 @@ impl Widget for GitBranchWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::fs;
+    use std::process;
+    use std::time::Instant;
 
     fn ctx_with_cwd(cwd: &str) -> EvalContext<'_> {
         EvalContext {
@@ -100,13 +107,13 @@ mod tests {
         // Regression: the old cwd-keyed cache pinned the branch forever, so a
         // `git checkout` in the same directory showed the stale branch. With the
         // cache gone, a second evaluation of the same cwd reports the new branch.
-        if std::process::Command::new("git").arg("--version").output().is_err() {
+        if process::Command::new("git").arg("--version").output().is_err() {
             return; // needs a real git; skip where unavailable
         }
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().to_str().unwrap().to_string();
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            process::Command::new("git")
                 .args(["-C", &cwd])
                 .args(args)
                 .output()
@@ -142,19 +149,19 @@ mod tests {
         // grandchild would survive the kill and linger as a test artifact).
         let dir = tempfile::tempdir().unwrap();
         let stub = dir.path().join("git");
-        std::fs::write(&stub, "#!/bin/sh\nexec sleep 10\n").unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&stub, "#!/bin/sh\nexec sleep 10\n").unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let old_path = std::env::var("PATH").unwrap_or_default();
+        let old_path = env::var("PATH").unwrap_or_default();
         let new_path = format!("{}:{old_path}", dir.path().display());
         // SAFETY: nextest runs each test in its own process. Under plain
         // `cargo test` the only cross-test effect is an extra leading PATH
         // entry containing nothing but `git`, which no sibling test resolves.
-        unsafe { std::env::set_var("PATH", &new_path) };
+        unsafe { env::set_var("PATH", &new_path) };
 
         let cwd = dir.path().to_str().unwrap().to_string();
         let mut w = GitBranchWidget::new(ResolvedStyle::default(), None, SmolStr::new(""));
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         let out = w.evaluate(&ctx_with_cwd(&cwd)).await;
         let elapsed = start.elapsed();
 

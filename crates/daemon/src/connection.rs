@@ -12,6 +12,21 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
+use crate::osc_actions;
+use crate::declared::expand_tilde;
+use crate::session::{SessionHistory, SessionTree};
+use crate::window_manager::{OverlayKeyResult, Severity};
+use plexy_glass_mux::{block_mode, blocks, command_prompt, copy_mode, hint};
+use plexy_glass_protocol::errors::CodecError;
+use std::cmp::Ordering as CmpOrdering;
+use std::env;
+use std::fs;
+use std::future;
+use std::io::Error;
+use std::mem;
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio::{io, task, time};
 
 pub async fn serve<S>(
     stream: S,
@@ -22,14 +37,14 @@ pub async fn serve<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (mut reader, mut writer) = io::split(stream);
     let client_hello = server_handshake(&mut reader, &mut writer, daemon_pid).await?;
 
     let frame = Codec::read_frame(&mut reader).await?.ok_or_else(|| {
-        DaemonError::Io(std::io::Error::other("client closed before first message"))
+        DaemonError::Io(Error::other("client closed before first message"))
     })?;
     let msg: ClientMsg = postcard::from_bytes(&frame)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+        .map_err(|e| CodecError::Decode(e.to_string()))?;
 
     match msg {
         ClientMsg::ListSessions => {
@@ -149,7 +164,7 @@ where
                         let manager = sess.window_manager.lock().await;
                         manager.input_target_pane().and_then(|p| {
                             p.with_screen(|s| {
-                                plexy_glass_mux::blocks::last_completed_prompt(s).map(
+                                blocks::last_completed_prompt(s).map(
                                     |prompt| {
                                         // `block_output_range` only returns None when no
                                         // `PROMPT_START` exists at or above the line, and
@@ -160,8 +175,8 @@ where
                                                 .unwrap_or((prompt, prompt));
                                         (
                                             plexy_glass_mux::block_text(s, range),
-                                            plexy_glass_mux::blocks::closing_exit(s, prompt),
-                                            plexy_glass_mux::blocks::block_command_line(
+                                            blocks::closing_exit(s, prompt),
+                                            blocks::block_command_line(
                                                 s, prompt,
                                             ),
                                         )
@@ -200,12 +215,15 @@ where
     W: AsyncWrite + Unpin,
 {
     let bytes = postcard::to_allocvec(msg)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
+        .map_err(|e| CodecError::Encode(e.to_string()))?;
     Codec::write_frame(writer, &bytes).await?;
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)] // one internal entry point, splitting it up would lose clarity
+#[allow(
+    clippy::too_many_arguments,
+    reason = "single internal entry point; refactoring loses clarity"
+)]
 async fn serve_attach<R, W>(
     mut reader: R,
     mut writer: W,
@@ -218,8 +236,8 @@ async fn serve_attach<R, W>(
     client_hello: plexy_glass_protocol::ClientHello,
 ) -> Result<(), DaemonError>
 where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
 {
     // Per-connection decode context from the handshake. `kbd` scopes THIS
     // client's key decode (deterministic, replacing the Permissive default).
@@ -275,7 +293,7 @@ where
     // `blocking_lock` internally, so dispatch it off the async runtime.
     let session_for_register = Arc::clone(&session);
     let prefix_for_register = Arc::clone(&prefix_active);
-    let handle = match tokio::task::spawn_blocking(move || {
+    let handle = match task::spawn_blocking(move || {
         session_for_register.register_client(size, prefix_for_register)
     })
     .await
@@ -285,7 +303,7 @@ where
             return send_msg(&mut writer, &ServerMsg::Error(perr)).await;
         }
         Ok(Err(e)) => return Err(e),
-        Err(join) => return Err(DaemonError::Io(std::io::Error::other(join.to_string()))),
+        Err(join) => return Err(DaemonError::Io(Error::other(join.to_string()))),
     };
 
     let mut client_id = handle.client_id;
@@ -331,7 +349,7 @@ where
     let has_config_error = registry.has_config_error();
     let show_welcome = !has_config_error
         && config.welcome
-        && std::env::var_os("PLEXY_GLASS_NO_WELCOME").is_none()
+        && env::var_os("PLEXY_GLASS_NO_WELCOME").is_none()
         && registry.take_welcome();
     if show_welcome {
         {
@@ -349,7 +367,7 @@ where
     // Esc cancels an overlay on legacy / modifyOtherKeys clients). Long enough
     // that a real `\x1b[…` split across reads still arrives as one sequence,
     // short enough to feel instant.
-    const IDLE_FLUSH: std::time::Duration = std::time::Duration::from_millis(30);
+    const IDLE_FLUSH: Duration = Duration::from_millis(30);
 
     // Cancel-safety: `Codec::read_frame` is `read_exact`-based and NOT
     // cancel-safe (dropping it mid-frame loses buffered bytes), so it is
@@ -358,7 +376,7 @@ where
     // by `armed` so when the parser is idle it is never polled (no
     // busy-wake), matching the `serve_exec` discipline.
     let mut read_fut = Box::pin(Codec::read_frame(&mut reader));
-    let idle_flush = tokio::time::sleep(IDLE_FLUSH);
+    let idle_flush = time::sleep(IDLE_FLUSH);
     tokio::pin!(idle_flush);
     // Whether the parser is mid-escape AND we have set the timer deadline for
     // this pending state. Reset to the `IDLE_FLUSH` deadline the first time a
@@ -475,7 +493,7 @@ where
                 // there are no frames, which is exactly when it must fire.
                 if router.has_pending() {
                     if !armed {
-                        idle_flush.as_mut().reset(tokio::time::Instant::now() + IDLE_FLUSH);
+                        idle_flush.as_mut().reset(time::Instant::now() + IDLE_FLUSH);
                         armed = true;
                     }
                 } else {
@@ -488,7 +506,7 @@ where
                 size = new_size;
                 let session_for_resize = Arc::clone(&session);
                 let cid = client_id;
-                let _ = tokio::task::spawn_blocking(move || {
+                let _ = task::spawn_blocking(move || {
                     session_for_resize.handle_resize(cid, new_size);
                 })
                 .await;
@@ -523,7 +541,7 @@ where
 async fn cleanup_and_exit(
     session: Arc<Session>,
     client_id: u64,
-    renderer_task: tokio::task::JoinHandle<()>,
+    renderer_task: task::JoinHandle<()>,
 ) -> Result<(), DaemonError> {
     // A floating popup is transient: it does not survive detach (any client).
     {
@@ -531,7 +549,7 @@ async fn cleanup_and_exit(
         m.close_popup();
     }
     let session_for_dereg = Arc::clone(&session);
-    let _ = tokio::task::spawn_blocking(move || {
+    let _ = task::spawn_blocking(move || {
         session_for_dereg.deregister_client(client_id);
     })
     .await;
@@ -653,9 +671,9 @@ async fn dispatch_input_event(
                             let m = ctx.session.window_manager.lock().await;
                             let pane_opt = m.active_window().active_pane();
                             pane_opt.and_then(|p| {
-                                let screen = p.with_screen(std::clone::Clone::clone);
+                                let screen = p.with_screen(Clone::clone);
                                 p.with_copy_mode_mut(|state| {
-                                    plexy_glass_mux::copy_mode::handle(
+                                    copy_mode::handle(
                                         &event_ke, state, &screen,
                                     )
                                 })
@@ -674,12 +692,12 @@ async fn dispatch_input_event(
                             }
                             Some(plexy_glass_mux::CopyModeAction::Yank(text)) => {
                                 let wrote =
-                                    crate::osc_actions::write_clipboard(text.as_bytes()).await;
+                                    osc_actions::write_clipboard(text.as_bytes()).await;
                                 // Honest message: a failed clipboard write must not
                                 // claim "✓ copied". The text is still in the paste
                                 // buffer, so the warn points at Ctrl+a ].
                                 let (msg, sev) =
-                                    crate::osc_actions::yank_status(wrote, &text, true);
+                                    osc_actions::yank_status(wrote, &text, true);
                                 // Also push a paste buffer (before re-taking the
                                 // WM lock, so the registry await isn't held under it).
                                 ctx.registry.push_paste_buffer(text.into_bytes()).await;
@@ -699,9 +717,9 @@ async fn dispatch_input_event(
                             let m = ctx.session.window_manager.lock().await;
                             let pane_opt = m.active_window().active_pane();
                             pane_opt.and_then(|p| {
-                                let screen = p.with_screen(std::clone::Clone::clone);
+                                let screen = p.with_screen(Clone::clone);
                                 p.with_block_mode_mut(|state| {
-                                    plexy_glass_mux::block_mode::handle(
+                                    block_mode::handle(
                                         &event_ke, state, &screen,
                                     )
                                 })
@@ -720,11 +738,11 @@ async fn dispatch_input_event(
                             }
                             Some(plexy_glass_mux::BlockModeAction::Yank(text)) => {
                                 let wrote =
-                                    crate::osc_actions::write_clipboard(text.as_bytes()).await;
+                                    osc_actions::write_clipboard(text.as_bytes()).await;
                                 // Honest message (see copy-mode yank above); the
                                 // text is in the paste buffer, so warn points there.
                                 let (msg, sev) =
-                                    crate::osc_actions::yank_status(wrote, &text, true);
+                                    osc_actions::yank_status(wrote, &text, true);
                                 // STAY in block mode (unlike copy mode's yank).
                                 ctx.registry.push_paste_buffer(text.into_bytes()).await;
                                 ctx.session.set_status_message(msg, sev).await;
@@ -750,7 +768,7 @@ async fn dispatch_input_event(
                                 let m = ctx.session.window_manager.lock().await;
                                 if let Some(p) = m.active_window().active_pane() {
                                     p.with_screen_mut(|s| {
-                                        plexy_glass_mux::blocks::toggle_block_fold(s, line);
+                                        blocks::toggle_block_fold(s, line);
                                     });
                                 }
                                 ctx.session.notify.notify_one();
@@ -758,14 +776,14 @@ async fn dispatch_input_event(
                             Some(plexy_glass_mux::BlockModeAction::FoldAll) => {
                                 let m = ctx.session.window_manager.lock().await;
                                 if let Some(p) = m.active_window().active_pane() {
-                                    p.with_screen_mut(plexy_glass_mux::blocks::fold_all_completed);
+                                    p.with_screen_mut(blocks::fold_all_completed);
                                 }
                                 ctx.session.notify.notify_one();
                             }
                             Some(plexy_glass_mux::BlockModeAction::UnfoldAll) => {
                                 let m = ctx.session.window_manager.lock().await;
                                 if let Some(p) = m.active_window().active_pane() {
-                                    p.with_screen_mut(plexy_glass_mux::blocks::unfold_all);
+                                    p.with_screen_mut(blocks::unfold_all);
                                 }
                                 ctx.session.notify.notify_one();
                             }
@@ -921,7 +939,7 @@ impl ClientCtx<'_> {
         let target_for_register = Arc::clone(&target);
         let size = self.size;
         let prefix_armed = Arc::clone(self.prefix_armed);
-        let Ok(Ok(new_handle)) = tokio::task::spawn_blocking(move || {
+        let Ok(Ok(new_handle)) = task::spawn_blocking(move || {
             target_for_register.register_client(size, prefix_armed)
         })
         .await
@@ -933,9 +951,9 @@ impl ClientCtx<'_> {
         };
         // Re-point the renderer (rebind + invalidate + full repaint).
         let _ = self.switch_tx.send(new_handle.frame_rx.clone());
-        let old = std::mem::replace(self.session, target);
-        let old_id = std::mem::replace(self.client_id, new_handle.client_id);
-        let _ = tokio::task::spawn_blocking(move || old.deregister_client(old_id)).await;
+        let old = mem::replace(self.session, target);
+        let old_id = mem::replace(self.client_id, new_handle.client_id);
+        let _ = task::spawn_blocking(move || old.deregister_client(old_id)).await;
         self.session.set_status_info(format!("switched to {name}")).await;
         true
     }
@@ -973,7 +991,7 @@ async fn open_session_picker_overlay(session: &Arc<Session>, registry: &Arc<Sess
 /// this runtime task).
 async fn open_tree_overlay(session: &Arc<Session>, registry: &Arc<SessionRegistry>) {
     let current = session.name();
-    let mut snaps: Vec<crate::session::SessionTree> = Vec::new();
+    let mut snaps: Vec<SessionTree> = Vec::new();
     for entry in registry.list().await {
         let Some(s) = registry.get(&entry.name).await else {
             continue;
@@ -993,7 +1011,7 @@ async fn open_tree_overlay(session: &Arc<Session>, registry: &Arc<SessionRegistr
 /// unit-testable. Only the current session's path is marked `is_current`: the
 /// session itself, its active window, and that window's active pane.
 fn build_tree_nodes(
-    snaps: &[crate::session::SessionTree],
+    snaps: &[SessionTree],
     current: &str,
 ) -> Vec<plexy_glass_mux::TreeNode> {
     use plexy_glass_mux::{TreeNode, pane_label, session_label, window_label};
@@ -1050,7 +1068,7 @@ const HISTORY_ENTRY_CAP: usize = 2000;
 async fn open_history_overlay(session: &Arc<Session>, registry: &Arc<SessionRegistry>) {
     let current = session.name();
     let current_pane = session.active_pane_id().await;
-    let mut snaps: Vec<crate::session::SessionHistory> = Vec::new();
+    let mut snaps: Vec<SessionHistory> = Vec::new();
     for entry in registry.list().await {
         let Some(s) = registry.get(&entry.name).await else {
             continue;
@@ -1079,7 +1097,7 @@ async fn open_hints_overlay(session: &Arc<Session>) {
     if !cfg.hints.enabled {
         return;
     }
-    let alphabet = plexy_glass_mux::hint::effective_alphabet(&cfg.hints.alphabet);
+    let alphabet = hint::effective_alphabet(&cfg.hints.alphabet);
     let targets = {
         let m = session.window_manager.lock().await;
         match m.active_window().active_pane() {
@@ -1104,7 +1122,7 @@ async fn open_hints_overlay(session: &Arc<Session>) {
 /// sessions, each pane's blocks already newest-first from `history_snapshot`.
 /// Capped at [`HISTORY_ENTRY_CAP`] (logged when it triggers). Pure, for testing.
 fn build_history_entries(
-    snaps: &[crate::session::SessionHistory],
+    snaps: &[SessionHistory],
     current_session: &str,
     current_pane: Option<plexy_glass_mux::PaneId>,
 ) -> Vec<plexy_glass_mux::HistoryEntry> {
@@ -1318,8 +1336,8 @@ impl ClientCtx<'_> {
         match pick.action {
             plexy_glass_mux::HintAction::Copy => {
                 // Mirror the copy-mode yank path: system clipboard + paste buffer.
-                let wrote = crate::osc_actions::write_clipboard(pick.text.as_bytes()).await;
-                let msg = crate::osc_actions::copied_message(&pick.text);
+                let wrote = osc_actions::write_clipboard(pick.text.as_bytes()).await;
+                let msg = osc_actions::copied_message(&pick.text);
                 self.registry.push_paste_buffer(pick.text.into_bytes()).await;
                 // Be honest: only claim "copied" if the OS clipboard write landed;
                 // otherwise the content is still in the paste buffer, so point there.
@@ -1335,7 +1353,7 @@ impl ClientCtx<'_> {
                 // Await the opener (not fire-and-forget) so a missing system
                 // opener becomes a visible message instead of a silent no-op.
                 let url = pick.text;
-                match crate::osc_actions::open_url(&url).await {
+                match osc_actions::open_url(&url).await {
                     Ok(()) => self.session.set_status_info(format!("opening {url}")).await,
                     Err(_) => {
                         self.session
@@ -1426,8 +1444,8 @@ impl ConnVerb {
 fn attach_notice(
     has_config_error: bool,
     skip_count: usize,
-) -> Option<(crate::window_manager::Severity, String)> {
-    use crate::window_manager::Severity;
+) -> Option<(Severity, String)> {
+    use Severity;
     if has_config_error {
         Some((
             Severity::Error,
@@ -1445,8 +1463,8 @@ fn attach_notice(
 
 /// The status notice after a `reload`: the error wins; otherwise a clean reload
 /// reports success, noting any dropped bindings. Pure, for unit-testing.
-fn reload_notice(error: Option<&str>, skip_count: usize) -> (crate::window_manager::Severity, String) {
-    use crate::window_manager::Severity;
+fn reload_notice(error: Option<&str>, skip_count: usize) -> (Severity, String) {
+    use Severity;
     match error {
         Some(e) => (Severity::Error, format!("reload failed: {e}")),
         None if skip_count > 0 => (
@@ -1476,7 +1494,7 @@ async fn run_connection_verb(
             let new_cfg = ctx.session.config_snapshot();
             let (km, skips) = plexy_glass_keys::build_keymap_with_skips(&new_cfg.keymap);
             *keymap = km;
-            let err_text = result.as_ref().err().map(std::string::ToString::to_string);
+            let err_text = result.as_ref().err().map(ToString::to_string);
             let (severity, text) = reload_notice(err_text.as_deref(), skips.len());
             ctx.session.set_status_message(text, severity).await;
             ctx.session.notify.notify_one();
@@ -1542,9 +1560,9 @@ async fn run_connection_verb(
 async fn apply_overlay_result(
     ctx: &mut ClientCtx<'_>,
     keymap: &mut Keymap,
-    result: crate::window_manager::OverlayKeyResult,
+    result: OverlayKeyResult,
 ) -> bool {
-    use crate::window_manager::OverlayKeyResult;
+    use OverlayKeyResult;
     match result {
         OverlayKeyResult::Ignored => {}
         OverlayKeyResult::Redraw => {
@@ -1586,7 +1604,7 @@ async fn apply_overlay_result(
             }
         }
         OverlayKeyResult::Command(line) => {
-            match plexy_glass_mux::command_prompt::parse(&line) {
+            match command_prompt::parse(&line) {
                 Err(e) => {
                     ctx.session.set_status_error(e.to_string()).await;
                 }
@@ -1714,7 +1732,7 @@ where
         if plexy_glass_mux::prev_prompt_line(s, u32::MAX).is_none() {
             return ExecPre::NoMarks;
         }
-        if !plexy_glass_mux::blocks::pane_at_prompt(s) {
+        if !blocks::pane_at_prompt(s) {
             return ExecPre::Busy;
         }
         ExecPre::Ready { baseline: s.blocks_completed }
@@ -1747,14 +1765,14 @@ where
     // cancel-safe, dropping it mid-frame loses buffered bytes), so it is
     // pinned outside the loop instead of recreated per tick. That is
     // sufficient because every way it completes ends the wait.
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(25));
+    let mut interval = time::interval(Duration::from_millis(25));
     let exit_fut = pane.wait();
     tokio::pin!(exit_fut);
     let timeout_fut = async {
         match timeout_ms {
-            Some(ms) => tokio::time::sleep(std::time::Duration::from_millis(ms)).await,
+            Some(ms) => time::sleep(Duration::from_millis(ms)).await,
             // No timeout requested: this arm never fires.
-            None => std::future::pending::<()>().await,
+            None => future::pending::<()>().await,
         }
     };
     tokio::pin!(timeout_fut);
@@ -1769,7 +1787,7 @@ where
     // misreported within one poll interval.
     let check = || {
         pane.with_screen(|s| match s.blocks_completed.cmp(&baseline) {
-            std::cmp::Ordering::Greater => {
+            CmpOrdering::Greater => {
                 // Output is best-effort from surviving rows: the command
                 // may have cleared the screen (empty is fine).
                 let output = plexy_glass_mux::last_completed_block(s)
@@ -1777,8 +1795,8 @@ where
                     .unwrap_or_default();
                 ExecTick::Done { exit: s.last_block_exit, output }
             }
-            std::cmp::Ordering::Less => ExecTick::Reset,
-            std::cmp::Ordering::Equal => ExecTick::Pending,
+            CmpOrdering::Less => ExecTick::Reset,
+            CmpOrdering::Equal => ExecTick::Pending,
         })
     };
 
@@ -1832,7 +1850,7 @@ async fn run_prompt_line(
     registry: &Arc<SessionRegistry>,
     line: &str,
 ) -> (bool, Option<String>) {
-    let cmd = match plexy_glass_mux::command_prompt::parse(line) {
+    let cmd = match command_prompt::parse(line) {
         Ok(c) => c,
         Err(e) => return (false, Some(e.to_string())),
     };
@@ -1913,7 +1931,7 @@ async fn copy_last_output(session: &Arc<Session>, registry: &Arc<SessionRegistry
         })
     };
     if let Some(text) = text {
-        let _ = crate::osc_actions::write_clipboard(text.as_bytes()).await;
+        let _ = osc_actions::write_clipboard(text.as_bytes()).await;
         registry.push_paste_buffer(text.into_bytes()).await;
         session.set_status_ok("copied output of last command".into()).await;
         true
@@ -1990,9 +2008,9 @@ const LOAD_BUFFER_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// whatever directory the first auto-spawning client happened to be in
 /// (undiscoverable from any plexy-glass surface), so relative resolution
 /// would be a silent footgun.
-fn resolve_buffer_path(verb: &str, path: &str) -> Result<std::path::PathBuf, String> {
-    let home = std::env::var("HOME").ok();
-    let resolved = std::path::PathBuf::from(crate::declared::expand_tilde(path, home.as_deref()));
+fn resolve_buffer_path(verb: &str, path: &str) -> Result<PathBuf, String> {
+    let home = env::var("HOME").ok();
+    let resolved = PathBuf::from(expand_tilde(path, home.as_deref()));
     if resolved.is_relative() {
         return Err(format!(
             "{verb}: relative paths are not supported — the daemon's working \
@@ -2034,7 +2052,7 @@ async fn save_buffer(
             .await
             .ok_or_else(|| "save-buffer: no paste buffer".to_string())?,
     };
-    std::fs::write(&resolved, &content)
+    fs::write(&resolved, &content)
         .map_err(|e| format!("save-buffer: {}: {e}", resolved.display()))?;
     Ok(format!("saved {buf_name} → {} ({} bytes)", resolved.display(), content.len()))
 }
@@ -2049,7 +2067,7 @@ async fn save_buffer(
 async fn load_buffer(registry: &Arc<SessionRegistry>, path: &str) -> Result<String, String> {
     let resolved = resolve_buffer_path("load-buffer", path)?;
     let disp = resolved.display();
-    let meta = std::fs::metadata(&resolved)
+    let meta = fs::metadata(&resolved)
         .map_err(|e| format!("load-buffer: {disp}: {e}"))?;
     if !meta.is_file() {
         return Err(format!("load-buffer: {disp}: not a regular file"));
@@ -2062,7 +2080,7 @@ async fn load_buffer(registry: &Arc<SessionRegistry>, path: &str) -> Result<Stri
     // cap+1 bucket the file is oversize and we return the oversize error.
     use std::io::Read as _;
     let mut content = Vec::new();
-    std::fs::File::open(&resolved)
+    fs::File::open(&resolved)
         .map_err(|e| format!("load-buffer: {disp}: {e}"))?
         .take(LOAD_BUFFER_MAX_BYTES + 1)
         .read_to_end(&mut content)
@@ -2085,7 +2103,7 @@ async fn paste_bytes(session: &Arc<Session>, content: Vec<u8>) {
 }
 
 fn default_spawn_spec() -> SpawnSpec {
-    let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let program = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     SpawnSpec {
         program,
         args: vec![],
@@ -2097,19 +2115,24 @@ fn default_spawn_spec() -> SpawnSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pane::Pane;
+    use crate::session::wrap_bracketed_paste;
+    use crate::test_env::isolate;
+    use std::os::unix::fs::symlink;
+    use std::process;
     use plexy_glass_protocol::{PROTOCOL_VERSION, PtySize, SpawnSpec, client_handshake};
     use tokio::io::duplex;
 
     #[test]
     fn wrap_paste_wraps_with_bracketed_paste_escapes() {
         let inner = b"hello world";
-        let wrapped = crate::session::wrap_bracketed_paste(inner);
+        let wrapped = wrap_bracketed_paste(inner);
         assert_eq!(wrapped.as_slice(), b"\x1b[200~hello world\x1b[201~");
     }
 
     #[test]
     fn attach_notice_prefers_config_error_over_skips() {
-        use crate::window_manager::Severity;
+        use Severity;
         // A broken config wins over a skip warning.
         let (sev, text) = attach_notice(true, 3).unwrap();
         assert_eq!(sev, Severity::Error);
@@ -2125,7 +2148,7 @@ mod tests {
 
     #[test]
     fn reload_notice_reports_error_skips_or_clean_success() {
-        use crate::window_manager::Severity;
+        use Severity;
         let (sev, text) = reload_notice(Some("line 7:3: boom"), 0);
         assert_eq!(sev, Severity::Error);
         assert_eq!(text, "reload failed: line 7:3: boom");
@@ -2139,13 +2162,13 @@ mod tests {
 
     #[test]
     fn wrap_paste_empty_input() {
-        let wrapped = crate::session::wrap_bracketed_paste(b"");
+        let wrapped = wrap_bracketed_paste(b"");
         assert_eq!(wrapped.as_slice(), b"\x1b[200~\x1b[201~");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn end_to_end_attach_renders_then_exits() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let (server_side, client_side) = duplex(64 * 1024);
         let server = tokio::spawn(async move {
             serve(
@@ -2157,7 +2180,7 @@ mod tests {
             .await
         });
 
-        let (mut cr, mut cw) = tokio::io::split(client_side);
+        let (mut cr, mut cw) = io::split(client_side);
         let server_hello = client_handshake(&mut cr, &mut cw).await.unwrap();
         assert_eq!(server_hello.version, PROTOCOL_VERSION);
 
@@ -2177,10 +2200,10 @@ mod tests {
 
         let mut saw_attached = false;
         let mut saw_output = false;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-        while tokio::time::Instant::now() < deadline {
-            let Ok(Ok(Some(frame))) = tokio::time::timeout(
-                std::time::Duration::from_millis(500),
+        let deadline = time::Instant::now() + Duration::from_secs(3);
+        while time::Instant::now() < deadline {
+            let Ok(Ok(Some(frame))) = time::timeout(
+                Duration::from_millis(500),
                 Codec::read_frame(&mut cr),
             )
             .await
@@ -2208,7 +2231,7 @@ mod tests {
     // pre-existing live session "b": registered on b, deregistered from a.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn command_prompt_switch_moves_client_between_sessions() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -2271,7 +2294,7 @@ mod tests {
                         clients_of(&entries, "a"),
                         clients_of(&entries, "b")
                     );
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    time::sleep(Duration::from_millis(20)).await;
                 }
             }
         };
@@ -2296,7 +2319,7 @@ mod tests {
         // `:switch dev` when "dev" is declared but NOT running builds it from
         // the template (sourcing config from the live session's snapshot), then
         // switches. No boot loop here, so "dev" is not live until the switch.
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -2348,13 +2371,13 @@ mod tests {
                         return;
                     }
                     assert!(Instant::now() <= deadline, "dev never auto-created + switched: {entries:?}");
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    time::sleep(Duration::from_millis(20)).await;
                 }
             }
         };
 
         // Give the attach a moment, then switch to the declared-not-running name.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(100)).await;
         let input = ClientMsg::Input(bytes::Bytes::from_static(b"\x01:switch dev\r"));
         Codec::write_frame(&mut cw, &postcard::to_allocvec(&input).unwrap()).await.unwrap();
 
@@ -2367,7 +2390,7 @@ mod tests {
     // `prefix-indicator` widget); an unbound follow-up key (Cancel) disarms it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prefix_press_arms_session_follow_up_key_disarms() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -2415,7 +2438,7 @@ mod tests {
                     break s;
                 }
                 assert!(Instant::now() < deadline, "timed out waiting for attach");
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                time::sleep(Duration::from_millis(20)).await;
             }
         };
         assert!(!session.any_prefix_armed().await, "armed before any input");
@@ -2426,7 +2449,7 @@ mod tests {
                 let deadline = Instant::now() + Duration::from_secs(5);
                 while session.any_prefix_armed().await != want {
                     assert!(Instant::now() < deadline, "timed out waiting for {what}");
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    time::sleep(Duration::from_millis(10)).await;
                 }
             }
         };
@@ -2453,7 +2476,7 @@ mod tests {
     // switches there. Exercises the picker open → filter → commit → switch path.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn session_picker_filters_and_switches() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -2512,7 +2535,7 @@ mod tests {
                         clients_of(&entries, "alpha"),
                         clients_of(&entries, "beta")
                     );
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    time::sleep(Duration::from_millis(20)).await;
                 }
             }
         };
@@ -2533,7 +2556,7 @@ mod tests {
     // moves the selection to the "beta" session node; Enter switches there.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn choose_tree_switches_sessions() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -2592,7 +2615,7 @@ mod tests {
                         clients_of(&entries, "alpha"),
                         clients_of(&entries, "beta")
                     );
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    time::sleep(Duration::from_millis(20)).await;
                 }
             }
         };
@@ -2611,7 +2634,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn history_jump_lands_in_block_mode_on_the_target_block() {
         use plexy_glass_emulator::{Row, RowMark};
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
@@ -2712,7 +2735,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn history_overlay_open_and_enter_jumps_to_newest_block() {
         use plexy_glass_emulator::{Row, RowMark};
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -2759,7 +2782,7 @@ mod tests {
             m.handle_overlay_key(&plexy_glass_mux::KeyEvent::plain(plexy_glass_mux::Key::Enter))
         };
         match result {
-            crate::window_manager::OverlayKeyResult::History(t) => {
+            OverlayKeyResult::History(t) => {
                 assert_eq!(t.session, "h");
                 assert_eq!(t.command, "pwd", "newest current-pane block selected by default");
             }
@@ -2772,7 +2795,7 @@ mod tests {
     /// Headless `cmd "hints"` must be refused with the standard message.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hints_verb_refused_headless() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -2792,7 +2815,7 @@ mod tests {
     /// must flash "no hint targets" on the status line and leave no overlay open.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn open_hints_overlay_flashes_no_targets_on_empty_grid() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -2819,7 +2842,7 @@ mod tests {
     /// `open_hints_overlay` opens the hint overlay when the grid contains a URL.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn open_hints_overlay_opens_overlay_when_targets_found() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -2853,7 +2876,7 @@ mod tests {
     /// even when the pane's grid contains a URL.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn open_hints_overlay_no_op_when_disabled() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let mut cfg = plexy_glass_config::built_in_default();
         cfg.hints.enabled = false;
@@ -2944,7 +2967,7 @@ mod tests {
     // landed on beta's `WindowManager` via a fresh `tree_snapshot` of beta.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn choose_tree_renames_window_in_other_session() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -2992,7 +3015,7 @@ mod tests {
                 break;
             }
             assert!(Instant::now() <= deadline, "alpha never registered a client");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
 
         // Tree nodes (sorted): alpha(0), alpha-win(1), alpha-pane(2), beta(3),
@@ -3019,7 +3042,7 @@ mod tests {
                 };
                 panic!("beta window not renamed; got {name:?}");
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
         server.abort();
     }
@@ -3035,7 +3058,7 @@ mod tests {
     // no status message.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tree_rename_session_commits_and_restamps_open_tree() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use plexy_glass_mux::{NodeKey, Overlay, TreeAction, TreeKind, session_label};
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
@@ -3133,7 +3156,7 @@ mod tests {
     // tree untouched. Nothing was optimistically mutated, so nothing to revert.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tree_rename_session_collision_sets_status_and_leaves_tree() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use plexy_glass_mux::{Overlay, TreeAction};
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
@@ -3198,7 +3221,7 @@ mod tests {
     // message and the registry untouched.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tree_rename_session_to_declared_name_is_refused() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use plexy_glass_mux::TreeAction;
         let registry = Arc::new(crate::SessionRegistry::new());
         // "dev" is declared in config but not running, so the refusal must not
@@ -3249,7 +3272,7 @@ mod tests {
     // moves the pane back into window 0 and removes the emptied source window.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn break_and_join_panes_via_keys() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -3306,7 +3329,7 @@ mod tests {
                         };
                         panic!("timed out: windows={w} panes={p} (want w={want_windows} p={want_panes})");
                     }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    time::sleep(Duration::from_millis(20)).await;
                 }
             }
         };
@@ -3351,7 +3374,7 @@ mod tests {
     // `Ctrl+a =` + `d` deletes a buffer (the registry count drops).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn paste_buffer_reaches_pane_and_chooser_deletes() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -3391,7 +3414,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         while registry.get("main").await.is_none() {
             assert!(Instant::now() <= deadline, "session never created");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
 
         // Inject a buffer (deterministic, so we avoid driving a live copy-mode yank).
@@ -3429,7 +3452,7 @@ mod tests {
                         }
                     }
                     assert!(Instant::now() <= deadline, "pane never showed {needle:?}");
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    time::sleep(Duration::from_millis(20)).await;
                 }
             }
         };
@@ -3452,7 +3475,7 @@ mod tests {
                 break;
             }
             assert!(Instant::now() <= deadline, "chooser delete did not drop the buffer count");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
 
         server.abort();
@@ -3463,7 +3486,7 @@ mod tests {
     // guard). Drives the real wire path.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn paste_swallowed_behind_overlay_but_reaches_pane_without_one() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -3498,7 +3521,7 @@ mod tests {
                 break s;
             }
             assert!(Instant::now() < deadline, "session never created");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         };
         let pane = session
             .window_manager
@@ -3537,7 +3560,7 @@ mod tests {
                 break;
             }
             assert!(Instant::now() < deadline, "help overlay never opened");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
         Codec::write_frame(
             &mut cw,
@@ -3551,7 +3574,7 @@ mod tests {
 
         // Give the daemon ample time to (incorrectly) forward it, then assert
         // the marker never reached cat's echo.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        time::sleep(Duration::from_millis(300)).await;
         let text = pane.with_screen(plexy_glass_mux::screen_text);
         assert!(
             !text.contains("SWALLOWED-PASTE"),
@@ -3566,7 +3589,7 @@ mod tests {
     // selection, `y` to yank) so the yank→push wiring is protected.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn copy_mode_yank_pushes_a_paste_buffer() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -3605,7 +3628,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         while registry.get("main").await.is_none() {
             assert!(Instant::now() <= deadline, "session never created");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
 
         // Ctrl+a [ enters copy mode; `v` starts a selection; `y` yanks → push.
@@ -3623,7 +3646,7 @@ mod tests {
                 break;
             }
             assert!(Instant::now() <= deadline, "copy-mode yank did not push a paste buffer");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
 
         server.abort();
@@ -3634,7 +3657,7 @@ mod tests {
     // (monitor-bell on by default), and switching to it clears the flag.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn background_bell_flags_window_via_coordinator() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -3687,7 +3710,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         while registry.get("bellmon").await.is_none() {
             assert!(Instant::now() <= deadline, "session never created");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
         {
             let s = registry.get("bellmon").await.unwrap();
@@ -3723,7 +3746,7 @@ mod tests {
                 break;
             }
             assert!(Instant::now() <= deadline, "the coordinator never flagged the background window's bell");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
 
         // Switching to window 1 (Ctrl+a n) clears its flag.
@@ -3745,7 +3768,7 @@ mod tests {
                 break;
             }
             assert!(Instant::now() <= deadline, "bell flag did not clear after switching to the window");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
 
         server.abort();
@@ -3756,7 +3779,7 @@ mod tests {
     // nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn focus_in_reaches_only_a_subscribing_pane() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -3804,7 +3827,7 @@ mod tests {
                 }
             }
             assert!(Instant::now() < deadline, "pane never appeared");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
 
         // The daemon queues `\e[I` to the child PTY. We observe it via the
@@ -3831,7 +3854,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(5);
             while Instant::now() < deadline {
                 if let Ok(Ok(b)) =
-                    tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+                    time::timeout(Duration::from_millis(200), rx.recv()).await
                 {
                     acc.extend_from_slice(&b);
                     if acc.windows(ECHOED_FOCUS_IN.len()).any(|w| w == ECHOED_FOCUS_IN) {
@@ -3850,7 +3873,7 @@ mod tests {
     // A pane WITHOUT ?1004 receives no focus-in bytes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn focus_in_is_dropped_for_non_subscriber() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -3894,7 +3917,7 @@ mod tests {
                 }
             }
             assert!(Instant::now() < deadline, "pane never appeared");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         };
 
         Codec::write_frame(&mut cw, &postcard::to_allocvec(&ClientMsg::FocusIn).unwrap())
@@ -3910,7 +3933,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_millis(600);
             while Instant::now() < deadline {
                 if let Ok(Ok(b)) =
-                    tokio::time::timeout(Duration::from_millis(150), rx.recv()).await
+                    time::timeout(Duration::from_millis(150), rx.recv()).await
                 {
                     acc.extend_from_slice(&b);
                     if acc.windows(ECHOED_FOCUS_IN.len()).any(|w| w == ECHOED_FOCUS_IN) {
@@ -3932,7 +3955,7 @@ mod tests {
     // so `\x1b[?997;1n` comes back as `^[[?997;1n`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn color_scheme_reaches_only_a_subscribing_pane() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -3979,7 +4002,7 @@ mod tests {
                 }
             }
             assert!(Instant::now() < deadline, "pane never appeared");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
 
         // Subscribe BEFORE sending so we don't miss the echo. The cooked PTY
@@ -4005,7 +4028,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(5);
             while Instant::now() < deadline {
                 if let Ok(Ok(b)) =
-                    tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+                    time::timeout(Duration::from_millis(200), rx.recv()).await
                 {
                     acc.extend_from_slice(&b);
                     if acc.windows(ECHOED_DARK.len()).any(|w| w == ECHOED_DARK) {
@@ -4024,7 +4047,7 @@ mod tests {
     // A pane WITHOUT ?2031 receives no color-scheme report.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn color_scheme_is_dropped_for_non_subscriber() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -4068,7 +4091,7 @@ mod tests {
                 }
             }
             assert!(Instant::now() < deadline, "pane never appeared");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         };
 
         Codec::write_frame(
@@ -4088,7 +4111,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_millis(600);
             while Instant::now() < deadline {
                 if let Ok(Ok(b)) =
-                    tokio::time::timeout(Duration::from_millis(150), rx.recv()).await
+                    time::timeout(Duration::from_millis(150), rx.recv()).await
                 {
                     acc.extend_from_slice(&b);
                     if acc.windows(ECHOED_DARK.len()).any(|w| w == ECHOED_DARK) {
@@ -4111,7 +4134,7 @@ mod tests {
     // the old per-call-site machinery, the exact gap the refactor closes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pane_switch_synthesizes_focus_in_to_destination() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         use tokio::io::{AsyncReadExt, split};
 
@@ -4155,7 +4178,7 @@ mod tests {
                 }
             }
             assert!(Instant::now() < deadline, "first pane never appeared");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
 
         // Ctrl+a v → split into two panes (the new pane becomes active).
@@ -4181,7 +4204,7 @@ mod tests {
                 break;
             }
             assert!(Instant::now() < deadline, "split never produced 2 panes");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
 
         // Subscribe to PaneId(0) (the pane we will switch BACK to) BEFORE the
@@ -4210,7 +4233,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(5);
             while Instant::now() < deadline {
                 if let Ok(Ok(b)) =
-                    tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+                    time::timeout(Duration::from_millis(200), rx.recv()).await
                 {
                     acc.extend_from_slice(&b);
                     if acc.windows(ECHOED_FOCUS_IN.len()).any(|w| w == ECHOED_FOCUS_IN) {
@@ -4244,11 +4267,11 @@ mod tests {
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let server =
             tokio::spawn(async move { serve(server_side, 7, reg, cfg).await });
-        let (mut cr, mut cw) = tokio::io::split(client_side);
+        let (mut cr, mut cw) = io::split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
         Codec::write_frame(&mut cw, &postcard::to_allocvec(msg).unwrap()).await.unwrap();
-        let frame = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+        let frame = time::timeout(
+            Duration::from_secs(5),
             Codec::read_frame(&mut cr),
         )
         .await
@@ -4269,7 +4292,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_command_splits_via_wire() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -4291,7 +4314,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_command_parse_error_is_not_ok() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         registry.attach_or_create("s1".into(), script_cat(), script_size(), cfg).await.unwrap();
@@ -4309,7 +4332,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_command_interactive_only_refused() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         registry.attach_or_create("s1".into(), script_cat(), script_size(), cfg).await.unwrap();
@@ -4344,7 +4367,7 @@ mod tests {
     /// BOTH `run_prompt_line` and this test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_prompt_line_never_silently_noops_connection_verbs() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -4419,7 +4442,7 @@ mod tests {
     /// the input-target pane.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_buffer_via_wire_then_paste_by_name_types_it() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -4469,7 +4492,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn paste_unknown_name_is_an_error() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -4488,7 +4511,7 @@ mod tests {
     /// byte), and the status message carries the buffer name + resolved path.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn save_buffer_newest_and_named_write_bytes_verbatim() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -4509,19 +4532,19 @@ mod tests {
             message.as_deref(),
             Some(format!("saved buffer1 → {} (9 bytes)", newest.display()).as_str())
         );
-        assert_eq!(std::fs::read(&newest).unwrap(), b"new line\n");
+        assert_eq!(fs::read(&newest).unwrap(), b"new line\n");
 
         // Named `buffer0`, binary-safe write.
         let named = dir.path().join("named.out");
         let line = format!("save-buffer buffer0 {}", named.display());
         let (ok, message) = run_prompt_line(&session, &registry, &line).await;
         assert!(ok, "save-buffer buffer0 failed: {message:?}");
-        assert_eq!(std::fs::read(&named).unwrap(), b"old\xFFbytes");
+        assert_eq!(fs::read(&named).unwrap(), b"old\xFFbytes");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn save_buffer_errors_carry_the_resolved_path() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -4570,7 +4593,7 @@ mod tests {
     /// newest buffer; an empty file loads as an empty buffer (legal).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn load_buffer_reads_file_bytes_verbatim() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -4580,7 +4603,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         let file = dir.path().join("snippet.bin");
-        std::fs::write(&file, b"bin\xFFary\ncontent").unwrap();
+        fs::write(&file, b"bin\xFFary\ncontent").unwrap();
         let line = format!("load-buffer {}", file.display());
         let (ok, message) = run_prompt_line(&session, &registry, &line).await;
         assert!(ok, "load-buffer failed: {message:?}");
@@ -4592,7 +4615,7 @@ mod tests {
 
         // Empty file → empty buffer.
         let empty = dir.path().join("empty.txt");
-        std::fs::write(&empty, b"").unwrap();
+        fs::write(&empty, b"").unwrap();
         let line = format!("load-buffer {}", empty.display());
         let (ok, message) = run_prompt_line(&session, &registry, &line).await;
         assert!(ok, "load-buffer of an empty file failed: {message:?}");
@@ -4603,7 +4626,7 @@ mod tests {
     /// paths are all refused BEFORE any read.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn load_buffer_refuses_non_regular_oversize_and_relative() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -4624,7 +4647,7 @@ mod tests {
         // FIFO: opening it would hang a runtime worker, so the `is_file`
         // gate refuses it from metadata alone.
         let fifo = dir.path().join("pipe");
-        let status = std::process::Command::new("mkfifo")
+        let status = process::Command::new("mkfifo")
             .arg(&fifo)
             .status()
             .expect("spawn mkfifo");
@@ -4639,7 +4662,7 @@ mod tests {
 
         // Oversize: a sparse file one byte past the 10 MiB cap.
         let big = dir.path().join("big.bin");
-        let f = std::fs::File::create(&big).unwrap();
+        let f = fs::File::create(&big).unwrap();
         f.set_len(10 * 1024 * 1024 + 1).unwrap();
         drop(f);
         let line = format!("load-buffer {}", big.display());
@@ -4672,7 +4695,7 @@ mod tests {
     /// link and the target fails `is_file()`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn load_buffer_follows_symlink_to_regular_file() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -4683,9 +4706,9 @@ mod tests {
 
         // Symlink to a regular file, so this must load.
         let target = dir.path().join("real.txt");
-        std::fs::write(&target, b"via symlink").unwrap();
+        fs::write(&target, b"via symlink").unwrap();
         let link = dir.path().join("link.txt");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
+        symlink(&target, &link).unwrap();
         let line = format!("load-buffer {}", link.display());
         let (ok, message) = run_prompt_line(&session, &registry, &line).await;
         assert!(ok, "symlink-to-regular-file must load: {message:?}");
@@ -4696,13 +4719,13 @@ mod tests {
 
         // Symlink to a FIFO, so this must be refused.
         let fifo = dir.path().join("pipe");
-        let status = std::process::Command::new("mkfifo")
+        let status = process::Command::new("mkfifo")
             .arg(&fifo)
             .status()
             .expect("spawn mkfifo");
         assert!(status.success(), "mkfifo failed");
         let fifo_link = dir.path().join("pipe_link");
-        std::os::unix::fs::symlink(&fifo, &fifo_link).unwrap();
+        symlink(&fifo, &fifo_link).unwrap();
         let line = format!("load-buffer {}", fifo_link.display());
         let (ok, message) = run_prompt_line(&session, &registry, &line).await;
         assert!(!ok, "symlink-to-FIFO must be refused");
@@ -4726,7 +4749,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn copy_output_pushes_buffer_and_sets_status() {
         use plexy_glass_emulator::RowMark;
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -4764,7 +4787,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn copy_output_no_blocks_over_the_wire_is_not_ok() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         registry.attach_or_create("s1".into(), script_cat(), script_size(), cfg).await.unwrap();
@@ -4786,7 +4809,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_command_reload_is_ok_via_wire() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         registry.attach_or_create("s1".into(), script_cat(), script_size(), cfg).await.unwrap();
@@ -4810,7 +4833,7 @@ mod tests {
     // `split v` fails inside `WindowManager::handle_command`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_command_dispatch_error_is_not_ok() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -4838,7 +4861,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_command_resolution() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
 
@@ -4898,7 +4921,7 @@ mod tests {
     }
 
     /// Poll `pane`'s screen until `screen_text` contains `marker`.
-    async fn wait_screen_contains(pane: &crate::pane::Pane, marker: &str) {
+    async fn wait_screen_contains(pane: &Pane, marker: &str) {
         use std::time::{Duration, Instant};
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -4907,13 +4930,13 @@ mod tests {
                 return;
             }
             assert!(Instant::now() < deadline, "screen never showed {marker:?}; got:\n{text}");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn send_input_reaches_pane() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -4945,7 +4968,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_pane_returns_screen_text() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
@@ -4976,7 +4999,7 @@ mod tests {
                 break;
             }
             assert!(Instant::now() < deadline, "capture never showed the marker; got:\n{text}");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -4985,7 +5008,7 @@ mod tests {
     // stay symmetric.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn send_and_capture_are_popup_aware() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         use std::time::{Duration, Instant};
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
@@ -5031,7 +5054,7 @@ mod tests {
                 break;
             }
             assert!(Instant::now() < deadline, "popup capture missed the marker; got:\n{text}");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
 
         // Kill the popup child so it doesn't outlive the test.
@@ -5042,7 +5065,7 @@ mod tests {
     // carrying the standard no-blocks message.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_last_command_no_blocks_returns_error() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         registry
@@ -5070,7 +5093,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_last_command_returns_block_text() {
         use plexy_glass_emulator::RowMark;
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -5117,7 +5140,7 @@ mod tests {
     // `CaptureLastCommand` for a non-existent session returns `CommandResult{ok:false}`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_last_command_unknown_session_returns_error() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
 
         let reply = one_shot(
@@ -5140,7 +5163,7 @@ mod tests {
     // cat's verbatim copy sets marks; asserts are contains-style).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_last_block_returns_structured_parts() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -5171,8 +5194,8 @@ mod tests {
             .expect("session has a pane")
             .clone();
         wait_screen_state(&pane, "seeded block completed with exit 4", |s| {
-            plexy_glass_mux::blocks::last_completed_prompt(s)
-                .is_some_and(|p| plexy_glass_mux::blocks::closing_exit(s, p) == Some(4))
+            blocks::last_completed_prompt(s)
+                .is_some_and(|p| blocks::closing_exit(s, p) == Some(4))
         })
         .await;
 
@@ -5193,7 +5216,7 @@ mod tests {
     // carries `command_line: None` while text/exit still work.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_last_block_without_b_mark_has_no_command_line() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -5221,8 +5244,8 @@ mod tests {
             .expect("session has a pane")
             .clone();
         wait_screen_state(&pane, "seeded no-B block completed with exit 4", |s| {
-            plexy_glass_mux::blocks::last_completed_prompt(s)
-                .is_some_and(|p| plexy_glass_mux::blocks::closing_exit(s, p) == Some(4))
+            blocks::last_completed_prompt(s)
+                .is_some_and(|p| blocks::closing_exit(s, p) == Some(4))
         })
         .await;
 
@@ -5242,7 +5265,7 @@ mod tests {
     // carrying the standard no-blocks message (same asymmetry as the siblings).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_last_block_no_blocks_returns_error() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         registry
@@ -5264,7 +5287,7 @@ mod tests {
     // `CaptureLastBlock` for a non-existent session returns `CommandResult{ok:false}`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_last_block_unknown_session_returns_error() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
 
         let reply = one_shot(
@@ -5286,7 +5309,7 @@ mod tests {
     // screen asserts are contains-style, never exact.
 
     /// Poll `pane`'s screen until `pred` holds (e.g. "a prompt mark landed").
-    async fn wait_screen_state<F>(pane: &crate::pane::Pane, desc: &str, pred: F)
+    async fn wait_screen_state<F>(pane: &Pane, desc: &str, pred: F)
     where
         F: Fn(&plexy_glass_emulator::Screen) -> bool,
     {
@@ -5297,7 +5320,7 @@ mod tests {
                 return;
             }
             assert!(Instant::now() < deadline, "screen never reached state: {desc}");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -5312,7 +5335,7 @@ mod tests {
     async fn exec_fixture(
         registry: &Arc<crate::SessionRegistry>,
         name: &str,
-    ) -> crate::pane::Pane {
+    ) -> Pane {
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
             .attach_or_create(name.into(), script_cat(), script_size(), cfg)
@@ -5335,7 +5358,7 @@ mod tests {
             .expect("session has a pane")
             .clone();
         wait_screen_state(&pane, "seeded prompt mark processed", |s| {
-            has_prompt(s) && plexy_glass_mux::blocks::pane_at_prompt(s)
+            has_prompt(s) && blocks::pane_at_prompt(s)
         })
         .await;
         pane
@@ -5350,7 +5373,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exec_command_happy_path() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let _pane = exec_fixture(&registry, "exec1").await;
 
@@ -5373,7 +5396,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exec_command_exit_zero() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let _pane = exec_fixture(&registry, "exec0").await;
 
@@ -5396,7 +5419,7 @@ mod tests {
     // NOT a timeout.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exec_command_bare_d_reports_no_exit() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let _pane = exec_fixture(&registry, "execnd").await;
 
@@ -5417,7 +5440,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exec_command_no_marks_refused() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         registry.attach_or_create("nomark".into(), script_cat(), script_size(), cfg).await.unwrap();
@@ -5438,7 +5461,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exec_command_busy_refused() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let pane = exec_fixture(&registry, "busy").await;
 
@@ -5453,7 +5476,7 @@ mod tests {
         .await;
         assert!(expect_command_result(reply).0);
         wait_screen_state(&pane, "C mark processed (pane busy)", |s| {
-            has_prompt(s) && !plexy_glass_mux::blocks::pane_at_prompt(s)
+            has_prompt(s) && !blocks::pane_at_prompt(s)
         })
         .await;
 
@@ -5473,7 +5496,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exec_command_alt_screen_refused() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -5517,7 +5540,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exec_command_unknown_session_refused() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
 
         let reply = one_shot(
@@ -5536,7 +5559,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exec_command_timeout_is_structural() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let _pane = exec_fixture(&registry, "exectmo").await;
 
@@ -5562,7 +5585,7 @@ mod tests {
     // text, so the reply must be a timeout, never the stale block's exit 9.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exec_command_stale_d_never_satisfies_wait() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -5590,7 +5613,7 @@ mod tests {
             .expect("session has a pane")
             .clone();
         wait_screen_state(&pane, "seeded block completed (D;9 processed)", |s| {
-            s.blocks_completed >= 1 && plexy_glass_mux::blocks::pane_at_prompt(s)
+            s.blocks_completed >= 1 && blocks::pane_at_prompt(s)
         })
         .await;
 
@@ -5614,16 +5637,16 @@ mod tests {
         registry: &Arc<crate::SessionRegistry>,
         msg: &ClientMsg,
     ) -> (
-        tokio::task::JoinHandle<Result<(), crate::error::DaemonError>>,
-        tokio::io::ReadHalf<tokio::io::DuplexStream>,
-        tokio::io::WriteHalf<tokio::io::DuplexStream>,
+        task::JoinHandle<Result<(), DaemonError>>,
+        io::ReadHalf<io::DuplexStream>,
+        io::WriteHalf<io::DuplexStream>,
     ) {
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(registry);
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let server =
             tokio::spawn(async move { serve(server_side, 7, reg, cfg).await });
-        let (mut cr, mut cw) = tokio::io::split(client_side);
+        let (mut cr, mut cw) = io::split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
         Codec::write_frame(&mut cw, &postcard::to_allocvec(msg).unwrap()).await.unwrap();
         (server, cr, cw)
@@ -5631,7 +5654,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exec_command_child_exit_mid_wait() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let pane = exec_fixture(&registry, "execkill").await;
 
@@ -5651,8 +5674,8 @@ mod tests {
         wait_screen_contains(&pane, "EXEC_HOLD_1").await;
         pane.kill_child();
 
-        let frame = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+        let frame = time::timeout(
+            Duration::from_secs(5),
             Codec::read_frame(&mut cr),
         )
         .await
@@ -5668,7 +5691,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exec_command_client_drop_abandons_wait() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let pane = exec_fixture(&registry, "execdrop").await;
 
@@ -5687,7 +5710,7 @@ mod tests {
         // reader and abandon the wait, no immortal 25 ms poll task left behind.
         drop(cr);
         drop(cw);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        let result = time::timeout(Duration::from_secs(5), server)
             .await
             .expect("serve task never completed after client drop");
         result.unwrap().unwrap();
@@ -5699,7 +5722,7 @@ mod tests {
     // CommandResult { ok: false, "run: pane was reset mid-command" }.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exec_command_reset_mid_command_refused() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
@@ -5730,7 +5753,7 @@ mod tests {
         // Poll until the counter is >= 1 AND the pane is at a prompt (D;0 and the
         // second A are processed).
         wait_screen_state(&pane, "completed block + at-prompt processed", |s| {
-            s.blocks_completed >= 1 && plexy_glass_mux::blocks::pane_at_prompt(s)
+            s.blocks_completed >= 1 && blocks::pane_at_prompt(s)
         })
         .await;
 
@@ -5762,8 +5785,8 @@ mod tests {
         assert!(expect_command_result(ris_reply).0, "RIS SendInput failed");
 
         // The exec serve task must observe the reset and reply with a refusal.
-        let frame = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+        let frame = time::timeout(
+            Duration::from_secs(5),
             Codec::read_frame(&mut cr),
         )
         .await
@@ -5782,7 +5805,7 @@ mod tests {
     // wait" }, since the connection is exclusively serving a single `run`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exec_command_unexpected_frame_refused() {
-        let _g = crate::test_env::isolate();
+        let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let pane = exec_fixture(&registry, "execuf").await;
 
@@ -5806,8 +5829,8 @@ mod tests {
         .await
         .unwrap();
 
-        let frame = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+        let frame = time::timeout(
+            Duration::from_secs(5),
             Codec::read_frame(&mut cr),
         )
         .await

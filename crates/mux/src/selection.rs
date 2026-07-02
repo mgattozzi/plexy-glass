@@ -2,6 +2,7 @@
 //! rect; extension past the border clamps.
 
 use crate::{pane_id::PaneId, rect::Rect};
+use crate::blocks::{self, FoldProjection};
 
 #[derive(Debug, Clone)]
 pub struct Selection {
@@ -119,7 +120,7 @@ pub fn viewport_content_row(
     scroll_offset: u32,
     vrow: u16,
 ) -> Option<&plexy_glass_emulator::Row> {
-    let proj = crate::blocks::FoldProjection::build(screen);
+    let proj = FoldProjection::build(screen);
     let visible_total = proj.visible_total();
     let top = visible_total
         .saturating_sub(u32::from(pane_rows))
@@ -127,7 +128,7 @@ pub fn viewport_content_row(
     let idx = top + u32::from(vrow);
     (idx < visible_total)
         .then(|| proj.to_unified(idx))
-        .and_then(|u| crate::blocks::row_at(screen, u))
+        .and_then(|u| blocks::row_at(screen, u))
 }
 
 /// Return a `Word`-kind `Selection` covering the word at viewport (row, col), or
@@ -237,7 +238,7 @@ pub fn extract_text(
     pane_rows: u16,
     scroll_offset: u32,
 ) -> String {
-    let proj = crate::blocks::FoldProjection::build(screen);
+    let proj = FoldProjection::build(screen);
     let visible_total = proj.visible_total();
     // Top visible line, matching the compositor's live-pane FoldCtx.
     let top_visible = visible_total
@@ -252,7 +253,7 @@ pub fn extract_text(
         let visible_idx = top_visible + u32::from(r);
         let row = (visible_idx < visible_total)
             .then(|| proj.to_unified(visible_idx))
-            .and_then(|u| crate::blocks::row_at(screen, u));
+            .and_then(|u| blocks::row_at(screen, u));
         if let Some(row) = row {
             let mut row_start = if r == start.0 { start.1 } else { 0 };
             // If a drag anchor landed on a wide grapheme's spacer half, back up
@@ -305,7 +306,7 @@ pub fn screen_text(screen: &plexy_glass_emulator::Screen) -> String {
         let trimmed = line.trim_end();
         lines.push(trimmed.to_string());
     }
-    while lines.last().is_some_and(std::string::String::is_empty) {
+    while lines.last().is_some_and(String::is_empty) {
         lines.pop();
     }
     lines.join("\n")

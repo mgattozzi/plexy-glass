@@ -1,4 +1,6 @@
 use super::{COMMAND_HISTORY_CAP, WindowManager};
+use plexy_glass_mux::overlay;
+use std::mem;
 use plexy_glass_mux::{
     BufferAction, BufferEntry, BufferOutcome, BufferPickerState, HistoryEntry, HistoryOutcome,
     HistoryState, HistoryTarget, HintOutcome, HintPick, HintState, KeyEvent, NodeKey, Overlay,
@@ -149,7 +151,7 @@ impl WindowManager {
             return;
         };
         // Re-key collapsed entries so existing folds survive the rename.
-        state.collapsed = std::mem::take(&mut state.collapsed)
+        state.collapsed = mem::take(&mut state.collapsed)
             .into_iter()
             .map(|k| match k {
                 NodeKey::Session(s) if s == old => NodeKey::Session(new.to_string()),
@@ -267,7 +269,7 @@ impl WindowManager {
             let Some(overlay) = self.overlay.as_mut() else {
                 return OverlayKeyResult::Ignored;
             };
-            let action = plexy_glass_mux::overlay::handle(event, overlay);
+            let action = overlay::handle(event, overlay);
             let target = match overlay {
                 Overlay::Rename { target, .. } => Some(*target),
                 _ => None,

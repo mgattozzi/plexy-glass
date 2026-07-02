@@ -4,6 +4,7 @@ use plexy_glass_daemon::Session;
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use tokio::task;
 
 fn spec() -> SpawnSpec {
     SpawnSpec {
@@ -25,7 +26,7 @@ async fn two_clients_effective_size_is_min() {
     .unwrap();
 
     let s2 = Arc::clone(&s);
-    let a = tokio::task::spawn_blocking(move || {
+    let a = task::spawn_blocking(move || {
         s2.register_client(
             PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 },
             Arc::new(AtomicBool::new(false)),
@@ -36,7 +37,7 @@ async fn two_clients_effective_size_is_min() {
     .unwrap();
 
     let s2 = Arc::clone(&s);
-    let b = tokio::task::spawn_blocking(move || {
+    let b = task::spawn_blocking(move || {
         s2.register_client(
             PtySize { rows: 20, cols: 60, pixel_width: 0, pixel_height: 0 },
             Arc::new(AtomicBool::new(false)),
@@ -47,20 +48,20 @@ async fn two_clients_effective_size_is_min() {
     .unwrap();
 
     let s2 = Arc::clone(&s);
-    let eff = tokio::task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+    let eff = task::spawn_blocking(move || s2.effective_size()).await.unwrap();
     assert_eq!((eff.rows, eff.cols), (20, 60));
 
     let s2 = Arc::clone(&s);
     let cid_b = b.client_id;
-    tokio::task::spawn_blocking(move || s2.deregister_client(cid_b)).await.unwrap();
+    task::spawn_blocking(move || s2.deregister_client(cid_b)).await.unwrap();
 
     let s2 = Arc::clone(&s);
-    let eff = tokio::task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+    let eff = task::spawn_blocking(move || s2.effective_size()).await.unwrap();
     assert_eq!((eff.rows, eff.cols), (30, 100));
 
     let s2 = Arc::clone(&s);
     let cid_a = a.client_id;
-    tokio::task::spawn_blocking(move || s2.deregister_client(cid_a)).await.unwrap();
+    task::spawn_blocking(move || s2.deregister_client(cid_a)).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -76,7 +77,7 @@ async fn concurrent_register_is_safe() {
     let mut handles = Vec::new();
     for i in 0..8u16 {
         let s2 = Arc::clone(&s);
-        let h = tokio::task::spawn_blocking(move || {
+        let h = task::spawn_blocking(move || {
             s2.register_client(
                 PtySize {
                     rows: 10 + i,
@@ -98,12 +99,12 @@ async fn concurrent_register_is_safe() {
     assert_eq!(client_ids.len(), 8);
 
     let s2 = Arc::clone(&s);
-    let eff = tokio::task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+    let eff = task::spawn_blocking(move || s2.effective_size()).await.unwrap();
     // smallest-client-wins: rows=10+0=10, cols=30+0=30
     assert_eq!((eff.rows, eff.cols), (10, 30));
 
     for id in client_ids {
         let s2 = Arc::clone(&s);
-        tokio::task::spawn_blocking(move || s2.deregister_client(id)).await.unwrap();
+        task::spawn_blocking(move || s2.deregister_client(id)).await.unwrap();
     }
 }

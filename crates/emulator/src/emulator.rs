@@ -1,9 +1,11 @@
 //! Top-level `Emulator`: composes `Parser` + `Screen` behind a small public API.
 
 use crate::{
+    cursor::Cursor,
     parser::Parser,
     reflow::reflow,
-    screen::Screen,
+    scrollback::Scrollback,
+    screen::{ColorQuery, Screen},
 };
 
 pub struct Emulator {
@@ -35,7 +37,7 @@ impl Emulator {
         // Reflow the active screen (and scrollback unless we're in alt-screen mode).
         if self.screen.alt.is_some() {
             // Alt-screen is reflowed independently; scrollback untouched.
-            let mut empty_sb = crate::scrollback::Scrollback::with_cap(0);
+            let mut empty_sb = Scrollback::with_cap(0);
             reflow(
                 &mut self.screen.active,
                 &mut empty_sb,
@@ -48,8 +50,8 @@ impl Emulator {
             // restores the main grid at its stale pre-resize dimensions while the
             // cursor/scroll_region reflect the new size. Its cursor lives in
             // `saved_cursor`; reflow it too so the restored cursor stays in-bounds.
-            let mut parked_sb = crate::scrollback::Scrollback::with_cap(0);
-            let mut throwaway = crate::cursor::Cursor::default();
+            let mut parked_sb = Scrollback::with_cap(0);
+            let mut throwaway = Cursor::default();
             let parked_cursor = self.screen.saved_cursor.as_mut().unwrap_or(&mut throwaway);
             if let Some(parked) = self.screen.alt.as_mut() {
                 reflow(parked, &mut parked_sb, parked_cursor, rows, cols);
@@ -102,7 +104,7 @@ impl Emulator {
     /// Drain queued OSC 10/11/12 color queries. The daemon calls this from
     /// the PTY reader thread (same place it drains `take_replies`) and replies
     /// with the current palette colors.
-    pub fn take_color_queries(&mut self) -> Vec<(usize, crate::screen::ColorQuery)> {
+    pub fn take_color_queries(&mut self) -> Vec<(usize, ColorQuery)> {
         self.screen.take_color_queries()
     }
 
@@ -117,6 +119,8 @@ impl Emulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grid::RowMark;
+    use crate::screen::pack_da2_version;
 
     #[test]
     fn advance_writes_to_screen() {
@@ -149,7 +153,7 @@ mod tests {
         assert!(
             e.screen().active.rows[0]
                 .mark
-                .contains(crate::grid::RowMark::PROMPT_END),
+                .contains(RowMark::PROMPT_END),
             "PROMPT_END must be set on row 0 before resize"
         );
         e.resize(4, 16);
@@ -158,7 +162,7 @@ mod tests {
         assert!(
             e.screen().active.rows[0]
                 .mark
-                .contains(crate::grid::RowMark::PROMPT_END),
+                .contains(RowMark::PROMPT_END),
             "PROMPT_END must survive reflow"
         );
     }
@@ -232,7 +236,7 @@ mod tests {
         e.advance(b"\x1b[>c");
         let replies = e.take_replies();
         // DA2 now packs the crate version (0.1.0 -> 100) instead of a literal 1.
-        let ver = crate::screen::pack_da2_version();
+        let ver = pack_da2_version();
         assert_eq!(replies, vec![format!("\x1b[>0;{ver};0c").into_bytes()]);
     }
 
@@ -250,7 +254,7 @@ mod tests {
         let mut e = Emulator::new(4, 8);
         e.advance(b"\x1b]11;?\x07");
         let drained = e.take_color_queries();
-        assert_eq!(drained, vec![(0, crate::screen::ColorQuery::Background)]);
+        assert_eq!(drained, vec![(0, ColorQuery::Background)]);
         assert!(e.take_color_queries().is_empty());
     }
 

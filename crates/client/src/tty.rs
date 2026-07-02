@@ -1,10 +1,13 @@
 use crate::error::ClientError;
+use crate::negotiate::EnabledCaps;
+use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, Signal};
 use nix::sys::termios::{
     self, ControlFlags, InputFlags, LocalFlags, OutputFlags, SetArg, SpecialCharacterIndices,
     Termios,
 };
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::panic;
 
 /// RAII handle for the host TTY. Saves termios on construction and restores
 /// it on Drop. Also resets cursor + alt-screen state on Drop.
@@ -68,7 +71,7 @@ impl HostTty {
         // exit alternate screen. The keyboard-protocol / focus / theme inverse
         // (kitty pop, modkeys reset, ?1004l, ?2031l) is whatever negotiation
         // actually enabled, see `negotiated_teardown_bytes`.
-        let mut out = std::io::stdout();
+        let mut out = io::stdout();
         let _ = out.write_all(b"\x1b[?2004l\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l");
         let _ = out.write_all(&negotiated_teardown_bytes());
         let _ = out.flush();
@@ -102,7 +105,7 @@ pub fn current_size(fd: BorrowedFd<'_>) -> Result<plexy_glass_protocol::PtySize,
     // for the duration of the call.
     let rc = unsafe { ioctl(fd.as_raw_fd(), TIOCGWINSZ, &mut ws) };
     if rc != 0 {
-        return Err(ClientError::Io(std::io::Error::last_os_error()));
+        return Err(ClientError::Io(io::Error::last_os_error()));
     }
     Ok(plexy_glass_protocol::PtySize {
         rows: ws.ws_row,
@@ -121,11 +124,11 @@ static EMERGENCY_FD: OnceLock<RawFd> = OnceLock::new();
 // Wrap it in a `Mutex` so the `OnceLock` is safe to share between threads.
 static EMERGENCY_TERMIOS: OnceLock<Mutex<Termios>> = OnceLock::new();
 static ARMED: AtomicBool = AtomicBool::new(false);
-static ENABLED_CAPS: OnceLock<crate::negotiate::EnabledCaps> = OnceLock::new();
+static ENABLED_CAPS: OnceLock<EnabledCaps> = OnceLock::new();
 
 /// Record what the client enabled outward so both teardown paths emit the exact
 /// inverse. Call once, right after the negotiation phase.
-pub fn set_enabled_caps(caps: crate::negotiate::EnabledCaps) {
+pub fn set_enabled_caps(caps: EnabledCaps) {
     let _ = ENABLED_CAPS.set(caps);
 }
 
@@ -152,8 +155,8 @@ pub fn install_emergency_restore(fd: BorrowedFd<'_>, snapshot: &Termios) {
     let _ = EMERGENCY_TERMIOS.set(Mutex::new(snapshot.clone()));
     ARMED.store(true, Ordering::SeqCst);
 
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
         restore_from_static();
         default_hook(info);
     }));
@@ -164,9 +167,9 @@ pub fn install_emergency_restore(fd: BorrowedFd<'_>, snapshot: &Termios) {
         let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM");
         let mut sighup = signal(SignalKind::hangup()).expect("install SIGHUP");
         let (sig, num) = tokio::select! {
-            _ = sigint.recv() => ("SIGINT", nix::sys::signal::Signal::SIGINT),
-            _ = sigterm.recv() => ("SIGTERM", nix::sys::signal::Signal::SIGTERM),
-            _ = sighup.recv() => ("SIGHUP", nix::sys::signal::Signal::SIGHUP),
+            _ = sigint.recv() => ("SIGINT", Signal::SIGINT),
+            _ = sigterm.recv() => ("SIGTERM", Signal::SIGTERM),
+            _ = sighup.recv() => ("SIGHUP", Signal::SIGHUP),
         };
         tracing::warn!(signal = sig, "received signal, restoring tty and re-raising");
         restore_from_static();
@@ -175,16 +178,16 @@ pub fn install_emergency_restore(fd: BorrowedFd<'_>, snapshot: &Termios) {
         // SAFETY: sigaction is unsafe; we install SIG_DFL with an empty mask
         // and empty flags for a known signal. raise is safe in nix 0.31.
         unsafe {
-            let _ = nix::sys::signal::sigaction(
+            let _ = signal::sigaction(
                 num,
-                &nix::sys::signal::SigAction::new(
-                    nix::sys::signal::SigHandler::SigDfl,
-                    nix::sys::signal::SaFlags::empty(),
-                    nix::sys::signal::SigSet::empty(),
+                &SigAction::new(
+                    SigHandler::SigDfl,
+                    SaFlags::empty(),
+                    SigSet::empty(),
                 ),
             );
         }
-        let _ = nix::sys::signal::raise(num);
+        let _ = signal::raise(num);
     });
 }
 
@@ -204,7 +207,7 @@ fn restore_from_static() {
     // SAFETY: fd remains valid as long as the process holds stdin/stdout.
     let fd = unsafe { BorrowedFd::borrow_raw(fd) };
     let _ = termios::tcsetattr(fd, SetArg::TCSANOW, &snap);
-    let mut out = std::io::stdout();
+    let mut out = io::stdout();
     let _ = out.write_all(b"\x1b[?2004l\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l");
     let _ = out.write_all(&negotiated_teardown_bytes());
     let _ = out.flush();

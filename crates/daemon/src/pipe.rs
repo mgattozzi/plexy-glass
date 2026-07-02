@@ -19,12 +19,15 @@
 
 use crate::LockExt;
 use crate::error::DaemonError;
+use crate::pane::Pane;
 use crate::session::Session;
 use bytes::Bytes;
+use std::io::Error;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use tokio::io::AsyncWriteExt;
+use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, watch};
 
 /// The per-pane pipe slot. Lives on `Pane`'s shared inner state; the drain
@@ -108,13 +111,13 @@ pub fn cancel_slot(slot: &PipeSlot, reason: PipeCloseReason) -> bool {
 /// predecessor with reason `Replaced`), and spawn the drain task. A spawn
 /// failure returns `Err` and leaves any existing pipe untouched.
 pub fn start_pipe(
-    pane: &crate::pane::Pane,
+    pane: &Pane,
     session: Weak<Session>,
     shell: &str,
     cmd: &str,
     cwd: Option<String>,
 ) -> Result<(), DaemonError> {
-    let mut command = tokio::process::Command::new(shell);
+    let mut command = Command::new(shell);
     command
         .arg("-c")
         .arg(cmd)
@@ -126,7 +129,7 @@ pub fn start_pipe(
     }
     let mut child = command
         .spawn()
-        .map_err(|e| DaemonError::Io(std::io::Error::other(format!("pipe-pane spawn: {e}"))))?;
+        .map_err(|e| DaemonError::Io(Error::other(format!("pipe-pane spawn: {e}"))))?;
     // invariant: `stdin(Stdio::piped())` above guarantees the handle exists.
     let stdin = child.stdin.take().expect("piped stdin");
     let rx = pane.subscribe_output();
@@ -141,8 +144,8 @@ pub fn start_pipe(
 pub(crate) fn install_and_drain(
     slot: PipeSlot,
     rx: broadcast::Receiver<Bytes>,
-    child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
+    child: Child,
+    stdin: ChildStdin,
     session: Weak<Session>,
 ) {
     let id = NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed);
@@ -178,8 +181,8 @@ async fn drain(
     slot: PipeSlot,
     id: u64,
     mut rx: broadcast::Receiver<Bytes>,
-    mut child: tokio::process::Child,
-    mut stdin: tokio::process::ChildStdin,
+    mut child: Child,
+    mut stdin: ChildStdin,
     mut cancel_rx: watch::Receiver<Option<PipeCloseReason>>,
     session: Weak<Session>,
 ) {
@@ -187,7 +190,7 @@ async fn drain(
         // Phase 1: wait for the next chunk (or a close condition).
         let chunk = tokio::select! {
             biased;
-            r = cancel_rx.wait_for(std::option::Option::is_some) => break cancel_reason(r),
+            r = cancel_rx.wait_for(Option::is_some) => break cancel_reason(r),
             // The consumer exited on its own (its `$SHELL -c` toplevel; a
             // grandchild may keep the pipe's read end open, which is why the
             // exit path below kills explicitly rather than just dropping
@@ -207,7 +210,7 @@ async fn drain(
         // channel close, so it must keep the side-band cancel selectable.
         tokio::select! {
             biased;
-            r = cancel_rx.wait_for(std::option::Option::is_some) => break cancel_reason(r),
+            r = cancel_rx.wait_for(Option::is_some) => break cancel_reason(r),
             w = stdin.write_all(&chunk) => {
                 if w.is_err() {
                     // EPIPE: the consumer closed its stdin or died.
@@ -245,17 +248,21 @@ async fn drain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use crate::test_env;
+    use nix::sys::signal;
+    use nix::unistd::Pid;
+    use std::time::{Duration, Instant};
+    use tokio::time;
 
     /// Whether `pid` names a live (un-reaped) process. `kill -0` semantics:
     /// a zombie still counts as alive until its parent reaps it, which is exactly
     /// the signal the no-zombie assertions need.
     pub fn pid_alive(pid: u32) -> bool {
-        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
+        signal::kill(Pid::from_raw(pid as i32), None).is_ok()
     }
 
-    fn spawn_consumer(cmd: &str) -> (tokio::process::Child, tokio::process::ChildStdin) {
-        let mut child = tokio::process::Command::new("/bin/sh")
+    fn spawn_consumer(cmd: &str) -> (Child, ChildStdin) {
+        let mut child = Command::new("/bin/sh")
             .arg("-c")
             .arg(cmd)
             .stdin(Stdio::piped())
@@ -279,7 +286,7 @@ mod tests {
     // (broadcast send never blocks or errors with a live receiver).
     #[tokio::test(flavor = "multi_thread")]
     async fn lagged_drain_closes_pipe_and_reports_too_slow() {
-        let _g = crate::test_env::isolate();
+        let _g = test_env::isolate();
         let session = Session::new(
             "t-pipe-lag".into(),
             plexy_glass_protocol::SpawnSpec {
@@ -289,7 +296,7 @@ mod tests {
                 cwd: None,
             },
             plexy_glass_protocol::PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
-            std::sync::Arc::new(plexy_glass_config::built_in_default()),
+            Arc::new(plexy_glass_config::built_in_default()),
         )
         .expect("session");
 
@@ -306,21 +313,21 @@ mod tests {
             rx,
             child,
             stdin,
-            std::sync::Arc::downgrade(&session),
+            Arc::downgrade(&session),
         );
 
         assert!(
-            crate::test_env::poll_until(Duration::from_secs(10), || slot_empty(&slot)).await,
+            test_env::poll_until(Duration::from_secs(10), || slot_empty(&slot)).await,
             "lagged pipe never cleared its slot"
         );
         // Killed AND reaped: kill -0 fails only once the zombie is gone.
         assert!(
-            crate::test_env::poll_until(Duration::from_secs(10), || !pid_alive(pid)).await,
+            test_env::poll_until(Duration::from_secs(10), || !pid_alive(pid)).await,
             "consumer survived (or was left a zombie) after the lagged close"
         );
         // The status line reports the too-slow close.
         assert!(
-            crate::test_env::poll_until(Duration::from_secs(10), || {
+            test_env::poll_until(Duration::from_secs(10), || {
                 let Ok(mut m) = session.window_manager.try_lock() else { return false };
                 m.take_active_message() == Some(MSG_TOO_SLOW)
             })
@@ -350,9 +357,9 @@ mod tests {
         assert!(!slot_empty(&slot), "handle installed");
 
         assert!(cancel_slot(&slot, PipeCloseReason::Stopped), "pipe was running");
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while pid_alive(pid) && std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pid_alive(pid) && Instant::now() < deadline {
+            time::sleep(Duration::from_millis(50)).await;
         }
         assert!(!pid_alive(pid), "consumer survived (or zombied) after cancel");
         // Second stop is a no-op.

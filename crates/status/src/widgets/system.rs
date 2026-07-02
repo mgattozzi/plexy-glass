@@ -1,5 +1,6 @@
 use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
 use async_trait::async_trait;
+use battery::units::ratio::percent;
 use smol_str::SmolStr;
 use std::time::Duration;
 
@@ -90,9 +91,7 @@ impl Widget for BatteryWidget {
         let Some(b) = batteries.flatten().next() else {
             return StyledText::empty();
         };
-        let pct = b
-            .state_of_charge()
-            .get::<battery::units::ratio::percent>();
+        let pct = b.state_of_charge().get::<percent>();
         // Plain ASCII prefix. The compositor's status painter walks chars
         // 1:1 against terminal cells and doesn't reserve a spacer for
         // wide characters, so a "🔋" or "⚡" here would garble subsequent

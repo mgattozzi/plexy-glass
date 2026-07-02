@@ -6,6 +6,7 @@
 
 use crate::{Direction, Key, KeyEvent, KeyEventKind, Modifiers, SplitDir};
 use std::collections::HashMap;
+use crate::preset::LayoutPreset;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -74,7 +75,7 @@ pub enum Command {
     /// Close the floating popup, killing its child.
     ClosePopup,
     /// Rearrange the active window's panes into a preset layout.
-    SelectLayout(crate::preset::LayoutPreset),
+    SelectLayout(LayoutPreset),
     /// Cycle to the next preset layout (remembered per window).
     NextLayout,
     /// Scroll the active pane's viewport so the previous OSC 133 prompt row

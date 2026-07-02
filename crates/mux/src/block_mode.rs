@@ -7,6 +7,7 @@
 
 use crate::{Direction, Key, KeyEvent, Modifiers};
 use plexy_glass_emulator::Screen;
+use crate::blocks;
 
 /// Block-mode state. `selected` is the absolute line of the selected block's
 /// `PROMPT_START`; `viewport_top` is the absolute line shown at viewport row 0
@@ -63,12 +64,12 @@ impl BlockMode {
         if screen.alt.is_some() {
             return None;
         }
-        let selected = crate::blocks::last_prompt_line(screen)?;
+        let selected = blocks::last_prompt_line(screen)?;
         let mut state = Self {
             selected,
             viewport_top: 0,
             pane_rows,
-            total_lines: crate::blocks::total_lines(screen),
+            total_lines: blocks::total_lines(screen),
             filter: None,
         };
         state.recenter();
@@ -83,13 +84,13 @@ impl BlockMode {
         if screen.alt.is_some() {
             return None;
         }
-        let selected = crate::blocks::prompt_at_or_above(screen, prompt_line)
-            .or_else(|| crate::blocks::first_prompt_line(screen))?;
+        let selected = blocks::prompt_at_or_above(screen, prompt_line)
+            .or_else(|| blocks::first_prompt_line(screen))?;
         let mut state = Self {
             selected,
             viewport_top: 0,
             pane_rows,
-            total_lines: crate::blocks::total_lines(screen),
+            total_lines: blocks::total_lines(screen),
             filter: None,
         };
         state.recenter();
@@ -129,10 +130,10 @@ pub fn handle(event: &KeyEvent, state: &mut BlockMode, screen: &Screen) -> Block
 
     // Keep total_lines fresh (background output may have grown the screen) and
     // re-anchor the selection onto a surviving prompt (eviction / drift safety).
-    state.total_lines = crate::blocks::total_lines(screen);
-    match crate::blocks::prompt_at_or_above(screen, state.selected) {
+    state.total_lines = blocks::total_lines(screen);
+    match blocks::prompt_at_or_above(screen, state.selected) {
         Some(p) => state.selected = p,
-        None => match crate::blocks::first_prompt_line(screen) {
+        None => match blocks::first_prompt_line(screen) {
             Some(p) => state.selected = p,
             None => return Exit, // no blocks left at all
         },
@@ -147,7 +148,7 @@ pub fn handle(event: &KeyEvent, state: &mut BlockMode, screen: &Screen) -> Block
     // empty query matches all blocks, so seed `matches` with the full set,
     // otherwise the first typed char would narrow from the empty default.
     if event.mods.is_empty() && event.key == Key::Char('/') {
-        let all = crate::blocks::all_prompt_lines(screen);
+        let all = blocks::all_prompt_lines(screen);
         let f = state.filter.get_or_insert_with(Filter::default);
         f.prompt_active = true;
         if f.query.is_empty() {
@@ -188,26 +189,26 @@ pub fn handle(event: &KeyEvent, state: &mut BlockMode, screen: &Screen) -> Block
             move_to(state, set.last().copied())
         }
         (m, Key::Char('y')) if m.is_empty() => {
-            let range = crate::blocks::block_extent(screen, state.selected);
-            Yank(crate::blocks::block_text(screen, range))
+            let range = blocks::block_extent(screen, state.selected);
+            Yank(blocks::block_text(screen, range))
         }
         (m, Key::Char('o')) if m.is_empty() => {
             // `selected` is always re-anchored to a real prompt above, so
             // block_output_range returns Some (it falls back to the prompt row
             // when the block has no OUTPUT_START). The None arm is defensive.
-            match crate::blocks::block_output_range(screen, state.selected) {
-                Some(range) => Yank(crate::blocks::block_text(screen, range)),
+            match blocks::block_output_range(screen, state.selected) {
+                Some(range) => Yank(blocks::block_text(screen, range)),
                 None => Ignore,
             }
         }
         (m, Key::Char('c')) if m.is_empty() => {
-            match crate::blocks::block_command_line(screen, state.selected) {
+            match blocks::block_command_line(screen, state.selected) {
                 Some(cmd) => Yank(cmd),
                 None => Ignore,
             }
         }
         (m, Key::Char('r')) if m.is_empty() => {
-            match crate::blocks::block_command_line(screen, state.selected) {
+            match blocks::block_command_line(screen, state.selected) {
                 Some(cmd) => ReRun(cmd),
                 None => Ignore,
             }
@@ -244,7 +245,7 @@ fn active_set(state: &BlockMode, screen: &Screen) -> Vec<u32> {
         // with an empty query is unreachable here; the guard is a redundant defensive
         // check.
         Some(f) if !f.query.is_empty() => f.matches.clone(),
-        _ => crate::blocks::all_prompt_lines(screen),
+        _ => blocks::all_prompt_lines(screen),
     }
 }
 
@@ -267,7 +268,7 @@ fn next_failed(set: &[u32], screen: &Screen, selected: u32, forward: bool) -> Op
     let failed: Vec<u32> = set
         .iter()
         .copied()
-        .filter(|&p| matches!(crate::blocks::closing_exit(screen, p), Some(c) if c != 0))
+        .filter(|&p| matches!(blocks::closing_exit(screen, p), Some(c) if c != 0))
         .collect();
     next_in(&failed, selected, forward)
 }
@@ -279,18 +280,18 @@ fn next_failed(set: &[u32], screen: &Screen, selected: u32, forward: bool) -> Op
 /// set).
 fn recompute_matches(screen: &Screen, query: &str, prior: Option<&[u32]>) -> Vec<u32> {
     if query.is_empty() {
-        return crate::blocks::all_prompt_lines(screen);
+        return blocks::all_prompt_lines(screen);
     }
     let q = query.to_lowercase();
     let candidates = match prior {
         Some(p) => p.to_vec(),
-        None => crate::blocks::all_prompt_lines(screen),
+        None => blocks::all_prompt_lines(screen),
     };
     candidates
         .into_iter()
         .filter(|&prompt| {
             let text =
-                crate::blocks::block_text(screen, crate::blocks::block_extent(screen, prompt));
+                blocks::block_text(screen, blocks::block_extent(screen, prompt));
             text.to_lowercase().contains(&q)
         })
         .collect()
@@ -412,7 +413,7 @@ mod tests {
     #[test]
     fn new_at_selects_given_prompt_line() {
         let s = two_blocks();
-        let lines = crate::blocks::all_prompt_lines(&s);
+        let lines = blocks::all_prompt_lines(&s);
         assert_eq!(lines, vec![0, 3], "prompts at 0 and 3");
         assert_eq!(BlockMode::new_at(&s, 8, lines[0]).unwrap().selected, 0);
         assert_eq!(BlockMode::new_at(&s, 8, lines[1]).unwrap().selected, 3);

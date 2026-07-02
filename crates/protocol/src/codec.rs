@@ -1,5 +1,6 @@
 use crate::errors::CodecError;
 use bytes::{Bytes, BytesMut};
+use std::io::ErrorKind;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Maximum permitted frame payload size. Frames larger than this are rejected
@@ -21,7 +22,7 @@ impl Codec {
         let mut len_buf = [0u8; 4];
         match reader.read_exact(&mut len_buf).await {
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(None),
             Err(e) => return Err(CodecError::Io(e)),
         }
         let len = u32::from_le_bytes(len_buf);
@@ -33,7 +34,7 @@ impl Codec {
         reader
             .read_exact(&mut buf)
             .await
-            .map_err(|e| if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            .map_err(|e| if e.kind() == ErrorKind::UnexpectedEof {
                 CodecError::UnexpectedEof
             } else {
                 CodecError::Io(e)
@@ -66,6 +67,7 @@ impl Codec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io;
     use tokio::io::duplex;
     use tokio::io::AsyncWriteExt;
 
@@ -115,7 +117,7 @@ mod tests {
     async fn write_frame_rejects_oversized_payload() {
         // Symmetric with the read guard: an over-cap payload must be refused
         // before any bytes are emitted, with the exact FrameTooLarge shape.
-        let mut sink = tokio::io::sink();
+        let mut sink = io::sink();
         let payload = vec![0u8; (MAX_FRAME_BYTES + 1) as usize];
         let err = Codec::write_frame(&mut sink, &payload).await.unwrap_err();
         match err {

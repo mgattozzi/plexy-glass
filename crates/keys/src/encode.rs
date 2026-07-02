@@ -345,7 +345,7 @@ fn kitty_bytes(event: &KeyEvent, flags: u8, app_cursor: bool) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{KeyParseOutput, KeyParser};
+    use crate::parser::{KeyParseOutput, KeyParser, decode_xterm_mods};
 
     fn parse_first_event(bytes: &[u8]) -> KeyEvent {
         let mut p = KeyParser::new();
@@ -562,7 +562,7 @@ mod tests {
             Modifiers::CTRL | Modifiers::SHIFT,
             Modifiers::ALT | Modifiers::SUPER,
         ] {
-            assert_eq!(crate::parser::decode_xterm_mods(mods_param(m)), m);
+            assert_eq!(decode_xterm_mods(mods_param(m)), m);
         }
     }
 

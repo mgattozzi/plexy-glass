@@ -7,6 +7,7 @@
 use plexy_glass_config::{PaneNode, PaneTemplate, SplitDirection};
 use plexy_glass_mux::SplitDir;
 use plexy_glass_protocol::SpawnSpec;
+use std::env;
 
 /// A binary layout tree (the engine's split model) with a pane template at each
 /// leaf. An N-ary config split folds into a right-leaning chain of binary splits.
@@ -188,7 +189,7 @@ pub(crate) fn resolve_home_cwd(
 
 /// `resolve_home_cwd` reading `HOME` from the environment.
 pub(crate) fn home_base(window_cwd: Option<&str>, session_cwd: Option<&str>) -> Option<String> {
-    let home = std::env::var("HOME").ok();
+    let home = env::var("HOME").ok();
     resolve_home_cwd(window_cwd, session_cwd, home.as_deref())
 }
 
@@ -198,7 +199,7 @@ pub(crate) fn home_base(window_cwd: Option<&str>, session_cwd: Option<&str>) -> 
 /// effective overlay (session ∪ window ∪ pane, already merged) set ON TOP of
 /// the inherited daemon environment by the spawn path.
 pub(crate) fn pane_spec(pt: &PaneTemplate, home_cwd: Option<&str>, env: Vec<(String, String)>) -> SpawnSpec {
-    let home = std::env::var("HOME").ok();
+    let home = env::var("HOME").ok();
     make_spec(&default_shell(), pt, home_cwd, home.as_deref(), env)
 }
 
@@ -240,7 +241,7 @@ pub(crate) fn merge_env(
 }
 
 pub(crate) fn default_shell() -> String {
-    std::env::var("SHELL")
+    env::var("SHELL")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "/bin/sh".to_string())

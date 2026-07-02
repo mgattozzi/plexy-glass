@@ -2,11 +2,15 @@
 //! system clipboard, and synthesizing keystrokes for click-to-position.
 
 use crate::error::DaemonError;
+use crate::pane::Pane;
+use crate::window_manager::Severity;
 use bytes::Bytes;
 
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::time;
 
 /// Build the user-facing acknowledgement for a clipboard write. A multi-line
 /// copy reports the line count; a single line reports the width-truncated text.
@@ -36,7 +40,7 @@ pub(crate) fn yank_status(
     wrote: bool,
     text: &str,
     paste_fallback: bool,
-) -> (String, crate::window_manager::Severity) {
+) -> (String, Severity) {
     use crate::window_manager::Severity;
     if wrote {
         (copied_message(text), Severity::Success)
@@ -115,7 +119,7 @@ pub async fn write_clipboard(payload: &[u8]) -> bool {
             }
             let _ = child.wait().await;
         };
-        if tokio::time::timeout(std::time::Duration::from_secs(2), write_and_wait).await == Ok(()) { return true }
+        if time::timeout(Duration::from_secs(2), write_and_wait).await == Ok(()) { return true }
         tracing::warn!(program, "clipboard write timed out");
         return false; // child killed on drop; don't multiply the stall
     }
@@ -150,7 +154,7 @@ pub async fn read_clipboard() -> Vec<u8> {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .output();
-        match tokio::time::timeout(std::time::Duration::from_secs(2), fut).await {
+        match time::timeout(Duration::from_secs(2), fut).await {
             Ok(Ok(out)) if out.status.success() => return out.stdout,
             Ok(_) => {} // tool missing or non-zero: try the next one
             Err(_) => {
@@ -181,7 +185,7 @@ pub async fn read_clipboard() -> Vec<u8> {
 /// Returns `Ok(false)` if no movement was performed; `Ok(true)` if the click
 /// was consumed as a reposition (arrow keys sent, or already on target).
 pub async fn click_to_position(
-    pane: &crate::pane::Pane,
+    pane: &Pane,
     click_row: u16,
     click_col: u16,
 ) -> Result<bool, DaemonError> {
@@ -242,6 +246,9 @@ fn graphemes_in_span(cells: &[plexy_glass_emulator::Cell], lo: u16, hi: u16) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::fs;
+    use std::time::Instant;
 
     #[test]
     fn copied_message_reports_lines_or_truncated_text() {
@@ -278,11 +285,11 @@ mod tests {
         // Stub PATH to an empty dir so `open`/`xdg-open` can't be spawned; the
         // caller relies on this Err to show "couldn't open (no system opener)".
         let dir = tempfile::tempdir().unwrap();
-        let old = std::env::var("PATH").unwrap_or_default();
+        let old = env::var("PATH").unwrap_or_default();
         // SAFETY: nextest runs each test in its own process.
-        unsafe { std::env::set_var("PATH", dir.path()) };
+        unsafe { env::set_var("PATH", dir.path()) };
         let r = open_url("about:blank").await;
-        unsafe { std::env::set_var("PATH", old) };
+        unsafe { env::set_var("PATH", old) };
         assert!(r.is_err(), "no opener on PATH must surface as Err, not a silent Ok");
     }
 
@@ -291,11 +298,11 @@ mod tests {
         // Empty PATH → no pbcopy/wl-copy/xclip/xsel → the write can't happen, and
         // the caller must learn that (so it warns instead of claiming "copied").
         let dir = tempfile::tempdir().unwrap();
-        let old = std::env::var("PATH").unwrap_or_default();
+        let old = env::var("PATH").unwrap_or_default();
         // SAFETY: nextest runs each test in its own process.
-        unsafe { std::env::set_var("PATH", dir.path()) };
+        unsafe { env::set_var("PATH", dir.path()) };
         let wrote = write_clipboard(b"hello").await;
-        unsafe { std::env::set_var("PATH", old) };
+        unsafe { env::set_var("PATH", old) };
         assert!(!wrote, "no clipboard tool must report false");
     }
 
@@ -303,10 +310,10 @@ mod tests {
     async fn read_clipboard_returns_bounded_without_panic() {
         // No helper is guaranteed in the test env; whatever happens (empty,
         // real contents, or a missing tool) it must return quickly without panic.
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         let _ = read_clipboard().await;
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
+            start.elapsed() < Duration::from_secs(5),
             "read_clipboard must be bounded"
         );
     }
@@ -320,20 +327,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for name in ["pbcopy", "wl-copy", "xclip", "xsel"] {
             let stub = dir.path().join(name);
-            std::fs::write(&stub, "#!/bin/sh\nexec sleep 10\n").unwrap();
-            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+            fs::write(&stub, "#!/bin/sh\nexec sleep 10\n").unwrap();
+            fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let old_path = std::env::var("PATH").unwrap_or_default();
+        let old_path = env::var("PATH").unwrap_or_default();
         let new_path = format!("{}:{old_path}", dir.path().display());
         // SAFETY: nextest runs each test in its own process.
-        unsafe { std::env::set_var("PATH", &new_path) };
+        unsafe { env::set_var("PATH", &new_path) };
 
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         let wrote = write_clipboard(b"hello").await;
         let elapsed = start.elapsed();
         assert!(!wrote, "a hung helper times out and reports false");
         assert!(
-            elapsed < std::time::Duration::from_secs(5),
+            elapsed < Duration::from_secs(5),
             "write_clipboard must be bounded by the timeout, took {elapsed:?}"
         );
     }
@@ -361,7 +368,7 @@ mod tests {
         assert_eq!(graphemes_in_span(&cells, 0, 5), 4);
     }
 
-    fn cat_pane() -> crate::pane::Pane {
+    fn cat_pane() -> Pane {
         use crate::pane::Pane;
         use plexy_glass_mux::PaneId;
         use plexy_glass_protocol::{PtySize, SpawnSpec};

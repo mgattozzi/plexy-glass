@@ -1,9 +1,12 @@
 use super::{Severity, WindowManager};
 use crate::error::DaemonError;
+use crate::osc_actions;
+use plexy_glass_mux::blocks;
 use plexy_glass_mux::{
     BorderHit, BorderSide, Command, MouseButton, MouseEncoding, MouseEvent, MouseKind, PaneId,
     Rect, Selection, WindowId, encode_for_child, extract_text, prev_prompt_line,
 };
+use std::time::Duration;
 use std::time::Instant;
 
 /// Active border drag-resize. Cleared on Release. While `Some`, all mouse
@@ -475,7 +478,7 @@ impl WindowManager {
                     && h.col == event.col
                     && h.button == MouseButton::Left
                     && now.saturating_duration_since(h.at)
-                        < std::time::Duration::from_millis(400)
+                        < Duration::from_millis(400)
             }
             None => false,
         };
@@ -585,7 +588,7 @@ impl WindowManager {
     /// pasted bytes are wrapped with `\x1b[200~ ... \x1b[201~` so inner apps
     /// can distinguish paste from typed input.
     async fn handle_middle_press(&self, pane_id: PaneId) -> Result<(), DaemonError> {
-        let bytes = crate::osc_actions::read_clipboard().await;
+        let bytes = osc_actions::read_clipboard().await;
         if bytes.is_empty() {
             return Ok(());
         }
@@ -663,7 +666,7 @@ impl WindowManager {
                     // through the visible-space projection.
                     let rows = s.active.num_rows();
                     let abs_line =
-                        plexy_glass_mux::blocks::scroll_line_at(s, rows, scroll_offset, local_row);
+                        blocks::scroll_line_at(s, rows, scroll_offset, local_row);
                     // is_prompt is private; use the public prev_prompt_line:
                     // prev_prompt_line(s, abs_line + 1) == Some(abs_line) iff
                     // abs_line itself carries PROMPT_START.
@@ -673,8 +676,8 @@ impl WindowManager {
                         // Put the prompt at the viewport top (visible-space offset;
                         // a line already in the live view saturates to 0).
                         let new_offset =
-                            plexy_glass_mux::blocks::scroll_offset_for_top(s, rows, abs_line);
-                        let max = plexy_glass_mux::blocks::max_scroll_offset(s, rows);
+                            blocks::scroll_offset_for_top(s, rows, abs_line);
+                        let max = blocks::max_scroll_offset(s, rows);
                         Some((new_offset, max))
                     } else {
                         None
@@ -715,7 +718,7 @@ impl WindowManager {
             // hint-mode Open action (connection.rs dispatch_hint). `open_url` only
             // spawns the opener (it doesn't wait for it to finish), so this stays
             // cheap under the WM lock.
-            match crate::osc_actions::open_url(&url).await {
+            match osc_actions::open_url(&url).await {
                 Ok(()) => self.set_status_message(format!("opening {url}"), Severity::Info),
                 Err(_) => self.set_status_message(
                     "couldn't open (no system opener)".to_string(),
@@ -810,7 +813,7 @@ impl WindowManager {
                 && pane.scroll_offset() == 0
             {
                 let (row, col) = sel.anchor;
-                if crate::osc_actions::click_to_position(&pane, row, col).await? {
+                if osc_actions::click_to_position(&pane, row, col).await? {
                     self.notify.notify_one();
                 }
             }
@@ -841,7 +844,7 @@ impl WindowManager {
         // Visible-space max so each notch moves one visible line (folds skipped),
         // with no over-scroll dead zone.
         let max_offset =
-            pane.with_screen(|s| plexy_glass_mux::blocks::max_scroll_offset(s, s.active.num_rows()));
+            pane.with_screen(|s| blocks::max_scroll_offset(s, s.active.num_rows()));
         // Wheel-up = positive delta = scroll INTO older history.
         pane.scroll_by(delta.into(), max_offset);
     }

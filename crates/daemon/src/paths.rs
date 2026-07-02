@@ -1,4 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::{env, fs, io};
+
+use nix::unistd;
 
 /// Filesystem layout for one running daemon.
 #[derive(Debug, Clone)]
@@ -21,8 +24,8 @@ impl RuntimePaths {
     /// Resolve the canonical paths for the running user.
     /// On Linux uses `$XDG_RUNTIME_DIR` if set, else `$TMPDIR/plexy-glass-$UID`.
     /// On macOS uses `$TMPDIR/plexy-glass-$UID` and `~/Library/Logs/plexy-glass`.
-    pub fn for_current_user() -> std::io::Result<Self> {
-        let uid = nix::unistd::getuid().as_raw();
+    pub fn for_current_user() -> io::Result<Self> {
+        let uid = unistd::getuid().as_raw();
         let runtime_dir = Self::resolve_runtime_dir(uid);
         let log_dir = Self::resolve_log_dir()?;
         Ok(Self::for_dirs(&runtime_dir, &log_dir))
@@ -47,7 +50,7 @@ impl RuntimePaths {
         // way to do it on macOS, where XDG_RUNTIME_DIR is ignored and the
         // canonical path is otherwise a fixed per-UID dir, so all invocations
         // share one daemon.
-        if let Some(root) = std::env::var_os("PLEXY_GLASS_DIR") {
+        if let Some(root) = env::var_os("PLEXY_GLASS_DIR") {
             return PathBuf::from(root).join("run");
         }
         // Per the spec: only honor XDG_RUNTIME_DIR on Linux. On macOS the
@@ -55,43 +58,43 @@ impl RuntimePaths {
         // (some users set one for cross-platform consistency) would otherwise
         // point at /run/user/$UID which doesn't exist on macOS.
         #[cfg(target_os = "linux")]
-        if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        if let Some(dir) = env::var_os("XDG_RUNTIME_DIR") {
             return PathBuf::from(dir).join("plexy-glass");
         }
-        let tmp = std::env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+        let tmp = env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
         tmp.join(format!("plexy-glass-{uid}"))
     }
 
-    fn resolve_log_dir() -> std::io::Result<PathBuf> {
+    fn resolve_log_dir() -> io::Result<PathBuf> {
         // Same instance-root override as `resolve_runtime_dir`: keep a test
         // daemon's logs out of the daily driver's log file.
-        if let Some(root) = std::env::var_os("PLEXY_GLASS_DIR") {
+        if let Some(root) = env::var_os("PLEXY_GLASS_DIR") {
             return Ok(PathBuf::from(root).join("logs"));
         }
         #[cfg(target_os = "macos")]
         {
-            if let Some(home) = std::env::var_os("HOME") {
+            if let Some(home) = env::var_os("HOME") {
                 return Ok(PathBuf::from(home).join("Library/Logs/plexy-glass"));
             }
         }
-        if let Some(state) = std::env::var_os("XDG_STATE_HOME") {
+        if let Some(state) = env::var_os("XDG_STATE_HOME") {
             return Ok(PathBuf::from(state).join("plexy-glass"));
         }
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = env::var_os("HOME") {
             return Ok(PathBuf::from(home).join(".local/state/plexy-glass"));
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
             "neither $HOME nor $XDG_STATE_HOME is set",
         ))
     }
 
     /// Ensure `runtime_dir` and `log_dir` exist with restrictive permissions.
-    pub fn create_dirs(&self) -> std::io::Result<()> {
+    pub fn create_dirs(&self) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         for dir in [&self.runtime_dir, &self.log_dir] {
-            std::fs::create_dir_all(dir)?;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+            fs::create_dir_all(dir)?;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
         }
         Ok(())
     }
@@ -99,6 +102,8 @@ impl RuntimePaths {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::PoisonError;
+
     use super::*;
 
     #[test]
@@ -118,10 +123,10 @@ mod tests {
         // the knob that lets a second daemon run beside the daily driver.
         let _lock = crate::STATE_ENV_LOCK
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let prev = std::env::var_os("PLEXY_GLASS_DIR");
+            .unwrap_or_else(PoisonError::into_inner);
+        let prev = env::var_os("PLEXY_GLASS_DIR");
         // SAFETY: STATE_ENV_LOCK held for the test body; restored below.
-        unsafe { std::env::set_var("PLEXY_GLASS_DIR", "/tmp/plexy-instance") };
+        unsafe { env::set_var("PLEXY_GLASS_DIR", "/tmp/plexy-instance") };
         // The override returns early before any fallible HOME lookup, so these
         // cannot fail regardless of the test environment.
         let paths = RuntimePaths::for_current_user().unwrap();
@@ -129,8 +134,8 @@ mod tests {
         // sibling env-sensitive tests.
         unsafe {
             match &prev {
-                Some(v) => std::env::set_var("PLEXY_GLASS_DIR", v),
-                None => std::env::remove_var("PLEXY_GLASS_DIR"),
+                Some(v) => env::set_var("PLEXY_GLASS_DIR", v),
+                None => env::remove_var("PLEXY_GLASS_DIR"),
             }
         }
         assert_eq!(paths.socket, PathBuf::from("/tmp/plexy-instance/run/daemon.sock"));
@@ -147,7 +152,7 @@ mod tests {
         let paths = RuntimePaths::for_dirs(&rt, &log);
         paths.create_dirs().unwrap();
         for dir in [&rt, &log] {
-            let mode = std::fs::metadata(dir).unwrap().permissions().mode();
+            let mode = fs::metadata(dir).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o700, "expected 0o700 on {}", dir.display());
         }
     }

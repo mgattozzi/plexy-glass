@@ -1,6 +1,7 @@
 use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
 use async_trait::async_trait;
 use smol_str::SmolStr;
+use std::fmt;
 use std::time::Duration;
 
 pub struct TimeWidget {
@@ -27,7 +28,7 @@ impl Widget for TimeWidget {
         // degrade to a safe default on error instead of panicking. `format_now`
         // closes over the chosen clock (UTC or local) so both the primary and
         // fallback formats use the same one.
-        let format_now = |fmt: &str, out: &mut String| -> std::fmt::Result {
+        let format_now = |fmt: &str, out: &mut String| -> fmt::Result {
             if self.utc {
                 write!(out, "{}", chrono::Utc::now().format(fmt))
             } else {

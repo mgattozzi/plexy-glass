@@ -3,6 +3,7 @@
 //! touches the panes themselves.
 
 use crate::{direction::SplitDir, layout::LayoutNode, pane_id::PaneId};
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutPreset {
@@ -57,8 +58,8 @@ impl LayoutPreset {
     }
 }
 
-impl std::fmt::Display for LayoutPreset {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for LayoutPreset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
     }
 }
@@ -146,6 +147,7 @@ fn even_node_chain(mut nodes: Vec<LayoutNode>, dir: SplitDir) -> LayoutNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use crate::{LayoutTree, PaneId, Rect};
 
     fn ids(n: u32) -> Vec<PaneId> {
@@ -284,7 +286,7 @@ mod tests {
         // row-heights in the tiled preset are within 1 cell of each other,
         // exercising the two-row case (n=4, k=2, k1=1, ratio should be 0.5).
         let row_heights = |rs: &[Rect]| -> Vec<u16> {
-            let mut map = std::collections::HashMap::new();
+            let mut map = HashMap::new();
             for r in rs {
                 map.insert(r.row, r.rows);
             }

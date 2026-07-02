@@ -1,6 +1,9 @@
 use crate::error::ClientError;
 use bytes::BytesMut;
+use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{ClientMsg, Codec, ColorScheme, ExitStatus, PtySize, ServerMsg};
+use std::io;
+use std::str;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
@@ -68,7 +71,7 @@ fn parse_color_scheme(b: &[u8]) -> Option<(ColorScheme, usize)> {
     if j == 0 || j >= rest.len() || rest[j] != b'n' {
         return None;
     }
-    let n: u32 = std::str::from_utf8(&rest[..j]).ok()?.parse().ok()?;
+    let n: u32 = str::from_utf8(&rest[..j]).ok()?.parse().ok()?;
     let scheme = match n {
         1 => ColorScheme::Dark,
         2 => ColorScheme::Light,
@@ -124,7 +127,7 @@ where
                     Box::pin(Codec::read_frame(&mut daemon_read))
                 };
                 let msg: ServerMsg = postcard::from_bytes(&frame)
-                    .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+                    .map_err(|e| CodecError::Decode(e.to_string()))?;
                 match msg {
                     ServerMsg::Output(b) => {
                         stdout.write_all(&b).await.map_err(ClientError::Io)?;
@@ -139,7 +142,10 @@ where
                     }
                     // `Attached` was already handled by the caller; `ServerMsg`
                     // is `#[non_exhaustive]`, so ignore it and any future variants.
-                    #[allow(unreachable_patterns)]
+                    #[allow(
+                        unreachable_patterns,
+                        reason = "ServerMsg is #[non_exhaustive]; the wildcard handles the caller-consumed Attached and any variants added later"
+                    )]
                     _ => {}
                 }
             }
@@ -181,7 +187,7 @@ where
     W: AsyncWrite + Unpin,
 {
     let bytes = postcard::to_allocvec(msg)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Encode(e.to_string()))?;
+        .map_err(|e| CodecError::Encode(e.to_string()))?;
     Codec::write_frame(writer, &bytes).await?;
     Ok(())
 }
@@ -211,13 +217,13 @@ where
     .await?;
     let frame = Codec::read_frame(reader)
         .await?
-        .ok_or_else(|| ClientError::Io(std::io::Error::other("daemon closed before Attached")))?;
+        .ok_or_else(|| ClientError::Io(io::Error::other("daemon closed before Attached")))?;
     let msg: ServerMsg = postcard::from_bytes(&frame)
-        .map_err(|e| plexy_glass_protocol::errors::CodecError::Decode(e.to_string()))?;
+        .map_err(|e| CodecError::Decode(e.to_string()))?;
     match msg {
         ServerMsg::Attached { .. } => Ok(()),
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(std::io::Error::other(format!(
+        other => Err(ClientError::Io(io::Error::other(format!(
             "expected Attached, got {other:?}"
         )))),
     }
@@ -228,7 +234,10 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use plexy_glass_protocol::{ExitStatus, ServerMsg};
+    use std::time::Duration;
     use tokio::io::duplex;
+    use tokio::task;
+    use tokio::time;
 
     #[tokio::test]
     async fn pump_writes_output_to_stdout_and_exits_on_exited() {
@@ -256,8 +265,8 @@ mod tests {
         assert!(matches!(status, ExitStatus::Code(0)), "got: {status:?}");
 
         let mut out = Vec::new();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
+        let _ = time::timeout(
+            Duration::from_millis(200),
             stdout_r.read_to_end(&mut out),
         )
         .await;
@@ -300,7 +309,7 @@ mod tests {
                 if stdin_w.write_all(b"k").await.is_err() {
                     break;
                 }
-                tokio::task::yield_now().await;
+                task::yield_now().await;
             }
         });
 
@@ -320,8 +329,8 @@ mod tests {
         assert!(matches!(status, ExitStatus::Code(0)), "got: {status:?}");
 
         let mut out = Vec::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+        time::timeout(
+            Duration::from_secs(5),
             stdout_r.read_to_end(&mut out),
         )
         .await

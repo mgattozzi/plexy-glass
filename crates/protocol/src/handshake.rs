@@ -2,6 +2,7 @@ use crate::{
     ClientHello, Codec, CodecError, GraphicsCaps, NegotiatedKbd, PROTOCOL_VERSION, ProtocolError,
     ServerHello,
 };
+use std::env;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Errors that can occur during the version handshake.
@@ -59,7 +60,7 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
+    let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
     let hello = ClientHello {
         version: PROTOCOL_VERSION,
         term,
@@ -130,13 +131,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io;
     use tokio::io::duplex;
 
     #[tokio::test]
     async fn handshake_succeeds_when_versions_match() {
         let (client_side, server_side) = duplex(1024);
-        let (mut cr, mut cw) = tokio::io::split(client_side);
-        let (mut sr, mut sw) = tokio::io::split(server_side);
+        let (mut cr, mut cw) = io::split(client_side);
+        let (mut sr, mut sw) = io::split(server_side);
 
         let server = tokio::spawn(async move {
             server_handshake(&mut sr, &mut sw, 42).await
@@ -156,7 +158,7 @@ mod tests {
         // Hand-craft a client hello with a wrong version and run only the
         // server side; assert it returns VersionMismatch.
         let (mut a, server_side) = duplex(1024);
-        let (mut sr, mut sw) = tokio::io::split(server_side);
+        let (mut sr, mut sw) = io::split(server_side);
 
         // Write a bogus (NEWER) ClientHello: we cannot decode a newer wire
         // safely, so the server must still reject it.
@@ -185,7 +187,7 @@ mod tests {
         // accept a ServerHello whose version is >= ours (the previously-dead
         // downgrade path). Drives only the client side.
         let (mut a, client_side) = duplex(1024);
-        let (mut cr, mut cw) = tokio::io::split(client_side);
+        let (mut cr, mut cw) = io::split(client_side);
         let newer = ServerHello { version: PROTOCOL_VERSION + 1, daemon_pid: 7 };
         Codec::write_frame(&mut a, &postcard::to_allocvec(&newer).unwrap()).await.unwrap();
         let hello = ClientHello {
@@ -202,7 +204,7 @@ mod tests {
     async fn client_rejects_older_server() {
         // An OLDER server cannot serve our newer protocol → VersionMismatch.
         let (mut a, client_side) = duplex(1024);
-        let (mut cr, mut cw) = tokio::io::split(client_side);
+        let (mut cr, mut cw) = io::split(client_side);
         let older = ServerHello { version: PROTOCOL_VERSION - 1, daemon_pid: 7 };
         Codec::write_frame(&mut a, &postcard::to_allocvec(&older).unwrap()).await.unwrap();
         let hello = ClientHello {
@@ -227,7 +229,7 @@ mod tests {
         // hello. The server must NOT error: it downgrades the recorded caps to
         // Legacy and proceeds.
         let (mut a, server_side) = duplex(1024);
-        let (mut sr, mut sw) = tokio::io::split(server_side);
+        let (mut sr, mut sw) = io::split(server_side);
 
         let bogus = ClientHello {
             version: PROTOCOL_VERSION - 1,

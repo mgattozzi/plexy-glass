@@ -2,18 +2,26 @@
 //! associated metadata, and provides the methods the parser dispatches into.
 
 use crate::{
+    attrs::{Attrs, UnderlineStyle},
     cell::Cell,
-    cursor::Cursor,
-    graphics::{Image, ImageFormat, ImageProtocol, ImageStore, Placement, VirtualPlacement},
-    grid::{Grid, RowMark, WrapOrigin},
+    color::Color,
+    cursor::{Cursor, CursorShape},
+    graphics::{self, Image, ImageFormat, ImageProtocol, ImageStore, Placement, VirtualPlacement},
+    grid::{Grid, Row, RowMark, WrapOrigin},
     hyperlinks::HyperlinkTable,
     keyboard::KeyboardState,
     modes::Modes,
     parser::ScreenOps,
     scrollback::Scrollback,
     tabs::TabStops,
+    width::display_width,
 };
+use base64::engine::general_purpose::STANDARD;
+use std::cmp::Ordering;
+use std::mem;
+use std::str;
 use std::sync::Arc;
+use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
 /// In-progress chunked image transmission (`m=1 … m=0`). Accumulated across
@@ -165,7 +173,7 @@ pub struct Screen {
     /// next block. Transient (never persisted/serialized).
     // invariant: the one deliberate clock read in the otherwise-pure emulator,
     // scoped to C->D timing; tests assert presence/ordering, never exact millis.
-    pub pending_command_start: Option<std::time::Instant>,
+    pub pending_command_start: Option<Instant>,
     /// Text-area size in pixels, relayed from the attached client's terminal
     /// (`0` = unknown). Used to derive the cell pixel size for graphics scaling
     /// and to answer `CSI 14/16/18t` size reports.
@@ -261,7 +269,7 @@ impl Screen {
         if self.alt.is_some() || payload.is_empty() {
             return;
         }
-        let (w, h) = crate::graphics::sixel_dimensions(payload).unwrap_or((0, 0));
+        let (w, h) = graphics::sixel_dimensions(payload).unwrap_or((0, 0));
         // Reconstruct the inner DCS payload for re-emit: <params>q<data>.
         let mut inner = Vec::with_capacity(payload.len() + 8);
         for (i, g) in params.iter().enumerate() {
@@ -300,7 +308,7 @@ impl Screen {
         if self.alt.is_some() {
             return;
         }
-        let Some(cmd) = crate::graphics::parse_command(framed) else {
+        let Some(cmd) = graphics::parse_command(framed) else {
             return;
         };
         match cmd.action {
@@ -334,7 +342,7 @@ impl Screen {
         }
     }
 
-    fn accumulate_transmission(&mut self, cmd: crate::graphics::GraphicsCommand) {
+    fn accumulate_transmission(&mut self, cmd: graphics::GraphicsCommand) {
         let is_continuation = self.pending_tx.is_some()
             && cmd.format.is_none()
             && cmd.id.is_none()
@@ -475,7 +483,7 @@ impl Screen {
     /// Push a row into scrollback, keeping placement anchors valid: each evicted
     /// front row shifts every absolute `anchor_line` down by one, and placements
     /// whose anchor falls off the front (their rows left history) are dropped.
-    fn push_scrollback(&mut self, row: crate::grid::Row) {
+    fn push_scrollback(&mut self, row: Row) {
         let evicted = self.scrollback.push(row) as u32;
         if evicted == 0 || self.placements.is_empty() {
             return;
@@ -549,26 +557,26 @@ impl Screen {
     /// Drain queued replies. The daemon calls this after `Emulator::advance`
     /// and pipes the bytes back into the child's stdin.
     pub fn take_replies(&mut self) -> Vec<Vec<u8>> {
-        std::mem::take(&mut self.replies)
+        mem::take(&mut self.replies)
     }
 
     /// Drain queued clipboard writes. The daemon calls this after
     /// `Emulator::advance` and flushes the payloads via `pbcopy` / `xclip`.
     pub fn take_clipboard_writes(&mut self) -> Vec<Vec<u8>> {
-        std::mem::take(&mut self.clipboard_writes)
+        mem::take(&mut self.clipboard_writes)
     }
 
     /// Drain queued color queries. The daemon calls this after
     /// `Emulator::advance` and writes back the palette color replies to the
     /// child's stdin.
     pub fn take_color_queries(&mut self) -> Vec<(usize, ColorQuery)> {
-        std::mem::take(&mut self.color_queries)
+        mem::take(&mut self.color_queries)
     }
 
     /// Drain the standalone-BEL flag. The daemon calls this after
     /// `Emulator::advance` to detect a bell for per-window monitoring.
     pub fn take_bell(&mut self) -> bool {
-        std::mem::take(&mut self.bell_pending)
+        mem::take(&mut self.bell_pending)
     }
 
     pub const fn rows(&self) -> u16 {
@@ -672,7 +680,7 @@ impl Screen {
         if self
             .active
             .get_cell(row, end)
-            .is_some_and(|c| crate::width::display_width(c.grapheme.as_str()) == 2)
+            .is_some_and(|c| display_width(c.grapheme.as_str()) == 2)
         {
             self.active.put_cell(row, end + 1, Cell::default());
         }
@@ -725,7 +733,7 @@ impl Screen {
     /// relative to the scroll-region top and confined to `[top, bottom]`;
     /// otherwise it is an absolute grid row clamped to the grid.
     fn absolute_row(&self, row_arg: u16) -> u16 {
-        if self.modes.contains(crate::modes::Modes::ORIGIN) {
+        if self.modes.contains(Modes::ORIGIN) {
             let (top, bottom) = self.scroll_region;
             top.saturating_add(row_arg).min(bottom)
         } else {
@@ -736,14 +744,14 @@ impl Screen {
     pub fn advance_to_next_row(&mut self, soft_wrap: bool) {
         let (top, bottom) = self.scroll_region;
         match self.cursor.row.cmp(&bottom) {
-            std::cmp::Ordering::Equal => {
+            Ordering::Equal => {
                 // At the bottom margin: scroll the region up by one. Only the
                 // physical top line of the screen (region top at row 0) feeds
                 // scrollback. A partial scroll region (DECSTBM top>0) scrolls an
                 // interior region, and rows leaving the top of THAT region are
                 // discarded (matching xterm/tmux/wezterm/VTE), not pushed into
                 // scrollback, which would corrupt history/block marks.
-                let mut popped: Vec<crate::grid::Row> = Vec::new();
+                let mut popped: Vec<Row> = Vec::new();
                 let target = if self.alt.is_none() && top == 0 {
                     Some(&mut popped)
                 } else {
@@ -756,13 +764,13 @@ impl Screen {
                 // Stay at the bottom; new content goes there.
                 self.cursor.row = bottom;
             }
-            std::cmp::Ordering::Greater => {
+            Ordering::Greater => {
                 // Below the scroll region: a line feed moves the cursor down toward
                 // the grid bottom WITHOUT scrolling the region (per xterm, the cursor
                 // is outside the region, so the region's content is untouched).
                 self.cursor.row = (self.cursor.row + 1).min(self.rows().saturating_sub(1));
             }
-            std::cmp::Ordering::Less => {
+            Ordering::Less => {
                 self.cursor.row += 1;
             }
         }
@@ -1012,7 +1020,7 @@ impl Screen {
                 // else the absolute top-left.
                 let max_rows = self.rows();
                 let max_cols = self.cols();
-                let home_row = if self.modes.contains(crate::modes::Modes::ORIGIN) {
+                let home_row = if self.modes.contains(Modes::ORIGIN) {
                     self.scroll_region.0
                 } else {
                     0
@@ -1149,9 +1157,9 @@ impl Screen {
                 // rendered cursor is a separate follow-up (see report).
                 Some(b' ') => {
                     let shape = match first.unwrap_or(0) {
-                        0..=2 => crate::cursor::CursorShape::Block,
-                        3..=4 => crate::cursor::CursorShape::Underline,
-                        5..=6 => crate::cursor::CursorShape::Bar,
+                        0..=2 => CursorShape::Block,
+                        3..=4 => CursorShape::Underline,
+                        5..=6 => CursorShape::Bar,
                         _ => self.cursor.shape,
                     };
                     self.cursor.shape = shape;
@@ -1254,7 +1262,7 @@ impl Screen {
     /// `?` query → reply `\e[?<flags>u`; `=` set-in-place (mode 1/2/3);
     /// `>` push (default 0); `<` pop (default 1, empty-stack resets to 0).
     fn handle_kitty_kbd(&mut self, params: &vte::Params, intermediates: &[u8]) {
-        let alt = self.modes.contains(crate::modes::Modes::ALT_SCREEN);
+        let alt = self.modes.contains(Modes::ALT_SCREEN);
         fn first_param(p: &vte::Params) -> Option<u16> {
             p.iter().next().and_then(|g| g.first().copied())
         }
@@ -1294,11 +1302,11 @@ impl Screen {
     /// rendition. Hard reset (RIS, `\ec`) is handled in `handle_esc`.
     fn handle_decstr(&mut self) {
         self.kbd.reset();
-        self.cursor.attrs = crate::attrs::Attrs::empty();
-        self.cursor.fg = crate::color::Color::Default;
-        self.cursor.bg = crate::color::Color::Default;
-        self.cursor.underline_color = crate::color::Color::Default;
-        self.cursor.underline_style = crate::attrs::UnderlineStyle::None;
+        self.cursor.attrs = Attrs::empty();
+        self.cursor.fg = Color::Default;
+        self.cursor.bg = Color::Default;
+        self.cursor.underline_color = Color::Default;
+        self.cursor.underline_style = UnderlineStyle::None;
         self.cursor.pending_wrap = false;
         self.saved_cursor = None;
         self.charset_g0 = Charset::Ascii;
@@ -1325,7 +1333,7 @@ impl Screen {
     /// failures), always terminated with ST (`\e\\`).
     fn xtgettcap(&mut self, payload: &[u8]) {
         use crate::terminfo::{Capability, hex_decode, hex_encode, lookup};
-        let Ok(payload) = std::str::from_utf8(payload) else {
+        let Ok(payload) = str::from_utf8(payload) else {
             tracing::trace!("XTGETTCAP payload not UTF-8; ignoring");
             return;
         };
@@ -1339,7 +1347,7 @@ impl Screen {
                 tracing::trace!(hexname, "XTGETTCAP: bad hex name; skipping");
                 continue;
             };
-            let Ok(name) = std::str::from_utf8(&name_bytes) else {
+            let Ok(name) = str::from_utf8(&name_bytes) else {
                 continue;
             };
             let name_hex = hex_encode(&name_bytes);
@@ -1432,11 +1440,11 @@ impl Screen {
             return;
         }
         let (rows, cols) = (self.rows(), self.cols());
-        let alt = std::mem::replace(&mut self.active, Grid::new(rows, cols));
+        let alt = mem::replace(&mut self.active, Grid::new(rows, cols));
         self.alt = Some(alt);
         self.saved_cursor = Some(self.cursor.clone());
         self.cursor = Cursor::default();
-        self.modes.insert(crate::modes::Modes::ALT_SCREEN);
+        self.modes.insert(Modes::ALT_SCREEN);
     }
 
     fn leave_alt_screen(&mut self) {
@@ -1445,7 +1453,7 @@ impl Screen {
             if let Some(c) = self.saved_cursor.take() {
                 self.cursor = c;
             }
-            self.modes.remove(crate::modes::Modes::ALT_SCREEN);
+            self.modes.remove(Modes::ALT_SCREEN);
         }
     }
 
@@ -1474,12 +1482,12 @@ impl Screen {
                 // style (unknown codes clamp to Single via from_sgr_subparam).
                 [4, style, ..] => {
                     if *style == 0 {
-                        self.cursor.attrs.remove(crate::attrs::Attrs::UNDERLINE);
-                        self.cursor.underline_style = crate::attrs::UnderlineStyle::None;
+                        self.cursor.attrs.remove(Attrs::UNDERLINE);
+                        self.cursor.underline_style = UnderlineStyle::None;
                     } else {
-                        self.cursor.attrs.insert(crate::attrs::Attrs::UNDERLINE);
+                        self.cursor.attrs.insert(Attrs::UNDERLINE);
                         self.cursor.underline_style =
-                            crate::attrs::UnderlineStyle::from_sgr_subparam(*style);
+                            UnderlineStyle::from_sgr_subparam(*style);
                     }
                 }
                 // Colon-form RGB extended color (38:2:.. / 48:2:.. / 58:2:..):
@@ -1511,37 +1519,37 @@ impl Screen {
             let n = codes[i];
             match n {
                 0 => {
-                    self.cursor.attrs = crate::attrs::Attrs::empty();
-                    self.cursor.fg = crate::color::Color::Default;
-                    self.cursor.bg = crate::color::Color::Default;
-                    self.cursor.underline_color = crate::color::Color::Default;
-                    self.cursor.underline_style = crate::attrs::UnderlineStyle::None;
+                    self.cursor.attrs = Attrs::empty();
+                    self.cursor.fg = Color::Default;
+                    self.cursor.bg = Color::Default;
+                    self.cursor.underline_color = Color::Default;
+                    self.cursor.underline_style = UnderlineStyle::None;
                 }
-                1 => self.cursor.attrs.insert(crate::attrs::Attrs::BOLD),
-                2 => self.cursor.attrs.insert(crate::attrs::Attrs::DIM),
-                3 => self.cursor.attrs.insert(crate::attrs::Attrs::ITALIC),
+                1 => self.cursor.attrs.insert(Attrs::BOLD),
+                2 => self.cursor.attrs.insert(Attrs::DIM),
+                3 => self.cursor.attrs.insert(Attrs::ITALIC),
                 4 => {
-                    self.cursor.attrs.insert(crate::attrs::Attrs::UNDERLINE);
-                    self.cursor.underline_style = crate::attrs::UnderlineStyle::Single;
+                    self.cursor.attrs.insert(Attrs::UNDERLINE);
+                    self.cursor.underline_style = UnderlineStyle::Single;
                 }
-                5 => self.cursor.attrs.insert(crate::attrs::Attrs::BLINK),
-                7 => self.cursor.attrs.insert(crate::attrs::Attrs::REVERSE),
-                8 => self.cursor.attrs.insert(crate::attrs::Attrs::HIDDEN),
-                9 => self.cursor.attrs.insert(crate::attrs::Attrs::STRIKETHROUGH),
+                5 => self.cursor.attrs.insert(Attrs::BLINK),
+                7 => self.cursor.attrs.insert(Attrs::REVERSE),
+                8 => self.cursor.attrs.insert(Attrs::HIDDEN),
+                9 => self.cursor.attrs.insert(Attrs::STRIKETHROUGH),
                 22 => {
-                    self.cursor.attrs.remove(crate::attrs::Attrs::BOLD);
-                    self.cursor.attrs.remove(crate::attrs::Attrs::DIM);
+                    self.cursor.attrs.remove(Attrs::BOLD);
+                    self.cursor.attrs.remove(Attrs::DIM);
                 }
-                23 => self.cursor.attrs.remove(crate::attrs::Attrs::ITALIC),
+                23 => self.cursor.attrs.remove(Attrs::ITALIC),
                 24 => {
-                    self.cursor.attrs.remove(crate::attrs::Attrs::UNDERLINE);
-                    self.cursor.underline_style = crate::attrs::UnderlineStyle::None;
+                    self.cursor.attrs.remove(Attrs::UNDERLINE);
+                    self.cursor.underline_style = UnderlineStyle::None;
                 }
-                25 => self.cursor.attrs.remove(crate::attrs::Attrs::BLINK),
-                27 => self.cursor.attrs.remove(crate::attrs::Attrs::REVERSE),
-                28 => self.cursor.attrs.remove(crate::attrs::Attrs::HIDDEN),
-                29 => self.cursor.attrs.remove(crate::attrs::Attrs::STRIKETHROUGH),
-                30..=37 => self.cursor.fg = crate::color::Color::from_ansi_basic((n - 30) as u8),
+                25 => self.cursor.attrs.remove(Attrs::BLINK),
+                27 => self.cursor.attrs.remove(Attrs::REVERSE),
+                28 => self.cursor.attrs.remove(Attrs::HIDDEN),
+                29 => self.cursor.attrs.remove(Attrs::STRIKETHROUGH),
+                30..=37 => self.cursor.fg = Color::from_ansi_basic((n - 30) as u8),
                 38 => {
                     let (color, consumed) = parse_extended_color(&codes[i + 1..]);
                     if let Some(c) = color {
@@ -1549,8 +1557,8 @@ impl Screen {
                     }
                     i += consumed;
                 }
-                39 => self.cursor.fg = crate::color::Color::Default,
-                40..=47 => self.cursor.bg = crate::color::Color::from_ansi_basic((n - 40) as u8),
+                39 => self.cursor.fg = Color::Default,
+                40..=47 => self.cursor.bg = Color::from_ansi_basic((n - 40) as u8),
                 48 => {
                     let (color, consumed) = parse_extended_color(&codes[i + 1..]);
                     if let Some(c) = color {
@@ -1558,7 +1566,7 @@ impl Screen {
                     }
                     i += consumed;
                 }
-                49 => self.cursor.bg = crate::color::Color::Default,
+                49 => self.cursor.bg = Color::Default,
                 58 => {
                     let (color, consumed) = parse_extended_color(&codes[i + 1..]);
                     if let Some(c) = color {
@@ -1566,10 +1574,10 @@ impl Screen {
                     }
                     i += consumed;
                 }
-                59 => self.cursor.underline_color = crate::color::Color::Default,
-                90..=97 => self.cursor.fg = crate::color::Color::from_ansi_bright((n - 90) as u8),
+                59 => self.cursor.underline_color = Color::Default,
+                90..=97 => self.cursor.fg = Color::from_ansi_bright((n - 90) as u8),
                 100..=107 => {
-                    self.cursor.bg = crate::color::Color::from_ansi_bright((n - 100) as u8);
+                    self.cursor.bg = Color::from_ansi_bright((n - 100) as u8);
                 }
                 _ => {
                     tracing::trace!(code = n, "unhandled SGR");
@@ -1630,7 +1638,7 @@ impl Screen {
                 // for XTGETTCAP `TN`); a child's reset must not change the $TERM
                 // it was launched with for the rest of the pane's life.
                 let (rows, cols) = (self.rows(), self.cols());
-                let term = std::mem::take(&mut self.term);
+                let term = mem::take(&mut self.term);
                 let scheme_dark = self.color_scheme_dark;
                 *self = Self::new(rows, cols);
                 self.term = term;
@@ -1667,7 +1675,7 @@ impl Screen {
         let Some(&cmd) = params.first() else {
             return;
         };
-        let cmd_str = std::str::from_utf8(cmd).unwrap_or("");
+        let cmd_str = str::from_utf8(cmd).unwrap_or("");
         match cmd_str {
             "0" | "2" => {
                 if let Some(arg) = params.get(1) {
@@ -1724,14 +1732,14 @@ impl Screen {
             joined.extend_from_slice(p);
         }
         let rejoined = String::from_utf8_lossy(&joined);
-        let Some((args, b64)) = crate::graphics::parse_iterm_file(&rejoined) else {
+        let Some((args, b64)) = graphics::parse_iterm_file(&rejoined) else {
             return;
         };
         // Only render images marked for inline display.
         if !args.split(';').any(|kv| kv == "inline=1") {
             return;
         }
-        let (w, h) = crate::graphics::iterm_dimensions(args, b64).unwrap_or((0, 0));
+        let (w, h) = graphics::iterm_dimensions(args, b64).unwrap_or((0, 0));
         self.image_id_seq = self.image_id_seq.wrapping_add(1);
         let id = self.image_id_seq;
         self.image_gen = self.image_gen.wrapping_add(1);
@@ -1790,13 +1798,13 @@ impl Screen {
                 self.mark_cursor_row(|m| m.set(RowMark::PROMPT_START));
             }
             b'C' => {
-                self.pending_command_start = Some(std::time::Instant::now());
+                self.pending_command_start = Some(Instant::now());
                 self.mark_cursor_row(|m| m.set(RowMark::OUTPUT_START));
             }
             b'D' => {
                 let exit_code = params
                     .get(2)
-                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .and_then(|p| str::from_utf8(p).ok())
                     .and_then(|s| s.parse::<i32>().ok());
                 let duration_ms = self
                     .pending_command_start
@@ -1845,7 +1853,7 @@ impl Screen {
         if !matches!(selection, b'c' | b's') {
             return;
         }
-        let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(payload) else {
+        let Ok(decoded) = STANDARD.decode(payload) else {
             tracing::trace!("OSC 52 base64 decode failed; ignoring");
             return;
         };
@@ -1867,14 +1875,14 @@ pub(crate) fn pack_da2_version() -> u32 {
     major * 10000 + minor * 100 + patch
 }
 
-fn parse_extended_color(rest: &[u16]) -> (Option<crate::color::Color>, usize) {
+fn parse_extended_color(rest: &[u16]) -> (Option<Color>, usize) {
     if rest.is_empty() {
         return (None, 0);
     }
     match rest[0] {
-        5 if rest.len() >= 2 => (Some(crate::color::Color::Indexed(rest[1] as u8)), 2),
+        5 if rest.len() >= 2 => (Some(Color::Indexed(rest[1] as u8)), 2),
         2 if rest.len() >= 4 => (
-            Some(crate::color::Color::Rgb(
+            Some(Color::Rgb(
                 rest[1] as u8,
                 rest[2] as u8,
                 rest[3] as u8,
@@ -1922,19 +1930,22 @@ impl ScreenOps for Screen {
 fn decode_png_dims(b64: &[u8]) -> Option<(u32, u32)> {
     use base64::Engine as _;
     let take = (b64.len() / 4 * 4).min(64);
-    let decoded = base64::engine::general_purpose::STANDARD
+    let decoded = STANDARD
         .decode(&b64[..take])
         .ok()?;
-    crate::graphics::png_dimensions(&decoded)
+    graphics::png_dimensions(&decoded)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use base64::Engine as _;
+    use crate::parser::Parser;
+    use crate::terminfo;
+    use std::iter;
 
     fn drive(input: &[u8]) -> Screen {
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(4, 8);
         p.advance(&mut s, input);
         p.flush(&mut s);
@@ -1961,7 +1972,7 @@ mod tests {
         png.extend_from_slice(b"IHDR");
         png.extend_from_slice(&30u32.to_be_bytes());
         png.extend_from_slice(&40u32.to_be_bytes());
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let b64 = STANDARD.encode(&png);
         let (a, b) = b64.split_at(28);
         let chunk1 = format!("\x1b_Ga=T,i=7,f=100,m=1;{a}\x1b\\");
         let chunk2 = format!("\x1b_Gm=0;{b}\x1b\\");
@@ -2004,7 +2015,7 @@ mod tests {
     fn placement_dropped_when_its_scrollback_row_evicts() {
         // Regression: anchor_line must follow scrollback eviction, not freeze.
         let mut e = crate::Emulator::new(3, 80);
-        e.screen_mut().scrollback = crate::scrollback::Scrollback::with_cap(2);
+        e.screen_mut().scrollback = Scrollback::with_cap(2);
         e.advance(b"\x1b_Ga=T,i=1,f=24,s=10,v=20;QQ\x1b\\"); // 1×1-cell image, anchor 0
         assert_eq!(e.screen().placements.len(), 1);
         // Scroll well past cap+grid so the anchored row leaves history entirely.
@@ -2074,7 +2085,7 @@ mod tests {
         assert!(folded_after_reflow, "FOLDED rides reflow on the prompt row");
 
         // Tiny scrollback cap + scroll past → the folded prompt row evicts.
-        e.screen_mut().scrollback = crate::scrollback::Scrollback::with_cap(1);
+        e.screen_mut().scrollback = Scrollback::with_cap(1);
         for _ in 0..20 {
             e.advance(b"\r\n");
         }
@@ -2378,7 +2389,7 @@ mod tests {
 
     #[test]
     fn lf_at_bottom_scrolls_into_scrollback() {
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(2, 4);
         p.advance(&mut s, b"AAAA\nBBBB\nCCCC");
         // "AAAA" should have scrolled into scrollback.
@@ -2386,7 +2397,7 @@ mod tests {
     }
 
     fn parse(input: &[u8]) -> Screen {
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(8, 24);
         p.advance(&mut s, input);
         p.flush(&mut s);
@@ -2443,7 +2454,7 @@ mod tests {
         // but Claude Code emits no bare `\e[4m` at all and no `\e[24m`/`\e[0m`
         // underline reset, so any underlined cell here is the bug's signature.
         const STREAM: &[u8] = include_bytes!("../testdata/claude-code-startup.raw");
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         // Sized wider than the capture's furthest column move (`\e[152G`) so the
         // splash never wraps; over-sizing only leaves extra blank cells.
         let mut s = Screen::new(50, 200);
@@ -2459,8 +2470,8 @@ mod tests {
                     continue;
                 }
                 non_blank += 1;
-                if cell.attrs.contains(crate::attrs::Attrs::UNDERLINE)
-                    || cell.underline_style != crate::attrs::UnderlineStyle::None
+                if cell.attrs.contains(Attrs::UNDERLINE)
+                    || cell.underline_style != UnderlineStyle::None
                 {
                     underlined += 1;
                 }
@@ -2483,19 +2494,19 @@ mod tests {
     #[test]
     fn set_term_then_xtgettcap_tn_reports_it() {
         // TN (544e) reports the term we were spawned with.
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(4, 8);
         s.set_term("xterm-ghostty".into());
         p.advance(&mut s, b"\x1bP+q544e\x1b\\X");
         p.flush(&mut s);
-        let hex = crate::terminfo::hex_encode(b"xterm-ghostty");
+        let hex = terminfo::hex_encode(b"xterm-ghostty");
         assert_eq!(s.replies, vec![format!("\x1bP1+r544e={hex}\x1b\\").into_bytes()]);
     }
 
     #[test]
     fn ris_preserves_term() {
         // RIS (\ec) must keep the spawn-time $TERM (pane spawn identity).
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(4, 8);
         s.set_term("xterm-ghostty".into());
         p.advance(&mut s, b"\x1bcX");
@@ -2524,7 +2535,7 @@ mod tests {
         let val = "\\E[58:2:%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m";
         let expected = format!(
             "\x1bP1+r536574756c63={}\x1b\\",
-            crate::terminfo::hex_encode(val.as_bytes())
+            terminfo::hex_encode(val.as_bytes())
         )
         .into_bytes();
         assert_eq!(s.replies, vec![expected]);
@@ -2545,7 +2556,7 @@ mod tests {
                 v.extend_from_slice(b"\x1b\\");
                 v
             })
-            .chain(std::iter::once({
+            .chain(iter::once({
                 let mut v = b"\x1bP1+r5375".to_vec();
                 v.extend_from_slice(b"\x1b\\");
                 v
@@ -2762,27 +2773,27 @@ mod tests {
     #[test]
     fn decset_alt_screen_save_and_restore() {
         let s = parse(b"main\x1b[?1049h");
-        assert!(s.modes.contains(crate::modes::Modes::ALT_SCREEN));
+        assert!(s.modes.contains(Modes::ALT_SCREEN));
         assert!(s.alt.is_some());
         assert!(s.active.get_cell(0, 0).unwrap().is_blank());
 
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s2 = Screen::new(8, 24);
         p.advance(&mut s2, b"main\x1b[?1049halt\x1b[?1049l");
         p.flush(&mut s2);
-        assert!(!s2.modes.contains(crate::modes::Modes::ALT_SCREEN));
+        assert!(!s2.modes.contains(Modes::ALT_SCREEN));
         assert!(s2.alt.is_none());
         assert_eq!(s2.active.get_cell(0, 0).unwrap().grapheme.as_str(), "m");
     }
 
     #[test]
     fn decset_25_toggles_cursor_visibility() {
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(8, 24);
         p.advance(&mut s, b"\x1b[?25l");
-        assert!(!s.modes.contains(crate::modes::Modes::CURSOR_VISIBLE));
+        assert!(!s.modes.contains(Modes::CURSOR_VISIBLE));
         p.advance(&mut s, b"\x1b[?25h");
-        assert!(s.modes.contains(crate::modes::Modes::CURSOR_VISIBLE));
+        assert!(s.modes.contains(Modes::CURSOR_VISIBLE));
     }
 
     #[test]
@@ -2794,7 +2805,7 @@ mod tests {
 
     #[test]
     fn su_scrolls_within_region() {
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(4, 4);
         p.advance(&mut s, b"AAAA\nBBBB\nCCCC\nDDDD");
         p.flush(&mut s);
@@ -2807,7 +2818,7 @@ mod tests {
         // A DECSTBM region with a non-zero top margin scrolls an INTERIOR
         // region; rows leaving the top of that region must be discarded, not
         // pushed into scrollback (which would corrupt command history / marks).
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(4, 4);
         p.advance(&mut s, b"\x1b[2;4r"); // scroll_region = (1, 3), top margin > 0
         p.advance(&mut s, b"\x1b[2;1H"); // cursor to the region top
@@ -2836,7 +2847,7 @@ mod tests {
     fn irm_insert_mode_is_not_honored() {
         // IRM (ANSI mode 4) is deliberately unsupported: enabling it must not
         // shift cells, since writing overwrites at the cursor.
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(2, 8);
         p.advance(&mut s, b"abc");
         p.advance(&mut s, b"\x1b[H"); // home (0,0)
@@ -2864,7 +2875,7 @@ mod tests {
 
     #[test]
     fn ri_at_top_of_region_scrolls_down() {
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(4, 4);
         p.advance(&mut s, b"AAAA\nBBBB\nCCCC\nDDDD\x1b[H");
         p.flush(&mut s);
@@ -2874,7 +2885,7 @@ mod tests {
 
     #[test]
     fn hts_sets_tab_at_cursor() {
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(8, 24);
         p.advance(&mut s, b"\x1b[1;4H\x1bH\x1b[1;1H\t");
         assert_eq!(s.cursor.col, 3);
@@ -2894,7 +2905,7 @@ mod tests {
 
     #[test]
     fn osc_8_assigns_then_clears_hyperlink_id() {
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(4, 8);
         p.advance(
             &mut s,
@@ -3051,7 +3062,7 @@ mod tests {
     fn prompt_end_mark_rides_into_scrollback_with_row() {
         // B lands on row 1, then a linefeed scrolls everything up (2-row screen).
         // The row carrying PROMPT_END travels into scrollback.
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(2, 8);
         // "b" + B puts cursor on row 1 at col 1; then one linefeed scrolls the grid.
         p.advance(&mut s, b"a\r\nb\x1b]133;B\x07\r\nc");
@@ -3064,7 +3075,7 @@ mod tests {
     #[test]
     fn prompt_end_mark_rides_into_scrollback_when_row_scrolls_away() {
         // B lands on row 0; two scrolls push that row into scrollback.
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(2, 8);
         p.advance(&mut s, b"a\x1b]133;B\x07\r\nb\r\nc\r\nd");
         p.flush(&mut s);
@@ -3095,7 +3106,7 @@ mod tests {
     fn row_marks_ride_into_scrollback() {
         // A marked row that scrolls off the top keeps its flags and exit code
         // in scrollback, the mark lives ON the Row so no transfer code is needed.
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(2, 8);
         p.advance(&mut s, b"\x1b]133;A\x07\x1b]133;D;7\x07a\r\nb\r\nc\r\nd");
         p.flush(&mut s);
@@ -3110,9 +3121,9 @@ mod tests {
     fn scrollback_eviction_drops_marks_with_their_rows() {
         // At the scrollback cap, evicted rows take their marks with them, so
         // nothing retains a reference to an evicted block.
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(2, 8);
-        s.scrollback = crate::scrollback::Scrollback::with_cap(1);
+        s.scrollback = Scrollback::with_cap(1);
         // Mark row 'a', then scroll enough that 'a' is evicted (cap 1 keeps
         // only the most recent scrolled-out row).
         p.advance(&mut s, b"\x1b]133;A\x07\x1b]133;D;7\x07a\r\nb\r\nc\r\nd\r\ne");
@@ -3177,7 +3188,7 @@ mod tests {
     fn osc_52_oversized_payload_dropped() {
         // 5 MiB of 'a' base64-encoded.
         let big = "a".repeat(5 * 1024 * 1024);
-        let encoded = base64::engine::general_purpose::STANDARD.encode(big.as_bytes());
+        let encoded = STANDARD.encode(big.as_bytes());
         let sequence = format!("\x1b]52;c;{encoded}\x07");
         let s = parse(sequence.as_bytes());
         assert!(s.clipboard_writes.is_empty(), "expected oversized payload to be dropped");
@@ -3340,7 +3351,7 @@ mod tests {
         let s = parse(b"\x1b[38:2::1:2:3mX\x1b[4mY");
         let x = s.active.get_cell(0, 0).unwrap();
         assert!(!x.attrs.contains(Attrs::UNDERLINE), "X must NOT be underlined");
-        assert_eq!(x.fg, crate::color::Color::Rgb(1, 2, 3));
+        assert_eq!(x.fg, Color::Rgb(1, 2, 3));
         let y = s.active.get_cell(0, 1).unwrap();
         assert!(y.attrs.contains(Attrs::UNDERLINE), "Y SHOULD be underlined (the \\e[4m)");
     }
@@ -3358,7 +3369,7 @@ mod tests {
     #[test]
     fn xtmodkeys_set_level_2_then_query_reports_it() {
         // \e[>4;2m sets modifyOtherKeys level 2; \e[?4m queries it.
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(8, 24);
         p.advance(&mut s, b"\x1b[>4;2m\x1b[?4mX");
         p.flush(&mut s);
@@ -3401,7 +3412,7 @@ mod tests {
     }
     #[test]
     fn kitty_stacks_are_per_screen() {
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(8, 24);
         p.advance(&mut s, b"\x1b[>5u\x1b[?1049h\x1b[>9uX");
         p.flush(&mut s);
@@ -3423,7 +3434,7 @@ mod tests {
         assert_eq!(s.kbd.modify_other_keys(), 0, "DECSTR clears modifyOtherKeys");
         assert_eq!(
             s.active.get_cell(0, 0).unwrap().underline_color,
-            crate::color::Color::Default,
+            Color::Default,
             "DECSTR resets the cursor's underline color"
         );
     }
@@ -3468,7 +3479,7 @@ mod tests {
     #[test]
     fn focus_events_mode_sets_bit() {
         let s = parse(b"\x1b[?1004hX");
-        assert!(s.modes.contains(crate::modes::Modes::FOCUS_EVENTS));
+        assert!(s.modes.contains(Modes::FOCUS_EVENTS));
     }
     #[test]
     fn color_scheme_query_replies_dark() {
@@ -3479,7 +3490,7 @@ mod tests {
     #[test]
     fn color_scheme_query_reflects_set_preference() {
         // After the daemon records a light scheme, ?996n must answer light (;2n).
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(4, 8);
         s.set_color_scheme_dark(false);
         p.advance(&mut s, b"\x1b[?996nX");
@@ -3488,7 +3499,7 @@ mod tests {
         // And RIS preserves the daemon-set scheme.
         let mut s2 = Screen::new(4, 8);
         s2.set_color_scheme_dark(false);
-        let mut p2 = crate::parser::Parser::new();
+        let mut p2 = Parser::new();
         p2.advance(&mut s2, b"\x1bc\x1b[?996nX");
         p2.flush(&mut s2);
         assert_eq!(s2.replies, vec![b"\x1b[?997;2n".to_vec()]);
@@ -3565,9 +3576,9 @@ mod tests {
     fn scroll_eviction_does_not_affect_counter_or_exit() {
         // Feed enough lines to scroll the marked row into scrollback and then
         // evict it; the counter and exit must survive eviction.
-        let mut p = crate::parser::Parser::new();
+        let mut p = Parser::new();
         let mut s = Screen::new(2, 8);
-        s.scrollback = crate::scrollback::Scrollback::with_cap(1);
+        s.scrollback = Scrollback::with_cap(1);
         // Emit D on row 0, then scroll many lines past the scrollback cap.
         p.advance(&mut s, b"\x1b]133;D;4\x07");
         p.flush(&mut s);

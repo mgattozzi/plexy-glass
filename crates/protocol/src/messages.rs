@@ -1,3 +1,4 @@
+use crate::errors::ProtocolError;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
@@ -164,7 +165,7 @@ pub enum ServerMsg {
     SessionKilled { name: String },
     Output(Bytes),
     Exited { status: ExitStatus },
-    Error(crate::errors::ProtocolError),
+    Error(ProtocolError),
     ConfigReloaded { error: Option<String> },
     /// Outcome of `RunCommand` / `SendInput`: `ok` drives the CLI exit code;
     /// `message` is the confirmation or error text.
@@ -335,7 +336,7 @@ mod tests {
 
     #[test]
     fn server_msg_error_round_trips() {
-        let err = ServerMsg::Error(crate::errors::ProtocolError::VersionMismatch {
+        let err = ServerMsg::Error(ProtocolError::VersionMismatch {
             client: 1,
             server: 2,
         });

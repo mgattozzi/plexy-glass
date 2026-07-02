@@ -1,6 +1,7 @@
 //! Rectangular cell grid with wrap-origin tracking on rows.
 
 use crate::cell::Cell;
+use crate::width::display_width;
 
 /// Per-row wrap origin. Used by reflow to reconstruct logical lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,11 +213,11 @@ fn normalize_wide_pairs(cells: &mut [Cell]) {
     for i in 0..n {
         if cells[i].is_wide_spacer() {
             let paired =
-                i > 0 && crate::width::display_width(cells[i - 1].grapheme.as_str()) == 2;
+                i > 0 && display_width(cells[i - 1].grapheme.as_str()) == 2;
             if !paired {
                 cells[i] = Cell::default();
             }
-        } else if crate::width::display_width(cells[i].grapheme.as_str()) == 2 {
+        } else if display_width(cells[i].grapheme.as_str()) == 2 {
             let paired = i + 1 < n && cells[i + 1].is_wide_spacer();
             if !paired {
                 cells[i] = Cell::default();
@@ -387,6 +388,7 @@ impl Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem;
     use smol_str::SmolStr;
 
     fn x_cell() -> Cell {
@@ -399,7 +401,7 @@ mod tests {
     #[test]
     fn row_mark_stays_small() {
         // Rows are cloned per frame, so the annotation must stay cheap.
-        assert!(std::mem::size_of::<RowMark>() <= 12);
+        assert!(mem::size_of::<RowMark>() <= 12);
     }
 
     #[test]

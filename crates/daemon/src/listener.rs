@@ -1,6 +1,8 @@
 use crate::error::DaemonError;
 use crate::paths::RuntimePaths;
 use nix::fcntl::{Flock, FlockArg};
+use nix::unistd;
+use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::MetadataExt;
@@ -39,8 +41,8 @@ impl Listener {
         })?;
 
         // Refuse to clobber another user's socket.
-        if let Ok(meta) = std::fs::metadata(&paths.socket)
-            && meta.uid() != nix::unistd::getuid().as_raw()
+        if let Ok(meta) = fs::metadata(&paths.socket)
+            && meta.uid() != unistd::getuid().as_raw()
         {
             return Err(DaemonError::SocketOwnedByOtherUser {
                 path: paths.socket,
@@ -48,7 +50,7 @@ impl Listener {
         }
 
         // Unlink any stale socket file and bind.
-        match std::fs::remove_file(&paths.socket) {
+        match fs::remove_file(&paths.socket) {
             Ok(()) => warn!(path = %paths.socket.display(), "removed stale socket"),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(DaemonError::Io(e)),
@@ -56,11 +58,11 @@ impl Listener {
         let socket = UnixListener::bind(&paths.socket)?;
         // 0600 socket: only the owner can connect.
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&paths.socket, std::fs::Permissions::from_mode(0o600))?;
+        fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
 
         // Write our PID down so the user can inspect it.
-        let pid = nix::unistd::getpid().as_raw();
-        std::fs::write(&paths.pidfile, format!("{pid}\n"))?;
+        let pid = unistd::getpid().as_raw();
+        fs::write(&paths.pidfile, format!("{pid}\n"))?;
 
         info!(socket = %paths.socket.display(), pid, "daemon listening");
         Ok(Self {
@@ -76,8 +78,8 @@ impl Drop for Listener {
         // Best-effort cleanup. We keep the lockfile around (just release the lock by
         // dropping the `File`) but remove the socket and pid file so a future daemon
         // doesn't see stale artifacts.
-        let _ = std::fs::remove_file(&self.paths.socket);
-        let _ = std::fs::remove_file(&self.paths.pidfile);
+        let _ = fs::remove_file(&self.paths.socket);
+        let _ = fs::remove_file(&self.paths.pidfile);
     }
 }
 
@@ -106,7 +108,7 @@ mod tests {
         let (_tmp, paths) = fixture();
         paths.create_dirs().unwrap();
         // Plant a stale plain file at the socket path.
-        std::fs::write(&paths.socket, b"stale").unwrap();
+        fs::write(&paths.socket, b"stale").unwrap();
         let l = Listener::bind(paths.clone()).expect("bind despite stale file");
         assert!(paths.socket.exists());
         drop(l);

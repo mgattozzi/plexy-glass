@@ -8,6 +8,7 @@
 //! terminal-trust-hardening spec, Phase 1.
 
 use std::sync::{Mutex, MutexGuard};
+use std::sync::PoisonError;
 
 pub trait LockExt<T> {
     /// Lock, recovering the guard from a poisoned lock instead of panicking.
@@ -17,7 +18,7 @@ pub trait LockExt<T> {
 impl<T> LockExt<T> for Mutex<T> {
     fn lock_recover(&self) -> MutexGuard<'_, T> {
         // `PoisonError` carries the guard; take it and move on.
-        self.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -25,13 +26,14 @@ impl<T> LockExt<T> for Mutex<T> {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    use std::thread;
 
     #[test]
     fn lock_recover_returns_inner_after_poison() {
         let m = Arc::new(Mutex::new(7));
         let m2 = Arc::clone(&m);
         // Poison the mutex: panic while holding the guard.
-        let _ = std::thread::spawn(move || {
+        let _ = thread::spawn(move || {
             let _g = m2.lock().unwrap();
             panic!("poison the lock");
         })
