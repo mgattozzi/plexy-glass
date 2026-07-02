@@ -98,6 +98,14 @@ scope. If a step is wrong, fix the plan first, then proceed.
 - No `unwrap`/`expect` in non-test code except for invariants that cannot
   fail (each documented with a one-line `// invariant:` comment).
 - No `#[allow]` annotations without a one-line justification comment.
+- **Imports, not fully-qualified paths.** Add a `use` at the top of the file and
+  refer to the short name — do **not** write fully-qualified paths inline
+  (`std::cmp::Ordering::Equal`, `tokio::signal::unix::signal`,
+  `crate::width::display_width`). A path with ≥3 segments used inline is a smell;
+  `use` it. (Mechanically enforced by `clippy::absolute_paths` where enabled.)
+- **Test-module `use` at the top.** In a `#[cfg(test)] mod tests { … }` block,
+  put every `use` at the **top of the test module**, never inside an individual
+  `#[test]` fn. (Not lintable — this is a hard convention.)
 
 ## User documentation
 
