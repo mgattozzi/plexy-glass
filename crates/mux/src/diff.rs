@@ -133,6 +133,8 @@ impl DiffRenderer {
             self.boxed.clear();
             self.virtual_placed.clear();
             self.placed_data.clear();
+            self.frames_sent.clear();
+            self.last_anim_sent.clear();
             self.reset_images = false;
         }
 
@@ -161,6 +163,8 @@ impl DiffRenderer {
             self.boxed.clear();
             self.virtual_placed.clear();
             self.placed_data.clear();
+            self.frames_sent.clear();
+            self.last_anim_sent.clear();
             // Clear + home, then walk every row, every cell.
             out.push_str("\x1b[2J\x1b[H");
             let mut current_attrs = CellAttrs::default();
@@ -1609,6 +1613,35 @@ mod tests {
         assert!(
             s.contains("a=a") && s.contains(",s=3"),
             "control reset means it's re-sent even though value is unchanged: {s:?}"
+        );
+    }
+
+    #[test]
+    fn z_order_and_animation_frames_coexist_on_one_placement() {
+        // Z-ordering (Task ?) and animation replay (Tasks 2-4) touch different
+        // fields on the same `VisiblePlacement` and are otherwise independent
+        // code paths; prove they actually compose on one placement instead of
+        // just each being tested in isolation.
+        let mut d = kitty_renderer();
+        let mut p = vp(1, 7, 1, 2, 3);
+        p.z = 7;
+        p.frames = Arc::new(vec![
+            sample_frame_visible(b"FR0Z"),
+            sample_frame_visible(b"FR1Z"),
+        ]);
+        p.anim_control = Some(AnimControl {
+            state: Some(3),
+            loop_count: Some(1),
+            current_frame: None,
+        });
+        let s = render_str(&mut d, &frame_with(vec![p]));
+        assert!(
+            s.contains(",z=7"),
+            "z-order must still be emitted on an animated placement: {s:?}"
+        );
+        assert!(
+            s.contains("FR0Z") && s.contains("FR1Z"),
+            "both frames must replay on a z-ordered placement: {s:?}"
         );
     }
 
