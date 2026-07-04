@@ -1491,7 +1491,10 @@ mod tests {
     fn new_client_gets_base_transmit_all_frames_and_latest_control() {
         let mut d = kitty_renderer();
         let mut p = vp(1, 7, 1, 2, 3);
-        p.frames = Arc::new(vec![sample_frame_visible(b"f1"), sample_frame_visible(b"f2")]);
+        p.frames = Arc::new(vec![
+            sample_frame_visible(b"f1"),
+            sample_frame_visible(b"f2"),
+        ]);
         p.anim_control = Some(AnimControl {
             state: Some(3),
             loop_count: Some(1),
@@ -1501,7 +1504,10 @@ mod tests {
         assert!(s.contains("a=t"), "expected the base transmit, got: {s}");
         let f1_pos = s.find("f1").expect("f1 must be replayed");
         let f2_pos = s.find("f2").expect("f2 must be replayed");
-        assert!(f1_pos < f2_pos, "frames must replay in arrival order: {s:?}");
+        assert!(
+            f1_pos < f2_pos,
+            "frames must replay in arrival order: {s:?}"
+        );
         assert!(
             s.contains("a=a"),
             "expected the animation control command, got: {s}"
@@ -1516,9 +1522,15 @@ mod tests {
         p.frames = Arc::new(vec![sample_frame_visible(b"f1")]);
         render_str(&mut d, &frame_with(vec![p.clone()])); // client is now caught up to 1 frame
 
-        p.frames = Arc::new(vec![sample_frame_visible(b"f1"), sample_frame_visible(b"f2")]);
+        p.frames = Arc::new(vec![
+            sample_frame_visible(b"f1"),
+            sample_frame_visible(b"f2"),
+        ]);
         let s = render_str(&mut d, &frame_with(vec![p]));
-        assert!(!s.contains("f1"), "f1 was already sent, must not repeat: {s:?}");
+        assert!(
+            !s.contains("f1"),
+            "f1 was already sent, must not repeat: {s:?}"
+        );
         assert!(s.contains("f2"), "f2 is new, must be sent: {s:?}");
     }
 
@@ -1647,7 +1659,10 @@ mod tests {
         let mut total = 0usize;
         for growth in batch_sizes {
             let new_total = total + growth;
-            let s = render_str(&mut d, &frame_with(vec![vp_with_frames(image_id, new_total)]));
+            let s = render_str(
+                &mut d,
+                &frame_with(vec![vp_with_frames(image_id, new_total)]),
+            );
             if growth == 0 {
                 assert!(
                     (0..new_total).all(|i| !s.contains(&format!("FR{i}Z"))),

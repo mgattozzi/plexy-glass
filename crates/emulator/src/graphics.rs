@@ -88,12 +88,7 @@ impl Image {
     /// Bytes counted toward `ImageStore`'s budget: the base transmit plus
     /// every stored animation frame.
     pub fn total_bytes(&self) -> usize {
-        self.data_b64.len()
-            + self
-                .frames
-                .iter()
-                .map(|f| f.data_b64.len())
-                .sum::<usize>()
+        self.data_b64.len() + self.frames.iter().map(|f| f.data_b64.len()).sum::<usize>()
     }
 }
 
@@ -802,7 +797,10 @@ mod tests {
         store.insert(sample_image(1, b"base"));
         store.push_frame(1, sample_frame(b"frame-one"));
         assert_eq!(store.get(1).unwrap().frames.len(), 1);
-        assert_eq!(store.get(1).unwrap().frames[0].data_b64.as_ref(), b"frame-one");
+        assert_eq!(
+            store.get(1).unwrap().frames[0].data_b64.as_ref(),
+            b"frame-one"
+        );
     }
 
     #[test]

@@ -20,8 +20,16 @@ fn graphics_advance() {
         let s = emu.screen();
         assert_eq!(s.active.num_rows(), ROWS, "row count changed");
         assert_eq!(s.active.num_cols(), COLS, "col count changed");
-        assert!(s.cursor.row < ROWS, "cursor.row {} out of bounds", s.cursor.row);
-        assert!(s.cursor.col < COLS, "cursor.col {} out of bounds", s.cursor.col);
+        assert!(
+            s.cursor.row < ROWS,
+            "cursor.row {} out of bounds",
+            s.cursor.row
+        );
+        assert!(
+            s.cursor.col < COLS,
+            "cursor.col {} out of bounds",
+            s.cursor.col
+        );
         // Every placement's image id must actually resolve, or be tolerated
         // as evicted (never dangling in a way that panics downstream) — the
         // compositor already assumes this via `images.get(p.image_id)` with

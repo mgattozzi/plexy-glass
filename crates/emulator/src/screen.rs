@@ -2451,7 +2451,10 @@ mod tests {
         let s = e.screen();
         let ctrl = s.images.get(8).unwrap().anim_control.as_ref().unwrap();
         assert_eq!(ctrl.state, Some(1));
-        assert_eq!(ctrl.loop_count, None, "second a=a omitted v= — must not retain the prior v=5");
+        assert_eq!(
+            ctrl.loop_count, None,
+            "second a=a omitted v= — must not retain the prior v=5"
+        );
         assert_eq!(
             ctrl.current_frame, None,
             "second a=a omitted c= — must not retain the prior c=3"
@@ -2466,7 +2469,10 @@ mod tests {
         e.advance(b"\n");
         let s = e.screen();
         let ctrl = s.images.get(8).unwrap().anim_control.as_ref().unwrap();
-        assert_eq!(ctrl.state, None, "s=0 means ignored/unspecified, same as v=0");
+        assert_eq!(
+            ctrl.state, None,
+            "s=0 means ignored/unspecified, same as v=0"
+        );
     }
 
     #[test]

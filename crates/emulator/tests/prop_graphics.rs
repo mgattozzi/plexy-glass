@@ -78,13 +78,14 @@ fn prop_frame_command_round_trips_its_keys(tc: TestCase) {
     let z = tc.draw(gs::integers::<i32>().min_value(-5000).max_value(5000));
     let overwrite = tc.draw(gs::booleans());
     let x_key = if overwrite { ",X=1" } else { "" };
-    let framed =
-        format!("\x1b_Ga=f,i={id},r={r},x={x},y={y},z={z}{x_key},f=24,s=1,v=1;QUJD\x1b\\");
+    let framed = format!("\x1b_Ga=f,i={id},r={r},x={x},y={y},z={z}{x_key},f=24,s=1,v=1;QUJD\x1b\\");
     let cmd = parse_command(framed.as_bytes());
     let Some(cmd) = cmd else {
         panic!("valid a=f command failed to parse");
     };
-    tc.note(&format!("id={id} r={r} x={x} y={y} z={z} overwrite={overwrite}"));
+    tc.note(&format!(
+        "id={id} r={r} x={x} y={y} z={z} overwrite={overwrite}"
+    ));
     assert_eq!(cmd.action, b'f');
     assert_eq!(cmd.id, Some(id));
     assert_eq!(cmd.rows, Some(r));
@@ -172,10 +173,13 @@ fn prop_frame_bytes_reflect_eviction(tc: TestCase) {
         let expected = base_len + window.iter().sum::<usize>();
         let total = store
             .get(1)
-            .expect("image 1 must still be present (byte budget is far above what this test pushes)")
+            .expect(
+                "image 1 must still be present (byte budget is far above what this test pushes)",
+            )
             .total_bytes();
         assert_eq!(
-            total, expected,
+            total,
+            expected,
             "byte accounting drifted after push #{i} of {n} (window len {})",
             window.len()
         );
