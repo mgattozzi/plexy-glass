@@ -1,7 +1,7 @@
-use crate::{built_in_default, kdl_config, Config};
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
+use std::{fs, io};
+
+use crate::{Config, built_in_default, kdl_config};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -74,7 +74,10 @@ mod load_tests {
         let path = dir.path().join("config.kdl");
         fs::write(&path, "this is not valid kdl {{{").unwrap();
         let (_cfg, err) = load_or_default_at(&path);
-        assert!(matches!(err, Some(ConfigError::Kdl(_))), "parse error surfaced: {err:?}");
+        assert!(
+            matches!(err, Some(ConfigError::Kdl(_))),
+            "parse error surfaced: {err:?}"
+        );
     }
 
     #[test]

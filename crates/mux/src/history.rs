@@ -53,7 +53,11 @@ pub enum HistoryOutcome {
 
 impl HistoryState {
     pub const fn new(entries: Vec<HistoryEntry>) -> Self {
-        Self { entries, selected: 0, filter: String::new() }
+        Self {
+            entries,
+            selected: 0,
+            filter: String::new(),
+        }
     }
 
     /// Indices of entries whose haystack contains the (lowercased) filter,
@@ -129,7 +133,11 @@ fn move_sel(
         return HistoryOutcome::None;
     }
     let cur = pos.unwrap_or(0);
-    let next = if down { (cur + 1).min(vis.len() - 1) } else { cur.saturating_sub(1) };
+    let next = if down {
+        (cur + 1).min(vis.len() - 1)
+    } else {
+        cur.saturating_sub(1)
+    };
     state.selected = vis[next];
     HistoryOutcome::Redraw
 }
@@ -181,7 +189,11 @@ mod tests {
     fn visible_filters_command_and_output_case_insensitive() {
         let mut s = state();
         s.filter = "REFUSED".into();
-        assert_eq!(s.visible_indices(), vec![1], "matches output, case-insensitive");
+        assert_eq!(
+            s.visible_indices(),
+            vec![1],
+            "matches output, case-insensitive"
+        );
         s.filter = "docker".into();
         assert_eq!(s.visible_indices(), vec![0], "matches command");
         s.filter = "zzz".into();
@@ -208,19 +220,28 @@ mod tests {
     fn enter_with_empty_result_is_none() {
         let mut s = state();
         s.filter = "zzz".into();
-        assert_eq!(handle_history(&key(Key::Enter), &mut s), HistoryOutcome::None);
+        assert_eq!(
+            handle_history(&key(Key::Enter), &mut s),
+            HistoryOutcome::None
+        );
     }
 
     #[test]
     fn esc_cancels() {
         let mut s = state();
-        assert_eq!(handle_history(&key(Key::Escape), &mut s), HistoryOutcome::Cancel);
+        assert_eq!(
+            handle_history(&key(Key::Escape), &mut s),
+            HistoryOutcome::Cancel
+        );
     }
 
     #[test]
     fn arrows_and_ctrl_np_move_within_visible() {
         let mut s = state();
-        assert_eq!(handle_history(&key(Key::Arrow(Direction::Down)), &mut s), HistoryOutcome::Redraw);
+        assert_eq!(
+            handle_history(&key(Key::Arrow(Direction::Down)), &mut s),
+            HistoryOutcome::Redraw
+        );
         assert_eq!(s.selected, 1);
         handle_history(&key(Key::Arrow(Direction::Down)), &mut s); // clamp at end
         assert_eq!(s.selected, 1);
@@ -234,9 +255,15 @@ mod tests {
     fn home_and_end_jump_to_ends() {
         let mut s = state();
         // Start at 0; End → last visible (1); Home → first visible (0).
-        assert_eq!(handle_history(&key(Key::End), &mut s), HistoryOutcome::Redraw);
+        assert_eq!(
+            handle_history(&key(Key::End), &mut s),
+            HistoryOutcome::Redraw
+        );
         assert_eq!(s.selected, 1);
-        assert_eq!(handle_history(&key(Key::Home), &mut s), HistoryOutcome::Redraw);
+        assert_eq!(
+            handle_history(&key(Key::Home), &mut s),
+            HistoryOutcome::Redraw
+        );
         assert_eq!(s.selected, 0);
     }
 
@@ -246,7 +273,10 @@ mod tests {
         s.filter = "cargo".into();
         s.selected = 1;
         // pop to "carg" still matches only entry 1.
-        assert_eq!(handle_history(&key(Key::Backspace), &mut s), HistoryOutcome::Redraw);
+        assert_eq!(
+            handle_history(&key(Key::Backspace), &mut s),
+            HistoryOutcome::Redraw
+        );
         assert_eq!(s.filter, "carg");
         assert_eq!(s.selected, 1);
     }

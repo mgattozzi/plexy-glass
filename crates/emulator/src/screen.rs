@@ -1,28 +1,29 @@
 //! Screen state composes the active grid, scrollback, cursor, modes, and
 //! associated metadata, and provides the methods the parser dispatches into.
 
-use crate::{
-    attrs::{Attrs, UnderlineStyle},
-    cell::Cell,
-    color::Color,
-    cursor::{Cursor, CursorShape},
-    graphics::{self, Image, ImageFormat, ImageProtocol, ImageStore, Placement, VirtualPlacement},
-    grid::{Grid, Row, RowMark, WrapOrigin},
-    hyperlinks::HyperlinkTable,
-    keyboard::KeyboardState,
-    modes::Modes,
-    parser::ScreenOps,
-    scrollback::Scrollback,
-    tabs::TabStops,
-    width::display_width,
-};
-use base64::engine::general_purpose::STANDARD;
 use std::cmp::Ordering;
-use std::mem;
-use std::str;
 use std::sync::Arc;
 use std::time::Instant;
+use std::{mem, str};
+
+use base64::engine::general_purpose::STANDARD;
 use unicode_width::UnicodeWidthStr;
+
+use crate::attrs::{Attrs, UnderlineStyle};
+use crate::cell::Cell;
+use crate::color::Color;
+use crate::cursor::{Cursor, CursorShape};
+use crate::graphics::{
+    self, Image, ImageFormat, ImageProtocol, ImageStore, Placement, VirtualPlacement,
+};
+use crate::grid::{Grid, Row, RowMark, WrapOrigin};
+use crate::hyperlinks::HyperlinkTable;
+use crate::keyboard::KeyboardState;
+use crate::modes::Modes;
+use crate::parser::ScreenOps;
+use crate::scrollback::Scrollback;
+use crate::tabs::TabStops;
+use crate::width::display_width;
 
 /// In-progress chunked image transmission (`m=1 … m=0`). Accumulated across
 /// `handle_graphics` calls until the final chunk, then finalized into an
@@ -105,7 +106,6 @@ const fn dec_special_graphic(byte: u8) -> Option<&'static str> {
         _ => return None,
     })
 }
-
 
 #[derive(Clone)]
 pub struct Screen {
@@ -254,7 +254,11 @@ impl Screen {
 
     /// The charset GL currently maps to (G1 when shifted out, else G0).
     const fn active_charset(&self) -> Charset {
-        if self.charset_shift_out { self.charset_g1 } else { self.charset_g0 }
+        if self.charset_shift_out {
+            self.charset_g1
+        } else {
+            self.charset_g0
+        }
     }
 
     /// Handle a captured Kitty-graphics APC (`framed` = `ESC _ G … ESC \`).
@@ -299,7 +303,8 @@ impl Screen {
         let evicted = self.images.insert(image);
         if !evicted.is_empty() {
             self.placements.retain(|p| !evicted.contains(&p.image_id));
-            self.virtual_placements.retain(|p| !evicted.contains(&p.image_id));
+            self.virtual_placements
+                .retain(|p| !evicted.contains(&p.image_id));
         }
         self.add_placement(id, ImageProtocol::Sixel, w, h, None, None);
     }
@@ -387,7 +392,8 @@ impl Screen {
             return;
         };
         let (mut w, mut h) = (tx.width.unwrap_or(0), tx.height.unwrap_or(0));
-        if (w == 0 || h == 0) && tx.format == ImageFormat::Png
+        if (w == 0 || h == 0)
+            && tx.format == ImageFormat::Png
             && let Some((pw, ph)) = decode_png_dims(&tx.data_b64)
         {
             w = pw;
@@ -407,7 +413,8 @@ impl Screen {
         let evicted = self.images.insert(image);
         if !evicted.is_empty() {
             self.placements.retain(|p| !evicted.contains(&p.image_id));
-            self.virtual_placements.retain(|p| !evicted.contains(&p.image_id));
+            self.virtual_placements
+                .retain(|p| !evicted.contains(&p.image_id));
         }
         // Only a *display* transmission (a=T) places. a=t (transmit only) just
         // stores the image, even with U=1 set.
@@ -416,7 +423,14 @@ impl Screen {
                 // a=T,U=1: virtual placement, so no anchor and no cursor advance.
                 self.add_virtual_placement(tx.id, tx.placement_id, tx.place_rows, tx.place_cols);
             } else {
-                self.add_placement(tx.id, ImageProtocol::Kitty, w, h, tx.place_rows, tx.place_cols);
+                self.add_placement(
+                    tx.id,
+                    ImageProtocol::Kitty,
+                    w,
+                    h,
+                    tx.place_rows,
+                    tx.place_cols,
+                );
             }
         }
     }
@@ -425,7 +439,13 @@ impl Screen {
     /// image via its `U+10EEEE` cells, so this neither anchors to a line nor
     /// advances the cursor; it just notes that the image has a virtual placement
     /// for the per-client renderer to transmit + emit `a=p,U=1` once.
-    fn add_virtual_placement(&mut self, image_id: u32, placement_id: Option<u32>, r: Option<u16>, c: Option<u16>) {
+    fn add_virtual_placement(
+        &mut self,
+        image_id: u32,
+        placement_id: Option<u32>,
+        r: Option<u16>,
+        c: Option<u16>,
+    ) {
         let placement_id = placement_id.unwrap_or(0);
         let seq = self.graphics_seq;
         self.graphics_seq = self.graphics_seq.wrapping_add(1);
@@ -447,14 +467,20 @@ impl Screen {
 
     /// Add a placement at the cursor and advance the cursor by its row footprint
     /// (so subsequent output lands below the image, the spike's overlap fix).
-    fn add_placement(&mut self, image_id: u32, protocol: ImageProtocol, pixel_w: u32, pixel_h: u32, r: Option<u16>, c: Option<u16>) {
+    fn add_placement(
+        &mut self,
+        image_id: u32,
+        protocol: ImageProtocol,
+        pixel_w: u32,
+        pixel_h: u32,
+        r: Option<u16>,
+        c: Option<u16>,
+    ) {
         let (cell_w, cell_h) = self.cell_pixels();
-        let rows = r.unwrap_or_else(|| {
-            pixel_h.div_ceil(u32::from(cell_h).max(1)).clamp(1, 1000) as u16
-        });
-        let cols = c.unwrap_or_else(|| {
-            pixel_w.div_ceil(u32::from(cell_w).max(1)).clamp(1, 1000) as u16
-        });
+        let rows =
+            r.unwrap_or_else(|| pixel_h.div_ceil(u32::from(cell_h).max(1)).clamp(1, 1000) as u16);
+        let cols =
+            c.unwrap_or_else(|| pixel_w.div_ceil(u32::from(cell_w).max(1)).clamp(1, 1000) as u16);
         let anchor_line = self.scrollback.len() as u32 + u32::from(self.cursor.row);
         self.placement_id_seq = self.placement_id_seq.wrapping_add(1);
         let placement_id = self.placement_id_seq;
@@ -488,13 +514,14 @@ impl Screen {
         if evicted == 0 || self.placements.is_empty() {
             return;
         }
-        self.placements.retain_mut(|p| match p.anchor_line.checked_sub(evicted) {
-            Some(a) => {
-                p.anchor_line = a;
-                true
-            }
-            None => false,
-        });
+        self.placements
+            .retain_mut(|p| match p.anchor_line.checked_sub(evicted) {
+                Some(a) => {
+                    p.anchor_line = a;
+                    true
+                }
+                None => false,
+            });
     }
 
     /// DECALN (`ESC # 8`): fill the entire active grid with `E` (the DEC screen
@@ -536,7 +563,10 @@ impl Screen {
         } else {
             // max(1): a degenerate area smaller than the grid would otherwise
             // floor to 0 px/cell and blow the footprint up to the 1000-row clamp.
-            ((self.area_px_w / cols).max(1), (self.area_px_h / rows).max(1))
+            (
+                (self.area_px_w / cols).max(1),
+                (self.area_px_h / rows).max(1),
+            )
         }
     }
 
@@ -673,7 +703,12 @@ impl Screen {
     fn clear_wide_straddle(&mut self, start: u16, end: u16) {
         let row = self.cursor.row;
         // Left edge lands on a spacer, so its grapheme to the left is orphaned.
-        if start > 0 && self.active.get_cell(row, start).is_some_and(super::cell::Cell::is_wide_spacer) {
+        if start > 0
+            && self
+                .active
+                .get_cell(row, start)
+                .is_some_and(super::cell::Cell::is_wide_spacer)
+        {
             self.active.put_cell(row, start - 1, Cell::default());
         }
         // Right edge lands on a wide grapheme → its spacer to the right is orphaned.
@@ -699,7 +734,10 @@ impl Screen {
         if let Some(mut base) = base {
             // A wide grapheme leaves the cursor two columns past its base, so the
             // cell to the left is the wide_spacer and we step one further to the base.
-            if self.active.get_cell(self.cursor.row, base).is_some_and(super::cell::Cell::is_wide_spacer)
+            if self
+                .active
+                .get_cell(self.cursor.row, base)
+                .is_some_and(super::cell::Cell::is_wide_spacer)
                 && let Some(b) = base.checked_sub(1)
             {
                 base = b;
@@ -815,7 +853,7 @@ impl Screen {
                 self.cursor.col = 0;
                 self.cursor.pending_wrap = false;
             }
-            0x0E => self.charset_shift_out = true,  // SO (shift out): GL → G1
+            0x0E => self.charset_shift_out = true, // SO (shift out): GL → G1
             0x0F => self.charset_shift_out = false, // SI (shift in): GL → G0
             _ => {
                 tracing::trace!(byte, "unhandled C0 control");
@@ -912,7 +950,9 @@ impl Screen {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 let last = self.cols().saturating_sub(1);
                 for _ in 0..n {
-                    if let Some(c) = self.tabs.next(self.cursor.col) { self.cursor.col = c.min(last) } else {
+                    if let Some(c) = self.tabs.next(self.cursor.col) {
+                        self.cursor.col = c.min(last);
+                    } else {
                         self.cursor.col = last;
                         break;
                     }
@@ -923,7 +963,9 @@ impl Screen {
                 // CBT (cursor backward tabulation): retreat N tab stops.
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 for _ in 0..n {
-                    if let Some(c) = self.tabs.prev(self.cursor.col) { self.cursor.col = c } else {
+                    if let Some(c) = self.tabs.prev(self.cursor.col) {
+                        self.cursor.col = c;
+                    } else {
                         self.cursor.col = 0;
                         break;
                     }
@@ -969,14 +1011,15 @@ impl Screen {
                         let cleared = self.scrollback.len() as u32;
                         self.scrollback.rows_mut().clear();
                         if cleared > 0 {
-                            self.placements
-                                .retain_mut(|p| match p.anchor_line.checked_sub(cleared) {
+                            self.placements.retain_mut(|p| {
+                                match p.anchor_line.checked_sub(cleared) {
                                     Some(a) => {
                                         p.anchor_line = a;
                                         true
                                     }
                                     None => false,
-                                });
+                                }
+                            });
                         }
                     }
                     _ => {}
@@ -1009,7 +1052,9 @@ impl Screen {
             'l' => self.set_mode(params, intermediates, false),
             'r' => {
                 let top = first.unwrap_or(1).saturating_sub(1);
-                let bottom = nth(params, 1).unwrap_or_else(|| self.rows()).saturating_sub(1);
+                let bottom = nth(params, 1)
+                    .unwrap_or_else(|| self.rows())
+                    .saturating_sub(1);
                 let bottom = bottom.min(self.rows().saturating_sub(1));
                 if top < bottom {
                     self.scroll_region = (top, bottom);
@@ -1052,13 +1097,15 @@ impl Screen {
             '@' => {
                 // ICH: insert N blank cells at the cursor, shifting right (overflow lost).
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
-                self.active.insert_cells(self.cursor.row, self.cursor.col, n);
+                self.active
+                    .insert_cells(self.cursor.row, self.cursor.col, n);
                 self.cursor.pending_wrap = false;
             }
             'P' => {
                 // DCH: delete N cells at the cursor, shifting left (blanks fill from right).
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
-                self.active.delete_cells(self.cursor.row, self.cursor.col, n);
+                self.active
+                    .delete_cells(self.cursor.row, self.cursor.col, n);
                 self.cursor.pending_wrap = false;
             }
             'X' => {
@@ -1192,15 +1239,18 @@ impl Screen {
                     }
                     16 => {
                         // Cell size in pixels -> CSI 6 ; height ; width t
-                        self.replies.push(format!("\x1b[6;{cell_h};{cell_w}t").into_bytes());
+                        self.replies
+                            .push(format!("\x1b[6;{cell_h};{cell_w}t").into_bytes());
                     }
                     18 => {
                         // Text area size in chars → CSI 8 ; rows ; cols t
-                        self.replies.push(format!("\x1b[8;{rows};{cols}t").into_bytes());
+                        self.replies
+                            .push(format!("\x1b[8;{rows};{cols}t").into_bytes());
                     }
                     19 => {
                         // Screen size in chars → CSI 9 ; rows ; cols t
-                        self.replies.push(format!("\x1b[9;{rows};{cols}t").into_bytes());
+                        self.replies
+                            .push(format!("\x1b[9;{rows};{cols}t").into_bytes());
                     }
                     other => {
                         tracing::trace!(op = other, "ignored window-manipulation op");
@@ -1322,7 +1372,11 @@ impl Screen {
         let Some(ps) = params.iter().next().and_then(|p| p.first().copied()) else {
             return;
         };
-        let pm = if private { self.modes.decrqm_state(ps) } else { 0 };
+        let pm = if private {
+            self.modes.decrqm_state(ps)
+        } else {
+            0
+        };
         let prefix = if private { "?" } else { "" };
         self.replies
             .push(format!("\x1b[{prefix}{ps};{pm}$y").into_bytes());
@@ -1486,8 +1540,7 @@ impl Screen {
                         self.cursor.underline_style = UnderlineStyle::None;
                     } else {
                         self.cursor.attrs.insert(Attrs::UNDERLINE);
-                        self.cursor.underline_style =
-                            UnderlineStyle::from_sgr_subparam(*style);
+                        self.cursor.underline_style = UnderlineStyle::from_sgr_subparam(*style);
                     }
                 }
                 // Colon-form RGB extended color (38:2:.. / 48:2:.. / 58:2:..):
@@ -1756,7 +1809,8 @@ impl Screen {
         let evicted = self.images.insert(image);
         if !evicted.is_empty() {
             self.placements.retain(|p| !evicted.contains(&p.image_id));
-            self.virtual_placements.retain(|p| !evicted.contains(&p.image_id));
+            self.virtual_placements
+                .retain(|p| !evicted.contains(&p.image_id));
         }
         self.add_placement(id, ImageProtocol::Iterm2, w, h, None, None);
     }
@@ -1771,7 +1825,10 @@ impl Screen {
             // so far, so the daemon re-interleaves the color reply in order.
             self.color_queries.push((self.replies.len(), query));
         } else {
-            tracing::trace!(?query, "OSC color set form ignored (palette is daemon-controlled)");
+            tracing::trace!(
+                ?query,
+                "OSC color set form ignored (palette is daemon-controlled)"
+            );
         }
     }
 
@@ -1849,7 +1906,10 @@ impl Screen {
         if *payload == b"?" {
             return; // Phase 4 is set-only.
         }
-        let selection = params.get(1).and_then(|p| p.first().copied()).unwrap_or(b'c');
+        let selection = params
+            .get(1)
+            .and_then(|p| p.first().copied())
+            .unwrap_or(b'c');
         if !matches!(selection, b'c' | b's') {
             return;
         }
@@ -1858,7 +1918,10 @@ impl Screen {
             return;
         };
         if decoded.len() > Self::OSC52_MAX_BYTES {
-            tracing::warn!(bytes = decoded.len(), "OSC 52 payload exceeds cap; dropping");
+            tracing::warn!(
+                bytes = decoded.len(),
+                "OSC 52 payload exceeds cap; dropping"
+            );
             return;
         }
         self.clipboard_writes.push(decoded);
@@ -1882,11 +1945,7 @@ fn parse_extended_color(rest: &[u16]) -> (Option<Color>, usize) {
     match rest[0] {
         5 if rest.len() >= 2 => (Some(Color::Indexed(rest[1] as u8)), 2),
         2 if rest.len() >= 4 => (
-            Some(Color::Rgb(
-                rest[1] as u8,
-                rest[2] as u8,
-                rest[3] as u8,
-            )),
+            Some(Color::Rgb(rest[1] as u8, rest[2] as u8, rest[3] as u8)),
             4,
         ),
         _ => (None, 0),
@@ -1909,7 +1968,13 @@ impl ScreenOps for Screen {
     fn handle_esc(&mut self, intermediates: &[u8], byte: u8) {
         Self::handle_esc(self, intermediates, byte);
     }
-    fn handle_dcs(&mut self, intermediates: &[u8], action: u8, params: &[Vec<u16>], payload: &[u8]) {
+    fn handle_dcs(
+        &mut self,
+        intermediates: &[u8],
+        action: u8,
+        params: &[Vec<u16>],
+        payload: &[u8],
+    ) {
         // XTGETTCAP: DCS + q <hexnames> ST.
         if intermediates.first() == Some(&b'+') && action == b'q' {
             Self::xtgettcap(self, payload);
@@ -1930,19 +1995,19 @@ impl ScreenOps for Screen {
 fn decode_png_dims(b64: &[u8]) -> Option<(u32, u32)> {
     use base64::Engine as _;
     let take = (b64.len() / 4 * 4).min(64);
-    let decoded = STANDARD
-        .decode(&b64[..take])
-        .ok()?;
+    let decoded = STANDARD.decode(&b64[..take]).ok()?;
     graphics::png_dimensions(&decoded)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::iter;
+
     use base64::Engine as _;
+
+    use super::*;
     use crate::parser::Parser;
     use crate::terminfo;
-    use std::iter;
 
     fn drive(input: &[u8]) -> Screen {
         let mut p = Parser::new();
@@ -1979,7 +2044,11 @@ mod tests {
 
         let mut e = crate::Emulator::new(24, 80);
         e.advance(chunk1.as_bytes());
-        assert_eq!(e.screen().cursor.row, 0, "no cursor move before the final chunk");
+        assert_eq!(
+            e.screen().cursor.row,
+            0,
+            "no cursor move before the final chunk"
+        );
         assert!(e.screen().images.is_empty(), "not finalized yet");
 
         e.advance(chunk2.as_bytes());
@@ -1989,8 +2058,15 @@ mod tests {
         let p = &s.placements[0];
         assert_eq!(p.image_id, 7);
         assert_eq!(p.anchor_line, 0, "anchored at the image start");
-        assert_eq!((p.cols, p.rows), (3, 2), "footprint from dims ÷ default cell");
-        assert_eq!(s.cursor.row, 2, "cursor advanced by the footprint after m=0");
+        assert_eq!(
+            (p.cols, p.rows),
+            (3, 2),
+            "footprint from dims ÷ default cell"
+        );
+        assert_eq!(
+            s.cursor.row, 2,
+            "cursor advanced by the footprint after m=0"
+        );
     }
 
     #[test]
@@ -2000,7 +2076,10 @@ mod tests {
         e.advance(b"\x1b_Ga=T,i=9,f=24,s=20,v=20;QUJD\x1b\\");
         assert_eq!(e.screen().placements.len(), 1);
         e.advance(b"\x1b_Ga=d,i=9\x1b\\");
-        assert!(e.screen().placements.is_empty(), "a=d,i=9 removed the placement");
+        assert!(
+            e.screen().placements.is_empty(),
+            "a=d,i=9 removed the placement"
+        );
     }
 
     #[test]
@@ -2033,8 +2112,14 @@ mod tests {
         let mut e = crate::Emulator::new(24, 80);
         // m=1 with no following m=0 chunk: never finalized.
         e.advance(b"\x1b_Ga=T,i=3,f=24,s=2,v=2,m=1;QQ\x1b\\");
-        assert!(e.screen().images.is_empty(), "no image stored without finalize");
-        assert!(e.screen().placements.is_empty(), "no placement without finalize");
+        assert!(
+            e.screen().images.is_empty(),
+            "no image stored without finalize"
+        );
+        assert!(
+            e.screen().placements.is_empty(),
+            "no placement without finalize"
+        );
     }
 
     #[test]
@@ -2051,7 +2136,10 @@ mod tests {
     fn place_of_unknown_image_is_noop() {
         let mut e = crate::Emulator::new(24, 80);
         e.advance(b"\x1b_Ga=p,i=999\x1b\\"); // place an id never transmitted
-        assert!(e.screen().placements.is_empty(), "no placement for unknown id");
+        assert!(
+            e.screen().placements.is_empty(),
+            "no placement for unknown id"
+        );
         assert_eq!(e.screen().cursor.row, 0, "cursor untouched");
     }
 
@@ -2061,7 +2149,10 @@ mod tests {
         e.advance(b"\x1b_Ga=T,i=5,f=24,s=10,v=20;QQ\x1b\\");
         assert_eq!(e.screen().placements.len(), 1);
         e.resize(24, 100); // width change reflows; absolute anchors no longer valid
-        assert!(e.screen().placements.is_empty(), "placements dropped on resize");
+        assert!(
+            e.screen().placements.is_empty(),
+            "placements dropped on resize"
+        );
     }
 
     #[test]
@@ -2072,7 +2163,11 @@ mod tests {
         let mut e = crate::Emulator::new(4, 20);
         e.advance(b"\x1b]133;A\x07$ cmd\r\nout1\r\nout2\r\n");
         e.screen_mut().active.rows[0].mark.set_folded(true);
-        assert!(e.screen().active.rows[0].mark.contains(RowMark::PROMPT_START));
+        assert!(
+            e.screen().active.rows[0]
+                .mark
+                .contains(RowMark::PROMPT_START)
+        );
 
         e.resize(4, 12); // reflow at a new width
         let folded_after_reflow = e
@@ -2110,8 +2205,14 @@ mod tests {
         assert!(s.placements.is_empty(), "no anchored placement for U=1");
         assert_eq!(s.virtual_placements.len(), 1);
         let vp = &s.virtual_placements[0];
-        assert_eq!((vp.image_id, vp.placement_id, vp.cols, vp.rows), (7, 1, 3, 2));
-        assert_eq!(s.cursor.row, row_before, "virtual placement does not move the cursor");
+        assert_eq!(
+            (vp.image_id, vp.placement_id, vp.cols, vp.rows),
+            (7, 1, 3, 2)
+        );
+        assert_eq!(
+            s.cursor.row, row_before,
+            "virtual placement does not move the cursor"
+        );
     }
 
     #[test]
@@ -2131,7 +2232,10 @@ mod tests {
         e.advance(b"\x1b_Ga=T,U=1,i=9,f=24,s=10,v=20,c=2,r=1;QUJD\x1b\\");
         assert_eq!(e.screen().virtual_placements.len(), 1);
         e.advance(b"\x1b_Ga=d,i=9\x1b\\");
-        assert!(e.screen().virtual_placements.is_empty(), "a=d,i=9 cleared the virtual placement");
+        assert!(
+            e.screen().virtual_placements.is_empty(),
+            "a=d,i=9 cleared the virtual placement"
+        );
     }
 
     #[test]
@@ -2168,7 +2272,10 @@ mod tests {
         // The stored payload is re-emittable: <params>q<data>, ending in the
         // sixel data, with the raster attrs intact right after `q`.
         let img = s.images.get(s.placements[0].image_id).unwrap();
-        assert!(img.data_b64.windows(2).any(|w| w == b"q\""), "q + raster preserved");
+        assert!(
+            img.data_b64.windows(2).any(|w| w == b"q\""),
+            "q + raster preserved"
+        );
         assert!(img.data_b64.ends_with(b"~~~"), "sixel data preserved");
     }
 
@@ -2191,15 +2298,25 @@ mod tests {
         assert_eq!(s.placements[0].protocol, ImageProtocol::Iterm2);
         assert_eq!(s.cursor.row, 1, "cursor advanced by the 1-row footprint");
         let img = s.images.get(s.placements[0].image_id).unwrap();
-        assert_eq!(img.data_b64.as_ref(), b"QUJD", "base64 data kept for re-emit");
-        assert_eq!(img.iterm_args.as_deref(), Some("inline=1;width=10px;height=20px"));
+        assert_eq!(
+            img.data_b64.as_ref(),
+            b"QUJD",
+            "base64 data kept for re-emit"
+        );
+        assert_eq!(
+            img.iterm_args.as_deref(),
+            Some("inline=1;width=10px;height=20px")
+        );
     }
 
     #[test]
     fn iterm2_non_inline_is_ignored() {
         let mut e = crate::Emulator::new(24, 80);
         e.advance(b"\x1b]1337;File=inline=0;width=10px:QUJD\x07");
-        assert!(e.screen().images.is_empty(), "a non-inline File= is a download, not rendered");
+        assert!(
+            e.screen().images.is_empty(),
+            "a non-inline File= is a download, not rendered"
+        );
     }
 
     #[test]
@@ -2208,7 +2325,10 @@ mod tests {
         e.advance(b"\x1b]1337\x07"); // bare 1337, no File=
         e.advance(b"\x1b]1337;File=\x07"); // File= but no `:data`
         e.advance(b"\x1b]1337;Foo=bar\x07"); // not a File=
-        assert!(e.screen().images.is_empty(), "malformed/empty 1337 captures nothing");
+        assert!(
+            e.screen().images.is_empty(),
+            "malformed/empty 1337 captures nothing"
+        );
     }
 
     #[test]
@@ -2227,7 +2347,10 @@ mod tests {
         let mut e = crate::Emulator::new(24, 80);
         e.advance(b"\x1bP$qm\x1b\\"); // DECRQSS
         e.advance(b"\x1bP+q544e\x1b\\"); // XTGETTCAP
-        assert!(e.screen().images.is_empty(), "DCS queries ($q / +q) are not sixel");
+        assert!(
+            e.screen().images.is_empty(),
+            "DCS queries ($q / +q) are not sixel"
+        );
     }
 
     #[test]
@@ -2238,7 +2361,11 @@ mod tests {
         e.advance(b"\x1b_Ga=T,U=1,i=9,f=24,s=10,v=20,c=2,r=1;QUJD\x1b\\");
         assert_eq!(e.screen().virtual_placements.len(), 1);
         e.resize(24, 100);
-        assert_eq!(e.screen().virtual_placements.len(), 1, "virtual placement survives resize");
+        assert_eq!(
+            e.screen().virtual_placements.len(),
+            1,
+            "virtual placement survives resize"
+        );
     }
 
     #[test]
@@ -2248,7 +2375,10 @@ mod tests {
         let g1 = e.screen().images.get(5).expect("stored").generation;
         e.advance(b"\x1b_Ga=t,i=5,f=24,s=10,v=20;Qg\x1b\\"); // re-transmit same id, new data
         let g2 = e.screen().images.get(5).expect("stored").generation;
-        assert!(g2 > g1, "re-transmit of an existing id bumps the content generation");
+        assert!(
+            g2 > g1,
+            "re-transmit of an existing id bumps the content generation"
+        );
     }
 
     #[test]
@@ -2265,7 +2395,11 @@ mod tests {
     fn csi_16t_falls_back_to_default_cell_when_area_unknown() {
         let mut e = crate::Emulator::new(24, 80); // no set_pixel_area
         e.advance(b"\x1b[16t");
-        assert_eq!(e.take_replies(), vec![b"\x1b[6;20;10t".to_vec()], "fallback 10x20");
+        assert_eq!(
+            e.take_replies(),
+            vec![b"\x1b[6;20;10t".to_vec()],
+            "fallback 10x20"
+        );
     }
 
     #[test]
@@ -2291,7 +2425,10 @@ mod tests {
         let mut e = crate::Emulator::new(24, 80);
         e.advance(b"\x1b[8;40;100t"); // resize request
         e.advance(b"\x1b[3;0;0t"); // move window
-        assert!(e.take_replies().is_empty(), "window-manipulation ops are ignored");
+        assert!(
+            e.take_replies().is_empty(),
+            "window-manipulation ops are ignored"
+        );
     }
 
     #[test]
@@ -2327,7 +2464,10 @@ mod tests {
         // half a wide char destroys the whole char (xterm/VTE semantics), so 好's
         // orphaned grapheme cell at col 0 is blanked too.
         let s = drive("好x\x1b[1;2Ha".as_bytes());
-        assert!(s.active.get_cell(0, 0).unwrap().is_blank(), "好's grapheme half not cleared");
+        assert!(
+            s.active.get_cell(0, 0).unwrap().is_blank(),
+            "好's grapheme half not cleared"
+        );
         assert_eq!(s.active.get_cell(0, 1).unwrap().grapheme.as_str(), "a");
         assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "x");
     }
@@ -2339,7 +2479,10 @@ mod tests {
         let s = drive("好x\x1b[1;1Ha".as_bytes());
         assert_eq!(s.active.get_cell(0, 0).unwrap().grapheme.as_str(), "a");
         let c1 = s.active.get_cell(0, 1).unwrap();
-        assert!(c1.is_blank() && !c1.is_wide_spacer(), "orphaned spacer not cleared");
+        assert!(
+            c1.is_blank() && !c1.is_wide_spacer(),
+            "orphaned spacer not cleared"
+        );
         assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "x");
     }
 
@@ -2408,14 +2551,20 @@ mod tests {
     fn cuu_stops_at_top_scroll_margin() {
         // Region rows 3..7 (top=2). Cursor at row 5, CUU 10 stops at the margin.
         let s = parse(b"\x1b[3;7r\x1b[6;1H\x1b[10A");
-        assert_eq!(s.cursor.row, 2, "CUU must stop at the top margin, not grid 0");
+        assert_eq!(
+            s.cursor.row, 2,
+            "CUU must stop at the top margin, not grid 0"
+        );
     }
 
     #[test]
     fn cud_stops_at_bottom_scroll_margin() {
         // Region rows 3..7 (bottom=6). Cursor at row 3, CUD 10 stops at the margin.
         let s = parse(b"\x1b[3;7r\x1b[4;1H\x1b[10B");
-        assert_eq!(s.cursor.row, 6, "CUD must stop at the bottom margin, not the grid edge");
+        assert_eq!(
+            s.cursor.row, 6,
+            "CUD must stop at the bottom margin, not the grid edge"
+        );
     }
 
     #[test]
@@ -2423,20 +2572,29 @@ mod tests {
         // Region rows 1..3 (bottom=2). Place the cursor at row 4 (below it); a LF
         // must move it DOWN to row 5, not snap it up to the bottom margin.
         let s = parse(b"\x1b[1;3r\x1b[5;1H\n");
-        assert_eq!(s.cursor.row, 5, "LF below the region must move down, not snap to the margin");
+        assert_eq!(
+            s.cursor.row, 5,
+            "LF below the region must move down, not snap to the margin"
+        );
     }
 
     #[test]
     fn decom_makes_cup_region_relative_and_homes() {
         // Region rows 5..8 (top=4). DECSET ?6h homes to the region top...
         let s = parse(b"\x1b[5;8r\x1b[?6h");
-        assert_eq!(s.cursor.row, 4, "DECOM set homes the cursor to the region top");
+        assert_eq!(
+            s.cursor.row, 4,
+            "DECOM set homes the cursor to the region top"
+        );
         // ...and CUP rows become relative to the region top.
         let s = parse(b"\x1b[5;8r\x1b[?6h\x1b[3;1H");
         assert_eq!(s.cursor.row, 6, "CUP row 3 in origin mode = top(4) + 2");
         // Reset returns to absolute addressing.
         let s = parse(b"\x1b[5;8r\x1b[?6h\x1b[?6l\x1b[3;1H");
-        assert_eq!(s.cursor.row, 2, "CUP row 3 with origin reset = absolute grid row 2");
+        assert_eq!(
+            s.cursor.row, 2,
+            "CUP row 3 with origin reset = absolute grid row 2"
+        );
     }
 
     #[test]
@@ -2465,7 +2623,9 @@ mod tests {
         let mut underlined = 0usize;
         for r in 0..s.rows() {
             for c in 0..s.cols() {
-                let Some(cell) = s.active.get_cell(r, c) else { continue };
+                let Some(cell) = s.active.get_cell(r, c) else {
+                    continue;
+                };
                 if cell.is_blank() || cell.is_wide_spacer() {
                     continue;
                 }
@@ -2477,7 +2637,10 @@ mod tests {
                 }
             }
         }
-        assert!(non_blank > 0, "fixture produced no visible cells — wrong screen size or empty capture");
+        assert!(
+            non_blank > 0,
+            "fixture produced no visible cells — wrong screen size or empty capture"
+        );
         assert_eq!(
             underlined, 0,
             "{underlined}/{non_blank} non-blank cells spuriously underlined (the `\\e[>4;2m`-as-SGR bug)"
@@ -2488,7 +2651,10 @@ mod tests {
     fn xtgettcap_numeric_cap_colors() {
         // \eP+q636f6c6f7273\e\\ queries "colors" → \eP1+r636f6c6f7273=323536\e\\.
         let s = parse(b"\x1bP+q636f6c6f7273\x1b\\X");
-        assert_eq!(s.replies, vec![b"\x1bP1+r636f6c6f7273=323536\x1b\\".to_vec()]);
+        assert_eq!(
+            s.replies,
+            vec![b"\x1bP1+r636f6c6f7273=323536\x1b\\".to_vec()]
+        );
     }
 
     #[test]
@@ -2500,7 +2666,10 @@ mod tests {
         p.advance(&mut s, b"\x1bP+q544e\x1b\\X");
         p.flush(&mut s);
         let hex = terminfo::hex_encode(b"xterm-ghostty");
-        assert_eq!(s.replies, vec![format!("\x1bP1+r544e={hex}\x1b\\").into_bytes()]);
+        assert_eq!(
+            s.replies,
+            vec![format!("\x1bP1+r544e={hex}\x1b\\").into_bytes()]
+        );
     }
 
     #[test]
@@ -2570,7 +2739,10 @@ mod tests {
         // A trailing `;` yields an empty split segment; it must be skipped, not
         // answered with a nameless \eP0+r\e\\.
         let s = parse(b"\x1bP+q636f6c6f7273;\x1b\\X");
-        assert_eq!(s.replies, vec![b"\x1bP1+r636f6c6f7273=323536\x1b\\".to_vec()]);
+        assert_eq!(
+            s.replies,
+            vec![b"\x1bP1+r636f6c6f7273=323536\x1b\\".to_vec()]
+        );
     }
 
     #[test]
@@ -2635,7 +2807,8 @@ mod tests {
 
     #[test]
     fn sgr_bold_red_then_reset() {
-        use crate::{attrs::Attrs, color::Color};
+        use crate::attrs::Attrs;
+        use crate::color::Color;
         let s = parse(b"\x1b[1;31mhi\x1b[0mlo");
         let c0 = s.active.get_cell(0, 0).unwrap();
         assert!(c0.attrs.contains(Attrs::BOLD));
@@ -2651,9 +2824,20 @@ mod tests {
         // \e[m (no params) must behave as \e[0m (reset). If it doesn't, an underline
         // started with \e[4m sticks on everything after, which is the reported bug.
         let s = parse(b"\x1b[4mX\x1b[mY");
-        assert!(s.active.get_cell(0, 0).unwrap().attrs.contains(Attrs::UNDERLINE), "X underlined");
         assert!(
-            !s.active.get_cell(0, 1).unwrap().attrs.contains(Attrs::UNDERLINE),
+            s.active
+                .get_cell(0, 0)
+                .unwrap()
+                .attrs
+                .contains(Attrs::UNDERLINE),
+            "X underlined"
+        );
+        assert!(
+            !s.active
+                .get_cell(0, 1)
+                .unwrap()
+                .attrs
+                .contains(Attrs::UNDERLINE),
             "Y must NOT be underlined after a bare \\e[m reset"
         );
     }
@@ -2664,13 +2848,28 @@ mod tests {
         // \e[4:3m = curly underline ON; \e[4:0m = underline OFF (styled forms that
         // tmux-256color advertises and TUIs like claude-code emit).
         let s = parse(b"\x1b[4:3mX\x1b[4:0mY");
-        assert!(s.active.get_cell(0, 0).unwrap().attrs.contains(Attrs::UNDERLINE), "X underlined (curly)");
         assert!(
-            !s.active.get_cell(0, 0).unwrap().attrs.contains(Attrs::ITALIC),
+            s.active
+                .get_cell(0, 0)
+                .unwrap()
+                .attrs
+                .contains(Attrs::UNDERLINE),
+            "X underlined (curly)"
+        );
+        assert!(
+            !s.active
+                .get_cell(0, 0)
+                .unwrap()
+                .attrs
+                .contains(Attrs::ITALIC),
             "X must NOT be italic — 4:3 is a curly-underline style, not SGR 3"
         );
         assert!(
-            !s.active.get_cell(0, 1).unwrap().attrs.contains(Attrs::UNDERLINE),
+            !s.active
+                .get_cell(0, 1)
+                .unwrap()
+                .attrs
+                .contains(Attrs::UNDERLINE),
             "Y must NOT be underlined after \\e[4:0m"
         );
     }
@@ -2683,7 +2882,10 @@ mod tests {
         let s = parse(b"\x1b[4:3mX");
         let c = s.active.get_cell(0, 0).unwrap();
         assert_eq!(c.underline_style, UnderlineStyle::Curly, "4:3 = curly");
-        assert!(c.attrs.contains(Attrs::UNDERLINE), "UNDERLINE boolean still set");
+        assert!(
+            c.attrs.contains(Attrs::UNDERLINE),
+            "UNDERLINE boolean still set"
+        );
         assert!(!c.attrs.contains(Attrs::ITALIC), "4:3 is not SGR 3");
     }
 
@@ -2716,7 +2918,11 @@ mod tests {
         // Plain \e[4m is Single + UNDERLINE; \e[24m clears to None.
         let s = parse(b"\x1b[4mX\x1b[24mY");
         let x = s.active.get_cell(0, 0).unwrap();
-        assert_eq!(x.underline_style, UnderlineStyle::Single, "plain 4 = single");
+        assert_eq!(
+            x.underline_style,
+            UnderlineStyle::Single,
+            "plain 4 = single"
+        );
         assert!(x.attrs.contains(Attrs::UNDERLINE));
         let y = s.active.get_cell(0, 1).unwrap();
         assert_eq!(y.underline_style, UnderlineStyle::None, "24 = none");
@@ -2961,8 +3167,15 @@ mod tests {
         // "abc" moves cursor to col 3; B records that col on the row.
         let s = parse(b"abc\x1b]133;B\x07");
         let mark = s.active.rows[0].mark;
-        assert!(mark.contains(RowMark::PROMPT_END), "PROMPT_END flag must be set");
-        assert_eq!(mark.prompt_end_col(), Some(3), "col must equal cursor col at B time");
+        assert!(
+            mark.contains(RowMark::PROMPT_END),
+            "PROMPT_END flag must be set"
+        );
+        assert_eq!(
+            mark.prompt_end_col(),
+            Some(3),
+            "col must equal cursor col at B time"
+        );
     }
 
     #[test]
@@ -2983,7 +3196,10 @@ mod tests {
             .iter()
             .find(|r| r.mark.contains(RowMark::BLOCK_END))
             .expect("a BLOCK_END row");
-        assert!(d_row.mark.duration_ms().is_some(), "C->D must record a duration");
+        assert!(
+            d_row.mark.duration_ms().is_some(),
+            "C->D must record a duration"
+        );
     }
 
     #[test]
@@ -2995,7 +3211,11 @@ mod tests {
             .iter()
             .find(|r| r.mark.contains(RowMark::BLOCK_END))
             .expect("a BLOCK_END row");
-        assert_eq!(d_row.mark.duration_ms(), None, "D without C has no duration");
+        assert_eq!(
+            d_row.mark.duration_ms(),
+            None,
+            "D without C has no duration"
+        );
     }
 
     #[test]
@@ -3008,7 +3228,11 @@ mod tests {
             .iter()
             .find(|r| r.mark.contains(RowMark::BLOCK_END))
             .expect("a BLOCK_END row");
-        assert_eq!(d_row.mark.duration_ms(), None, "A must clear a dangling start");
+        assert_eq!(
+            d_row.mark.duration_ms(),
+            None,
+            "A must clear a dangling start"
+        );
     }
 
     #[test]
@@ -3040,7 +3264,9 @@ mod tests {
     #[test]
     fn osc_133_ignored_on_alt_screen() {
         // All four marks while the alt screen is active: no row flags on either grid.
-        let s = parse(b"\x1b[?1049h\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07\x1b[?1049l");
+        let s = parse(
+            b"\x1b[?1049h\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07\x1b[?1049l",
+        );
         assert!(s.alt.is_none(), "test must end back on the main screen");
         for row in &s.active.rows {
             assert!(row.mark.is_empty(), "main grid must be unmarked");
@@ -3052,9 +3278,15 @@ mod tests {
         // All four 133 marks now live on the row.
         let s = parse(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07");
         let mark = s.active.rows[0].mark;
-        assert!(mark.contains(RowMark::PROMPT_START), "A must set PROMPT_START");
+        assert!(
+            mark.contains(RowMark::PROMPT_START),
+            "A must set PROMPT_START"
+        );
         assert!(mark.contains(RowMark::PROMPT_END), "B must set PROMPT_END");
-        assert!(mark.contains(RowMark::OUTPUT_START), "C must set OUTPUT_START");
+        assert!(
+            mark.contains(RowMark::OUTPUT_START),
+            "C must set OUTPUT_START"
+        );
         assert!(mark.contains(RowMark::BLOCK_END), "D must set BLOCK_END");
     }
 
@@ -3069,7 +3301,10 @@ mod tests {
         p.flush(&mut s);
         // Row 1's content ("b"+mark) is now at row 0 after scrolling.
         let mark = s.active.rows[0].mark;
-        assert!(mark.contains(RowMark::PROMPT_END), "PROMPT_END must follow its row on scroll");
+        assert!(
+            mark.contains(RowMark::PROMPT_END),
+            "PROMPT_END must follow its row on scroll"
+        );
     }
 
     #[test]
@@ -3080,10 +3315,21 @@ mod tests {
         p.advance(&mut s, b"a\x1b]133;B\x07\r\nb\r\nc\r\nd");
         p.flush(&mut s);
         // The row with `PROMPT_END` is in scrollback, so the active grid has no B rows.
-        let active_has_b = s.active.rows.iter().any(|r| r.mark.contains(RowMark::PROMPT_END));
-        assert!(!active_has_b, "PROMPT_END row scrolled away; active grid must be clean");
+        let active_has_b = s
+            .active
+            .rows
+            .iter()
+            .any(|r| r.mark.contains(RowMark::PROMPT_END));
+        assert!(
+            !active_has_b,
+            "PROMPT_END row scrolled away; active grid must be clean"
+        );
         // It rides in scrollback.
-        let sb_has_b = s.scrollback.rows().iter().any(|r| r.mark.contains(RowMark::PROMPT_END));
+        let sb_has_b = s
+            .scrollback
+            .rows()
+            .iter()
+            .any(|r| r.mark.contains(RowMark::PROMPT_END));
         assert!(sb_has_b, "PROMPT_END row must exist in scrollback");
     }
 
@@ -3126,7 +3372,10 @@ mod tests {
         s.scrollback = Scrollback::with_cap(1);
         // Mark row 'a', then scroll enough that 'a' is evicted (cap 1 keeps
         // only the most recent scrolled-out row).
-        p.advance(&mut s, b"\x1b]133;A\x07\x1b]133;D;7\x07a\r\nb\r\nc\r\nd\r\ne");
+        p.advance(
+            &mut s,
+            b"\x1b]133;A\x07\x1b]133;D;7\x07a\r\nb\r\nc\r\nd\r\ne",
+        );
         p.flush(&mut s);
         assert_eq!(s.scrollback.len(), 1);
         assert!(
@@ -3167,7 +3416,11 @@ mod tests {
         let s = parse(b"abc\x1b]133;B\x07x\x1b]133;B\x07");
         let mark = s.active.rows[0].mark;
         assert!(mark.contains(RowMark::PROMPT_END));
-        assert_eq!(mark.prompt_end_col(), Some(4), "second B must update the col");
+        assert_eq!(
+            mark.prompt_end_col(),
+            Some(4),
+            "second B must update the col"
+        );
     }
 
     #[test]
@@ -3191,7 +3444,10 @@ mod tests {
         let encoded = STANDARD.encode(big.as_bytes());
         let sequence = format!("\x1b]52;c;{encoded}\x07");
         let s = parse(sequence.as_bytes());
-        assert!(s.clipboard_writes.is_empty(), "expected oversized payload to be dropped");
+        assert!(
+            s.clipboard_writes.is_empty(),
+            "expected oversized payload to be dropped"
+        );
     }
 
     #[test]
@@ -3255,7 +3511,10 @@ mod tests {
         assert!(!parse(b"hi ").bell_pending, "ordinary output does not");
         // A BEL terminating an OSC string is routed to osc_dispatch, not
         // execute_c0, so it must NOT register as a standalone bell.
-        assert!(!parse(b"\x1b]0;title\x07").bell_pending, "OSC-terminating BEL is not a bell");
+        assert!(
+            !parse(b"\x1b]0;title\x07").bell_pending,
+            "OSC-terminating BEL is not a bell"
+        );
     }
 
     #[test]
@@ -3302,20 +3561,29 @@ mod tests {
         }
         let z = s.active.get_cell(0, 2).unwrap();
         assert_eq!(z.grapheme.as_str(), "z");
-        assert!(!z.attrs.contains(Attrs::UNDERLINE), "'z' must not be underlined");
+        assert!(
+            !z.attrs.contains(Attrs::UNDERLINE),
+            "'z' must not be underlined"
+        );
     }
 
     #[test]
     fn sgr_58_colon_indexed_sets_underline_color() {
         use crate::color::Color;
         let s = parse(b"\x1b[58:5:9mX");
-        assert_eq!(s.active.get_cell(0, 0).unwrap().underline_color, Color::Indexed(9));
+        assert_eq!(
+            s.active.get_cell(0, 0).unwrap().underline_color,
+            Color::Indexed(9)
+        );
     }
     #[test]
     fn sgr_58_colon_rgb_kitty_form_sets_underline_color() {
         use crate::color::Color;
         let s = parse(b"\x1b[58:2:10:20:30mX");
-        assert_eq!(s.active.get_cell(0, 0).unwrap().underline_color, Color::Rgb(10, 20, 30));
+        assert_eq!(
+            s.active.get_cell(0, 0).unwrap().underline_color,
+            Color::Rgb(10, 20, 30)
+        );
     }
     #[test]
     fn sgr_58_colon_rgb_iso_form_with_colorspace_slot() {
@@ -3323,25 +3591,37 @@ mod tests {
         // 58:2::r:g:b is the ISO form with an empty colorspace slot (vte yields 0
         // for empty).
         let s = parse(b"\x1b[58:2::10:20:30mX");
-        assert_eq!(s.active.get_cell(0, 0).unwrap().underline_color, Color::Rgb(10, 20, 30));
+        assert_eq!(
+            s.active.get_cell(0, 0).unwrap().underline_color,
+            Color::Rgb(10, 20, 30)
+        );
     }
     #[test]
     fn sgr_58_semicolon_form_sets_underline_color() {
         use crate::color::Color;
         let s = parse(b"\x1b[58;2;10;20;30mX");
-        assert_eq!(s.active.get_cell(0, 0).unwrap().underline_color, Color::Rgb(10, 20, 30));
+        assert_eq!(
+            s.active.get_cell(0, 0).unwrap().underline_color,
+            Color::Rgb(10, 20, 30)
+        );
     }
     #[test]
     fn sgr_59_resets_underline_color() {
         use crate::color::Color;
         let s = parse(b"\x1b[58:5:9m\x1b[59mX");
-        assert_eq!(s.active.get_cell(0, 0).unwrap().underline_color, Color::Default);
+        assert_eq!(
+            s.active.get_cell(0, 0).unwrap().underline_color,
+            Color::Default
+        );
     }
     #[test]
     fn sgr_0_resets_underline_color() {
         use crate::color::Color;
         let s = parse(b"\x1b[58:5:9m\x1b[0mX");
-        assert_eq!(s.active.get_cell(0, 0).unwrap().underline_color, Color::Default);
+        assert_eq!(
+            s.active.get_cell(0, 0).unwrap().underline_color,
+            Color::Default
+        );
     }
     #[test]
     fn parse_extended_color_iso_colorspace_slot_consumes_exact_count() {
@@ -3350,10 +3630,16 @@ mod tests {
         // following \e[4m underlines Y, not leak a stray param onto X.
         let s = parse(b"\x1b[38:2::1:2:3mX\x1b[4mY");
         let x = s.active.get_cell(0, 0).unwrap();
-        assert!(!x.attrs.contains(Attrs::UNDERLINE), "X must NOT be underlined");
+        assert!(
+            !x.attrs.contains(Attrs::UNDERLINE),
+            "X must NOT be underlined"
+        );
         assert_eq!(x.fg, Color::Rgb(1, 2, 3));
         let y = s.active.get_cell(0, 1).unwrap();
-        assert!(y.attrs.contains(Attrs::UNDERLINE), "Y SHOULD be underlined (the \\e[4m)");
+        assert!(
+            y.attrs.contains(Attrs::UNDERLINE),
+            "Y SHOULD be underlined (the \\e[4m)"
+        );
     }
     #[test]
     fn sgr_combined_semicolon_truecolor_fg_and_bg() {
@@ -3388,7 +3674,10 @@ mod tests {
         use crate::attrs::Attrs;
         let s = parse(b"\x1b[>4;2mX");
         let c0 = s.active.get_cell(0, 0).unwrap();
-        assert!(!c0.attrs.contains(Attrs::UNDERLINE), "X must not be underlined");
+        assert!(
+            !c0.attrs.contains(Attrs::UNDERLINE),
+            "X must not be underlined"
+        );
         assert!(!c0.attrs.contains(Attrs::DIM), "X must not be dim");
     }
 
@@ -3431,7 +3720,11 @@ mod tests {
         // covered (X is painted AFTER \e[!p, so it reflects the post-reset pen).
         let s = parse(b"\x1b[>4;2m\x1b[>15u\x1b[58:5:9m\x1b[!pX");
         assert_eq!(s.kbd.kitty_flags(false), 0, "DECSTR clears Kitty flags");
-        assert_eq!(s.kbd.modify_other_keys(), 0, "DECSTR clears modifyOtherKeys");
+        assert_eq!(
+            s.kbd.modify_other_keys(),
+            0,
+            "DECSTR clears modifyOtherKeys"
+        );
         assert_eq!(
             s.active.get_cell(0, 0).unwrap().underline_color,
             Color::Default,
@@ -3442,7 +3735,8 @@ mod tests {
     fn xtversion_replies_with_dcs() {
         // \e[>q (XTVERSION) → DCS \eP>|plexy-glass(<ver>)\e\\.
         let s = parse(b"\x1b[>qX");
-        let expected = format!("\x1bP>|plexy-glass({})\x1b\\", env!("CARGO_PKG_VERSION")).into_bytes();
+        let expected =
+            format!("\x1bP>|plexy-glass({})\x1b\\", env!("CARGO_PKG_VERSION")).into_bytes();
         assert_eq!(s.replies, vec![expected]);
     }
     #[test]
@@ -3524,7 +3818,10 @@ mod tests {
     #[test]
     fn last_block_duration_recorded_on_c_then_d() {
         let s = parse(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07x");
-        assert!(s.last_block_duration.is_some(), "C->D records a session-level duration");
+        assert!(
+            s.last_block_duration.is_some(),
+            "C->D records a session-level duration"
+        );
     }
 
     #[test]
@@ -3587,7 +3884,11 @@ mod tests {
         p.advance(&mut s, lots);
         p.flush(&mut s);
         assert_eq!(s.blocks_completed, 1, "eviction must not reset the counter");
-        assert_eq!(s.last_block_exit, Some(4), "eviction must not clear last exit");
+        assert_eq!(
+            s.last_block_exit,
+            Some(4),
+            "eviction must not clear last exit"
+        );
     }
 
     #[test]
@@ -3597,6 +3898,9 @@ mod tests {
         let s = parse(b"\x1b]133;A\x07\x1b]133;C\x07\x1b]133;D;2\x07\x1bc");
         assert_eq!(s.blocks_completed, 0);
         assert_eq!(s.last_block_exit, None);
-        assert_eq!(s.last_block_duration, None, "RIS clears last_block_duration too");
+        assert_eq!(
+            s.last_block_duration, None,
+            "RIS clears last_block_duration too"
+        );
     }
 }

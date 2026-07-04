@@ -1,6 +1,7 @@
-use super::*;
 use std::fs;
 use std::path::Path;
+
+use super::*;
 
 #[test]
 fn built_in_default_has_expected_shape() {
@@ -29,7 +30,10 @@ status {
     )
     .unwrap();
     let cfg = load_from_path(&path).expect("parse");
-    assert_eq!(cfg.palette.entries.get("fg").map(String::as_str), Some("#ffffff"));
+    assert_eq!(
+        cfg.palette.entries.get("fg").map(String::as_str),
+        Some("#ffffff")
+    );
     assert_eq!(cfg.status.refresh.as_secs(), 10);
     assert_eq!(cfg.status.right.len(), 1);
     match &cfg.status.right[0] {
@@ -84,42 +88,69 @@ fn built_in_keymap_has_prefix_bindings() {
 #[test]
 fn built_in_keymap_includes_enter_copy_mode() {
     let km = built_in_keymap();
-    assert!(km
-        .bindings
-        .iter()
-        .any(|b| b.keys == "prefix [" && b.command == "enter_copy_mode"));
+    assert!(
+        km.bindings
+            .iter()
+            .any(|b| b.keys == "prefix [" && b.command == "enter_copy_mode")
+    );
 }
 
 #[test]
 fn built_in_keymap_includes_toggle_sync_panes() {
     let km = built_in_keymap();
-    assert!(km
-        .bindings
-        .iter()
-        .any(|b| b.keys == "prefix y" && b.command == "toggle_sync_panes"));
+    assert!(
+        km.bindings
+            .iter()
+            .any(|b| b.keys == "prefix y" && b.command == "toggle_sync_panes")
+    );
 }
 
 #[test]
 fn built_in_keymap_includes_reload_config() {
     let km = built_in_keymap();
-    assert!(km
-        .bindings
-        .iter()
-        .any(|b| b.keys == "prefix R" && b.command == "reload_config"));
+    assert!(
+        km.bindings
+            .iter()
+            .any(|b| b.keys == "prefix R" && b.command == "reload_config")
+    );
 }
 
 #[test]
 fn built_in_keymap_includes_resize_and_last_bindings() {
     let km = built_in_keymap();
-    assert!(km.bindings.iter().any(|b| b.keys == "prefix L" && b.command == "resize_pane_right"));
-    assert!(km.bindings.iter().any(|b| b.keys == "prefix Tab" && b.command == "select_last_window"));
-    assert!(km.bindings.iter().any(|b| b.keys == "prefix ;" && b.command == "select_last_pane"));
+    assert!(
+        km.bindings
+            .iter()
+            .any(|b| b.keys == "prefix L" && b.command == "resize_pane_right")
+    );
+    assert!(
+        km.bindings
+            .iter()
+            .any(|b| b.keys == "prefix Tab" && b.command == "select_last_window")
+    );
+    assert!(
+        km.bindings
+            .iter()
+            .any(|b| b.keys == "prefix ;" && b.command == "select_last_pane")
+    );
 }
 
 #[test]
 fn built_in_keymap_includes_overlay_bindings() {
     let km = built_in_keymap();
-    assert!(km.bindings.iter().any(|b| b.keys == "prefix ," && b.command == "rename_window"));
-    assert!(km.bindings.iter().any(|b| b.keys == "prefix ." && b.command == "rename_pane"));
-    assert!(km.bindings.iter().any(|b| b.keys == "prefix ?" && b.command == "show_help"));
+    assert!(
+        km.bindings
+            .iter()
+            .any(|b| b.keys == "prefix ," && b.command == "rename_window")
+    );
+    assert!(
+        km.bindings
+            .iter()
+            .any(|b| b.keys == "prefix ." && b.command == "rename_pane")
+    );
+    assert!(
+        km.bindings
+            .iter()
+            .any(|b| b.keys == "prefix ?" && b.command == "show_help")
+    );
 }

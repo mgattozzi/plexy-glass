@@ -1,16 +1,15 @@
 //! A `Window` owns a set of `Pane`s laid out in a binary split tree.
 
-use crate::{error::DaemonError, pane::Pane};
-use plexy_glass_mux::{
-    CloseOutcome, LayoutError, LayoutTree, PaneId, Rect, SplitDir, SplitPosition, WindowId,
-};
-use plexy_glass_mux::blocks;
-use plexy_glass_protocol::{PtySize, SpawnSpec};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::io::Error;
 use std::sync::Arc;
 use std::time::Duration;
+
+use plexy_glass_mux::{
+    CloseOutcome, LayoutError, LayoutTree, PaneId, Rect, SplitDir, SplitPosition, WindowId, blocks,
+};
+use plexy_glass_protocol::{PtySize, SpawnSpec};
 // `tokio::time::Instant` is used for `last_output` so that tokio's mock-time
 // clock (`start_paused = true` / `time::advance`) controls silence-threshold
 // checks in unit tests without real wall-clock sleeps. Production behaviour is
@@ -18,6 +17,9 @@ use std::time::Duration;
 // mock-time is off.
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
+
+use crate::error::DaemonError;
+use crate::pane::Pane;
 
 /// Upper bound on retained focus-history entries (see `Window::record_focus`).
 /// Only the most-recent entries matter for the close-pane focus fallback.
@@ -258,9 +260,7 @@ impl Window {
         if !self.auto_named {
             return self.name.clone();
         }
-        if auto_rename
-            && let Some(n) = self.compute_auto_name()
-        {
+        if auto_rename && let Some(n) = self.compute_auto_name() {
             return n;
         }
         Self::shell_basename().unwrap_or_else(|| self.name.clone())
@@ -792,7 +792,9 @@ impl Window {
 
         let mut event: Option<CompletionEvent> = None;
         for id in self.layout.panes() {
-            let Some(p) = self.panes.get(&id) else { continue };
+            let Some(p) = self.panes.get(&id) else {
+                continue;
+            };
             let (count, evt) = p.with_screen(|s| {
                 let evt = CompletionEvent {
                     exit: s.last_block_exit,
@@ -982,7 +984,11 @@ mod tests {
         assert!(w.auto_named, "empty construction name → auto");
         // No running command, no OSC-7 cwd on a /bin/cat pane → shell basename.
         assert_eq!(w.display_name(true), "sh", "auto → shell basename");
-        assert_eq!(w.display_name(false), "sh", "auto_rename off → shell basename");
+        assert_eq!(
+            w.display_name(false),
+            "sh",
+            "auto_rename off → shell basename"
+        );
         assert!(!w.display_name(true).is_empty());
 
         w.set_manual_name("api".into());
@@ -1056,8 +1062,16 @@ mod tests {
             cfg(),
         )
         .unwrap();
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
-            .expect("split");
+        w.split(
+            SplitDir::Vertical,
+            PaneId(1),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+        )
+        .expect("split");
         assert_eq!(w.active(), PaneId(1));
         assert!(w.layout().panes().contains(&PaneId(0)));
         assert!(w.layout().panes().contains(&PaneId(1)));
@@ -1078,8 +1092,16 @@ mod tests {
             cfg(),
         )
         .unwrap();
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
-            .unwrap();
+        w.split(
+            SplitDir::Vertical,
+            PaneId(1),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+        )
+        .unwrap();
         let outcome = w.close_active().unwrap();
         assert_eq!(outcome, CloseOutcome::SiblingPromoted);
         assert_eq!(w.active(), PaneId(0));
@@ -1100,8 +1122,16 @@ mod tests {
             cfg(),
         )
         .unwrap();
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
-            .unwrap();
+        w.split(
+            SplitDir::Vertical,
+            PaneId(1),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+        )
+        .unwrap();
         assert!(w.toggle_zoom(), "active pane is now zoomed");
         // A subsequent host resize must keep the zoomed pane at the full
         // viewport, not collapse it back to its split rect.
@@ -1111,7 +1141,11 @@ mod tests {
             .pane(PaneId(1))
             .unwrap()
             .with_screen(|s| (s.active.num_rows(), s.active.num_cols()));
-        assert_eq!((rows, cols), (40, 100), "zoomed pane must track the full viewport");
+        assert_eq!(
+            (rows, cols),
+            (40, 100),
+            "zoomed pane must track the full viewport"
+        );
     }
 
     #[tokio::test]
@@ -1129,13 +1163,24 @@ mod tests {
             cfg(),
         )
         .unwrap();
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
-            .unwrap();
+        w.split(
+            SplitDir::Vertical,
+            PaneId(1),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+        )
+        .unwrap();
         assert!(w.toggle_zoom());
         assert!(w.is_zoomed());
         let outcome = w.close_pane(PaneId(1)).unwrap();
         assert_eq!(outcome, CloseOutcome::SiblingPromoted);
-        assert!(!w.is_zoomed(), "zoom must clear when its target pane is closed");
+        assert!(
+            !w.is_zoomed(),
+            "zoom must clear when its target pane is closed"
+        );
     }
 
     #[tokio::test]
@@ -1181,7 +1226,10 @@ mod tests {
         assert_eq!(event.exit, Some(0));
         assert_eq!(event.duration_ms, Some(5000));
         assert_eq!(event.command.as_deref(), Some("ls"));
-        assert_eq!(edge, None, "monitor-command edge suppressed when record_flag=false");
+        assert_eq!(
+            edge, None,
+            "monitor-command edge suppressed when record_flag=false"
+        );
         // Second drain: baseline caught up, no new event.
         let (event2, _) = w.drain_command_completion(false);
         assert!(event2.is_none(), "no event once the baseline caught up");
@@ -1201,8 +1249,16 @@ mod tests {
             cfg(),
         )
         .unwrap();
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
-            .unwrap(); // active = PaneId(1); leaves [0, 1]
+        w.split(
+            SplitDir::Vertical,
+            PaneId(1),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+        )
+        .unwrap(); // active = PaneId(1); leaves [0, 1]
         w
     }
 
@@ -1255,7 +1311,8 @@ mod tests {
             cfg(),
         )
         .unwrap();
-        dst.adopt_split(PaneId(2), SplitDir::Vertical, moved, viewport).unwrap();
+        dst.adopt_split(PaneId(2), SplitDir::Vertical, moved, viewport)
+            .unwrap();
         assert_eq!(dst.active(), PaneId(1), "adopted pane becomes active");
         assert!(dst.layout().panes().contains(&PaneId(1)));
         assert!(dst.layout().panes().contains(&PaneId(2)));
@@ -1306,7 +1363,11 @@ mod tests {
             Some(r0),
             "new pane occupies the old slot's rect"
         );
-        assert_eq!(w.active(), PaneId(1), "active untouched when swapping a non-active slot");
+        assert_eq!(
+            w.active(),
+            PaneId(1),
+            "active untouched when swapping a non-active slot"
+        );
         old.kill_child();
     }
 
@@ -1331,15 +1392,27 @@ mod tests {
         // entry 0 would be filtered and focus would fall to 1 instead.
         let viewport = Rect::new(0, 0, 24, 80);
         let mut w = two_pane_window(); // h=[0], active 1
-        w.split(SplitDir::Vertical, PaneId(2), shell_spec(), viewport, notify(), None, cfg())
-            .unwrap(); // h=[0,1], active 2
+        w.split(
+            SplitDir::Vertical,
+            PaneId(2),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+        )
+        .unwrap(); // h=[0,1], active 2
         w.focus(PaneId(0)); // h=[0,1,2], active 0
         w.focus(PaneId(2)); // h=[0,1,2,0], active 2
         let Ok(old) = w.swap_occupant(PaneId(0), donor_pane(PaneId(9))) else {
             panic!("pane 0 present")
         };
         w.close_pane(PaneId(2)).unwrap();
-        assert_eq!(w.active(), PaneId(9), "fallback focus uses the rewritten history entry");
+        assert_eq!(
+            w.active(),
+            PaneId(9),
+            "fallback focus uses the rewritten history entry"
+        );
         old.kill_child();
     }
 
@@ -1372,8 +1445,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(w.neighbor_leaf(true), None, "single pane has no neighbor");
-        w.split(SplitDir::Vertical, PaneId(1), shell_spec(), viewport, notify(), None, cfg())
-            .unwrap(); // active = PaneId(1), leaves [0, 1]
+        w.split(
+            SplitDir::Vertical,
+            PaneId(1),
+            shell_spec(),
+            viewport,
+            notify(),
+            None,
+            cfg(),
+        )
+        .unwrap(); // active = PaneId(1), leaves [0, 1]
         assert_eq!(w.neighbor_leaf(true), Some(PaneId(0)));
         assert_eq!(w.neighbor_leaf(false), Some(PaneId(0)));
     }

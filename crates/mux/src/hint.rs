@@ -3,9 +3,10 @@
 //! core: depends only on the emulator screen + `regex`, so it builds and tests
 //! standalone (like `selection.rs`).
 
+use std::sync::LazyLock;
+
 use plexy_glass_emulator::Screen;
 use regex::Regex;
-use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HintKind {
@@ -83,7 +84,10 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     };
     vec![
         p(HintKind::Url, r"https?://[^\s<>\x22'\\)\]}]+"),
-        p(HintKind::Email, r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
+        p(
+            HintKind::Email,
+            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+        ),
         p(
             HintKind::Path,
             r"(?:[~.]{0,2}/)?[\w.+-]+(?:/[\w.+-]+)+(?::\d+(?::\d+)?)?",
@@ -94,7 +98,10 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
         ),
         p(HintKind::Ip, r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b"),
         p(HintKind::Sha, r"\b[0-9a-f]{7,40}\b"),
-        p(HintKind::HexColor, r"#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b"),
+        p(
+            HintKind::HexColor,
+            r"#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b",
+        ),
     ]
 });
 
@@ -140,7 +147,9 @@ fn scan_row(screen: &Screen, row: u16, out: &mut Vec<HintTarget>) {
 
     let col_at = |byte: usize| -> u16 {
         // last recorded start whose byte offset is <= byte
-        let idx = starts.partition_point(|&(b, _)| b <= byte).saturating_sub(1);
+        let idx = starts
+            .partition_point(|&(b, _)| b <= byte)
+            .saturating_sub(1);
         starts[idx].1
     };
 
@@ -397,7 +406,11 @@ pub fn handle_hint(event: &KeyEvent, state: &mut HintState) -> HintOutcome {
         } else {
             target.copy_text()
         };
-        let action = if open { HintAction::Open } else { HintAction::Copy };
+        let action = if open {
+            HintAction::Open
+        } else {
+            HintAction::Copy
+        };
         return HintOutcome::Pick(HintPick { text, action });
     }
     HintOutcome::Redraw
@@ -405,9 +418,10 @@ pub fn handle_hint(event: &KeyEvent, state: &mut HintState) -> HintOutcome {
 
 #[cfg(test)]
 mod tests {
+    use plexy_glass_emulator::Emulator;
+
     use super::*;
     use crate::key::{Key, KeyEvent, Modifiers};
-    use plexy_glass_emulator::Emulator;
 
     fn screen_from(rows: u16, cols: u16, lines: &[&str]) -> plexy_glass_emulator::Screen {
         let mut e = Emulator::new(rows, cols);
@@ -496,7 +510,10 @@ mod tests {
         let line = "\x1b]8;;https://docs.rs\x1b\\docs\x1b]8;;\x1b\\";
         let s = screen_from(1, 20, &[line]);
         let ts = scan_hints(&s);
-        let t = ts.iter().find(|t| t.kind == HintKind::Hyperlink).expect("link");
+        let t = ts
+            .iter()
+            .find(|t| t.kind == HintKind::Hyperlink)
+            .expect("link");
         assert_eq!(t.text, "https://docs.rs");
         assert_eq!(t.start, (0, 0));
     }
@@ -508,7 +525,11 @@ mod tests {
     }
 
     fn t(text: &str, kind: HintKind) -> HintTarget {
-        HintTarget { start: (0, 0), text: text.into(), kind }
+        HintTarget {
+            start: (0, 0),
+            text: text.into(),
+            kind,
+        }
     }
 
     fn press(c: char) -> KeyEvent {
@@ -536,29 +557,49 @@ mod tests {
         let mut st = HintState::new(vec![t("hello", HintKind::Sha)], "asdf");
         // single target → label "a"
         let out = handle_hint(&press('a'), &mut st);
-        assert_eq!(out, HintOutcome::Pick(HintPick { text: "hello".into(), action: HintAction::Copy }));
+        assert_eq!(
+            out,
+            HintOutcome::Pick(HintPick {
+                text: "hello".into(),
+                action: HintAction::Copy
+            })
+        );
     }
 
     #[test]
     fn copy_decodes_file_url_to_path() {
         // An OSC 8 hyperlink to a local file copies as the path, not the URL.
-        let mut st = HintState::new(vec![t("file:///Users/me/foo.rs", HintKind::Hyperlink)], "asdf");
+        let mut st = HintState::new(
+            vec![t("file:///Users/me/foo.rs", HintKind::Hyperlink)],
+            "asdf",
+        );
         let out = handle_hint(&press('a'), &mut st);
         assert_eq!(
             out,
-            HintOutcome::Pick(HintPick { text: "/Users/me/foo.rs".into(), action: HintAction::Copy })
+            HintOutcome::Pick(HintPick {
+                text: "/Users/me/foo.rs".into(),
+                action: HintAction::Copy
+            })
         );
     }
 
     #[test]
     fn copy_file_url_decodes_percent_and_host() {
         // file://host/path with a percent-encoded space → decoded absolute path.
-        let mut st =
-            HintState::new(vec![t("file://localhost/Users/me/My%20File.rs", HintKind::Hyperlink)], "asdf");
+        let mut st = HintState::new(
+            vec![t(
+                "file://localhost/Users/me/My%20File.rs",
+                HintKind::Hyperlink,
+            )],
+            "asdf",
+        );
         let out = handle_hint(&press('a'), &mut st);
         assert_eq!(
             out,
-            HintOutcome::Pick(HintPick { text: "/Users/me/My File.rs".into(), action: HintAction::Copy })
+            HintOutcome::Pick(HintPick {
+                text: "/Users/me/My File.rs".into(),
+                action: HintAction::Copy
+            })
         );
     }
 
@@ -568,12 +609,18 @@ mod tests {
         let mut url = HintState::new(vec![t("https://docs.rs/x", HintKind::Url)], "asdf");
         assert_eq!(
             handle_hint(&press('a'), &mut url),
-            HintOutcome::Pick(HintPick { text: "https://docs.rs/x".into(), action: HintAction::Copy })
+            HintOutcome::Pick(HintPick {
+                text: "https://docs.rs/x".into(),
+                action: HintAction::Copy
+            })
         );
         let mut path = HintState::new(vec![t("src/main.rs:42:7", HintKind::Path)], "asdf");
         assert_eq!(
             handle_hint(&press('a'), &mut path),
-            HintOutcome::Pick(HintPick { text: "src/main.rs:42:7".into(), action: HintAction::Copy })
+            HintOutcome::Pick(HintPick {
+                text: "src/main.rs:42:7".into(),
+                action: HintAction::Copy
+            })
         );
     }
 
@@ -581,24 +628,43 @@ mod tests {
     fn uppercase_label_opens_with_stripped_path() {
         let mut st = HintState::new(vec![t("src/x.rs:9", HintKind::Path)], "asdf");
         let out = handle_hint(&press('A'), &mut st);
-        assert_eq!(out, HintOutcome::Pick(HintPick { text: "src/x.rs".into(), action: HintAction::Open }));
+        assert_eq!(
+            out,
+            HintOutcome::Pick(HintPick {
+                text: "src/x.rs".into(),
+                action: HintAction::Open
+            })
+        );
     }
 
     #[test]
     fn multichar_label_narrows_then_picks() {
-        let targets = vec![t("one", HintKind::Sha), t("two", HintKind::Sha), t("three", HintKind::Sha)];
+        let targets = vec![
+            t("one", HintKind::Sha),
+            t("two", HintKind::Sha),
+            t("three", HintKind::Sha),
+        ];
         // 3 targets, 2-char alphabet: labels aa, as, sa.
         let mut st = HintState::new(targets, "as");
         assert_eq!(handle_hint(&press('a'), &mut st), HintOutcome::Redraw);
         assert_eq!(st.typed, "a");
         let out = handle_hint(&press('s'), &mut st);
-        assert_eq!(out, HintOutcome::Pick(HintPick { text: "two".into(), action: HintAction::Copy }));
+        assert_eq!(
+            out,
+            HintOutcome::Pick(HintPick {
+                text: "two".into(),
+                action: HintAction::Copy
+            })
+        );
     }
 
     #[test]
     fn escape_cancels() {
         let mut st = HintState::new(vec![t("x", HintKind::Sha)], "asdf");
-        assert_eq!(handle_hint(&KeyEvent::plain(Key::Escape), &mut st), HintOutcome::Cancel);
+        assert_eq!(
+            handle_hint(&KeyEvent::plain(Key::Escape), &mut st),
+            HintOutcome::Cancel
+        );
     }
 
     #[test]
@@ -678,9 +744,24 @@ mod tests {
         // Three spans: url covers cols 0-10, sha covers cols 0-7, path covers 3-8.
         // Expected: url (longest from 0) wins; path starts within url so skipped.
         // Kills `replace - with +` mutations at line 255 (length comparator).
-        let url = Span { start_col: 0, end_col: 10, kind: HintKind::Url, text: "http://x.c/ab".into() };
-        let sha = Span { start_col: 0, end_col: 7, kind: HintKind::Sha, text: "deadbee".into() };
-        let path = Span { start_col: 3, end_col: 8, kind: HintKind::Path, text: "c/ab".into() };
+        let url = Span {
+            start_col: 0,
+            end_col: 10,
+            kind: HintKind::Url,
+            text: "http://x.c/ab".into(),
+        };
+        let sha = Span {
+            start_col: 0,
+            end_col: 7,
+            kind: HintKind::Sha,
+            text: "deadbee".into(),
+        };
+        let path = Span {
+            start_col: 3,
+            end_col: 8,
+            kind: HintKind::Path,
+            text: "c/ab".into(),
+        };
         let result = resolve_overlaps(vec![sha, path, url]);
         assert_eq!(result.len(), 1, "url should dominate: {result:?}");
         assert_eq!(result[0].kind, HintKind::Url);
@@ -690,11 +771,25 @@ mod tests {
     fn resolve_overlaps_priority_breaks_same_length_tie() {
         // Two spans of the same length at the same start: Hyperlink (priority 0)
         // wins over Url (priority 1). Kills `replace priority with 0/1` mutations.
-        let hyper = Span { start_col: 0, end_col: 5, kind: HintKind::Hyperlink, text: "https://x".into() };
-        let url = Span { start_col: 0, end_col: 5, kind: HintKind::Url, text: "https://x".into() };
+        let hyper = Span {
+            start_col: 0,
+            end_col: 5,
+            kind: HintKind::Hyperlink,
+            text: "https://x".into(),
+        };
+        let url = Span {
+            start_col: 0,
+            end_col: 5,
+            kind: HintKind::Url,
+            text: "https://x".into(),
+        };
         let result = resolve_overlaps(vec![url, hyper]);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].kind, HintKind::Hyperlink, "hyperlink priority beats url");
+        assert_eq!(
+            result[0].kind,
+            HintKind::Hyperlink,
+            "hyperlink priority beats url"
+        );
     }
 
     // ── push_hyperlink_spans boundary tests ─────────────────────────────────
@@ -736,7 +831,10 @@ mod tests {
         // k=2, n=4: 2^2=4 == n. With `<`, loop exits (4 is NOT < 4). len=2. ✓
         // With `<=`, loop continues: 4 <= 4 → len=3, cap=8. len=3 is too long.
         let labels = assign_labels(4, "ab");
-        assert!(labels.iter().all(|l| l.len() == 2), "4 targets with 2-char alphabet need len=2: {labels:?}");
+        assert!(
+            labels.iter().all(|l| l.len() == 2),
+            "4 targets with 2-char alphabet need len=2: {labels:?}"
+        );
         assert_eq!(labels.len(), 4);
     }
 

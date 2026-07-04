@@ -14,18 +14,19 @@
 //! behind, but they are harmless, a new daemon unlinks a stale socket on bind
 //! and rewrites the pidfile.
 
-use crate::error::ClientError;
+use std::path::Path;
+use std::process::{self, Command};
+use std::time::{Duration, Instant};
+use std::{fs, io};
+
 use nix::errno::Errno;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::{self, Pid};
 use plexy_glass_daemon::RuntimePaths;
-use std::fs;
-use std::io;
-use std::path::Path;
-use std::process::{self, Command};
-use std::time::{Duration, Instant};
 use tokio::time;
 use tracing::info;
+
+use crate::error::ClientError;
 
 const GRACE_PERIOD: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -89,7 +90,10 @@ async fn terminate(pids: Vec<i32>, paths: &RuntimePaths) -> Result<KillOutcome, 
     }
 
     let total = pids.len();
-    info!(count = total, "sending SIGTERM to plexy-glass daemon process(es)");
+    info!(
+        count = total,
+        "sending SIGTERM to plexy-glass daemon process(es)"
+    );
     for pid in &pids {
         let nix_pid = Pid::from_raw(*pid);
         let _ = signal::kill(nix_pid, Signal::SIGTERM);
@@ -106,12 +110,12 @@ async fn terminate(pids: Vec<i32>, paths: &RuntimePaths) -> Result<KillOutcome, 
 
     let force_killed = !alive.is_empty();
     if force_killed {
-        info!(stragglers = alive.len(), "sending SIGKILL to remaining daemons");
+        info!(
+            stragglers = alive.len(),
+            "sending SIGKILL to remaining daemons"
+        );
         for pid in &alive {
-            let _ = signal::kill(
-                Pid::from_raw(*pid),
-                Signal::SIGKILL,
-            );
+            let _ = signal::kill(Pid::from_raw(*pid), Signal::SIGKILL);
         }
         let kill_deadline = Instant::now() + Duration::from_millis(500);
         while Instant::now() < kill_deadline && !alive.is_empty() {
@@ -222,6 +226,9 @@ mod tests {
     #[test]
     fn is_alive_classifies_self_and_impossible_pid() {
         assert!(is_alive(process::id() as i32), "our own process is alive");
-        assert!(!is_alive(i32::MAX), "an impossible PID is not alive (ESRCH)");
+        assert!(
+            !is_alive(i32::MAX),
+            "an impossible PID is not alive (ESRCH)"
+        );
     }
 }

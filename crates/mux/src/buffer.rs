@@ -63,9 +63,9 @@ pub fn handle_buffers(event: &KeyEvent, state: &mut BufferPickerState) -> Buffer
         (m, Key::End) if m.is_empty() => set_sel(state, last),
         // 'G' arrives as (empty, 'G') from the byte parser; accept SHIFT too.
         (m, Key::Char('G')) if m.is_empty() || m == Modifiers::SHIFT => set_sel(state, last),
-        (_, Key::Enter | Key::KeypadEnter) => {
-            BufferOutcome::Act(BufferAction::Paste(state.entries[state.selected].name.clone()))
-        }
+        (_, Key::Enter | Key::KeypadEnter) => BufferOutcome::Act(BufferAction::Paste(
+            state.entries[state.selected].name.clone(),
+        )),
         (m, Key::Char('d')) if m.is_empty() => {
             let name = state.entries[state.selected].name.clone();
             state.entries.remove(state.selected);
@@ -113,7 +113,10 @@ mod tests {
     }
 
     fn entry(name: &str) -> BufferEntry {
-        BufferEntry { name: name.into(), preview: format!("preview of {name}") }
+        BufferEntry {
+            name: name.into(),
+            preview: format!("preview of {name}"),
+        }
     }
 
     fn sample() -> BufferPickerState {
@@ -126,12 +129,18 @@ mod tests {
     #[test]
     fn navigation_clamps_both_ends() {
         let mut s = sample();
-        assert_eq!(handle_buffers(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut s), BufferOutcome::None);
+        assert_eq!(
+            handle_buffers(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut s),
+            BufferOutcome::None
+        );
         for _ in 0..10 {
             handle_buffers(&ev(Modifiers::empty(), Key::Char('j')), &mut s);
         }
         assert_eq!(s.selected, 2);
-        assert_eq!(handle_buffers(&ev(Modifiers::empty(), Key::Char('j')), &mut s), BufferOutcome::None);
+        assert_eq!(
+            handle_buffers(&ev(Modifiers::empty(), Key::Char('j')), &mut s),
+            BufferOutcome::None
+        );
         handle_buffers(&ev(Modifiers::empty(), Key::Home), &mut s);
         assert_eq!(s.selected, 0);
         handle_buffers(&ev(Modifiers::empty(), Key::End), &mut s);
@@ -141,7 +150,10 @@ mod tests {
     #[test]
     fn shifted_g_arrives_without_modifier() {
         let mut s = sample();
-        assert_eq!(handle_buffers(&ev(Modifiers::empty(), Key::Char('G')), &mut s), BufferOutcome::Redraw);
+        assert_eq!(
+            handle_buffers(&ev(Modifiers::empty(), Key::Char('G')), &mut s),
+            BufferOutcome::Redraw
+        );
         assert_eq!(s.selected, 2);
     }
 
@@ -160,17 +172,29 @@ mod tests {
         let mut s = sample();
         handle_buffers(&ev(Modifiers::empty(), Key::End), &mut s); // selected = 2 (buffer0)
         let out = handle_buffers(&ev(Modifiers::empty(), Key::Char('d')), &mut s);
-        assert_eq!(out, BufferOutcome::Act(BufferAction::Delete("buffer0".into())));
+        assert_eq!(
+            out,
+            BufferOutcome::Act(BufferAction::Delete("buffer0".into()))
+        );
         assert_eq!(s.entries.len(), 2);
-        assert_eq!(s.selected, 1, "selection re-clamped after removing the last row");
+        assert_eq!(
+            s.selected, 1,
+            "selection re-clamped after removing the last row"
+        );
         assert!(s.entries.iter().all(|e| e.name != "buffer0"));
     }
 
     #[test]
     fn empty_list_ignores_keys_but_escape_closes() {
-        let mut s = BufferPickerState { entries: vec![], selected: 0 };
+        let mut s = BufferPickerState {
+            entries: vec![],
+            selected: 0,
+        };
         for key in [Key::Char('j'), Key::Char('G'), Key::Enter, Key::Char('d')] {
-            assert_eq!(handle_buffers(&ev(Modifiers::empty(), key), &mut s), BufferOutcome::None);
+            assert_eq!(
+                handle_buffers(&ev(Modifiers::empty(), key), &mut s),
+                BufferOutcome::None
+            );
         }
         // Esc must still close an empty chooser (not a no-op trap).
         assert_eq!(
@@ -182,6 +206,9 @@ mod tests {
     #[test]
     fn escape_cancels() {
         let mut s = sample();
-        assert_eq!(handle_buffers(&ev(Modifiers::empty(), Key::Escape), &mut s), BufferOutcome::Cancel);
+        assert_eq!(
+            handle_buffers(&ev(Modifiers::empty(), Key::Escape), &mut s),
+            BufferOutcome::Cancel
+        );
     }
 }

@@ -1,13 +1,15 @@
 //! Per-client renderer task: diffs frames against last frame, emits ANSI as ServerMsg::Output.
 
-use crate::error::DaemonError;
-use plexy_glass_mux::{DiffRenderer, VirtualScreen};
-use plexy_glass_protocol::{Codec, ServerMsg};
 use std::future;
 use std::io::Error;
 use std::sync::Arc;
+
+use plexy_glass_mux::{DiffRenderer, VirtualScreen};
+use plexy_glass_protocol::{Codec, ServerMsg};
 use tokio::io::AsyncWrite;
 use tokio::sync::{mpsc, watch};
+
+use crate::error::DaemonError;
 
 pub struct Renderer {
     diff: DiffRenderer,
@@ -104,14 +106,22 @@ impl Default for Renderer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plexy_glass_emulator::Cell;
     use tokio::io;
     use tokio::io::AsyncRead;
 
+    use super::*;
+
     fn screen_with(ch: &str) -> Arc<VirtualScreen> {
         let mut s = VirtualScreen::blank(2, 4);
-        s.put(0, 0, Cell { grapheme: ch.into(), ..Cell::default() });
+        s.put(
+            0,
+            0,
+            Cell {
+                grapheme: ch.into(),
+                ..Cell::default()
+            },
+        );
         Arc::new(s)
     }
 
@@ -141,11 +151,17 @@ mod tests {
         });
 
         // Initial frame is session A.
-        assert!(next_output(&mut client_sock).await.contains('A'), "initial frame is A");
+        assert!(
+            next_output(&mut client_sock).await.contains('A'),
+            "initial frame is A"
+        );
 
         // Hand the renderer session B's frame stream.
         switch_tx.send(rx_b).unwrap();
-        assert!(next_output(&mut client_sock).await.contains('B'), "post-switch frame is B");
+        assert!(
+            next_output(&mut client_sock).await.contains('B'),
+            "post-switch frame is B"
+        );
 
         task.abort();
     }

@@ -2,8 +2,11 @@
 //! list. Applying a preset rearranges the window's existing panes, and never
 //! touches the panes themselves.
 
-use crate::{direction::SplitDir, layout::LayoutNode, pane_id::PaneId};
 use std::fmt;
+
+use crate::direction::SplitDir;
+use crate::layout::LayoutNode;
+use crate::pane_id::PaneId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutPreset {
@@ -96,7 +99,10 @@ pub(crate) fn build(preset: LayoutPreset, panes: &[PaneId]) -> LayoutNode {
             let mut start = 0usize;
             for i in 0..rows {
                 let len = base + usize::from(i < rem);
-                row_nodes.push(even_leaf_chain(&panes[start..start + len], SplitDir::Vertical));
+                row_nodes.push(even_leaf_chain(
+                    &panes[start..start + len],
+                    SplitDir::Vertical,
+                ));
                 start += len;
             }
             even_node_chain(row_nodes, SplitDir::Horizontal)
@@ -146,8 +152,9 @@ fn even_node_chain(mut nodes: Vec<LayoutNode>, dir: SplitDir) -> LayoutNode {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashMap;
+
+    use super::*;
     use crate::{LayoutTree, PaneId, Rect};
 
     fn ids(n: u32) -> Vec<PaneId> {
@@ -207,7 +214,10 @@ mod tests {
     fn even_vertical_is_stacked_and_even() {
         for n in 2..=5u32 {
             let rs = rects(LayoutPreset::EvenVertical, n);
-            assert!(rs.iter().all(|r| r.col == 0 && r.cols == 120), "{n}: {rs:?}");
+            assert!(
+                rs.iter().all(|r| r.col == 0 && r.cols == 120),
+                "{n}: {rs:?}"
+            );
             let min = rs.iter().map(|r| r.rows).min().unwrap();
             let max = rs.iter().map(|r| r.rows).max().unwrap();
             assert!(max - min <= 1, "{n} panes: heights {rs:?}");
@@ -240,7 +250,10 @@ mod tests {
             let main = rs[0];
             assert_eq!((main.row, main.col), (0, 0));
             assert_eq!(main.cols, 120, "main pane spans full width");
-            assert!(main.rows >= 21 && main.rows <= 26, "{n}: main height {main:?}");
+            assert!(
+                main.rows >= 21 && main.rows <= 26,
+                "{n}: main height {main:?}"
+            );
             // The rest tile below the main pane, evenly.
             for r in &rs[1..] {
                 assert!(r.row > main.rows, "{n}: row pane above main: {r:?}");
@@ -299,13 +312,19 @@ mod tests {
         let rs4 = rects(LayoutPreset::Tiled, 4);
         let hs4 = row_heights(&rs4);
         assert_eq!(hs4.len(), 2, "n=4 tiled must have 2 distinct row heights");
-        assert!(hs4[1] - hs4[0] <= 1, "n=4 tiled row heights uneven: {hs4:?}");
+        assert!(
+            hs4[1] - hs4[0] <= 1,
+            "n=4 tiled row heights uneven: {hs4:?}"
+        );
 
         // n=9: three rows of 3 panes, heights should be within 1 of each other.
         let rs9 = rects(LayoutPreset::Tiled, 9);
         let hs9 = row_heights(&rs9);
         assert_eq!(hs9.len(), 3, "n=9 tiled must have 3 distinct row heights");
-        assert!(hs9[2] - hs9[0] <= 1, "n=9 tiled row heights uneven: {hs9:?}");
+        assert!(
+            hs9[2] - hs9[0] <= 1,
+            "n=9 tiled row heights uneven: {hs9:?}"
+        );
     }
 
     #[test]

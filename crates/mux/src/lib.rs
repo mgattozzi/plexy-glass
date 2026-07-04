@@ -44,7 +44,6 @@ pub use compositor::{
 };
 pub use copy_mode::{CopyMode, CopyModeAction, MatchSpan, SearchState};
 pub use diff::{DiffRenderer, GraphicsCaps};
-pub use virtual_screen::VisiblePlacement;
 pub use direction::{Direction, SplitDir};
 pub use hint::{
     DEFAULT_ALPHABET, HintAction, HintKind, HintOutcome, HintPick, HintState, HintTarget,
@@ -54,19 +53,18 @@ pub use history::{HistoryEntry, HistoryOutcome, HistoryState, HistoryTarget, han
 pub use key::{Key, KeyEvent, KeyEventKind, Modifiers};
 pub use keymap::{Chord, Command, Keymap, KeymapAction};
 pub use layout::{BorderHit, BorderSide, CloseOutcome, LayoutError, LayoutTree, SplitPosition};
-pub use mouse::{encode_for_child, MouseButton, MouseEncoding, MouseEvent, MouseKind, MouseModifiers, MouseParseAction, MouseParser};
-pub use overlay::{
-    Overlay, OverlayAction, PickerEntry, RenameTarget, picker_filtered_indices,
+pub use mouse::{
+    MouseButton, MouseEncoding, MouseEvent, MouseKind, MouseModifiers, MouseParseAction,
+    MouseParser, encode_for_child,
 };
+pub use overlay::{Overlay, OverlayAction, PickerEntry, RenameTarget, picker_filtered_indices};
 pub use pane_id::{PaneId, WindowId};
 pub use preset::LayoutPreset;
 pub use rect::Rect;
-pub use selection::{
-    Selection, extract_text, line_at, screen_text, viewport_content_row, word_at,
-};
+pub use selection::{Selection, extract_text, line_at, screen_text, viewport_content_row, word_at};
 pub use status::StatusLine;
 pub use tree::{
     NodeKey, TreeAction, TreeKind, TreeMode, TreeNode, TreeOutcome, TreeState, handle_tree,
     pane_label, session_label, window_label,
 };
-pub use virtual_screen::VirtualScreen;
+pub use virtual_screen::{VirtualScreen, VisiblePlacement};

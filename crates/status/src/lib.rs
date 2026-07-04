@@ -11,10 +11,10 @@ pub use engine::{
     WindowSummary,
 };
 pub use glyphs::{Cluster, GlyphSet, powerline_zone};
-pub use style::{resolve_color, resolve_style, ResolvedStyle, Rgb};
+pub use style::{ResolvedStyle, Rgb, resolve_color, resolve_style};
 pub use widget::{Segment, StyledText, Widget};
 pub use widgets::{
-    AttachedClientsWidget, BatteryWidget, CpuLoadWidget, CwdWidget, GitBranchWidget, HostnameWidget,
-    MemoryWidget, PrefixIndicatorWidget, SeparatorWidget, SessionWidget, ShellWidget, TextWidget,
-    TimeWidget, WindowListWidget,
+    AttachedClientsWidget, BatteryWidget, CpuLoadWidget, CwdWidget, GitBranchWidget,
+    HostnameWidget, MemoryWidget, PrefixIndicatorWidget, SeparatorWidget, SessionWidget,
+    ShellWidget, TextWidget, TimeWidget, WindowListWidget,
 };

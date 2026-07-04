@@ -8,27 +8,25 @@ pub mod shell_integration;
 pub mod transport;
 pub mod tty;
 
+use std::os::fd::{AsFd, OwnedFd};
+use std::time::Duration;
+use std::{env, io, process};
+
 pub use error::ClientError;
 pub use kill::{KillOutcome, kill, kill_all};
-pub use shell_integration::shell_integration_snippet;
-pub use pump::{handshake_spawn, pump};
-pub use transport::{connect_only, connect_or_spawn, default_socket_path};
-pub use tty::{HostTty, current_size};
-
 use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
     ClientHello, ClientMsg, Codec, PROTOCOL_VERSION, ServerMsg, SpawnSpec, client_handshake,
     client_handshake_with,
 };
-use std::env;
-use std::io;
-use std::os::fd::{AsFd, OwnedFd};
-use std::process;
-use std::time::Duration;
+pub use pump::{handshake_spawn, pump};
+pub use shell_integration::shell_integration_snippet;
 use tokio::io as tokio_io;
 use tokio::signal::unix;
 use tokio::sync::mpsc;
 use tracing::info;
+pub use transport::{connect_only, connect_or_spawn, default_socket_path};
+pub use tty::{HostTty, current_size};
 
 /// Attach to (or create) a session and drive the terminal interactively.
 ///
@@ -65,7 +63,11 @@ pub async fn run(
     // a test hook so the e2e harness (whose PTY can't answer the graphics
     // query) can exercise the full image render path. No effect unless set.
     let mut graphics = if env::var_os("PLEXY_FORCE_KITTY").is_some() {
-        plexy_glass_protocol::GraphicsCaps { kitty: true, sixel: false, iterm2: false }
+        plexy_glass_protocol::GraphicsCaps {
+            kitty: true,
+            sixel: false,
+            iterm2: false,
+        }
     } else {
         negotiate::classify_graphics(&probe_reply)
     };
@@ -80,7 +82,11 @@ pub async fn run(
     // sentinel in `probe_reply`. The pump reads stdin fresh, so without this
     // they'd be dropped; replay them as initial input once the session attaches.
     let type_ahead = negotiate::type_ahead_after_probe(&probe_reply).to_vec();
-    let caps = negotiate::EnabledCaps { kbd, focus_events: true, color_scheme: true };
+    let caps = negotiate::EnabledCaps {
+        kbd,
+        focus_events: true,
+        color_scheme: true,
+    };
 
     // Enable SGR-encoded mouse coords (?1006h), button-event tracking (?1002h,
     // motion only while a button is held; ?1003h would flood with hover), and
@@ -99,27 +105,49 @@ pub async fn run(
     tty::install_emergency_restore(stdin_fd, tty_guard.original_termios());
 
     let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
-    let hello = ClientHello { version: PROTOCOL_VERSION, term, kbd, graphics };
+    let hello = ClientHello {
+        version: PROTOCOL_VERSION,
+        term,
+        kbd,
+        graphics,
+    };
     let server_hello = client_handshake_with(&mut reader, &mut writer, hello).await?;
-    info!(daemon_pid = server_hello.daemon_pid, ?kbd, "connected to daemon");
+    info!(
+        daemon_pid = server_hello.daemon_pid,
+        ?kbd,
+        "connected to daemon"
+    );
 
     let initial_size = current_size(stdin_fd)?;
 
     let spec = spawn_cmd.unwrap_or_else(default_spawn_spec);
-    handshake_spawn(&mut reader, &mut writer, name, create_if_missing, Some(spec), initial_size)
-        .await?;
+    handshake_spawn(
+        &mut reader,
+        &mut writer,
+        name,
+        create_if_missing,
+        Some(spec),
+        initial_size,
+    )
+    .await?;
 
     // Replay probe-window type-ahead now that a pane exists to receive it. These
     // are plain keystrokes: focus/theme/mouse/paste modes are enabled only after
     // the probe, so the post-DA1 tail can't carry those events. Send it as Input.
     if !type_ahead.is_empty() {
-        pump::send_client_msg(&mut writer, &ClientMsg::Input(bytes::Bytes::from(type_ahead)))
-            .await?;
+        pump::send_client_msg(
+            &mut writer,
+            &ClientMsg::Input(bytes::Bytes::from(type_ahead)),
+        )
+        .await?;
     }
 
     // SIGWINCH plumbing.
     let (resize_tx, resize_rx) = mpsc::channel(4);
-    let owned_fd = stdin.as_fd().try_clone_to_owned().map_err(ClientError::Io)?;
+    let owned_fd = stdin
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(ClientError::Io)?;
     spawn_sigwinch_task(resize_tx, owned_fd);
 
     let stdout = tokio_io::stdout();
@@ -170,15 +198,13 @@ async fn request_reply(connect: Connect, msg: ClientMsg) -> Result<ServerMsg, Cl
     let (mut reader, mut writer) = tokio_io::split(stream);
     client_handshake(&mut reader, &mut writer).await?;
 
-    let payload = postcard::to_allocvec(&msg)
-        .map_err(|e| CodecError::Encode(e.to_string()))?;
+    let payload = postcard::to_allocvec(&msg).map_err(|e| CodecError::Encode(e.to_string()))?;
     Codec::write_frame(&mut writer, &payload).await?;
 
     let frame = Codec::read_frame(&mut reader)
         .await?
         .ok_or_else(|| ClientError::Io(io::Error::other("daemon closed before reply")))?;
-    postcard::from_bytes(&frame)
-        .map_err(|e| CodecError::Decode(e.to_string()).into())
+    postcard::from_bytes(&frame).map_err(|e| CodecError::Decode(e.to_string()).into())
 }
 
 /// Send `ReloadConfig` to the daemon and print the result.
@@ -239,9 +265,15 @@ pub fn print_sessions_table(entries: &[plexy_glass_protocol::SessionEntry]) {
         println!("(no sessions)");
         return;
     }
-    println!("{:<20}  {:>7}  {:>5}  {:>7}", "NAME", "WINDOWS", "PANES", "CLIENTS");
+    println!(
+        "{:<20}  {:>7}  {:>5}  {:>7}",
+        "NAME", "WINDOWS", "PANES", "CLIENTS"
+    );
     for e in entries {
-        println!("{:<20}  {:>7}  {:>5}  {:>7}", e.name, e.windows, e.panes, e.clients);
+        println!(
+            "{:<20}  {:>7}  {:>5}  {:>7}",
+            e.name, e.windows, e.panes, e.clients
+        );
     }
 }
 
@@ -282,7 +314,10 @@ pub async fn client_run_commands(
     lines: Vec<String>,
 ) -> Result<bool, ClientError> {
     for line in lines {
-        let msg = ClientMsg::RunCommand { session: name.clone(), line };
+        let msg = ClientMsg::RunCommand {
+            session: name.clone(),
+            line,
+        };
         let reply = request_reply(Connect::Only, msg).await?;
         match reply {
             ServerMsg::CommandResult { ok: true, message } => {
@@ -312,10 +347,7 @@ pub async fn client_run_commands(
 ///
 /// Single round-trip. Returns `Ok(true)` on success, `Ok(false)` when the
 /// daemon reports an error (message printed to stderr). No daemon → `Err`.
-pub async fn client_send_input(
-    name: Option<String>,
-    bytes: Vec<u8>,
-) -> Result<bool, ClientError> {
+pub async fn client_send_input(name: Option<String>, bytes: Vec<u8>) -> Result<bool, ClientError> {
     let msg = ClientMsg::SendInput {
         session: name,
         bytes: bytes::Bytes::from(bytes),
@@ -391,7 +423,11 @@ pub async fn client_capture(name: Option<String>, last_command: bool) -> Result<
 pub async fn client_capture_block(name: Option<String>) -> Result<bool, ClientError> {
     let reply = request_reply(Connect::Only, ClientMsg::CaptureLastBlock { session: name }).await?;
     match reply {
-        ServerMsg::BlockCapture { text, exit, command_line } => {
+        ServerMsg::BlockCapture {
+            text,
+            exit,
+            command_line,
+        } => {
             // The user-facing JSON key is `output` (unified with `run --json`);
             // the wire field name `text` is internal.
             let obj = serde_json::json!({
@@ -449,7 +485,11 @@ pub async fn client_exec(
     };
     let reply = request_reply(Connect::Only, msg).await?;
     match reply {
-        ServerMsg::ExecDone { exit, output, timed_out } => {
+        ServerMsg::ExecDone {
+            exit,
+            output,
+            timed_out,
+        } => {
             if json {
                 let obj = serde_json::json!({
                     "output": output,
@@ -469,13 +509,18 @@ pub async fn client_exec(
             if !json && !output.is_empty() {
                 println!("{output}");
             }
-            if let Some(n) = exit { Ok(n) } else {
+            if let Some(n) = exit {
+                Ok(n)
+            } else {
                 eprintln!("run: shell integration reported no exit code");
                 Ok(0)
             }
         }
         ServerMsg::CommandResult { ok: false, message } => {
-            eprintln!("plexy-glass run: {}", message.as_deref().unwrap_or("run failed"));
+            eprintln!(
+                "plexy-glass run: {}",
+                message.as_deref().unwrap_or("run failed")
+            );
             Ok(1)
         }
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
@@ -489,19 +534,24 @@ pub async fn client_exec(
 /// `--timeout 0` means *no* limit (→ `None`), not "time out instantly". Absent
 /// `--timeout` is likewise `None`.
 fn exec_timeout_ms(timeout_secs: Option<u64>) -> Option<u64> {
-    timeout_secs.filter(|&s| s != 0).map(|s| s.saturating_mul(1000))
+    timeout_secs
+        .filter(|&s| s != 0)
+        .map(|s| s.saturating_mul(1000))
 }
 
 fn default_spawn_spec() -> SpawnSpec {
     let program = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    SpawnSpec { program, args: vec![], env: vec![], cwd: None }
+    SpawnSpec {
+        program,
+        args: vec![],
+        env: vec![],
+        cwd: None,
+    }
 }
 
 fn spawn_sigwinch_task(tx: mpsc::Sender<plexy_glass_protocol::PtySize>, fd: OwnedFd) {
     tokio::spawn(async move {
-        let Ok(mut sig) = unix::signal(
-            unix::SignalKind::window_change(),
-        ) else {
+        let Ok(mut sig) = unix::signal(unix::SignalKind::window_change()) else {
             return;
         };
         while sig.recv().await.is_some() {

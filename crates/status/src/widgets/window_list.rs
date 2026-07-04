@@ -1,7 +1,9 @@
-use crate::{ClickAction, EvalContext, ResolvedStyle, Segment, StyledText, Widget};
+use std::time::Duration;
+
 use async_trait::async_trait;
 use smol_str::SmolStr;
-use std::time::Duration;
+
+use crate::{ClickAction, EvalContext, ResolvedStyle, Segment, StyledText, Widget};
 
 pub struct WindowListWidget {
     pub active_style: ResolvedStyle,
@@ -67,8 +69,20 @@ mod tests {
             inactive_style: ResolvedStyle::default(),
         };
         let windows = vec![
-            WindowSummary { name: "shell0".into(), activity: false, bell: false, done: None, silence: false },
-            WindowSummary { name: "shell1".into(), activity: false, bell: false, done: None, silence: false },
+            WindowSummary {
+                name: "shell0".into(),
+                activity: false,
+                bell: false,
+                done: None,
+                silence: false,
+            },
+            WindowSummary {
+                name: "shell1".into(),
+                activity: false,
+                bell: false,
+                done: None,
+                silence: false,
+            },
         ];
         let ctx = EvalContext {
             session_name: "main",
@@ -95,8 +109,20 @@ mod tests {
             inactive_style: ResolvedStyle::default(),
         };
         let windows = vec![
-            WindowSummary { name: "alpha".into(), activity: false, bell: false, done: None, silence: false },
-            WindowSummary { name: "beta".into(), activity: false, bell: false, done: None, silence: false },
+            WindowSummary {
+                name: "alpha".into(),
+                activity: false,
+                bell: false,
+                done: None,
+                silence: false,
+            },
+            WindowSummary {
+                name: "beta".into(),
+                activity: false,
+                bell: false,
+                done: None,
+                silence: false,
+            },
         ];
         let ctx = EvalContext {
             session_name: "main",
@@ -123,9 +149,27 @@ mod tests {
             inactive_style: ResolvedStyle::default(),
         };
         let windows = vec![
-            WindowSummary { name: "clean".into(), activity: false, bell: false, done: None, silence: false },
-            WindowSummary { name: "belled".into(), activity: false, bell: true, done: None, silence: false },
-            WindowSummary { name: "noisy".into(), activity: true, bell: true, done: None, silence: false },
+            WindowSummary {
+                name: "clean".into(),
+                activity: false,
+                bell: false,
+                done: None,
+                silence: false,
+            },
+            WindowSummary {
+                name: "belled".into(),
+                activity: false,
+                bell: true,
+                done: None,
+                silence: false,
+            },
+            WindowSummary {
+                name: "noisy".into(),
+                activity: true,
+                bell: true,
+                done: None,
+                silence: false,
+            },
         ];
         let ctx = EvalContext {
             session_name: "main",
@@ -140,9 +184,15 @@ mod tests {
             dragging_window: None,
         };
         let out = w.evaluate(&ctx).await;
-        assert!(!out.segments[0].text.contains('!') && !out.segments[0].text.contains('#'), "clean window has no flags");
+        assert!(
+            !out.segments[0].text.contains('!') && !out.segments[0].text.contains('#'),
+            "clean window has no flags"
+        );
         assert!(out.segments[1].text.contains("belled!"), "bell → '!'");
-        assert!(out.segments[2].text.contains("noisy!#"), "bell + activity → '!#'");
+        assert!(
+            out.segments[2].text.contains("noisy!#"),
+            "bell + activity → '!#'"
+        );
     }
 
     #[tokio::test]
@@ -152,9 +202,27 @@ mod tests {
             inactive_style: ResolvedStyle::default(),
         };
         let windows = vec![
-            WindowSummary { name: "cur".into(), activity: false, bell: false, done: None, silence: false },
-            WindowSummary { name: "ok".into(), activity: false, bell: false, done: Some(true), silence: false },
-            WindowSummary { name: "bad".into(), activity: false, bell: false, done: Some(false), silence: false },
+            WindowSummary {
+                name: "cur".into(),
+                activity: false,
+                bell: false,
+                done: None,
+                silence: false,
+            },
+            WindowSummary {
+                name: "ok".into(),
+                activity: false,
+                bell: false,
+                done: Some(true),
+                silence: false,
+            },
+            WindowSummary {
+                name: "bad".into(),
+                activity: false,
+                bell: false,
+                done: Some(false),
+                silence: false,
+            },
         ];
         let ctx = EvalContext {
             session_name: "main",
@@ -212,12 +280,31 @@ mod tests {
     #[tokio::test]
     async fn dragging_window_segment_is_reversed() {
         use plexy_glass_emulator::Attrs;
-        let active = ResolvedStyle { fg: None, bg: None, attrs: Attrs::BOLD };
+        let active = ResolvedStyle {
+            fg: None,
+            bg: None,
+            attrs: Attrs::BOLD,
+        };
         let inactive = ResolvedStyle::default();
-        let mut w = WindowListWidget { active_style: active, inactive_style: inactive };
+        let mut w = WindowListWidget {
+            active_style: active,
+            inactive_style: inactive,
+        };
         let windows = vec![
-            WindowSummary { name: "a".into(), activity: false, bell: false, done: None, silence: false },
-            WindowSummary { name: "b".into(), activity: false, bell: false, done: None, silence: false },
+            WindowSummary {
+                name: "a".into(),
+                activity: false,
+                bell: false,
+                done: None,
+                silence: false,
+            },
+            WindowSummary {
+                name: "b".into(),
+                activity: false,
+                bell: false,
+                done: None,
+                silence: false,
+            },
         ];
         let ctx = EvalContext {
             session_name: "main",
@@ -232,7 +319,13 @@ mod tests {
             dragging_window: Some(1),
         };
         let out = w.evaluate(&ctx).await;
-        assert!(out.segments[1].style.attrs.contains(Attrs::REVERSE), "dragged tab reversed");
-        assert!(!out.segments[0].style.attrs.contains(Attrs::REVERSE), "non-dragged not reversed");
+        assert!(
+            out.segments[1].style.attrs.contains(Attrs::REVERSE),
+            "dragged tab reversed"
+        );
+        assert!(
+            !out.segments[0].style.attrs.contains(Attrs::REVERSE),
+            "non-dragged not reversed"
+        );
     }
 }

@@ -3,26 +3,26 @@
 //! Cloning a `Pane` is cheap (shared `Arc<Inner>`); shared state is protected
 //! by Mutex/broadcast/mpsc/watch as before.
 
-use crate::LockExt;
-use crate::error::DaemonError;
-use crate::osc_actions;
-use crate::pipe::{self, PipeCloseReason, PipeHandle, PipeSlot};
-use bytes::Bytes;
-use plexy_glass_config::{Config, PaletteConfig};
-use plexy_glass_emulator::{ColorQuery, Emulator, Screen};
-use plexy_glass_status::Rgb;
-use plexy_glass_mux::PaneId;
-use plexy_glass_protocol::{ExitStatus, PtySize, SpawnSpec};
-use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize as PortablePtySize};
-use std::env;
 use std::io::{Error, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
+use std::{env, thread};
+
+use bytes::Bytes;
+use plexy_glass_config::{Config, PaletteConfig};
+use plexy_glass_emulator::{ColorQuery, Emulator, Screen};
+use plexy_glass_mux::PaneId;
+use plexy_glass_protocol::{ExitStatus, PtySize, SpawnSpec};
+use plexy_glass_status::Rgb;
+use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize as PortablePtySize};
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 use tracing::{debug, error};
+
+use crate::error::DaemonError;
+use crate::pipe::{self, PipeCloseReason, PipeHandle, PipeSlot};
+use crate::{LockExt, osc_actions};
 
 /// Run a per-pane thread body under `catch_unwind`. On panic, log it (the
 /// process panic hook also logs the location) and run `on_panic` (for the
@@ -115,9 +115,7 @@ impl Pane {
                         thread::sleep(Duration::from_millis(10 * attempt));
                     }
                     Err(e) => {
-                        return Err(DaemonError::Io(Error::other(format!(
-                            "openpty: {e}"
-                        ))));
+                        return Err(DaemonError::Io(Error::other(format!("openpty: {e}"))));
                     }
                 }
             }
@@ -233,10 +231,7 @@ impl Pane {
                     // A reader panic leaves the pane no longer draining its PTY.
                     // Mirror the EOF cleanup (close any pipe) and kill the child
                     // so wait_child unblocks, reaps, and fires the death channel.
-                    pipe::cancel_slot(
-                        &pipe_for_panic,
-                        PipeCloseReason::PaneClosed,
-                    );
+                    pipe::cancel_slot(&pipe_for_panic, PipeCloseReason::PaneClosed);
                     let _ = reader_killer.kill();
                     notify_for_panic.notify_one();
                 },
@@ -247,10 +242,7 @@ impl Pane {
                             Ok(0) => {
                                 debug!("pane reader EOF");
                                 // No more output can ever flow: close any pipe.
-                                pipe::cancel_slot(
-                                    &pipe_for_reader,
-                                    PipeCloseReason::PaneClosed,
-                                );
+                                pipe::cancel_slot(&pipe_for_reader, PipeCloseReason::PaneClosed);
                                 // Final notify so the renderer can pick up any
                                 // unprocessed bytes before the connection tears down.
                                 reader_notify_for_self.notify_one();
@@ -312,10 +304,7 @@ impl Pane {
                             }
                             Err(e) => {
                                 debug!(error = %e, "pane reader closed");
-                                pipe::cancel_slot(
-                                    &pipe_for_reader,
-                                    PipeCloseReason::PaneClosed,
-                                );
+                                pipe::cancel_slot(&pipe_for_reader, PipeCloseReason::PaneClosed);
                                 return;
                             }
                         }
@@ -329,18 +318,22 @@ impl Pane {
             // indexing/unwrap; fallible I/O returns early), so there is nothing
             // to mark-dead beyond the panic hook's log. If fallible logic is ever
             // added here, give it a mark-dead on_panic like the reader's.
-            guard_thread("pane-writer", || {}, move || {
-                while let Some(chunk) = input_rx.blocking_recv() {
-                    if let Err(e) = writer.write_all(&chunk) {
-                        error!(error = %e, "pane writer error");
-                        return;
+            guard_thread(
+                "pane-writer",
+                || {},
+                move || {
+                    while let Some(chunk) = input_rx.blocking_recv() {
+                        if let Err(e) = writer.write_all(&chunk) {
+                            error!(error = %e, "pane writer error");
+                            return;
+                        }
+                        if let Err(e) = writer.flush() {
+                            error!(error = %e, "pane flush error");
+                            return;
+                        }
                     }
-                    if let Err(e) = writer.flush() {
-                        error!(error = %e, "pane flush error");
-                        return;
-                    }
-                }
-            });
+                },
+            );
         });
 
         thread::spawn(move || {
@@ -348,20 +341,24 @@ impl Pane {
             // send + join, `let _` on the join's Err), so there is nothing to
             // mark-dead beyond the panic hook's log. If fallible logic is ever
             // added here, give it a mark-dead on_panic like the reader's.
-            guard_thread("pane-wait-child", || {}, move || {
-                let status = wait_child(&mut child);
-                let _ = exit_tx.send(Some(status));
-                // Wait for the reader thread to drain any remaining PTY bytes
-                // (line-editor cleanup, final prompt erase, etc.) into the
-                // emulator before signaling death. Otherwise the connection
-                // might tear down the renderer while the host TTY is still in a
-                // mid-render state, leaving the user's host shell to need a
-                // keystroke before redrawing.
-                let _ = reader_handle.join();
-                if let Some(tx) = death_tx {
-                    let _ = tx.blocking_send(id);
-                }
-            });
+            guard_thread(
+                "pane-wait-child",
+                || {},
+                move || {
+                    let status = wait_child(&mut child);
+                    let _ = exit_tx.send(Some(status));
+                    // Wait for the reader thread to drain any remaining PTY bytes
+                    // (line-editor cleanup, final prompt erase, etc.) into the
+                    // emulator before signaling death. Otherwise the connection
+                    // might tear down the renderer while the host TTY is still in a
+                    // mid-render state, leaving the user's host shell to need a
+                    // keystroke before redrawing.
+                    let _ = reader_handle.join();
+                    if let Some(tx) = death_tx {
+                        let _ = tx.blocking_send(id);
+                    }
+                },
+            );
         });
 
         Ok(Self {
@@ -442,7 +439,11 @@ impl Pane {
     /// observability for the kill/reap (no-zombie) assertions.
     pub fn pipe_pid(&self) -> Option<u32> {
         // invariant: pipe slot mutex held briefly; no await, no nested locks.
-        self.inner.pipe.lock_recover().as_ref().and_then(PipeHandle::pid)
+        self.inner
+            .pipe
+            .lock_recover()
+            .as_ref()
+            .and_then(PipeHandle::pid)
     }
 
     pub fn id(&self) -> PaneId {
@@ -527,7 +528,10 @@ impl Pane {
     /// The paste paths gate their `\e[200~`/`\e[201~` wrapping on the pane
     /// the bytes actually go to, see `WindowManager::input_target_pane`.
     pub fn wants_bracketed_paste(&self) -> bool {
-        self.with_screen(|s| s.modes.contains(plexy_glass_emulator::Modes::BRACKETED_PASTE))
+        self.with_screen(|s| {
+            s.modes
+                .contains(plexy_glass_emulator::Modes::BRACKETED_PASTE)
+        })
     }
 
     pub fn with_screen_mut<F, R>(&self, f: F) -> R
@@ -545,11 +549,15 @@ impl Pane {
     /// Adjust the scroll offset by `delta` rows (positive = up into
     /// scrollback, negative = down toward live). Clamps to `[0, max]`.
     pub fn scroll_by(&self, delta: i32, max_offset: u32) {
-        let _ = self.inner.scroll_offset.fetch_update(
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-            |current| Some((i64::from(current) + i64::from(delta)).clamp(0, i64::from(max_offset)) as u32),
-        );
+        let _ =
+            self.inner
+                .scroll_offset
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                    Some(
+                        (i64::from(current) + i64::from(delta)).clamp(0, i64::from(max_offset))
+                            as u32,
+                    )
+                });
     }
 
     pub fn reset_scroll(&self) {
@@ -560,7 +568,9 @@ impl Pane {
     /// grid), clamped to `[0, max_offset]`. The block-scroll verbs compute a
     /// target offset and need an absolute set; `scroll_by` is relative.
     pub fn set_scroll_offset(&self, offset: u32, max_offset: u32) {
-        self.inner.scroll_offset.store(offset.min(max_offset), Ordering::SeqCst);
+        self.inner
+            .scroll_offset
+            .store(offset.min(max_offset), Ordering::SeqCst);
     }
 
     pub fn scrollback_len(&self) -> u32 {
@@ -649,9 +659,8 @@ impl Pane {
     /// `Window::resize` after the layout recomputes pane rects). Keeps
     /// `CopyMode` state consistent across host resizes.
     pub fn on_size_changed(&self, new_rows: u16) {
-        let total_lines = self.with_screen(|s| {
-            s.scrollback.len() as u32 + u32::from(s.active.num_rows())
-        });
+        let total_lines =
+            self.with_screen(|s| s.scrollback.len() as u32 + u32::from(s.active.num_rows()));
         let _ = self.with_copy_mode_mut(|cm| {
             cm.set_pane_rows(new_rows, total_lines);
         });
@@ -690,10 +699,7 @@ fn format_color_reply(query: ColorQuery, palette: &PaletteConfig) -> Option<Vec<
         None
     })?;
     Some(
-        format!(
-            "\x1b]{osc_num};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x07",
-        )
-        .into_bytes(),
+        format!("\x1b]{osc_num};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x07").into_bytes(),
     )
 }
 
@@ -753,10 +759,11 @@ fn wait_child(child: &mut Box<dyn Child + Send + Sync>) -> ExitStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plexy_glass_mux::PaneId;
     use tokio::sync::Notify;
     use tokio::time::{self, Instant};
+
+    use super::*;
 
     fn size() -> PtySize {
         PtySize {
@@ -773,22 +780,36 @@ mod tests {
 
     #[test]
     fn guard_thread_runs_on_panic_handler_when_body_panics() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         let fired = Arc::new(AtomicBool::new(false));
         let f = Arc::clone(&fired);
-        guard_thread("test", move || f.store(true, Ordering::SeqCst), || panic!("boom"));
-        assert!(fired.load(Ordering::SeqCst), "on_panic must fire when body panics");
+        guard_thread(
+            "test",
+            move || f.store(true, Ordering::SeqCst),
+            || panic!("boom"),
+        );
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "on_panic must fire when body panics"
+        );
     }
 
     #[test]
     fn guard_thread_skips_handler_on_clean_body() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         let fired = Arc::new(AtomicBool::new(false));
         let f = Arc::clone(&fired);
-        guard_thread("test", move || f.store(true, Ordering::SeqCst), || { /* clean */ });
-        assert!(!fired.load(Ordering::SeqCst), "on_panic must NOT fire on a clean body");
+        guard_thread(
+            "test",
+            move || f.store(true, Ordering::SeqCst),
+            || { /* clean */ },
+        );
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "on_panic must NOT fire on a clean body"
+        );
     }
 
     #[tokio::test]
@@ -800,8 +821,15 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p =
-            Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
+        let p = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .expect("spawn");
         let mut exit = p.exit_rx();
         assert!(exit.borrow().is_none(), "child should still be running");
         p.kill_child();
@@ -823,8 +851,15 @@ mod tests {
             env: vec![("TERM".into(), "xterm-ghostty".into())],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg())
-            .expect("spawn");
+        let p = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .expect("spawn");
         assert_eq!(p.with_screen(|s| s.term.clone()), "xterm-ghostty");
         p.kill_child();
     }
@@ -837,8 +872,15 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg())
-            .expect("spawn");
+        let p = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .expect("spawn");
 
         p.enter_copy_mode(10, 24, 0, 0);
         assert!(p.is_in_copy_mode());
@@ -853,7 +895,10 @@ mod tests {
         };
         p.enter_block_mode(bm);
         assert!(p.is_in_block_mode(), "block mode on");
-        assert!(!p.is_in_copy_mode(), "entering block mode cleared copy mode");
+        assert!(
+            !p.is_in_copy_mode(),
+            "entering block mode cleared copy mode"
+        );
 
         p.exit_block_mode();
         assert!(!p.is_in_block_mode());
@@ -862,23 +907,56 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_seeds_pixel_area_into_the_emulator() {
-        let spec = SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
         // 1600x960 over 80x24 gives 20x40 px cells (distinct from the 10x20 fallback).
-        let sz = PtySize { rows: 24, cols: 80, pixel_width: 1600, pixel_height: 960 };
-        let p = Pane::spawn(PaneId(0), spec, sz, Arc::new(Notify::new()), None, cfg())
-            .expect("spawn");
-        assert_eq!(p.with_screen(plexy_glass_emulator::Screen::cell_pixels), (20, 40));
+        let sz = PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 1600,
+            pixel_height: 960,
+        };
+        let p =
+            Pane::spawn(PaneId(0), spec, sz, Arc::new(Notify::new()), None, cfg()).expect("spawn");
+        assert_eq!(
+            p.with_screen(plexy_glass_emulator::Screen::cell_pixels),
+            (20, 40)
+        );
         p.kill_child();
     }
 
     #[tokio::test]
     async fn resize_updates_pixel_area() {
-        let spec = SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg())
-            .expect("spawn");
-        p.resize(PtySize { rows: 24, cols: 80, pixel_width: 800, pixel_height: 480 })
-            .expect("resize");
-        assert_eq!(p.with_screen(plexy_glass_emulator::Screen::cell_pixels), (10, 20));
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let p = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .expect("spawn");
+        p.resize(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+        })
+        .expect("resize");
+        assert_eq!(
+            p.with_screen(plexy_glass_emulator::Screen::cell_pixels),
+            (10, 20)
+        );
         p.kill_child();
     }
 
@@ -890,8 +968,15 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let pane = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg())
-            .expect("spawn");
+        let pane = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .expect("spawn");
 
         // Poll the emulator screen rather than the broadcast channel: /bin/echo
         // exits almost immediately, so its output can be broadcast (and lost)
@@ -931,7 +1016,15 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
+        let session = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .expect("spawn");
         let mut rx = session.subscribe_output();
 
         session
@@ -942,9 +1035,7 @@ mod tests {
         let mut got = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            if let Ok(Ok(chunk)) =
-                time::timeout(Duration::from_millis(200), rx.recv()).await
-            {
+            if let Ok(Ok(chunk)) = time::timeout(Duration::from_millis(200), rx.recv()).await {
                 got.extend_from_slice(&chunk);
             }
             if got.windows(4).any(|w| w == b"ping") {
@@ -973,8 +1064,15 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg())
-            .expect("spawn");
+        let p = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .expect("spawn");
         assert!(!p.take_activity(), "no activity before any output");
         assert!(!p.take_bell(), "no bell before any output");
         // cat echoes its input; the BEL byte makes the emulator flag a bell.
@@ -1003,7 +1101,15 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
+        let session = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .expect("spawn");
         // Wait for the child to exit so the PTY has flushed.
         let _ = time::timeout(Duration::from_secs(2), session.wait()).await;
         // Give the reader thread a beat to drain.
@@ -1031,7 +1137,15 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
+        let session = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .expect("spawn");
 
         session
             .resize(PtySize {
@@ -1060,7 +1174,15 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
+        let p = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .expect("spawn");
         assert_eq!(p.scroll_offset(), 0);
     }
 
@@ -1072,7 +1194,15 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
+        let p = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .expect("spawn");
         p.scroll_by(-5, 100);
         assert_eq!(p.scroll_offset(), 0);
         p.scroll_by(3, 10);
@@ -1094,7 +1224,15 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
+        let p = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .expect("spawn");
         p.set_scroll_offset(7, 10);
         assert_eq!(p.scroll_offset(), 7);
         // Absolute, not relative: setting 3 lands on 3, not 10.
@@ -1115,7 +1253,15 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let session = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).expect("spawn");
+        let session = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .expect("spawn");
         let _ = time::timeout(Duration::from_secs(2), session.wait()).await;
         time::sleep(Duration::from_millis(100)).await;
 
@@ -1138,7 +1284,15 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).unwrap();
+        let p = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .unwrap();
         assert!(!p.is_in_copy_mode());
         p.enter_copy_mode(100, 24, 99, 0);
         assert!(p.is_in_copy_mode());
@@ -1157,7 +1311,15 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let p = Pane::spawn(PaneId(0), spec, size(), Arc::new(Notify::new()), None, cfg()).unwrap();
+        let p = Pane::spawn(
+            PaneId(0),
+            spec,
+            size(),
+            Arc::new(Notify::new()),
+            None,
+            cfg(),
+        )
+        .unwrap();
         p.enter_copy_mode(100, 24, 99, 0);
         p.on_size_changed(10);
         let pane_rows = p.with_copy_mode(|cm| cm.pane_rows).unwrap();

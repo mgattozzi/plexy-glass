@@ -39,7 +39,7 @@ pub use hyperlinks::HyperlinkTable;
 pub use keyboard::KeyboardState;
 pub use modes::Modes;
 pub use screen::{ColorQuery, Screen};
-pub use scrollback::{Scrollback, DEFAULT_SCROLLBACK_LINES};
+pub use scrollback::{DEFAULT_SCROLLBACK_LINES, Scrollback};
 pub use tabs::TabStops;
 pub use width::{
     char_width, display_width, grapheme_advance, graphemes_with_width, truncate_to_width,

@@ -1,0 +1,8 @@
+# Nightly-only import formatting (run via `cargo +nightly fmt`). Module
+# granularity: merge same-module `use`s into one `use mod::{a, b};`.
+# StdExternalCrate: order imports in three blocks, std, external crates,
+# then this crate. Pairs with `clippy::absolute_paths` (use-imports,
+# never inline fully-qualified paths); see CLAUDE.md "Imports, not
+# fully-qualified paths".
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"

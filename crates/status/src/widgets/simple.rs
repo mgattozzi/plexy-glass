@@ -1,8 +1,10 @@
-use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
+use std::time::Duration;
+
 use async_trait::async_trait;
 use nix::unistd;
 use smol_str::SmolStr;
-use std::time::Duration;
+
+use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
 
 pub struct TextWidget {
     pub text: SmolStr,
@@ -60,11 +62,7 @@ impl Widget for SessionWidget {
         for _ in 0..self.pad_right {
             buf.push(' ');
         }
-        StyledText::single_clickable(
-            SmolStr::new(buf),
-            self.style,
-            crate::ClickAction::Detach,
-        )
+        StyledText::single_clickable(SmolStr::new(buf), self.style, crate::ClickAction::Detach)
     }
 }
 
@@ -154,7 +152,11 @@ impl Widget for PrefixIndicatorWidget {
         let pfx = ctx.prefix_active;
         let tag = self.content.trim();
         if ctx.copy_mode_active {
-            let t = if pfx { format!(" COPY·{tag} ") } else { " COPY ".to_string() };
+            let t = if pfx {
+                format!(" COPY·{tag} ")
+            } else {
+                " COPY ".to_string()
+            };
             return StyledText::single_clickable(
                 SmolStr::new(t),
                 self.style,
@@ -162,7 +164,11 @@ impl Widget for PrefixIndicatorWidget {
             );
         }
         if ctx.sync_active {
-            let t = if pfx { format!(" SYNC·{tag} ") } else { " SYNC ".to_string() };
+            let t = if pfx {
+                format!(" SYNC·{tag} ")
+            } else {
+                " SYNC ".to_string()
+            };
             return StyledText::single_clickable(
                 SmolStr::new(t),
                 self.style,
@@ -170,7 +176,11 @@ impl Widget for PrefixIndicatorWidget {
             );
         }
         if ctx.zoom_active {
-            let t = if pfx { format!(" Z·{tag} ") } else { " Z ".to_string() };
+            let t = if pfx {
+                format!(" Z·{tag} ")
+            } else {
+                " Z ".to_string()
+            };
             return StyledText::single(SmolStr::new(t), self.style);
         }
         if !pfx {
@@ -466,7 +476,10 @@ mod tests {
             content: "PFX".into(),
             icon: SmolStr::new(""),
         };
-        let ctx = EvalContext { zoom_active: true, ..ctx_empty() };
+        let ctx = EvalContext {
+            zoom_active: true,
+            ..ctx_empty()
+        };
         let out = w.evaluate(&ctx).await;
         assert_eq!(out.segments[0].text.as_str(), " Z ");
     }
@@ -478,7 +491,11 @@ mod tests {
             content: "PFX".into(),
             icon: SmolStr::new(""),
         };
-        let ctx = EvalContext { sync_active: true, zoom_active: true, ..ctx_empty() };
+        let ctx = EvalContext {
+            sync_active: true,
+            zoom_active: true,
+            ..ctx_empty()
+        };
         let out = w.evaluate(&ctx).await;
         assert_eq!(out.segments[0].text.as_str(), " SYNC ");
     }

@@ -5,9 +5,9 @@
 //! `Screen`, returns a `BlockModeAction`); the connection layer applies the
 //! action (clipboard / paste buffer / inject / exit).
 
-use crate::{Direction, Key, KeyEvent, Modifiers};
 use plexy_glass_emulator::Screen;
-use crate::blocks;
+
+use crate::{Direction, Key, KeyEvent, Modifiers, blocks};
 
 /// Block-mode state. `selected` is the absolute line of the selected block's
 /// `PROMPT_START`; `viewport_top` is the absolute line shown at viewport row 0
@@ -117,7 +117,7 @@ impl BlockMode {
 
 /// Consume one key event, mutate state, return the action the caller applies.
 pub fn handle(event: &KeyEvent, state: &mut BlockMode, screen: &Screen) -> BlockModeAction {
-    use BlockModeAction::{Exit, Render, Yank, Ignore, ReRun, ToggleFold, FoldAll, UnfoldAll};
+    use BlockModeAction::{Exit, FoldAll, Ignore, ReRun, Render, ToggleFold, UnfoldAll, Yank};
 
     // A full-screen app took over the pane (alt screen) while block mode was
     // open. The OSC 133 marks live on the MAIN grid's scrollback, not on what
@@ -256,9 +256,16 @@ fn next_in(set: &[u32], selected: u32, forward: bool) -> Option<u32> {
         return None;
     }
     if forward {
-        set.iter().copied().find(|&p| p > selected).or_else(|| set.first().copied())
+        set.iter()
+            .copied()
+            .find(|&p| p > selected)
+            .or_else(|| set.first().copied())
     } else {
-        set.iter().copied().rev().find(|&p| p < selected).or_else(|| set.last().copied())
+        set.iter()
+            .copied()
+            .rev()
+            .find(|&p| p < selected)
+            .or_else(|| set.last().copied())
     }
 }
 
@@ -290,8 +297,7 @@ fn recompute_matches(screen: &Screen, query: &str, prior: Option<&[u32]>) -> Vec
     candidates
         .into_iter()
         .filter(|&prompt| {
-            let text =
-                blocks::block_text(screen, blocks::block_extent(screen, prompt));
+            let text = blocks::block_text(screen, blocks::block_extent(screen, prompt));
             text.to_lowercase().contains(&q)
         })
         .collect()
@@ -302,7 +308,9 @@ fn recompute_matches(screen: &Screen, query: &str, prior: Option<&[u32]>) -> Vec
 /// empty or the selection still matches.
 fn snap_after_filter(state: &mut BlockMode) {
     let target = {
-        let Some(f) = state.filter.as_ref() else { return };
+        let Some(f) = state.filter.as_ref() else {
+            return;
+        };
         // Equivalent note (299:31, first `|| → &&`): when query is empty and
         // `recompute_matches` seeded matches as all_prompt_lines, selected is always
         // in matches → the third `||` clause fires and returns early anyway.
@@ -319,7 +327,13 @@ fn snap_after_filter(state: &mut BlockMode) {
             // Equivalent note (306:69, `< → <=`): selected is guaranteed not in
             // matches (the `contains` guard would have returned above), so
             // `p <= selected` and `p < selected` find the same element.
-            .or_else(|| f.matches.iter().copied().rev().find(|&p| p < state.selected))
+            .or_else(|| {
+                f.matches
+                    .iter()
+                    .copied()
+                    .rev()
+                    .find(|&p| p < state.selected)
+            })
     };
     if let Some(t) = target {
         state.selected = t;
@@ -333,7 +347,7 @@ fn handle_filter_prompt(
     state: &mut BlockMode,
     screen: &Screen,
 ) -> BlockModeAction {
-    use BlockModeAction::{Render, Ignore};
+    use BlockModeAction::{Ignore, Render};
     match (event.mods, event.key) {
         (m, Key::Enter) if m.is_empty() => {
             if let Some(f) = state.filter.as_mut() {
@@ -386,8 +400,9 @@ fn handle_filter_prompt(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plexy_glass_emulator::Emulator;
+
+    use super::*;
 
     fn screen_from(rows: u16, cols: u16, bytes: &[u8]) -> Screen {
         let mut e = Emulator::new(rows, cols);
@@ -467,7 +482,11 @@ mod tests {
 
     #[test]
     fn new_for_refuses_on_alt_screen() {
-        let s = screen_from(4, 20, b"\x1b]133;A\x07$ x\r\n\x1b[?1049h\x1b]133;A\x07$ alt");
+        let s = screen_from(
+            4,
+            20,
+            b"\x1b]133;A\x07$ x\r\n\x1b[?1049h\x1b]133;A\x07$ alt",
+        );
         assert!(BlockMode::new_for(&s, 4).is_none());
     }
 
@@ -507,8 +526,16 @@ mod tests {
             BlockModeAction::ToggleFold(0),
             "Tab toggles the selected block"
         );
-        assert_eq!(handle(&key('Z'), &mut bm, &s), BlockModeAction::FoldAll, "Z folds all");
-        assert_eq!(handle(&key('O'), &mut bm, &s), BlockModeAction::UnfoldAll, "O unfolds all");
+        assert_eq!(
+            handle(&key('Z'), &mut bm, &s),
+            BlockModeAction::FoldAll,
+            "Z folds all"
+        );
+        assert_eq!(
+            handle(&key('O'), &mut bm, &s),
+            BlockModeAction::UnfoldAll,
+            "O unfolds all"
+        );
     }
 
     #[test]
@@ -520,7 +547,10 @@ mod tests {
         match action {
             BlockModeAction::Yank(t) => {
                 assert!(t.contains("one"), "command line present: {t:?}");
-                assert!(t.contains("out1") && t.contains("out2"), "output present: {t:?}");
+                assert!(
+                    t.contains("out1") && t.contains("out2"),
+                    "output present: {t:?}"
+                );
             }
             other => panic!("expected Yank, got {other:?}"),
         }
@@ -555,7 +585,10 @@ mod tests {
         let s = two_blocks();
         let mut bm = BlockMode::new_for(&s, 8).unwrap();
         handle(&key('k'), &mut bm, &s);
-        assert_eq!(handle(&key('r'), &mut bm, &s), BlockModeAction::ReRun("one".to_string()));
+        assert_eq!(
+            handle(&key('r'), &mut bm, &s),
+            BlockModeAction::ReRun("one".to_string())
+        );
     }
 
     #[test]
@@ -590,7 +623,11 @@ mod tests {
         // screen. `handle` must Exit (marks live on the main grid, not on screen).
         let main = two_blocks();
         let mut bm = BlockMode::new_for(&main, 8).unwrap();
-        let alt = screen_from(4, 20, b"\x1b]133;A\x07$ x\r\n\x1b[?1049h\x1b]133;A\x07$ alt");
+        let alt = screen_from(
+            4,
+            20,
+            b"\x1b]133;A\x07$ x\r\n\x1b[?1049h\x1b]133;A\x07$ alt",
+        );
         assert_eq!(handle(&key('j'), &mut bm, &alt), BlockModeAction::Exit);
         assert_eq!(handle(&key('y'), &mut bm, &alt), BlockModeAction::Exit);
     }
@@ -599,7 +636,13 @@ mod tests {
     fn handle_exits_when_no_prompts_remain() {
         // The selected prompt was evicted and no prompt survives anywhere.
         let s = screen_from(4, 20, b"plain text");
-        let mut bm = BlockMode { selected: 0, viewport_top: 0, pane_rows: 4, total_lines: 1, filter: None };
+        let mut bm = BlockMode {
+            selected: 0,
+            viewport_top: 0,
+            pane_rows: 4,
+            total_lines: 1,
+            filter: None,
+        };
         assert_eq!(handle(&key('j'), &mut bm, &s), BlockModeAction::Exit);
     }
 
@@ -640,10 +683,16 @@ mod tests {
         let s = two_blocks();
         let mut bm = BlockMode::new_for(&s, 8).unwrap(); // selected = 3 (newest)
         assert_eq!(handle(&key('G'), &mut bm, &s), BlockModeAction::Render);
-        assert_eq!(bm.selected, 3, "G at newest is a no-op move but still Render");
+        assert_eq!(
+            bm.selected, 3,
+            "G at newest is a no-op move but still Render"
+        );
         handle(&key('g'), &mut bm, &s); // → 0
         assert_eq!(handle(&key('g'), &mut bm, &s), BlockModeAction::Render);
-        assert_eq!(bm.selected, 0, "g at oldest is a no-op move but still Render");
+        assert_eq!(
+            bm.selected, 0,
+            "g at oldest is a no-op move but still Render"
+        );
     }
 
     #[test]
@@ -678,7 +727,10 @@ mod tests {
         }
         assert_eq!(bm.filter.as_ref().unwrap().matches, vec![0]);
         assert_eq!(bm.selected, 0, "selection snapped to the only match");
-        assert_eq!(handle(&KeyEvent::plain(Key::Enter), &mut bm, &s), BlockModeAction::Render);
+        assert_eq!(
+            handle(&KeyEvent::plain(Key::Enter), &mut bm, &s),
+            BlockModeAction::Render
+        );
         assert!(!bm.filter.as_ref().unwrap().prompt_active);
         assert_eq!(bm.filter.as_ref().unwrap().query, "alpha");
     }
@@ -704,10 +756,16 @@ mod tests {
     fn failed_jump_visits_only_failed_blocks_wrapping() {
         let s = three_blocks_ok_fail_ok(); // fail at line 2
         let mut bm = BlockMode::new_for(&s, 12).unwrap(); // selected = 4 (newest)
-        assert_eq!(handle(&shift_key('J'), &mut bm, &s), BlockModeAction::Render);
+        assert_eq!(
+            handle(&shift_key('J'), &mut bm, &s),
+            BlockModeAction::Render
+        );
         assert_eq!(bm.selected, 2);
         // Only one failed block → J wraps back to 2 (stays).
-        assert_eq!(handle(&shift_key('J'), &mut bm, &s), BlockModeAction::Render);
+        assert_eq!(
+            handle(&shift_key('J'), &mut bm, &s),
+            BlockModeAction::Render
+        );
         assert_eq!(bm.selected, 2);
     }
 
@@ -715,7 +773,10 @@ mod tests {
     fn failed_jump_no_failures_is_ignored() {
         let s = two_blocks(); // both blocks D;0 (ok)
         let mut bm = BlockMode::new_for(&s, 8).unwrap();
-        assert_eq!(handle(&shift_key('J'), &mut bm, &s), BlockModeAction::Ignore);
+        assert_eq!(
+            handle(&shift_key('J'), &mut bm, &s),
+            BlockModeAction::Ignore
+        );
     }
 
     #[test]
@@ -728,7 +789,10 @@ mod tests {
             handle(&key(ch), &mut bm, &s);
         }
         handle(&KeyEvent::plain(Key::Enter), &mut bm, &s);
-        assert_eq!(handle(&shift_key('J'), &mut bm, &s), BlockModeAction::Ignore);
+        assert_eq!(
+            handle(&shift_key('J'), &mut bm, &s),
+            BlockModeAction::Ignore
+        );
     }
 
     #[test]
@@ -741,9 +805,15 @@ mod tests {
         }
         handle(&KeyEvent::plain(Key::Enter), &mut bm, &s);
         assert!(bm.filter.is_some());
-        assert_eq!(handle(&KeyEvent::plain(Key::Escape), &mut bm, &s), BlockModeAction::Render);
+        assert_eq!(
+            handle(&KeyEvent::plain(Key::Escape), &mut bm, &s),
+            BlockModeAction::Render
+        );
         assert!(bm.filter.is_none());
-        assert_eq!(handle(&KeyEvent::plain(Key::Escape), &mut bm, &s), BlockModeAction::Exit);
+        assert_eq!(
+            handle(&KeyEvent::plain(Key::Escape), &mut bm, &s),
+            BlockModeAction::Exit
+        );
     }
 
     #[test]
@@ -753,7 +823,10 @@ mod tests {
         handle(&key('/'), &mut bm, &s);
         handle(&key('x'), &mut bm, &s);
         assert!(bm.filter.as_ref().unwrap().prompt_active);
-        assert_eq!(handle(&KeyEvent::plain(Key::Escape), &mut bm, &s), BlockModeAction::Render);
+        assert_eq!(
+            handle(&KeyEvent::plain(Key::Escape), &mut bm, &s),
+            BlockModeAction::Render
+        );
         assert!(bm.filter.is_none(), "Esc while typing clears the filter");
     }
 
@@ -775,7 +848,11 @@ mod tests {
         let mut bm = BlockMode::new_for(&s, 12).unwrap();
         handle(&key('/'), &mut bm, &s);
         assert_eq!(handle(&key('q'), &mut bm, &s), BlockModeAction::Render);
-        assert_eq!(bm.filter.as_ref().unwrap().query, "q", "q typed into the query");
+        assert_eq!(
+            bm.filter.as_ref().unwrap().query,
+            "q",
+            "q typed into the query"
+        );
     }
 
     // ── Modifier-guard tests ─────────────────────────────────────────
@@ -790,11 +867,26 @@ mod tests {
         let s = two_blocks();
         let mut bm = BlockMode::new_for(&s, 8).unwrap();
         let ctrl_key = |k: Key| KeyEvent::new(k, Modifiers::CTRL);
-        assert_eq!(handle(&ctrl_key(Key::Char('r')), &mut bm, &s), BlockModeAction::Ignore);
-        assert_eq!(handle(&ctrl_key(Key::Tab), &mut bm, &s), BlockModeAction::Ignore);
-        assert_eq!(handle(&ctrl_key(Key::Char('y')), &mut bm, &s), BlockModeAction::Ignore);
-        assert_eq!(handle(&ctrl_key(Key::Char('o')), &mut bm, &s), BlockModeAction::Ignore);
-        assert_eq!(handle(&ctrl_key(Key::Char('c')), &mut bm, &s), BlockModeAction::Ignore);
+        assert_eq!(
+            handle(&ctrl_key(Key::Char('r')), &mut bm, &s),
+            BlockModeAction::Ignore
+        );
+        assert_eq!(
+            handle(&ctrl_key(Key::Tab), &mut bm, &s),
+            BlockModeAction::Ignore
+        );
+        assert_eq!(
+            handle(&ctrl_key(Key::Char('y')), &mut bm, &s),
+            BlockModeAction::Ignore
+        );
+        assert_eq!(
+            handle(&ctrl_key(Key::Char('o')), &mut bm, &s),
+            BlockModeAction::Ignore
+        );
+        assert_eq!(
+            handle(&ctrl_key(Key::Char('c')), &mut bm, &s),
+            BlockModeAction::Ignore
+        );
     }
 
     #[test]
@@ -808,8 +900,14 @@ mod tests {
         assert_eq!(bm.selected, 2, "K moves backward to failed block at 2");
         // Reset to a non-fail block, then try Shift+K:
         bm.selected = 4;
-        assert_eq!(handle(&shift_key('K'), &mut bm, &s), BlockModeAction::Render);
-        assert_eq!(bm.selected, 2, "Shift+K also moves backward to failed block");
+        assert_eq!(
+            handle(&shift_key('K'), &mut bm, &s),
+            BlockModeAction::Render
+        );
+        assert_eq!(
+            bm.selected, 2,
+            "Shift+K also moves backward to failed block"
+        );
     }
 
     #[test]
@@ -821,12 +919,21 @@ mod tests {
         handle(&key('g'), &mut bm, &s); // go to first
         assert_eq!(bm.selected, 0);
         // Shift+G should jump to last:
-        assert_eq!(handle(&shift_key('G'), &mut bm, &s), BlockModeAction::Render);
+        assert_eq!(
+            handle(&shift_key('G'), &mut bm, &s),
+            BlockModeAction::Render
+        );
         assert_eq!(bm.selected, 3, "Shift+G jumps to last block");
         // Shift+Z folds all:
-        assert_eq!(handle(&shift_key('Z'), &mut bm, &s), BlockModeAction::FoldAll);
+        assert_eq!(
+            handle(&shift_key('Z'), &mut bm, &s),
+            BlockModeAction::FoldAll
+        );
         // Shift+O unfolds all:
-        assert_eq!(handle(&shift_key('O'), &mut bm, &s), BlockModeAction::UnfoldAll);
+        assert_eq!(
+            handle(&shift_key('O'), &mut bm, &s),
+            BlockModeAction::UnfoldAll
+        );
     }
 
     #[test]
@@ -839,22 +946,46 @@ mod tests {
         let ctrl = |k: Key| KeyEvent::new(k, Modifiers::CTRL);
 
         // j and k have `m.is_empty()` guard → Ctrl falls through to _ => Ignore
-        assert_eq!(handle(&ctrl(Key::Char('j')), &mut bm, &s), BlockModeAction::Ignore);
-        assert_eq!(handle(&ctrl(Key::Char('k')), &mut bm, &s), BlockModeAction::Ignore);
-        assert_eq!(handle(&ctrl(Key::Char('g')), &mut bm, &s), BlockModeAction::Ignore);
+        assert_eq!(
+            handle(&ctrl(Key::Char('j')), &mut bm, &s),
+            BlockModeAction::Ignore
+        );
+        assert_eq!(
+            handle(&ctrl(Key::Char('k')), &mut bm, &s),
+            BlockModeAction::Ignore
+        );
+        assert_eq!(
+            handle(&ctrl(Key::Char('g')), &mut bm, &s),
+            BlockModeAction::Ignore
+        );
 
         // G/Z/O have `m.is_empty() || m == SHIFT` guard → Ctrl falls through
-        assert_eq!(handle(&ctrl(Key::Char('G')), &mut bm, &s), BlockModeAction::Ignore);
-        assert_eq!(handle(&ctrl(Key::Char('Z')), &mut bm, &s), BlockModeAction::Ignore);
-        assert_eq!(handle(&ctrl(Key::Char('O')), &mut bm, &s), BlockModeAction::Ignore);
+        assert_eq!(
+            handle(&ctrl(Key::Char('G')), &mut bm, &s),
+            BlockModeAction::Ignore
+        );
+        assert_eq!(
+            handle(&ctrl(Key::Char('Z')), &mut bm, &s),
+            BlockModeAction::Ignore
+        );
+        assert_eq!(
+            handle(&ctrl(Key::Char('O')), &mut bm, &s),
+            BlockModeAction::Ignore
+        );
 
         // J/K jump to next/prev FAILED block. Use three_blocks_ok_fail_ok (fail at line 2)
         // so next_failed returns Some(...) → move_to returns Render. With the guard mutation
         // (→ true), Ctrl+J/K would match and return Render; without it they return Ignore.
         let sf = three_blocks_ok_fail_ok();
         let mut bmf = BlockMode::new_for(&sf, 12).unwrap();
-        assert_eq!(handle(&ctrl(Key::Char('J')), &mut bmf, &sf), BlockModeAction::Ignore);
-        assert_eq!(handle(&ctrl(Key::Char('K')), &mut bmf, &sf), BlockModeAction::Ignore);
+        assert_eq!(
+            handle(&ctrl(Key::Char('J')), &mut bmf, &sf),
+            BlockModeAction::Ignore
+        );
+        assert_eq!(
+            handle(&ctrl(Key::Char('K')), &mut bmf, &sf),
+            BlockModeAction::Ignore
+        );
     }
 
     #[test]
@@ -866,7 +997,11 @@ mod tests {
         let mut bm = BlockMode::new_for(&s, 12).unwrap();
         // Force: matches = [0, 4], selection = 2 (between them, not in matches).
         bm.selected = 2;
-        bm.filter = Some(Filter { query: "out".into(), matches: vec![0, 4], prompt_active: false });
+        bm.filter = Some(Filter {
+            query: "out".into(),
+            matches: vec![0, 4],
+            prompt_active: false,
+        });
         snap_after_filter(&mut bm);
         assert_eq!(
             bm.selected, 4,
@@ -896,20 +1031,35 @@ mod tests {
         let ctrl = |k: Key| KeyEvent::new(k, Modifiers::CTRL);
         // Ctrl+Enter should not commit (filter stays open):
         handle(&ctrl(Key::Enter), &mut bm, &s);
-        assert!(bm.filter.as_ref().unwrap().prompt_active, "Ctrl+Enter must not commit filter");
+        assert!(
+            bm.filter.as_ref().unwrap().prompt_active,
+            "Ctrl+Enter must not commit filter"
+        );
         // Ctrl+Esc should not cancel (filter stays):
         handle(&ctrl(Key::Escape), &mut bm, &s);
         assert!(bm.filter.is_some(), "Ctrl+Esc must not cancel filter");
         // Ctrl+Backspace should not pop a char:
         bm.filter.as_mut().unwrap().query = "abc".into();
         handle(&ctrl(Key::Backspace), &mut bm, &s);
-        assert_eq!(bm.filter.as_ref().unwrap().query, "abc", "Ctrl+Backspace must not pop query");
+        assert_eq!(
+            bm.filter.as_ref().unwrap().query,
+            "abc",
+            "Ctrl+Backspace must not pop query"
+        );
         // Ctrl+Char must not append to query (kills 351:31 guard→true mutant).
         // SHIFT+Char MUST append (kills 351:49 ==→!= mutant, which would reject SHIFT).
         handle(&ctrl(Key::Char('x')), &mut bm, &s);
-        assert_eq!(bm.filter.as_ref().unwrap().query, "abc", "Ctrl+Char must not push to query");
+        assert_eq!(
+            bm.filter.as_ref().unwrap().query,
+            "abc",
+            "Ctrl+Char must not push to query"
+        );
         let shift_x = KeyEvent::new(Key::Char('X'), Modifiers::SHIFT);
         handle(&shift_x, &mut bm, &s);
-        assert_eq!(bm.filter.as_ref().unwrap().query, "abcX", "SHIFT+Char must push to query");
+        assert_eq!(
+            bm.filter.as_ref().unwrap().query,
+            "abcX",
+            "SHIFT+Char must push to query"
+        );
     }
 }

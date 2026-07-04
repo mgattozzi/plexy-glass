@@ -14,8 +14,7 @@
 //! must destroy the whole char, never leave a dangling spacer / half-wide
 //! grapheme. Guards `clear_wide_straddle`.
 
-use hegel::TestCase;
-use hegel::generators as gs;
+use hegel::{TestCase, generators as gs};
 use plexy_glass_emulator::Emulator;
 use plexy_glass_emulator::width::display_width;
 
@@ -48,7 +47,11 @@ fn erase_leaves_no_orphan_wide_pairs(tc: TestCase) {
     // Fill with a random mix of ASCII and a wide CJK grapheme. The emulator keeps
     // the grid well-formed as it writes (wide chars wrap whole), so any orphan
     // after the erase below is the ERASE's doing.
-    let len = tc.draw(gs::integers::<u16>().min_value(0).max_value(cols.saturating_mul(rows)));
+    let len = tc.draw(
+        gs::integers::<u16>()
+            .min_value(0)
+            .max_value(cols.saturating_mul(rows)),
+    );
     let mut fill = String::new();
     for _ in 0..len {
         if tc.draw(gs::booleans()) {
@@ -75,7 +78,9 @@ fn erase_leaves_no_orphan_wide_pairs(tc: TestCase) {
     e.advance(op);
     e.advance(b"\x1b[m"); // flush any pending grapheme into the grid
 
-    tc.note(&format!("cols={cols} rows={rows} fill={fill:?} cur=({r},{c}) op={op:?}"));
+    tc.note(&format!(
+        "cols={cols} rows={rows} fill={fill:?} cur=({r},{c}) op={op:?}"
+    ));
 
     let screen = e.screen();
     for (ri, row) in screen.active.rows.iter().enumerate() {
@@ -108,7 +113,9 @@ fn write_leaves_no_orphan_wide_pairs(tc: TestCase) {
     }
     e.advance(b"\x1b[m"); // flush any pending trailing grapheme
 
-    tc.note(&format!("cols={cols} rows={rows} steps={steps} log={log:?}"));
+    tc.note(&format!(
+        "cols={cols} rows={rows} steps={steps} log={log:?}"
+    ));
 
     let screen = e.screen();
     for (ri, row) in screen.active.rows.iter().enumerate() {

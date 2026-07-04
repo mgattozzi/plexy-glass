@@ -1,9 +1,7 @@
 //! Cursor state: position, current attrs for new cells, visibility, shape.
 
-use crate::{
-    attrs::{Attrs, UnderlineStyle},
-    color::Color,
-};
+use crate::attrs::{Attrs, UnderlineStyle};
+use crate::color::Color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorShape {

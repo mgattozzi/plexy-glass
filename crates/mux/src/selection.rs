@@ -1,8 +1,9 @@
 //! Click-and-drag selection state for one pane. Constrained at the pane's
 //! rect; extension past the border clamps.
 
-use crate::{pane_id::PaneId, rect::Rect};
 use crate::blocks::{self, FoldProjection};
+use crate::pane_id::PaneId;
+use crate::rect::Rect;
 
 #[derive(Debug, Clone)]
 pub struct Selection {
@@ -164,7 +165,11 @@ pub fn word_at(
     // owning grapheme, and the outward walk must STEP OVER spacers, since
     // treating a spacer as a non-word cell would truncate the word at the
     // first wide glyph.
-    let col = if col > 0 && is_spacer(col) { col - 1 } else { col };
+    let col = if col > 0 && is_spacer(col) {
+        col - 1
+    } else {
+        col
+    };
     if !is_word(col) {
         return None;
     }
@@ -172,7 +177,11 @@ pub fn word_at(
     while start > 0 {
         // The cell left of `start` may be a spacer; its grapheme is one further.
         let candidate = start - 1;
-        let grapheme = if candidate > 0 && is_spacer(candidate) { candidate - 1 } else { candidate };
+        let grapheme = if candidate > 0 && is_spacer(candidate) {
+            candidate - 1
+        } else {
+            candidate
+        };
         if is_word(grapheme) {
             start = grapheme;
         } else {
@@ -180,11 +189,19 @@ pub fn word_at(
         }
     }
     // Include the click grapheme's own trailing spacer, then walk right.
-    let mut end = if col + 1 < cols && is_spacer(col + 1) { col + 1 } else { col };
+    let mut end = if col + 1 < cols && is_spacer(col + 1) {
+        col + 1
+    } else {
+        col
+    };
     while end + 1 < cols {
         let candidate = end + 1;
         if is_word(candidate) {
-            end = if candidate + 1 < cols && is_spacer(candidate + 1) { candidate + 1 } else { candidate };
+            end = if candidate + 1 < cols && is_spacer(candidate + 1) {
+                candidate + 1
+            } else {
+                candidate
+            };
         } else {
             break;
         }
@@ -209,7 +226,11 @@ pub fn line_at(
     let content = viewport_content_row(screen, pane_rows, scroll_offset, row)?;
     let mut last = None;
     for c in 0..cols {
-        if content.cells.get(c as usize).is_some_and(|cell| !cell.is_blank()) {
+        if content
+            .cells
+            .get(c as usize)
+            .is_some_and(|cell| !cell.is_blank())
+        {
             last = Some(c);
         }
     }
@@ -260,11 +281,18 @@ pub fn extract_text(
             // to the owning grapheme cell so the leading glyph isn't dropped.
             if r == start.0
                 && row_start > 0
-                && row.cells.get(row_start as usize).is_some_and(plexy_glass_emulator::Cell::is_wide_spacer)
+                && row
+                    .cells
+                    .get(row_start as usize)
+                    .is_some_and(plexy_glass_emulator::Cell::is_wide_spacer)
             {
                 row_start -= 1;
             }
-            let row_end = if r == end.0 { end.1 } else { cols.saturating_sub(1) };
+            let row_end = if r == end.0 {
+                end.1
+            } else {
+                cols.saturating_sub(1)
+            };
             let mut last_significant = row_start;
             for c in row_start..=row_end {
                 if let Some(cell) = row.cells.get(c as usize)
@@ -344,7 +372,11 @@ mod tests {
         emu.advance("中文ab ".as_bytes());
         let s = emu.screen();
         // Drag anchor on 中's spacer (col 1) → head at 'b' (col 5): 中 must survive.
-        let sel = Selection { source_pane: PaneId(0), anchor: (0, 1), head: (0, 5) };
+        let sel = Selection {
+            source_pane: PaneId(0),
+            anchor: (0, 1),
+            head: (0, 5),
+        };
         assert_eq!(extract_text(&sel, s, 5, 0), "中文ab");
     }
 
@@ -384,10 +416,7 @@ mod tests {
         s.extend(1, 2, Rect::new(0, 0, 3, 3));
         let cells: Vec<_> = s.cells(3).collect();
         // Row 0: (0,0), (0,1), (0,2); Row 1: (1,0), (1,1), (1,2).
-        assert_eq!(cells, vec![
-            (0, 0), (0, 1), (0, 2),
-            (1, 0), (1, 1), (1, 2),
-        ]);
+        assert_eq!(cells, vec![(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2),]);
     }
 
     #[test]
@@ -445,7 +474,11 @@ mod tests {
         // Scrolled back by 2, the viewport shows sb0/sb1; a row-0 selection must
         // copy "sb0", NOT the live grid's row 0 ("grid0").
         let screen = screen_from(2, 10, &["sb0", "sb1", "grid0", "grid1"]);
-        assert_eq!(screen.scrollback.rows().len(), 2, "setup: 2 rows scrolled off");
+        assert_eq!(
+            screen.scrollback.rows().len(),
+            2,
+            "setup: 2 rows scrolled off"
+        );
         let mut s = Selection::start(PaneId(0), 0, 0);
         s.extend(0, 2, Rect::new(0, 0, 2, 10)); // row 0, cols 0..=2
         // Live (scroll_offset 0): viewport row 0 is the grid's row 0 → "gri".
@@ -478,7 +511,8 @@ mod tests {
     fn word_at_includes_underscore_and_dash() {
         // '=' breaks the word; underscore + dash do not.
         let screen = screen_from(1, 20, &["foo_bar-baz=junk"]);
-        let s = word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 2).expect("on 'foo_bar-baz'");
+        let s = word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 2)
+            .expect("on 'foo_bar-baz'");
         assert_eq!(s.anchor, (0, 0));
         assert_eq!(s.head, (0, 10));
     }
@@ -486,7 +520,8 @@ mod tests {
     #[test]
     fn word_at_clamps_at_row_edge() {
         let screen = screen_from(1, 5, &["hello"]);
-        let s = word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 4).expect("on last 'o'");
+        let s =
+            word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 4).expect("on last 'o'");
         assert_eq!(s.anchor, (0, 0));
         assert_eq!(s.head, (0, 4));
     }
@@ -511,7 +546,11 @@ mod tests {
         // Scrolled back 2, viewport row 0 is "sb0one": double/triple-click there
         // must select from scrollback, not the live grid's "grid0" underneath.
         let screen = screen_from(2, 10, &["sb0one", "sb1", "grid0", "grid1"]);
-        assert_eq!(screen.scrollback.rows().len(), 2, "setup: 2 rows scrolled off");
+        assert_eq!(
+            screen.scrollback.rows().len(),
+            2,
+            "setup: 2 rows scrolled off"
+        );
 
         // Live (offset 0): viewport row 0 = grid's "grid0".
         let w = word_at(PaneId(0), &screen, 2, 0, 0, 1).expect("word on grid0");
@@ -568,10 +607,11 @@ mod tests {
         let mut s = Selection::start(PaneId(0), 0, 0);
         s.extend(1, 1, Rect::new(0, 0, 5, 5));
         let cells: Vec<_> = s.cells(5).collect();
-        assert_eq!(cells, vec![
-            (0, 0), (0, 1), (0, 2), (0, 3), (0, 4),
-            (1, 0), (1, 1),
-        ], "row 0 must run to max_cols-1, row 1 only to end.1");
+        assert_eq!(
+            cells,
+            vec![(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (1, 0), (1, 1),],
+            "row 0 must run to max_cols-1, row 1 only to end.1"
+        );
     }
 
     #[test]
@@ -584,8 +624,11 @@ mod tests {
         let s = emu.screen();
         let sel = word_at(PaneId(0), s, 1, 0, 0, 1)
             .expect("spacer click must find the wide char to its left");
-        assert_eq!(extract_text(&sel, s, 1, 0), "好",
-            "clicking 好's spacer must select 好, not jump right to space");
+        assert_eq!(
+            extract_text(&sel, s, 1, 0),
+            "好",
+            "clicking 好's spacer must select 好, not jump right to space"
+        );
 
         // Equivalent note: `col > 0 → col >= 0` at line 165:22 is equivalent because
         // wide-spacer cells never appear at column 0 (a spacer is always preceded by
@@ -610,8 +653,11 @@ mod tests {
         emu.advance("ab中cd ".as_bytes());
         let s = emu.screen();
         let sel = word_at(PaneId(0), s, 5, 0, 0, 5).expect("word at 'd'");
-        assert_eq!(extract_text(&sel, s, 5, 0), "ab中cd",
-            "left-walk from 'd' must cross 中's spacer to include 中,b,a");
+        assert_eq!(
+            extract_text(&sel, s, 5, 0),
+            "ab中cd",
+            "left-walk from 'd' must cross 中's spacer to include 中,b,a"
+        );
     }
 
     #[test]
@@ -626,8 +672,7 @@ mod tests {
         //   `col*1<cols`=`col<cols`, and the extra case (col=cols-1) still results in
         //   is_spacer(cols)=false → else, no difference in practice.
         let screen = screen_from(1, 10, &["abc def"]);
-        let sel = word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 2)
-            .expect("on 'c'");
+        let sel = word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 2).expect("on 'c'");
         assert_eq!(
             extract_text(&sel, &screen, screen.active.num_rows(), 0),
             "abc",
@@ -645,8 +690,11 @@ mod tests {
         emu.advance("中abc ".as_bytes());
         let s = emu.screen();
         let sel = word_at(PaneId(0), s, 1, 0, 0, 0).expect("word at col 0");
-        assert_eq!(extract_text(&sel, s, 1, 0), "中abc",
-            "clicking wide char at col 0 must include its spacer in the selection");
+        assert_eq!(
+            extract_text(&sel, s, 1, 0),
+            "中abc",
+            "clicking wide char at col 0 must include its spacer in the selection"
+        );
 
         // Equivalent notes for the right-walk loop (lines 182-188):
         // - 182:19 `< → <=`: extra iteration when end=cols-1; candidate=cols,
@@ -677,7 +725,11 @@ mod tests {
         //   selection rows are always < pane_rows so visible_idx never reaches
         //   visible_total. EQUIVALENT.
         let screen = screen_from(1, 15, &["hello world"]);
-        let sel = Selection { source_pane: PaneId(0), anchor: (0, 6), head: (0, 10) };
+        let sel = Selection {
+            source_pane: PaneId(0),
+            anchor: (0, 6),
+            head: (0, 10),
+        };
         assert_eq!(
             extract_text(&sel, &screen, screen.active.num_rows(), 0),
             "world",

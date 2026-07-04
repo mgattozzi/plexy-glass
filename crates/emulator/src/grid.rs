@@ -212,8 +212,7 @@ fn normalize_wide_pairs(cells: &mut [Cell]) {
     let n = cells.len();
     for i in 0..n {
         if cells[i].is_wide_spacer() {
-            let paired =
-                i > 0 && display_width(cells[i - 1].grapheme.as_str()) == 2;
+            let paired = i > 0 && display_width(cells[i - 1].grapheme.as_str()) == 2;
             if !paired {
                 cells[i] = Cell::default();
             }
@@ -387,9 +386,11 @@ impl Grid {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::mem;
+
     use smol_str::SmolStr;
+
+    use super::*;
 
     fn x_cell() -> Cell {
         Cell {
@@ -515,7 +516,11 @@ mod tests {
         // A default RowMark has prompt_end_col == None even though the field
         // stores 0 internally (the flag gates the accessor).
         let m = RowMark::default();
-        assert_eq!(m.prompt_end_col(), None, "no flag → None even if internal 0");
+        assert_eq!(
+            m.prompt_end_col(),
+            None,
+            "no flag → None even if internal 0"
+        );
         // Two marks with PROMPT_END should not equal one without, even at col 0.
         let mut with_flag = RowMark::default();
         with_flag.set_prompt_end(0);
@@ -533,7 +538,11 @@ mod tests {
 
         base.merge(other);
         assert!(base.contains(RowMark::PROMPT_END));
-        assert_eq!(base.prompt_end_col(), Some(7), "other's col must win on merge");
+        assert_eq!(
+            base.prompt_end_col(),
+            Some(7),
+            "other's col must win on merge"
+        );
     }
 
     #[test]
@@ -546,7 +555,11 @@ mod tests {
 
         base.merge(other);
         assert!(base.contains(RowMark::PROMPT_END));
-        assert_eq!(base.prompt_end_col(), Some(3), "self col preserved when other has no flag");
+        assert_eq!(
+            base.prompt_end_col(),
+            Some(3),
+            "self col preserved when other has no flag"
+        );
     }
 
     #[test]
@@ -580,7 +593,10 @@ mod tests {
         assert_eq!(m.exit(), Some(0));
         m.set_exit(None);
         assert_eq!(m.exit(), None);
-        assert!(m.contains(RowMark::BLOCK_END), "clearing exit keeps the flag");
+        assert!(
+            m.contains(RowMark::BLOCK_END),
+            "clearing exit keeps the flag"
+        );
     }
 
     #[test]
@@ -719,10 +735,21 @@ mod tests {
         // return early from the guard and skip this clear.
         g.clear_rect(1, 0, 1, 2);
         for c in 0..3u16 {
-            assert!(g.get_cell(1, c).unwrap().is_blank(), "row 1 col {c} must be blank");
+            assert!(
+                g.get_cell(1, c).unwrap().is_blank(),
+                "row 1 col {c} must be blank"
+            );
         }
-        assert_eq!(g.get_cell(0, 0).unwrap(), &x_cell(), "row 0 must be unchanged");
-        assert_eq!(g.get_cell(2, 0).unwrap(), &x_cell(), "row 2 must be unchanged");
+        assert_eq!(
+            g.get_cell(0, 0).unwrap(),
+            &x_cell(),
+            "row 0 must be unchanged"
+        );
+        assert_eq!(
+            g.get_cell(2, 0).unwrap(),
+            &x_cell(),
+            "row 2 must be unchanged"
+        );
     }
 
     #[test]
@@ -736,10 +763,21 @@ mod tests {
         // Single-col clear; tests the start_col == end_col case.
         g.clear_rect(0, 1, 2, 1);
         for r in 0..3u16 {
-            assert!(g.get_cell(r, 1).unwrap().is_blank(), "col 1 row {r} must be blank");
+            assert!(
+                g.get_cell(r, 1).unwrap().is_blank(),
+                "col 1 row {r} must be blank"
+            );
         }
-        assert_eq!(g.get_cell(0, 0).unwrap(), &x_cell(), "col 0 must be unchanged");
-        assert_eq!(g.get_cell(0, 2).unwrap(), &x_cell(), "col 2 must be unchanged");
+        assert_eq!(
+            g.get_cell(0, 0).unwrap(),
+            &x_cell(),
+            "col 0 must be unchanged"
+        );
+        assert_eq!(
+            g.get_cell(0, 2).unwrap(),
+            &x_cell(),
+            "col 2 must be unchanged"
+        );
     }
 
     // ---- scroll_up subregion / single-row / full-region ----
@@ -753,9 +791,20 @@ mod tests {
         g.put_cell(1, 0, x_cell());
         g.put_cell(2, 0, x_cell());
         g.scroll_up(1, 1, 1, None);
-        assert!(g.get_cell(1, 0).unwrap().is_blank(), "single-row scroll must blank row 1");
-        assert_eq!(g.get_cell(0, 0).unwrap(), &x_cell(), "row 0 must be unchanged");
-        assert_eq!(g.get_cell(2, 0).unwrap(), &x_cell(), "row 2 must be unchanged");
+        assert!(
+            g.get_cell(1, 0).unwrap().is_blank(),
+            "single-row scroll must blank row 1"
+        );
+        assert_eq!(
+            g.get_cell(0, 0).unwrap(),
+            &x_cell(),
+            "row 0 must be unchanged"
+        );
+        assert_eq!(
+            g.get_cell(2, 0).unwrap(),
+            &x_cell(),
+            "row 2 must be unchanged"
+        );
     }
 
     #[test]
@@ -776,7 +825,11 @@ mod tests {
         assert!(g.get_cell(1, 0).unwrap().is_blank(), "row 1 blanked");
         assert!(g.get_cell(2, 0).unwrap().is_blank(), "row 2 blanked");
         assert_eq!(g.get_cell(3, 0).unwrap(), &x_cell(), "row 3 unchanged");
-        assert_eq!(popped.len(), 2, "exactly 2 rows popped: n capped to region=bottom-top+1=2, not bottom+top+1=4");
+        assert_eq!(
+            popped.len(),
+            2,
+            "exactly 2 rows popped: n capped to region=bottom-top+1=2, not bottom+top+1=4"
+        );
     }
 
     #[test]
@@ -790,7 +843,10 @@ mod tests {
         }
         g.scroll_up(0, 2, 3, None); // n = 3 = region size
         for r in 0..3u16 {
-            assert!(g.get_cell(r, 0).unwrap().is_blank(), "row {r} must be blank after full scroll");
+            assert!(
+                g.get_cell(r, 0).unwrap().is_blank(),
+                "row {r} must be blank after full scroll"
+            );
         }
     }
 
@@ -803,7 +859,10 @@ mod tests {
             g.put_cell(r, 0, x_cell());
         }
         g.scroll_down(1, 1, 1);
-        assert!(g.get_cell(1, 0).unwrap().is_blank(), "single-row scroll_down must blank row 1");
+        assert!(
+            g.get_cell(1, 0).unwrap().is_blank(),
+            "single-row scroll_down must blank row 1"
+        );
         assert_eq!(g.get_cell(0, 0).unwrap(), &x_cell(), "row 0 unchanged");
         assert_eq!(g.get_cell(2, 0).unwrap(), &x_cell(), "row 2 unchanged");
     }
@@ -819,7 +878,10 @@ mod tests {
         }
         g.scroll_down(0, 2, 3); // n = 3 = region size
         for r in 0..3u16 {
-            assert!(g.get_cell(r, 0).unwrap().is_blank(), "row {r} must be blank after full scroll_down");
+            assert!(
+                g.get_cell(r, 0).unwrap().is_blank(),
+                "row {r} must be blank after full scroll_down"
+            );
         }
     }
 

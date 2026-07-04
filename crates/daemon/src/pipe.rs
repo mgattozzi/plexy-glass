@@ -17,18 +17,20 @@
 //! cancel watch; every await in the drain selects on it, so even a drain
 //! parked in a blocked stdin write observes the cancel promptly.
 
-use crate::LockExt;
-use crate::error::DaemonError;
-use crate::pane::Pane;
-use crate::session::Session;
-use bytes::Bytes;
 use std::io::Error;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
+
+use bytes::Bytes;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, watch};
+
+use crate::LockExt;
+use crate::error::DaemonError;
+use crate::pane::Pane;
+use crate::session::Session;
 
 /// The per-pane pipe slot. Lives on `Pane`'s shared inner state; the drain
 /// task holds its own `Arc` clone (NOT a `Pane` clone, which would keep the
@@ -150,7 +152,11 @@ pub(crate) fn install_and_drain(
 ) {
     let id = NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed);
     let (cancel_tx, cancel_rx) = watch::channel(None);
-    let handle = PipeHandle { id, cancel_tx, pid: child.id() };
+    let handle = PipeHandle {
+        id,
+        cancel_tx,
+        pid: child.id(),
+    };
     let prev = {
         // invariant: pipe slot mutex held briefly; no await, no nested locks.
         slot.lock_recover().replace(handle)
@@ -247,12 +253,14 @@ async fn drain(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_env;
+    use std::time::{Duration, Instant};
+
     use nix::sys::signal;
     use nix::unistd::Pid;
-    use std::time::{Duration, Instant};
     use tokio::time;
+
+    use super::*;
+    use crate::test_env;
 
     /// Whether `pid` names a live (un-reaped) process. `kill -0` semantics:
     /// a zombie still counts as alive until its parent reaps it, which is exactly
@@ -295,7 +303,12 @@ mod tests {
                 env: vec![],
                 cwd: None,
             },
-            plexy_glass_protocol::PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            plexy_glass_protocol::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
             Arc::new(plexy_glass_config::built_in_default()),
         )
         .expect("session");
@@ -303,7 +316,8 @@ mod tests {
         let (tx, rx) = broadcast::channel::<Bytes>(1);
         // Lag the receiver by construction: 3 sends, capacity 1.
         for _ in 0..3 {
-            tx.send(Bytes::from_static(b"x")).expect("send with live receiver");
+            tx.send(Bytes::from_static(b"x"))
+                .expect("send with live receiver");
         }
         let (child, stdin) = spawn_consumer("exec sleep 30");
         let pid = child.id().expect("consumer pid");
@@ -328,7 +342,9 @@ mod tests {
         // The status line reports the too-slow close.
         assert!(
             test_env::poll_until(Duration::from_secs(10), || {
-                let Ok(mut m) = session.window_manager.try_lock() else { return false };
+                let Ok(mut m) = session.window_manager.try_lock() else {
+                    return false;
+                };
                 m.take_active_message() == Some(MSG_TOO_SLOW)
             })
             .await,
@@ -356,12 +372,18 @@ mod tests {
         install_and_drain(Arc::clone(&slot), rx, child, stdin, Weak::new());
         assert!(!slot_empty(&slot), "handle installed");
 
-        assert!(cancel_slot(&slot, PipeCloseReason::Stopped), "pipe was running");
+        assert!(
+            cancel_slot(&slot, PipeCloseReason::Stopped),
+            "pipe was running"
+        );
         let deadline = Instant::now() + Duration::from_secs(10);
         while pid_alive(pid) && Instant::now() < deadline {
             time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(!pid_alive(pid), "consumer survived (or zombied) after cancel");
+        assert!(
+            !pid_alive(pid),
+            "consumer survived (or zombied) after cancel"
+        );
         // Second stop is a no-op.
         assert!(!cancel_slot(&slot, PipeCloseReason::Stopped));
         drop(tx);

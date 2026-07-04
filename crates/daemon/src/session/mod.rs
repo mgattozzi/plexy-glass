@@ -3,23 +3,21 @@
 mod coordinator;
 mod restore;
 
-use crate::{
-    LockExt,
-    error::DaemonError,
-    osc_actions,
-    pane::Pane,
-    pipe,
-    window_manager::{STATUS_TTL, Severity, WindowManager},
-};
-use coordinator::render_coordinator;
-use plexy_glass_mux::{PaneId, VirtualScreen, WindowId};
-use plexy_glass_protocol::{NegotiatedKbd, ProtocolError, PtySize, SessionEntry, SpawnSpec};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, SystemTime};
-use tokio::sync::{mpsc, watch, Mutex, Notify};
+
+use coordinator::render_coordinator;
+use plexy_glass_mux::{PaneId, VirtualScreen, WindowId};
+use plexy_glass_protocol::{NegotiatedKbd, ProtocolError, PtySize, SessionEntry, SpawnSpec};
+use tokio::sync::{Mutex, Notify, mpsc, watch};
 use tokio::task::{self, JoinHandle};
 use tokio::time;
+
+use crate::error::DaemonError;
+use crate::pane::Pane;
+use crate::window_manager::{STATUS_TTL, Severity, WindowManager};
+use crate::{LockExt, osc_actions, pipe};
 
 pub struct ClientHandle {
     pub client_id: u64,
@@ -208,18 +206,15 @@ impl Session {
         // `Session`, but until then a missing session still yields a valid
         // (if empty) ctx.
         let session_weak = Arc::downgrade(&session);
-        let tick_handle = engine.spawn_tick_task(
-            Arc::clone(&session.notify),
-            move || {
-                let weak = session_weak.clone();
-                async move {
-                    match weak.upgrade() {
-                        Some(s) => build_snapshot_ctx(&s).await,
-                        None => empty_snapshot_ctx(),
-                    }
+        let tick_handle = engine.spawn_tick_task(Arc::clone(&session.notify), move || {
+            let weak = session_weak.clone();
+            async move {
+                match weak.upgrade() {
+                    Some(s) => build_snapshot_ctx(&s).await,
+                    None => empty_snapshot_ctx(),
                 }
-            },
-        );
+            }
+        });
         // invariant: no other thread holds status_tick_handle at construction time
         *session.status_tick_handle.lock_recover() = Some(tick_handle);
 
@@ -262,7 +257,6 @@ impl Session {
             p.pane.kill_child();
         }
     }
-
 }
 
 /// A point-in-time snapshot of one session's windows/panes, used to build the
@@ -340,10 +334,20 @@ impl Session {
                     .collect();
                 // The picker shows the live derived name (auto-rename on); a
                 // pinned window returns its name verbatim regardless.
-                WindowTree { id: w.id, name: w.display_name(true), active_pane: w.active(), panes }
+                WindowTree {
+                    id: w.id,
+                    name: w.display_name(true),
+                    active_pane: w.active(),
+                    panes,
+                }
             })
             .collect();
-        SessionTree { name: self.name(), active_window, total_panes, windows }
+        SessionTree {
+            name: self.name(),
+            active_window,
+            total_panes,
+            windows,
+        }
     }
 
     /// Snapshot every command block in every pane for the history palette. Async:
@@ -379,7 +383,10 @@ impl Session {
                 });
             }
         }
-        SessionHistory { name: self.name(), blocks: out }
+        SessionHistory {
+            name: self.name(),
+            blocks: out,
+        }
     }
 
     /// `prefix_armed` is the connection's live prefix flag (shared, not
@@ -480,7 +487,11 @@ impl Session {
         }
     }
 
-    pub async fn handle_input_bytes(&self, bytes: &[u8], is_paste: bool) -> Result<(), DaemonError> {
+    pub async fn handle_input_bytes(
+        &self,
+        bytes: &[u8],
+        is_paste: bool,
+    ) -> Result<(), DaemonError> {
         // Resolve the target panes under the lock, send after dropping it.
         // Three cases: a floating popup is modal (input goes to its child,
         // never the layout panes, sync-panes included); otherwise sync-panes
@@ -540,7 +551,11 @@ impl Session {
     /// Forward a color-scheme report (`\e[?997;1n` dark / `;2n` light) to EVERY
     /// pane in EVERY window that subscribed via ?2031.
     pub async fn forward_color_scheme(&self, dark: bool) {
-        let seq: &[u8] = if dark { b"\x1b[?997;1n" } else { b"\x1b[?997;2n" };
+        let seq: &[u8] = if dark {
+            b"\x1b[?997;1n"
+        } else {
+            b"\x1b[?997;2n"
+        };
         // Record the scheme on EVERY pane under the lock so a later one-shot
         // `\e[?996n` query answers the real preference; collect the ?2031
         // subscribers, then send the unsolicited notification off-lock (the
@@ -552,7 +567,8 @@ impl Session {
                 for (_id, pane) in win.panes() {
                     pane.with_screen_mut(|s| s.set_color_scheme_dark(dark));
                     let wants = pane.with_screen(|s| {
-                        s.modes.contains(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES)
+                        s.modes
+                            .contains(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES)
                     });
                     if wants {
                         subs.push(pane.clone());
@@ -562,7 +578,8 @@ impl Session {
             if let Some(p) = manager.popup() {
                 p.pane.with_screen_mut(|s| s.set_color_scheme_dark(dark));
                 let wants = p.pane.with_screen(|s| {
-                    s.modes.contains(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES)
+                    s.modes
+                        .contains(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES)
                 });
                 if wants {
                     subs.push(p.pane.clone());
@@ -595,12 +612,16 @@ impl Session {
         if let Some(p) = find(old)
             && p.with_screen(|s| s.modes.contains(plexy_glass_emulator::Modes::FOCUS_EVENTS))
         {
-            p.send_input(bytes::Bytes::from_static(b"\x1b[O")).await.ok();
+            p.send_input(bytes::Bytes::from_static(b"\x1b[O"))
+                .await
+                .ok();
         }
         if let Some(p) = find(new)
             && p.with_screen(|s| s.modes.contains(plexy_glass_emulator::Modes::FOCUS_EVENTS))
         {
-            p.send_input(bytes::Bytes::from_static(b"\x1b[I")).await.ok();
+            p.send_input(bytes::Bytes::from_static(b"\x1b[I"))
+                .await
+                .ok();
         }
     }
 
@@ -642,7 +663,9 @@ impl Session {
     /// Mirrors the any-client-focused rule above.
     pub async fn any_prefix_armed(&self) -> bool {
         let clients = self.clients.lock().await;
-        clients.iter().any(|c| c.prefix_armed.load(Ordering::SeqCst))
+        clients
+            .iter()
+            .any(|c| c.prefix_armed.load(Ordering::SeqCst))
     }
 
     /// Re-encode a canonical key event into the active pane's negotiated
@@ -849,13 +872,7 @@ impl Session {
                             // ACTIVE pane's), which silently diverges
                             // whenever a popup owns input.
                             let cwd = m.pane_cwd(pane);
-                            pipe::start_pipe(
-                                pane,
-                                Arc::downgrade(self),
-                                &shell,
-                                &line,
-                                cwd,
-                            )?;
+                            pipe::start_pipe(pane, Arc::downgrade(self), &shell, &line, cwd)?;
                             format!("pipe-pane → {line}")
                         }
                         None => {
@@ -936,10 +953,7 @@ impl Session {
         let handle = tokio::spawn(async move {
             // Sleep just past the TTL so the message is definitely expired when
             // the wake-driven recompose runs and clears it.
-            time::sleep(
-                STATUS_TTL + Duration::from_millis(50),
-            )
-            .await;
+            time::sleep(STATUS_TTL + Duration::from_millis(50)).await;
             if let Some(s) = weak.upgrade() {
                 s.notify.notify_one();
             }
@@ -1075,18 +1089,15 @@ impl Session {
         }
 
         let session_weak = Arc::downgrade(self);
-        let tick_handle = new_engine.spawn_tick_task(
-            Arc::clone(&self.notify),
-            move || {
-                let weak = session_weak.clone();
-                async move {
-                    match weak.upgrade() {
-                        Some(s) => build_snapshot_ctx(&s).await,
-                        None => empty_snapshot_ctx(),
-                    }
+        let tick_handle = new_engine.spawn_tick_task(Arc::clone(&self.notify), move || {
+            let weak = session_weak.clone();
+            async move {
+                match weak.upgrade() {
+                    Some(s) => build_snapshot_ctx(&s).await,
+                    None => empty_snapshot_ctx(),
                 }
-            },
-        );
+            }
+        });
         {
             // invariant: status_tick_handle mutex held briefly; no .await holding the lock.
             let mut slot = self.status_tick_handle.lock_recover();
@@ -1191,26 +1202,33 @@ fn encode_for_pane(
         (
             s.kbd.kitty_flags(alt),
             s.kbd.modify_other_keys(),
-            s.modes.contains(plexy_glass_emulator::Modes::APP_CURSOR_KEYS),
+            s.modes
+                .contains(plexy_glass_emulator::Modes::APP_CURSOR_KEYS),
         )
     });
-    reencode_input(client_kbd, kitty_flags, modkeys, app_cursor, event, raw_bytes)
+    reencode_input(
+        client_kbd,
+        kitty_flags,
+        modkeys,
+        app_cursor,
+        event,
+        raw_bytes,
+    )
 }
 
 /// Await a core session task; if it ends by panic (or unexpectedly), log and
 /// escalate to a clean session teardown. No in-place restart: the coordinator
 /// (watch::Sender) and death task (mpsc::Receiver) own non-clonable channel
 /// endpoints. See the terminal-trust-hardening spec, Phase 1.
-async fn supervise_core(
-    name: &'static str,
-    weak: Weak<Session>,
-    handle: task::JoinHandle<()>,
-) {
+async fn supervise_core(name: &'static str, weak: Weak<Session>, handle: task::JoinHandle<()>) {
     match handle.await {
-        Ok(()) => {} // clean end (closing / empty); nothing to do
+        Ok(()) => {}                     // clean end (closing / empty); nothing to do
         Err(e) if e.is_cancelled() => {} // begin_close/Drop aborted it
         Err(_panic) => {
-            tracing::error!(task = name, "core session task panicked; tearing down session");
+            tracing::error!(
+                task = name,
+                "core session task panicked; tearing down session"
+            );
             if let Some(session) = weak.upgrade() {
                 session.begin_close();
                 session.terminate_panes().await;
@@ -1255,7 +1273,9 @@ async fn silence_tick_loop(weak: Weak<Session>) {
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
-        let Some(session) = weak.upgrade() else { return };
+        let Some(session) = weak.upgrade() else {
+            return;
+        };
         if session.closing.load(Ordering::SeqCst) {
             return;
         }
@@ -1339,20 +1359,21 @@ async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::Snaps
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use plexy_glass_protocol::SpawnSpec;
+    use std::path::Path;
     use std::sync::atomic::Ordering;
-    use crate::renderer::Renderer;
-    use crate::test_env;
+    use std::time::Instant;
+    use std::{env, fs};
+
     use nix::sys::signal;
     use nix::unistd::Pid;
-    use std::env;
-    use std::fs;
-    use std::path::Path;
-    use std::time::Instant;
+    use plexy_glass_protocol::SpawnSpec;
     use tokio::io;
     use tokio::net::UnixStream;
     use tokio::sync::broadcast;
+
+    use super::*;
+    use crate::renderer::Renderer;
+    use crate::test_env;
 
     fn spec() -> SpawnSpec {
         SpawnSpec {
@@ -1364,7 +1385,12 @@ mod tests {
     }
 
     fn size() -> PtySize {
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
     }
 
     fn cfg() -> Arc<plexy_glass_config::Config> {
@@ -1382,8 +1408,7 @@ mod tests {
     #[tokio::test]
     async fn supervise_core_escalates_to_teardown_on_panic() {
         let _g = test_env::isolate();
-        let session =
-            Session::new("s".into(), spec(), size(), cfg()).expect("construct session");
+        let session = Session::new("s".into(), spec(), size(), cfg()).expect("construct session");
         // A task that panics immediately.
         let h = tokio::spawn(async { panic!("core task died") });
         supervise_core("test-core", Arc::downgrade(&session), h).await;
@@ -1404,13 +1429,17 @@ mod tests {
             "no silence task before any monitor-silence arm"
         );
         // Arm silence on the active window → the task spawns.
-        s.handle_command(Command::SetMonitorSilence(Some(5))).await.unwrap();
+        s.handle_command(Command::SetMonitorSilence(Some(5)))
+            .await
+            .unwrap();
         assert!(
             s.silence_tick_handle.lock().unwrap().is_some(),
             "the silence task spawns on the first arm"
         );
         // Disarm (0/None) → the task is aborted (no idle 1 Hz task).
-        s.handle_command(Command::SetMonitorSilence(None)).await.unwrap();
+        s.handle_command(Command::SetMonitorSilence(None))
+            .await
+            .unwrap();
         assert!(
             s.silence_tick_handle.lock().unwrap().is_none(),
             "the silence task is aborted on the last disarm"
@@ -1426,7 +1455,9 @@ mod tests {
         s.handle_command(Command::NewWindow).await.unwrap(); // W1 active
         // Arm silence on W1, then switch away so W1 is the only (background)
         // silence-monitored window and the tick is running.
-        s.handle_command(Command::SetMonitorSilence(Some(5))).await.unwrap();
+        s.handle_command(Command::SetMonitorSilence(Some(5)))
+            .await
+            .unwrap();
         assert!(s.silence_tick_handle.lock().unwrap().is_some());
         s.handle_command(Command::SelectWindow(0)).await.unwrap();
         let w1_pane = {
@@ -1455,39 +1486,64 @@ mod tests {
         let s = Session::new("pc".into(), spec(), size(), cfg()).unwrap();
 
         // `split h` -> two panes in the active window.
-        s.handle_prompt_command(PromptCommand::SplitH).await.unwrap();
+        s.handle_prompt_command(PromptCommand::SplitH)
+            .await
+            .unwrap();
         assert_eq!(
-            s.window_manager.lock().await.active_window().layout().panes().len(),
+            s.window_manager
+                .lock()
+                .await
+                .active_window()
+                .layout()
+                .panes()
+                .len(),
             2
         );
 
         // `rename first` -> active window name.
-        s.handle_prompt_command(PromptCommand::RenameWindow("first".into())).await.unwrap();
+        s.handle_prompt_command(PromptCommand::RenameWindow("first".into()))
+            .await
+            .unwrap();
         assert_eq!(s.window_manager.lock().await.active_window().name, "first");
 
         // `rename-pane logs` -> active pane name.
-        s.handle_prompt_command(PromptCommand::RenamePane("logs".into())).await.unwrap();
+        s.handle_prompt_command(PromptCommand::RenamePane("logs".into()))
+            .await
+            .unwrap();
         {
             let m = s.window_manager.lock().await;
             let pid = m.active_window().active();
             assert_eq!(
-                m.active_window().pane(pid).and_then(super::super::pane::Pane::name).as_deref(),
+                m.active_window()
+                    .pane(pid)
+                    .and_then(super::super::pane::Pane::name)
+                    .as_deref(),
                 Some("logs")
             );
         }
 
         // `new` (active -> window 1), then `win 1` (SelectWindow(0)) returns to "first".
-        s.handle_prompt_command(PromptCommand::NewWindow).await.unwrap();
-        s.handle_prompt_command(PromptCommand::SelectWindow(0)).await.unwrap();
+        s.handle_prompt_command(PromptCommand::NewWindow)
+            .await
+            .unwrap();
+        s.handle_prompt_command(PromptCommand::SelectWindow(0))
+            .await
+            .unwrap();
         assert_eq!(s.window_manager.lock().await.active_window().name, "first");
 
         // `resize l 3` on the split must not error.
-        s.handle_prompt_command(PromptCommand::Resize(Direction::Left, 3)).await.unwrap();
+        s.handle_prompt_command(PromptCommand::Resize(Direction::Left, 3))
+            .await
+            .unwrap();
 
         // Connection-level verbs are defensive no-ops here.
-        assert!(matches!(s.handle_prompt_command(PromptCommand::Detach).await, Ok(None)));
         assert!(matches!(
-            s.handle_prompt_command(PromptCommand::Switch("x".into())).await,
+            s.handle_prompt_command(PromptCommand::Detach).await,
+            Ok(None)
+        ));
+        assert!(matches!(
+            s.handle_prompt_command(PromptCommand::Switch("x".into()))
+                .await,
             Ok(None)
         ));
     }
@@ -1496,14 +1552,18 @@ mod tests {
     async fn prompt_popup_maps_to_open_and_close() {
         let _g = test_env::isolate();
         let s = Session::new("t-popup-prompt".into(), spec(), size(), cfg()).unwrap();
-        s.handle_prompt_command(plexy_glass_mux::PromptCommand::Popup(Some("sleep 600".into())))
-            .await
-            .unwrap();
+        s.handle_prompt_command(plexy_glass_mux::PromptCommand::Popup(Some(
+            "sleep 600".into(),
+        )))
+        .await
+        .unwrap();
         {
             let m = s.window_manager.lock().await;
             assert_eq!(m.popup().unwrap().title, "sleep 600");
         }
-        s.handle_prompt_command(plexy_glass_mux::PromptCommand::ClosePopup).await.unwrap();
+        s.handle_prompt_command(plexy_glass_mux::PromptCommand::ClosePopup)
+            .await
+            .unwrap();
         assert!(!s.window_manager.lock().await.has_popup());
     }
 
@@ -1511,21 +1571,23 @@ mod tests {
     async fn input_bytes_route_to_popup_when_open() {
         let _g = test_env::isolate();
         let s = Session::new("t-popup-input".into(), spec(), size(), cfg()).unwrap();
-        s.handle_command(plexy_glass_mux::Command::OpenPopup { command: Some("cat".into()) })
-            .await
-            .unwrap();
+        s.handle_command(plexy_glass_mux::Command::OpenPopup {
+            command: Some("cat".into()),
+        })
+        .await
+        .unwrap();
         let mut rx = {
             let m = s.window_manager.lock().await;
             m.popup().unwrap().pane.subscribe_output()
         };
-        s.handle_input_bytes(b"popup_gets_this\n", false).await.unwrap();
+        s.handle_input_bytes(b"popup_gets_this\n", false)
+            .await
+            .unwrap();
         // cat echoes what it reads; the bytes must surface on the POPUP pane.
         let mut seen: Vec<u8> = Vec::new();
         let deadline = time::Instant::now() + Duration::from_secs(5);
         while time::Instant::now() < deadline {
-            if let Ok(Ok(chunk)) =
-                time::timeout(Duration::from_millis(200), rx.recv()).await
-            {
+            if let Ok(Ok(chunk)) = time::timeout(Duration::from_millis(200), rx.recv()).await {
                 seen.extend_from_slice(&chunk);
                 if seen.windows(15).any(|w| w == b"popup_gets_this") {
                     break;
@@ -1537,16 +1599,20 @@ mod tests {
             "popup pane never echoed routed input: {seen:?}"
         );
         // Kill the popup child so it doesn't outlive the test.
-        s.handle_command(plexy_glass_mux::Command::ClosePopup).await.unwrap();
+        s.handle_command(plexy_glass_mux::Command::ClosePopup)
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn focus_events_route_to_popup_when_open() {
         let _g = test_env::isolate();
         let s = Session::new("t-popup-focus".into(), spec(), size(), cfg()).unwrap();
-        s.handle_command(plexy_glass_mux::Command::OpenPopup { command: Some("cat".into()) })
-            .await
-            .unwrap();
+        s.handle_command(plexy_glass_mux::Command::OpenPopup {
+            command: Some("cat".into()),
+        })
+        .await
+        .unwrap();
         let mut rx = {
             let m = s.window_manager.lock().await;
             let popup = m.popup().unwrap();
@@ -1564,24 +1630,26 @@ mod tests {
         let raw: &[u8] = &[0x1b, b'[', b'I'];
         let caret: &[u8] = b"^[[I";
         let hit = |buf: &[u8]| {
-            buf.windows(raw.len()).any(|w| w == raw)
-                || buf.windows(caret.len()).any(|w| w == caret)
+            buf.windows(raw.len()).any(|w| w == raw) || buf.windows(caret.len()).any(|w| w == caret)
         };
         let mut seen: Vec<u8> = Vec::new();
         let deadline = time::Instant::now() + Duration::from_secs(5);
         while time::Instant::now() < deadline {
-            if let Ok(Ok(chunk)) =
-                time::timeout(Duration::from_millis(200), rx.recv()).await
-            {
+            if let Ok(Ok(chunk)) = time::timeout(Duration::from_millis(200), rx.recv()).await {
                 seen.extend_from_slice(&chunk);
                 if hit(&seen) {
                     break;
                 }
             }
         }
-        assert!(hit(&seen), "popup pane never saw the focus-in sequence: {seen:?}");
+        assert!(
+            hit(&seen),
+            "popup pane never saw the focus-in sequence: {seen:?}"
+        );
         // Kill the popup child so it doesn't outlive the test.
-        s.handle_command(plexy_glass_mux::Command::ClosePopup).await.unwrap();
+        s.handle_command(plexy_glass_mux::Command::ClosePopup)
+            .await
+            .unwrap();
     }
 
     // Regression: `build_snapshot_ctx` used `blocking_lock` and was driven by the
@@ -1609,15 +1677,25 @@ mod tests {
             // Add a second window and flag it (the WindowManager's sticky flags
             // are what build_snapshot_ctx reads into the status WindowSummary).
             let mut m = s.window_manager.lock().await;
-            m.handle_command(plexy_glass_mux::Command::NewWindow).unwrap();
+            m.handle_command(plexy_glass_mux::Command::NewWindow)
+                .unwrap();
             m.windows_mut()[0].set_bell();
             m.windows_mut()[0].set_activity();
         }
         let ctx = build_snapshot_ctx(&s).await;
         assert_eq!(ctx.windows.len(), 2);
-        assert!(ctx.windows[0].bell, "snapshot surfaces the window's bell flag");
-        assert!(ctx.windows[0].activity, "snapshot surfaces the window's activity flag");
-        assert!(!ctx.windows[1].bell && !ctx.windows[1].activity, "unflagged window is clean");
+        assert!(
+            ctx.windows[0].bell,
+            "snapshot surfaces the window's bell flag"
+        );
+        assert!(
+            ctx.windows[0].activity,
+            "snapshot surfaces the window's activity flag"
+        );
+        assert!(
+            !ctx.windows[1].bell && !ctx.windows[1].activity,
+            "unflagged window is clean"
+        );
     }
 
     #[tokio::test]
@@ -1639,7 +1717,8 @@ mod tests {
             // Split the first window so it has two panes, then add a window.
             let mut m = s.window_manager.lock().await;
             m.handle_command(plexy_glass_mux::Command::SplitV).unwrap();
-            m.handle_command(plexy_glass_mux::Command::NewWindow).unwrap();
+            m.handle_command(plexy_glass_mux::Command::NewWindow)
+                .unwrap();
         }
         let st = s.tree_snapshot().await;
         assert_eq!(st.name, "snap");
@@ -1713,7 +1792,12 @@ mod tests {
         let s2 = Arc::clone(&s);
         task::spawn_blocking(move || {
             s2.register_client(
-                PtySize { rows: 24, cols: 80, pixel_width: 1600, pixel_height: 960 },
+                PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 1600,
+                    pixel_height: 960,
+                },
                 Arc::new(AtomicBool::new(false)),
             )
         })
@@ -1723,7 +1807,12 @@ mod tests {
         let s2 = Arc::clone(&s);
         task::spawn_blocking(move || {
             s2.register_client(
-                PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+                PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
                 Arc::new(AtomicBool::new(false)),
             )
         })
@@ -1731,8 +1820,14 @@ mod tests {
         .unwrap()
         .unwrap();
         let s2 = Arc::clone(&s);
-        let eff = task::spawn_blocking(move || s2.effective_size()).await.unwrap();
-        assert_eq!((eff.pixel_width, eff.pixel_height), (1600, 960), "real pixels survive");
+        let eff = task::spawn_blocking(move || s2.effective_size())
+            .await
+            .unwrap();
+        assert_eq!(
+            (eff.pixel_width, eff.pixel_height),
+            (1600, 960),
+            "real pixels survive"
+        );
         assert_eq!((eff.rows, eff.cols), (24, 80));
     }
 
@@ -1743,7 +1838,12 @@ mod tests {
         let s2 = Arc::clone(&s);
         let h = task::spawn_blocking(move || {
             s2.register_client(
-                PtySize { rows: 10, cols: 30, pixel_width: 0, pixel_height: 0 },
+                PtySize {
+                    rows: 10,
+                    cols: 30,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
                 Arc::new(AtomicBool::new(false)),
             )
         })
@@ -1751,11 +1851,15 @@ mod tests {
         .unwrap()
         .unwrap();
         let s2 = Arc::clone(&s);
-        let eff = task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+        let eff = task::spawn_blocking(move || s2.effective_size())
+            .await
+            .unwrap();
         assert_eq!((eff.rows, eff.cols), (10, 30));
         let s2 = Arc::clone(&s);
         let cid = h.client_id;
-        task::spawn_blocking(move || s2.deregister_client(cid)).await.unwrap();
+        task::spawn_blocking(move || s2.deregister_client(cid))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1766,7 +1870,12 @@ mod tests {
         let s2 = Arc::clone(&s);
         let a = task::spawn_blocking(move || {
             s2.register_client(
-                PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+                PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
                 Arc::new(AtomicBool::new(false)),
             )
         })
@@ -1776,7 +1885,12 @@ mod tests {
         let s2 = Arc::clone(&s);
         let b = task::spawn_blocking(move || {
             s2.register_client(
-                PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+                PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
                 Arc::new(AtomicBool::new(false)),
             )
         })
@@ -1802,7 +1916,12 @@ mod tests {
         let s2 = Arc::clone(&s);
         let a = task::spawn_blocking(move || {
             s2.register_client(
-                PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+                PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
                 Arc::new(AtomicBool::new(false)),
             )
         })
@@ -1856,7 +1975,9 @@ mod tests {
         flag_b.store(true, Ordering::SeqCst);
         let s2 = Arc::clone(&s);
         let cid_b = b.client_id;
-        task::spawn_blocking(move || s2.deregister_client(cid_b)).await.unwrap();
+        task::spawn_blocking(move || s2.deregister_client(cid_b))
+            .await
+            .unwrap();
         assert!(!s.any_prefix_armed().await);
     }
 
@@ -1867,7 +1988,12 @@ mod tests {
         let s2 = Arc::clone(&s);
         let a = task::spawn_blocking(move || {
             s2.register_client(
-                PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+                PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
                 Arc::new(AtomicBool::new(false)),
             )
         })
@@ -1877,7 +2003,12 @@ mod tests {
         let s2 = Arc::clone(&s);
         let b = task::spawn_blocking(move || {
             s2.register_client(
-                PtySize { rows: 10, cols: 30, pixel_width: 0, pixel_height: 0 },
+                PtySize {
+                    rows: 10,
+                    cols: 30,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
                 Arc::new(AtomicBool::new(false)),
             )
         })
@@ -1885,21 +2016,35 @@ mod tests {
         .unwrap()
         .unwrap();
         let s2 = Arc::clone(&s);
-        let eff = task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+        let eff = task::spawn_blocking(move || s2.effective_size())
+            .await
+            .unwrap();
         assert_eq!((eff.rows, eff.cols), (10, 30));
         let s2 = Arc::clone(&s);
         let cid_b = b.client_id;
-        task::spawn_blocking(move || s2.deregister_client(cid_b)).await.unwrap();
+        task::spawn_blocking(move || s2.deregister_client(cid_b))
+            .await
+            .unwrap();
         let s2 = Arc::clone(&s);
-        let eff2 = task::spawn_blocking(move || s2.effective_size()).await.unwrap();
+        let eff2 = task::spawn_blocking(move || s2.effective_size())
+            .await
+            .unwrap();
         assert_eq!((eff2.rows, eff2.cols), (24, 80));
         let s2 = Arc::clone(&s);
         let cid_a = a.client_id;
-        task::spawn_blocking(move || s2.deregister_client(cid_a)).await.unwrap();
+        task::spawn_blocking(move || s2.deregister_client(cid_a))
+            .await
+            .unwrap();
         // No clients left → effective_size falls back to the WM host size.
         let s2 = Arc::clone(&s);
-        let eff_none = task::spawn_blocking(move || s2.effective_size()).await.unwrap();
-        assert_eq!((eff_none.rows, eff_none.cols), (24, 80), "no-clients fallback to host size");
+        let eff_none = task::spawn_blocking(move || s2.effective_size())
+            .await
+            .unwrap();
+        assert_eq!(
+            (eff_none.rows, eff_none.cols),
+            (24, 80),
+            "no-clients fallback to host size"
+        );
     }
 
     #[tokio::test]
@@ -1919,11 +2064,17 @@ mod tests {
         let saw = pane.with_screen(|screen| {
             (0..screen.active.num_cols())
                 .filter_map(|c| {
-                    screen.active.get_cell(0, c).map(|cell| cell.grapheme.as_str().to_string())
+                    screen
+                        .active
+                        .get_cell(0, c)
+                        .map(|cell| cell.grapheme.as_str().to_string())
                 })
                 .collect::<String>()
         });
-        assert!(saw.contains("hello"), "expected 'hello' in active grid; got {saw:?}");
+        assert!(
+            saw.contains("hello"),
+            "expected 'hello' in active grid; got {saw:?}"
+        );
         let _ = pane.send_input(bytes::Bytes::from_static(&[0x04])).await;
     }
 
@@ -1938,8 +2089,12 @@ mod tests {
         };
         let s = Session::new("test".into(), spec, size(), cfg()).unwrap();
         // Split into two panes and enable sync-input mode.
-        s.handle_command(plexy_glass_mux::Command::SplitV).await.unwrap();
-        s.handle_command(plexy_glass_mux::Command::ToggleSyncPanes).await.unwrap();
+        s.handle_command(plexy_glass_mux::Command::SplitV)
+            .await
+            .unwrap();
+        s.handle_command(plexy_glass_mux::Command::ToggleSyncPanes)
+            .await
+            .unwrap();
         // Broadcast input to both panes.
         s.handle_input_bytes(b"hello\n", false).await.unwrap();
         // Give children time to echo.
@@ -1953,11 +2108,17 @@ mod tests {
             let saw = pane.with_screen(|screen| {
                 (0..screen.active.num_cols())
                     .filter_map(|c| {
-                        screen.active.get_cell(0, c).map(|cell| cell.grapheme.as_str().to_string())
+                        screen
+                            .active
+                            .get_cell(0, c)
+                            .map(|cell| cell.grapheme.as_str().to_string())
                     })
                     .collect::<String>()
             });
-            assert!(saw.contains("hello"), "pane {id:?} missing 'hello' broadcast: {saw:?}");
+            assert!(
+                saw.contains("hello"),
+                "pane {id:?} missing 'hello' broadcast: {saw:?}"
+            );
         }
         // Cleanup: send EOF to each pane.
         for id in &panes {
@@ -1986,8 +2147,12 @@ mod tests {
             let mut m = s.window_manager.lock().await;
             m.set_default_program("/bin/cat");
         }
-        s.handle_command(plexy_glass_mux::Command::SplitV).await.unwrap();
-        s.handle_command(plexy_glass_mux::Command::ToggleSyncPanes).await.unwrap();
+        s.handle_command(plexy_glass_mux::Command::SplitV)
+            .await
+            .unwrap();
+        s.handle_command(plexy_glass_mux::Command::ToggleSyncPanes)
+            .await
+            .unwrap();
 
         // PaneId(0) = sibling: ?2004 ON. PaneId(1) = active: ?2004 OFF.
         let (sib, act) = {
@@ -1996,7 +2161,10 @@ mod tests {
             let act = m.active_window().pane(PaneId(1)).cloned().unwrap();
             (sib, act)
         };
-        sib.with_screen_mut(|sc| sc.modes.insert(plexy_glass_emulator::Modes::BRACKETED_PASTE));
+        sib.with_screen_mut(|sc| {
+            sc.modes
+                .insert(plexy_glass_emulator::Modes::BRACKETED_PASTE);
+        });
         assert!(sib.wants_bracketed_paste() && !act.wants_bracketed_paste());
         let mut sib_rx = sib.subscribe_output();
         let mut act_rx = act.subscribe_output();
@@ -2025,8 +2193,14 @@ mod tests {
         let sib_out = drain(&mut sib_rx).await;
         let act_out = drain(&mut act_rx).await;
         let has = |h: &[u8], n: &[u8]| h.windows(n.len()).any(|w| w == n);
-        assert!(has(&sib_out, b"200~"), "sibling (?2004 on) must get the paste markers: {sib_out:?}");
-        assert!(!has(&act_out, b"200~"), "active (?2004 off) must get the raw paste: {act_out:?}");
+        assert!(
+            has(&sib_out, b"200~"),
+            "sibling (?2004 on) must get the paste markers: {sib_out:?}"
+        );
+        assert!(
+            !has(&act_out, b"200~"),
+            "active (?2004 off) must get the raw paste: {act_out:?}"
+        );
 
         let _ = sib.send_input(bytes::Bytes::from_static(&[0x04])).await;
         let _ = act.send_input(bytes::Bytes::from_static(&[0x04])).await;
@@ -2041,7 +2215,9 @@ mod tests {
         use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
         let _g = test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
-        s.handle_command(plexy_glass_mux::Command::SplitV).await.unwrap();
+        s.handle_command(plexy_glass_mux::Command::SplitV)
+            .await
+            .unwrap();
         // Alt-press inside pane 0 → default drag-modifier is Alt → pane drag begins.
         let (r, c) = {
             let m = s.window_manager.lock().await;
@@ -2052,7 +2228,11 @@ mod tests {
         s.handle_mouse(MouseEvent {
             kind: MouseKind::Press,
             button: MouseButton::Left,
-            modifiers: MouseModifiers { shift: false, alt: true, ctrl: false },
+            modifiers: MouseModifiers {
+                shift: false,
+                alt: true,
+                ctrl: false,
+            },
             row: r,
             col: c,
         })
@@ -2064,7 +2244,9 @@ mod tests {
         );
         // Client teardown (id need not exist, the retain is a no-op and the reset runs).
         let s2 = Arc::clone(&s);
-        task::spawn_blocking(move || s2.deregister_client(999)).await.unwrap();
+        task::spawn_blocking(move || s2.deregister_client(999))
+            .await
+            .unwrap();
         assert!(
             s.window_manager.lock().await.pane_drag_roles().is_none(),
             "deregister_client must clear the stuck pane drag"
@@ -2147,11 +2329,7 @@ mod tests {
         let s = Session::new("test".into(), spec(), size(), cfg()).unwrap();
         let mut rx = s.frame_rx_template.clone();
         s.notify.notify_one();
-        let result = time::timeout(
-            Duration::from_secs(1),
-            rx.changed(),
-        )
-        .await;
+        let result = time::timeout(Duration::from_secs(1), rx.changed()).await;
         assert!(result.is_ok(), "expected a frame within 1s");
     }
 
@@ -2178,7 +2356,10 @@ mod tests {
             }
             time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(s.closing.load(Ordering::SeqCst), "session did not converge to closing");
+        assert!(
+            s.closing.load(Ordering::SeqCst),
+            "session did not converge to closing"
+        );
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_single_pane() {
@@ -2202,7 +2383,9 @@ mod tests {
                 }),
             }],
         };
-        let s = Session::build_from_template(&tmpl, size(), cfg()).await.unwrap();
+        let s = Session::build_from_template(&tmpl, size(), cfg())
+            .await
+            .unwrap();
         {
             let wm = s.window_manager.lock().await;
             assert_eq!(wm.windows().len(), 1);
@@ -2215,7 +2398,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_split_and_multiwindow() {
-        use plexy_glass_config::{PaneNode, PaneTemplate, SessionTemplate, SplitDirection, WindowTemplate};
+        use plexy_glass_config::{
+            PaneNode, PaneTemplate, SessionTemplate, SplitDirection, WindowTemplate,
+        };
         let _g = test_env::isolate();
         let pane = |c: Option<&str>| {
             PaneNode::Leaf(PaneTemplate {
@@ -2251,7 +2436,9 @@ mod tests {
                 },
             ],
         };
-        let s = Session::build_from_template(&tmpl, size(), cfg()).await.unwrap();
+        let s = Session::build_from_template(&tmpl, size(), cfg())
+            .await
+            .unwrap();
         {
             let wm = s.window_manager.lock().await;
             assert_eq!(wm.windows().len(), 2);
@@ -2268,13 +2455,15 @@ mod tests {
     async fn build_from_template_window_cwd_seeds_first_pane() {
         use plexy_glass_config::{PaneNode, PaneTemplate, SessionTemplate, WindowTemplate};
         let _g = test_env::isolate();
-        let pane = |cwd: Option<&str>| PaneNode::Leaf(PaneTemplate {
-            command: None,
-            cwd: cwd.map(str::to_string),
-            name: None,
-            active: false,
-            env: vec![],
-        });
+        let pane = |cwd: Option<&str>| {
+            PaneNode::Leaf(PaneTemplate {
+                command: None,
+                cwd: cwd.map(str::to_string),
+                name: None,
+                active: false,
+                env: vec![],
+            })
+        };
         let tmpl = SessionTemplate {
             name: "wcwd".into(),
             cwd: Some("/session".into()),
@@ -2296,7 +2485,9 @@ mod tests {
                 },
             ],
         };
-        let s = Session::build_from_template(&tmpl, size(), cfg()).await.unwrap();
+        let s = Session::build_from_template(&tmpl, size(), cfg())
+            .await
+            .unwrap();
         let wm = s.window_manager.lock().await;
         // window "api": its first pane spawns at the window cwd.
         assert_eq!(wm.windows()[0].home_cwd.as_deref(), Some("/win/api"));
@@ -2315,7 +2506,9 @@ mod tests {
         // Regression: a 2-way default split stays 50/50 (byte-identical to v1).
         let _g = test_env::isolate();
         let cfg = build_cfg(r#"session "s" { window "w" { split vertical { pane; pane } } }"#);
-        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
+        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
         {
             let wm = s.window_manager.lock().await;
             let win = &wm.windows()[0];
@@ -2324,7 +2517,10 @@ mod tests {
             let r0 = win.layout().rect_of(leaves[0], vp).unwrap();
             let r1 = win.layout().rect_of(leaves[1], vp).unwrap();
             // Equal within one cell (odd usable width splits off-by-one).
-            assert!((i32::from(r0.cols) - i32::from(r1.cols)).abs() <= 1, "{r0:?} {r1:?}");
+            assert!(
+                (i32::from(r0.cols) - i32::from(r1.cols)).abs() <= 1,
+                "{r0:?} {r1:?}"
+            );
         }
         s.terminate_panes().await;
     }
@@ -2334,8 +2530,11 @@ mod tests {
         // INTENTIONAL v2 change: a flat 3-way default builds 33/33/33, not v1's
         // 50/25/25 right-lean cascade.
         let _g = test_env::isolate();
-        let cfg = build_cfg(r#"session "s" { window "w" { split vertical { pane; pane; pane } } }"#);
-        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
+        let cfg =
+            build_cfg(r#"session "s" { window "w" { split vertical { pane; pane; pane } } }"#);
+        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
         {
             let wm = s.window_manager.lock().await;
             let win = &wm.windows()[0];
@@ -2359,7 +2558,9 @@ mod tests {
         let cfg = build_cfg(
             r#"session "s" { window "w" { split vertical { pane ratio=2; pane ratio=1 } } }"#,
         );
-        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
+        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
         {
             let wm = s.window_manager.lock().await;
             let win = &wm.windows()[0];
@@ -2386,7 +2587,9 @@ mod tests {
         let cfg = build_cfg(
             r#"session "s" { window "w" { split vertical { pane ratio=2; split horizontal ratio=1 { pane; pane } } } }"#,
         );
-        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
+        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
         {
             let wm = s.window_manager.lock().await;
             let win = &wm.windows()[0];
@@ -2416,7 +2619,9 @@ mod tests {
                 window "b" active=#true { split vertical { pane; pane active=#true } }
             }"#,
         );
-        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
+        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
         {
             let wm = s.window_manager.lock().await;
             // Window "b" (index 1) is the active window.
@@ -2454,7 +2659,9 @@ mod tests {
             "session \"s\" {{ window \"w\" {{ pane command=\"{cmd}\" {{ env {{ FOO \"bar\" }} }} }} }}"
         );
         let cfg = build_cfg(&kdl);
-        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg)).await.unwrap();
+        let s = Session::build_from_template(&cfg.sessions[0], size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
         let wrote = test_env::poll_until(Duration::from_secs(10), || {
             fs::read_to_string(&out)
                 .is_ok_and(|b| b.contains("FOO=") && b.contains("PATH=") && b.contains("TERM="))
@@ -2462,9 +2669,13 @@ mod tests {
         .await;
         assert!(wrote, "pane command never wrote the env file");
         let body = fs::read_to_string(&out).unwrap();
-        assert!(body.contains("FOO=bar"), "declared env reached the child: {body:?}");
         assert!(
-            body.lines().any(|l| l.starts_with("PATH=") && l.len() > "PATH=".len()),
+            body.contains("FOO=bar"),
+            "declared env reached the child: {body:?}"
+        );
+        assert!(
+            body.lines()
+                .any(|l| l.starts_with("PATH=") && l.len() > "PATH=".len()),
             "inherited PATH survived the overlay: {body:?}"
         );
         assert!(
@@ -2476,7 +2687,11 @@ mod tests {
     // ── scrollback persistence (P3) ────────────────────────────────────────
 
     /// Build a row of `text` at width `cols` with an optional 133 mark applied.
-    fn marked_row(text: &str, cols: u16, apply: impl FnOnce(&mut plexy_glass_emulator::RowMark)) -> plexy_glass_emulator::Row {
+    fn marked_row(
+        text: &str,
+        cols: u16,
+        apply: impl FnOnce(&mut plexy_glass_emulator::RowMark),
+    ) -> plexy_glass_emulator::Row {
         let mut r = plexy_glass_emulator::Row::blank(cols);
         for (i, ch) in text.chars().enumerate() {
             if (i as u16) < cols {
@@ -2496,10 +2711,9 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let _g = test_env::isolate();
         let s = Session::new("sp".into(), spec(), size(), cfg()).unwrap();
-        let handle = task::block_in_place(|| {
-            s.register_client(size(), Arc::new(AtomicBool::new(false)))
-        })
-        .unwrap();
+        let handle =
+            task::block_in_place(|| s.register_client(size(), Arc::new(AtomicBool::new(false))))
+                .unwrap();
         let frame_rx = handle.frame_rx.clone();
 
         // Real bidirectional socket, split exactly like serve_attach does.
@@ -2585,8 +2799,9 @@ mod tests {
     }
     // ---- pipe-pane (spec: 2026-06-12-pipe-pane-design.md) ----
 
-    use crate::pipe::{MSG_CONSUMER_EXITED, MSG_NO_PIPE, MSG_STOPPED};
     use plexy_glass_mux::PromptCommand;
+
+    use crate::pipe::{MSG_CONSUMER_EXITED, MSG_NO_PIPE, MSG_STOPPED};
 
     /// `kill -0` semantics: a zombie still counts as alive until reaped, so
     /// `!pid_alive` asserts killed AND reaped (no zombie).
@@ -2597,12 +2812,20 @@ mod tests {
     /// A pane spec whose child is `cat`: it echoes input back as pane OUTPUT,
     /// which is what the pipe streams.
     fn cat_spec() -> SpawnSpec {
-        SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None }
+        SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        }
     }
 
     async fn active_pane(s: &Arc<Session>) -> Pane {
         let m = s.window_manager.lock().await;
-        m.active_window().active_pane().cloned().expect("active pane")
+        m.active_window()
+            .active_pane()
+            .cloned()
+            .expect("active pane")
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2619,15 +2842,23 @@ mod tests {
             ))))
             .await
             .unwrap();
-        assert_eq!(msg.as_deref(), Some(format!("pipe-pane → cat > {}", file.display()).as_str()));
-        assert!(active_pane(&s).await.has_pipe(), "pipe installed on the target pane");
+        assert_eq!(
+            msg.as_deref(),
+            Some(format!("pipe-pane → cat > {}", file.display()).as_str())
+        );
+        assert!(
+            active_pane(&s).await.has_pipe(),
+            "pipe installed on the target pane"
+        );
 
         // Output produced AFTER pipe start flows to the consumer verbatim.
         s.handle_input_bytes(b"pipe_needle\n", false).await.unwrap();
         let f = file.clone();
         assert!(
             test_env::poll_until(Duration::from_secs(10), move || {
-                fs::read_to_string(&f).unwrap_or_default().contains("pipe_needle")
+                fs::read_to_string(&f)
+                    .unwrap_or_default()
+                    .contains("pipe_needle")
             })
             .await,
             "consumer file never received the pane output"
@@ -2642,36 +2873,47 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let f1 = tmp.path().join("one.out");
         let f2 = tmp.path().join("two.out");
-        s.handle_prompt_command(PromptCommand::PipePane(Some(format!("cat > {}", f1.display()))))
-            .await
-            .unwrap();
+        s.handle_prompt_command(PromptCommand::PipePane(Some(format!(
+            "cat > {}",
+            f1.display()
+        ))))
+        .await
+        .unwrap();
         let pane = active_pane(&s).await;
         let pid1 = pane.pipe_pid().expect("first consumer pid");
 
         // Starting a new pipe replaces (kills + reaps) the old one.
-        s.handle_prompt_command(PromptCommand::PipePane(Some(format!("cat > {}", f2.display()))))
-            .await
-            .unwrap();
+        s.handle_prompt_command(PromptCommand::PipePane(Some(format!(
+            "cat > {}",
+            f2.display()
+        ))))
+        .await
+        .unwrap();
         assert!(
-            test_env::poll_until(Duration::from_secs(10), || !pid_alive(pid1))
-                .await,
+            test_env::poll_until(Duration::from_secs(10), || !pid_alive(pid1)).await,
             "old consumer survived (or zombied) after replace"
         );
         let pid2 = pane.pipe_pid().expect("second consumer pid");
         assert_ne!(pid1, pid2, "slot holds the new consumer");
 
         // Post-replace output reaches only the new consumer.
-        s.handle_input_bytes(b"second_needle\n", false).await.unwrap();
+        s.handle_input_bytes(b"second_needle\n", false)
+            .await
+            .unwrap();
         let f2c = f2.clone();
         assert!(
             test_env::poll_until(Duration::from_secs(10), move || {
-                fs::read_to_string(&f2c).unwrap_or_default().contains("second_needle")
+                fs::read_to_string(&f2c)
+                    .unwrap_or_default()
+                    .contains("second_needle")
             })
             .await,
             "new consumer never received post-replace output"
         );
         assert!(
-            !fs::read_to_string(&f1).unwrap_or_default().contains("second_needle"),
+            !fs::read_to_string(&f1)
+                .unwrap_or_default()
+                .contains("second_needle"),
             "replaced consumer kept receiving output"
         );
         s.terminate_panes().await;
@@ -2684,7 +2926,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("stop.out");
         // Stop with no pipe running → distinct no-pipe status.
-        let msg = s.handle_prompt_command(PromptCommand::PipePane(None)).await.unwrap();
+        let msg = s
+            .handle_prompt_command(PromptCommand::PipePane(None))
+            .await
+            .unwrap();
         assert_eq!(msg.as_deref(), Some(MSG_NO_PIPE));
 
         s.handle_prompt_command(PromptCommand::PipePane(Some(format!(
@@ -2695,12 +2940,14 @@ mod tests {
         .unwrap();
         let pane = active_pane(&s).await;
         let pid = pane.pipe_pid().expect("consumer pid");
-        let msg = s.handle_prompt_command(PromptCommand::PipePane(None)).await.unwrap();
+        let msg = s
+            .handle_prompt_command(PromptCommand::PipePane(None))
+            .await
+            .unwrap();
         assert_eq!(msg.as_deref(), Some(MSG_STOPPED));
         assert!(!pane.has_pipe(), "stop clears the slot synchronously");
         assert!(
-            test_env::poll_until(Duration::from_secs(10), || !pid_alive(pid))
-                .await,
+            test_env::poll_until(Duration::from_secs(10), || !pid_alive(pid)).await,
             "stopped consumer survived (or zombied)"
         );
         s.terminate_panes().await;
@@ -2716,13 +2963,14 @@ mod tests {
             .unwrap();
         let pane = active_pane(&s).await;
         assert!(
-            test_env::poll_until(Duration::from_secs(10), || !pane.has_pipe())
-                .await,
+            test_env::poll_until(Duration::from_secs(10), || !pane.has_pipe()).await,
             "slot never cleared after the consumer exited"
         );
         assert!(
             test_env::poll_until(Duration::from_secs(10), || {
-                let Ok(mut m) = s.window_manager.try_lock() else { return false };
+                let Ok(mut m) = s.window_manager.try_lock() else {
+                    return false;
+                };
                 m.take_active_message() == Some(MSG_CONSUMER_EXITED)
             })
             .await,
@@ -2781,12 +3029,14 @@ mod tests {
             .await,
             "pane never finished flooding"
         );
-        assert!(pid_alive(pid), "never-reading consumer still parked before the kill");
+        assert!(
+            pid_alive(pid),
+            "never-reading consumer still parked before the kill"
+        );
 
         pane.kill_child();
         assert!(
-            test_env::poll_until(Duration::from_secs(10), || !pid_alive(pid))
-                .await,
+            test_env::poll_until(Duration::from_secs(10), || !pid_alive(pid)).await,
             "consumer survived (or zombied) after pane kill — kill_child must close the pipe"
         );
         assert!(!pane.has_pipe(), "kill_child cleared the pipe slot");
@@ -2811,22 +3061,20 @@ mod tests {
         let pid = pane.pipe_pid().expect("consumer pid");
         // Wait until the pipe's drain task is actually running (slot occupied).
         assert!(
-            test_env::poll_until(Duration::from_secs(5), || pane.has_pipe())
-                .await,
+            test_env::poll_until(Duration::from_secs(5), || pane.has_pipe()).await,
             "pipe never attached"
         );
         assert!(pid_alive(pid), "consumer must be alive before the kill");
 
         // Drive the Ctrl+a x route, NOT pane.kill_child() directly.
         // Single-pane window: KillPane → TreeEmpty → close_active_window.
-        s.handle_command(plexy_glass_mux::Command::KillPane).await.unwrap();
+        s.handle_command(plexy_glass_mux::Command::KillPane)
+            .await
+            .unwrap();
 
         // Consumer must be killed AND reaped (kill -0 fails once the zombie is gone).
         assert!(
-            test_env::poll_until(Duration::from_secs(10), || {
-                !pid_alive(pid)
-            })
-            .await,
+            test_env::poll_until(Duration::from_secs(10), || { !pid_alive(pid) }).await,
             "consumer survived (or zombied) after Command::KillPane — \
              close_active_window must call kill_child on removed panes"
         );
@@ -2852,27 +3100,27 @@ mod tests {
             .unwrap();
         let pid = pane_w0.pipe_pid().expect("consumer pid");
         assert!(
-            test_env::poll_until(Duration::from_secs(5), || {
-                pane_w0.has_pipe()
-            })
-            .await,
+            test_env::poll_until(Duration::from_secs(5), || { pane_w0.has_pipe() }).await,
             "pipe never attached"
         );
         assert!(pid_alive(pid), "consumer must be alive before the kill");
 
         // Open a second window so the session is not destroyed by the close.
-        s.handle_command(plexy_glass_mux::Command::NewWindow).await.unwrap();
+        s.handle_command(plexy_glass_mux::Command::NewWindow)
+            .await
+            .unwrap();
 
         // Switch back to window 0 and kill it via the Ctrl+a & route.
-        s.handle_command(plexy_glass_mux::Command::PrevWindow).await.unwrap();
-        s.handle_command(plexy_glass_mux::Command::KillWindow).await.unwrap();
+        s.handle_command(plexy_glass_mux::Command::PrevWindow)
+            .await
+            .unwrap();
+        s.handle_command(plexy_glass_mux::Command::KillWindow)
+            .await
+            .unwrap();
 
         // Consumer must be killed AND reaped.
         assert!(
-            test_env::poll_until(Duration::from_secs(10), || {
-                !pid_alive(pid)
-            })
-            .await,
+            test_env::poll_until(Duration::from_secs(10), || { !pid_alive(pid) }).await,
             "consumer survived (or zombied) after Command::KillWindow — \
              close_active_window must call kill_child on all removed panes"
         );
@@ -2904,7 +3152,9 @@ mod tests {
         // as pane output, which the pipe streams to the consumer unchanged.
         // `needle\n` is appended so the final grapheme is flushed from the
         // emulator's buffer before the assertion.
-        s.handle_input_bytes(b"\x1b[1mbold\x1b[0mneedle\n", false).await.unwrap();
+        s.handle_input_bytes(b"\x1b[1mbold\x1b[0mneedle\n", false)
+            .await
+            .unwrap();
 
         let f = file.clone();
         assert!(
@@ -2932,15 +3182,20 @@ mod tests {
         let popup_real = popup_dir.path().canonicalize().unwrap();
         let out = active_dir.path().join("cwd.out");
 
-        s.handle_command(plexy_glass_mux::Command::OpenPopup { command: Some("cat".into()) })
-            .await
-            .unwrap();
+        s.handle_command(plexy_glass_mux::Command::OpenPopup {
+            command: Some("cat".into()),
+        })
+        .await
+        .unwrap();
         {
             let m = s.window_manager.lock().await;
             // Distinct OSC-7 cwds: layout pane vs popup pane.
-            m.active_window().active_pane().unwrap().with_screen_mut(|scr| {
-                scr.cwd = Some(format!("file://localhost{}", active_dir.path().display()));
-            });
+            m.active_window()
+                .active_pane()
+                .unwrap()
+                .with_screen_mut(|scr| {
+                    scr.cwd = Some(format!("file://localhost{}", active_dir.path().display()));
+                });
             m.popup().unwrap().pane.with_screen_mut(|scr| {
                 scr.cwd = Some(format!("file://localhost{}", popup_dir.path().display()));
             });
@@ -2969,17 +3224,20 @@ mod tests {
             popup_real.as_path(),
             "consumer must spawn at the POPUP (input target) pane's cwd"
         );
-        s.handle_command(plexy_glass_mux::Command::ClosePopup).await.unwrap();
+        s.handle_command(plexy_glass_mux::Command::ClosePopup)
+            .await
+            .unwrap();
         s.terminate_panes().await;
     }
 }
 
 #[cfg(test)]
 mod reencode_tests {
-    use super::{reencode_input, select_target};
-    use plexy_glass_keys::{encode, KeyboardTarget};
+    use plexy_glass_keys::{KeyboardTarget, encode};
     use plexy_glass_mux::{Key, KeyEvent, Modifiers};
     use plexy_glass_protocol::NegotiatedKbd;
+
+    use super::{reencode_input, select_target};
 
     #[test]
     fn target_precedence_and_encoding() {
@@ -3007,13 +3265,25 @@ mod reencode_tests {
         // From a rich outer (kitty event carrying the shifted alternate).
         let mut rich = KeyEvent::new(Key::Char('i'), Modifiers::SHIFT);
         rich.shifted = Some('I');
-        let bytes =
-            reencode_input(NegotiatedKbd::Kitty(1), 5, 0, false, &rich, b"\x1b[105:73;2u");
+        let bytes = reencode_input(
+            NegotiatedKbd::Kitty(1),
+            5,
+            0,
+            false,
+            &rich,
+            b"\x1b[105:73;2u",
+        );
         assert_eq!(bytes, b"I");
         // Same rich event into a LEGACY pane: down-convert to "I" (this used
         // to be dropped entirely, the eaten-key half of the bug).
-        let bytes =
-            reencode_input(NegotiatedKbd::Kitty(1), 0, 0, false, &rich, b"\x1b[105:73;2u");
+        let bytes = reencode_input(
+            NegotiatedKbd::Kitty(1),
+            0,
+            0,
+            false,
+            &rich,
+            b"\x1b[105:73;2u",
+        );
         assert_eq!(bytes, b"I");
     }
 
@@ -3032,7 +3302,14 @@ mod reencode_tests {
         // Ctrl+a: \e[97;5u -> 0x01 (SOH), the legacy control byte.
         let ctrl_a = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
         assert_eq!(
-            reencode_input(NegotiatedKbd::Kitty(31), 0, 0, false, &ctrl_a, b"\x1b[97;5u"),
+            reencode_input(
+                NegotiatedKbd::Kitty(31),
+                0,
+                0,
+                false,
+                &ctrl_a,
+                b"\x1b[97;5u"
+            ),
             vec![0x01],
         );
     }

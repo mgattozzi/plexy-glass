@@ -1,7 +1,9 @@
-use crate::errors::CodecError;
-use bytes::{Bytes, BytesMut};
 use std::io::ErrorKind;
+
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+use crate::errors::CodecError;
 
 /// Maximum permitted frame payload size. Frames larger than this are rejected
 /// before allocation, so a hostile peer cannot make us allocate gigabytes.
@@ -27,18 +29,20 @@ impl Codec {
         }
         let len = u32::from_le_bytes(len_buf);
         if len > MAX_FRAME_BYTES {
-            return Err(CodecError::FrameTooLarge { max: MAX_FRAME_BYTES, got: len });
+            return Err(CodecError::FrameTooLarge {
+                max: MAX_FRAME_BYTES,
+                got: len,
+            });
         }
         let mut buf = BytesMut::with_capacity(len as usize);
         buf.resize(len as usize, 0);
-        reader
-            .read_exact(&mut buf)
-            .await
-            .map_err(|e| if e.kind() == ErrorKind::UnexpectedEof {
+        reader.read_exact(&mut buf).await.map_err(|e| {
+            if e.kind() == ErrorKind::UnexpectedEof {
                 CodecError::UnexpectedEof
             } else {
                 CodecError::Io(e)
-            })?;
+            }
+        })?;
         Ok(Some(buf.freeze()))
     }
 
@@ -55,9 +59,15 @@ impl Codec {
                 got: u32::MAX,
             })?;
         if len > MAX_FRAME_BYTES {
-            return Err(CodecError::FrameTooLarge { max: MAX_FRAME_BYTES, got: len });
+            return Err(CodecError::FrameTooLarge {
+                max: MAX_FRAME_BYTES,
+                got: len,
+            });
         }
-        writer.write_all(&len.to_le_bytes()).await.map_err(CodecError::Io)?;
+        writer
+            .write_all(&len.to_le_bytes())
+            .await
+            .map_err(CodecError::Io)?;
         writer.write_all(payload).await.map_err(CodecError::Io)?;
         writer.flush().await.map_err(CodecError::Io)?;
         Ok(())
@@ -66,10 +76,10 @@ impl Codec {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tokio::io;
-    use tokio::io::duplex;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncWriteExt, duplex};
+
+    use super::*;
 
     #[tokio::test]
     async fn round_trip_one_frame() {

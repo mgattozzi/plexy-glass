@@ -1,14 +1,14 @@
-use crate::error::DaemonError;
-use crate::paths::RuntimePaths;
+use std::fs::{File, OpenOptions};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::{fs, io};
+
 use nix::fcntl::{Flock, FlockArg};
 use nix::unistd;
-use std::fs;
-use std::fs::{File, OpenOptions};
-use std::io;
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::fs::OpenOptionsExt;
 use tokio::net::UnixListener;
 use tracing::{info, warn};
+
+use crate::error::DaemonError;
+use crate::paths::RuntimePaths;
 
 /// Holds the daemon's exclusive `flock` + listening socket. Both are released
 /// when this value is dropped.
@@ -33,20 +33,19 @@ impl Listener {
             .truncate(false)
             .mode(0o600)
             .open(&paths.lockfile)?;
-        let lock = Flock::lock(lockfile, FlockArg::LockExclusiveNonblock).map_err(|(_f, errno)| {
-            DaemonError::LockfileBusy {
-                path: paths.lockfile.clone(),
-                source: io::Error::from_raw_os_error(errno as i32),
-            }
-        })?;
+        let lock =
+            Flock::lock(lockfile, FlockArg::LockExclusiveNonblock).map_err(|(_f, errno)| {
+                DaemonError::LockfileBusy {
+                    path: paths.lockfile.clone(),
+                    source: io::Error::from_raw_os_error(errno as i32),
+                }
+            })?;
 
         // Refuse to clobber another user's socket.
         if let Ok(meta) = fs::metadata(&paths.socket)
             && meta.uid() != unistd::getuid().as_raw()
         {
-            return Err(DaemonError::SocketOwnedByOtherUser {
-                path: paths.socket,
-            });
+            return Err(DaemonError::SocketOwnedByOtherUser { path: paths.socket });
         }
 
         // Unlink any stale socket file and bind.

@@ -5,9 +5,10 @@
 //! `Session::handle_prompt_command` and the connection-level `switch_session`).
 //! Also provides verb-name completion used by the command overlay.
 
-use crate::{Direction, SplitDir};
 use std::error::Error;
 use std::fmt;
+
+use crate::{Direction, SplitDir};
 
 /// Which pane `focus` targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,11 +64,18 @@ pub enum PromptCommand {
     PasteBuffer(Option<String>),
     ChooseBuffer,
     /// Push literal text as a new paste buffer.
-    SetBuffer { text: String },
+    SetBuffer {
+        text: String,
+    },
     /// Write a buffer (named, or the newest with `None`) to a file.
-    SaveBuffer { name: Option<String>, path: String },
+    SaveBuffer {
+        name: Option<String>,
+        path: String,
+    },
     /// Read a file into a new paste buffer.
-    LoadBuffer { path: String },
+    LoadBuffer {
+        path: String,
+    },
     ToggleMonitorActivity,
     ToggleMonitorBell,
     ToggleMonitorCommand,
@@ -107,13 +115,49 @@ impl Error for ParseError {}
 
 /// Static verb names, sorted, for Tab-completion of the first token.
 pub const VERBS: &[&str] = &[
-    "block-mode", "break", "buffers", "close-popup", "copy", "copy-output", "detach", "focus",
-    "help", "hints", "history", "join", "kill", "last", "layout", "load-buffer", "mark",
-    "monitor-activity", "monitor-bell", "monitor-command", "monitor-silence", "new", "next",
-    "next-prompt", "paste",
-    "pipe-pane", "popup", "prev", "prev-prompt", "reload", "rename", "rename-pane", "resize",
-    "save-buffer", "sessions", "set-buffer", "split", "swap", "switch", "sync",
-    "tree", "win", "zoom",
+    "block-mode",
+    "break",
+    "buffers",
+    "close-popup",
+    "copy",
+    "copy-output",
+    "detach",
+    "focus",
+    "help",
+    "hints",
+    "history",
+    "join",
+    "kill",
+    "last",
+    "layout",
+    "load-buffer",
+    "mark",
+    "monitor-activity",
+    "monitor-bell",
+    "monitor-command",
+    "monitor-silence",
+    "new",
+    "next",
+    "next-prompt",
+    "paste",
+    "pipe-pane",
+    "popup",
+    "prev",
+    "prev-prompt",
+    "reload",
+    "rename",
+    "rename-pane",
+    "resize",
+    "save-buffer",
+    "sessions",
+    "set-buffer",
+    "split",
+    "swap",
+    "switch",
+    "sync",
+    "tree",
+    "win",
+    "zoom",
 ];
 
 fn err(msg: impl Into<String>) -> ParseError {
@@ -187,7 +231,9 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
             if rest.is_empty() {
                 Err(err("set-buffer: expected text"))
             } else {
-                Ok(PromptCommand::SetBuffer { text: rest.to_string() })
+                Ok(PromptCommand::SetBuffer {
+                    text: rest.to_string(),
+                })
             }
         }
         "save-buffer" => {
@@ -201,11 +247,17 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
                     name: Some(first.to_string()),
                     path: tail.trim_start().to_string(),
                 }),
-                Some(_) => Ok(PromptCommand::SaveBuffer { name: None, path: rest.to_string() }),
+                Some(_) => Ok(PromptCommand::SaveBuffer {
+                    name: None,
+                    path: rest.to_string(),
+                }),
                 // A lone `bufferN` is a missing path; a lone anything else is
                 // the path. Empty rest is a missing path either way.
                 None if !rest.is_empty() && !is_buffer_name(rest) => {
-                    Ok(PromptCommand::SaveBuffer { name: None, path: rest.to_string() })
+                    Ok(PromptCommand::SaveBuffer {
+                        name: None,
+                        path: rest.to_string(),
+                    })
                 }
                 None => Err(err("save-buffer: expected a path")),
             }
@@ -214,7 +266,9 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
             if rest.is_empty() {
                 Err(err("load-buffer: expected a path"))
             } else {
-                Ok(PromptCommand::LoadBuffer { path: rest.to_string() })
+                Ok(PromptCommand::LoadBuffer {
+                    path: rest.to_string(),
+                })
             }
         }
         "monitor-activity" => no_args(PromptCommand::ToggleMonitorActivity),
@@ -253,7 +307,9 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
             let [n] = args.as_slice() else {
                 return Err(err("win: expected a window number"));
             };
-            let n: u32 = n.parse().map_err(|_| err("win: expected a window number"))?;
+            let n: u32 = n
+                .parse()
+                .map_err(|_| err("win: expected a window number"))?;
             if n == 0 {
                 return Err(err("win: window numbers start at 1"));
             }
@@ -292,13 +348,15 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
             let (dir_s, n) = match args.as_slice() {
                 [d] => (*d, 1u16),
                 [d, n] => {
-                    let n: u16 = n.parse().map_err(|_| err("resize: count must be a number"))?;
+                    let n: u16 = n
+                        .parse()
+                        .map_err(|_| err("resize: count must be a number"))?;
                     (*d, n)
                 }
                 _ => return Err(err("resize: expected a direction l/r/u/d")),
             };
-            let dir =
-                dir_from_letter(dir_s).ok_or_else(|| err("resize: expected a direction l/r/u/d"))?;
+            let dir = dir_from_letter(dir_s)
+                .ok_or_else(|| err("resize: expected a direction l/r/u/d"))?;
             if n == 0 {
                 return Err(err("resize: count must be >= 1"));
             }
@@ -346,7 +404,9 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
             }
             match crate::LayoutPreset::parse(rest) {
                 Some(p) => Ok(PromptCommand::Layout(p)),
-                None => Err(err(format!("layout: unknown layout `{rest}`; expected one of {NAMES}"))),
+                None => Err(err(format!(
+                    "layout: unknown layout `{rest}`; expected one of {NAMES}"
+                ))),
             }
         }
         other => Err(err(format!("unknown command: {other}"))),
@@ -434,7 +494,10 @@ mod tests {
 
     #[test]
     fn no_arg_verb_rejects_extra() {
-        assert_eq!(p("zoom x").unwrap_err().to_string(), "zoom: takes no arguments");
+        assert_eq!(
+            p("zoom x").unwrap_err().to_string(),
+            "zoom: takes no arguments"
+        );
     }
 
     #[test]
@@ -451,19 +514,37 @@ mod tests {
 
     #[test]
     fn win_errors() {
-        assert_eq!(p("win").unwrap_err().to_string(), "win: expected a window number");
-        assert_eq!(p("win x").unwrap_err().to_string(), "win: expected a window number");
-        assert_eq!(p("win 0").unwrap_err().to_string(), "win: window numbers start at 1");
+        assert_eq!(
+            p("win").unwrap_err().to_string(),
+            "win: expected a window number"
+        );
+        assert_eq!(
+            p("win x").unwrap_err().to_string(),
+            "win: expected a window number"
+        );
+        assert_eq!(
+            p("win 0").unwrap_err().to_string(),
+            "win: window numbers start at 1"
+        );
         assert_eq!(p("win 999").unwrap_err().to_string(), "win: no such window");
-        assert_eq!(p("win 1 2").unwrap_err().to_string(), "win: expected a window number");
+        assert_eq!(
+            p("win 1 2").unwrap_err().to_string(),
+            "win: expected a window number"
+        );
     }
 
     #[test]
     fn split_variants() {
         assert_eq!(p("split h").unwrap(), PromptCommand::SplitH);
         assert_eq!(p("split v").unwrap(), PromptCommand::SplitV);
-        assert_eq!(p("split").unwrap_err().to_string(), "split: expected h or v");
-        assert_eq!(p("split z").unwrap_err().to_string(), "split: expected h or v");
+        assert_eq!(
+            p("split").unwrap_err().to_string(),
+            "split: expected h or v"
+        );
+        assert_eq!(
+            p("split z").unwrap_err().to_string(),
+            "split: expected h or v"
+        );
     }
 
     #[test]
@@ -471,18 +552,42 @@ mod tests {
         assert_eq!(p("kill").unwrap(), PromptCommand::KillPane);
         assert_eq!(p("kill win").unwrap(), PromptCommand::KillWindow);
         assert_eq!(p("kill window").unwrap(), PromptCommand::KillWindow);
-        assert_eq!(p("kill foo").unwrap_err().to_string(), "kill: expected nothing or 'win'");
+        assert_eq!(
+            p("kill foo").unwrap_err().to_string(),
+            "kill: expected nothing or 'win'"
+        );
     }
 
     #[test]
     fn focus_targets() {
-        assert_eq!(p("focus l").unwrap(), PromptCommand::Focus(FocusTarget::Dir(Direction::Left)));
-        assert_eq!(p("focus r").unwrap(), PromptCommand::Focus(FocusTarget::Dir(Direction::Right)));
-        assert_eq!(p("focus u").unwrap(), PromptCommand::Focus(FocusTarget::Dir(Direction::Up)));
-        assert_eq!(p("focus d").unwrap(), PromptCommand::Focus(FocusTarget::Dir(Direction::Down)));
-        assert_eq!(p("focus next").unwrap(), PromptCommand::Focus(FocusTarget::Next));
-        assert_eq!(p("focus prev").unwrap(), PromptCommand::Focus(FocusTarget::Prev));
-        assert_eq!(p("focus last").unwrap(), PromptCommand::Focus(FocusTarget::Last));
+        assert_eq!(
+            p("focus l").unwrap(),
+            PromptCommand::Focus(FocusTarget::Dir(Direction::Left))
+        );
+        assert_eq!(
+            p("focus r").unwrap(),
+            PromptCommand::Focus(FocusTarget::Dir(Direction::Right))
+        );
+        assert_eq!(
+            p("focus u").unwrap(),
+            PromptCommand::Focus(FocusTarget::Dir(Direction::Up))
+        );
+        assert_eq!(
+            p("focus d").unwrap(),
+            PromptCommand::Focus(FocusTarget::Dir(Direction::Down))
+        );
+        assert_eq!(
+            p("focus next").unwrap(),
+            PromptCommand::Focus(FocusTarget::Next)
+        );
+        assert_eq!(
+            p("focus prev").unwrap(),
+            PromptCommand::Focus(FocusTarget::Prev)
+        );
+        assert_eq!(
+            p("focus last").unwrap(),
+            PromptCommand::Focus(FocusTarget::Last)
+        );
         assert_eq!(
             p("focus x").unwrap_err().to_string(),
             "focus: expected l/r/u/d/next/prev/last"
@@ -491,68 +596,143 @@ mod tests {
 
     #[test]
     fn resize_with_and_without_count() {
-        assert_eq!(p("resize l").unwrap(), PromptCommand::Resize(Direction::Left, 1));
-        assert_eq!(p("resize r 5").unwrap(), PromptCommand::Resize(Direction::Right, 5));
-        assert_eq!(p("resize u 12").unwrap(), PromptCommand::Resize(Direction::Up, 12));
+        assert_eq!(
+            p("resize l").unwrap(),
+            PromptCommand::Resize(Direction::Left, 1)
+        );
+        assert_eq!(
+            p("resize r 5").unwrap(),
+            PromptCommand::Resize(Direction::Right, 5)
+        );
+        assert_eq!(
+            p("resize u 12").unwrap(),
+            PromptCommand::Resize(Direction::Up, 12)
+        );
     }
 
     #[test]
     fn resize_errors() {
-        assert_eq!(p("resize").unwrap_err().to_string(), "resize: expected a direction l/r/u/d");
-        assert_eq!(p("resize x").unwrap_err().to_string(), "resize: expected a direction l/r/u/d");
-        assert_eq!(p("resize l 0").unwrap_err().to_string(), "resize: count must be >= 1");
-        assert_eq!(p("resize l z").unwrap_err().to_string(), "resize: count must be a number");
+        assert_eq!(
+            p("resize").unwrap_err().to_string(),
+            "resize: expected a direction l/r/u/d"
+        );
+        assert_eq!(
+            p("resize x").unwrap_err().to_string(),
+            "resize: expected a direction l/r/u/d"
+        );
+        assert_eq!(
+            p("resize l 0").unwrap_err().to_string(),
+            "resize: count must be >= 1"
+        );
+        assert_eq!(
+            p("resize l z").unwrap_err().to_string(),
+            "resize: count must be a number"
+        );
         // Invalid direction with a VALID count gets the direction rejected.
-        assert_eq!(p("resize x 5").unwrap_err().to_string(), "resize: expected a direction l/r/u/d");
+        assert_eq!(
+            p("resize x 5").unwrap_err().to_string(),
+            "resize: expected a direction l/r/u/d"
+        );
         // Invalid direction AND a non-numeric count: the count is parsed first,
         // so its error wins (pins the parse-count-before-validate-dir order).
-        assert_eq!(p("resize x z").unwrap_err().to_string(), "resize: count must be a number");
+        assert_eq!(
+            p("resize x z").unwrap_err().to_string(),
+            "resize: count must be a number"
+        );
     }
 
     #[test]
     fn rename_preserves_internal_spaces() {
-        assert_eq!(p("rename my build").unwrap(), PromptCommand::RenameWindow("my build".into()));
-        assert_eq!(p("rename-pane left log").unwrap(), PromptCommand::RenamePane("left log".into()));
+        assert_eq!(
+            p("rename my build").unwrap(),
+            PromptCommand::RenameWindow("my build".into())
+        );
+        assert_eq!(
+            p("rename-pane left log").unwrap(),
+            PromptCommand::RenamePane("left log".into())
+        );
     }
 
     #[test]
     fn rename_requires_a_name() {
-        assert_eq!(p("rename").unwrap_err().to_string(), "rename: expected a name");
-        assert_eq!(p("rename   ").unwrap_err().to_string(), "rename: expected a name");
-        assert_eq!(p("rename-pane").unwrap_err().to_string(), "rename-pane: expected a name");
+        assert_eq!(
+            p("rename").unwrap_err().to_string(),
+            "rename: expected a name"
+        );
+        assert_eq!(
+            p("rename   ").unwrap_err().to_string(),
+            "rename: expected a name"
+        );
+        assert_eq!(
+            p("rename-pane").unwrap_err().to_string(),
+            "rename-pane: expected a name"
+        );
     }
 
     #[test]
     fn switch_takes_the_remainder() {
-        assert_eq!(p("switch work").unwrap(), PromptCommand::Switch("work".into()));
-        assert_eq!(p("switch").unwrap_err().to_string(), "switch: expected a session name");
+        assert_eq!(
+            p("switch work").unwrap(),
+            PromptCommand::Switch("work".into())
+        );
+        assert_eq!(
+            p("switch").unwrap_err().to_string(),
+            "switch: expected a session name"
+        );
     }
 
     #[test]
     fn sessions_verb() {
         assert_eq!(p("sessions").unwrap(), PromptCommand::ChooseSession);
-        assert_eq!(p("sessions x").unwrap_err().to_string(), "sessions: takes no arguments");
+        assert_eq!(
+            p("sessions x").unwrap_err().to_string(),
+            "sessions: takes no arguments"
+        );
     }
 
     #[test]
     fn tree_verb() {
         assert_eq!(p("tree").unwrap(), PromptCommand::ChooseTree);
-        assert_eq!(p("tree x").unwrap_err().to_string(), "tree: takes no arguments");
+        assert_eq!(
+            p("tree x").unwrap_err().to_string(),
+            "tree: takes no arguments"
+        );
     }
 
     #[test]
     fn pane_mobility_verbs() {
         assert_eq!(p("mark").unwrap(), PromptCommand::MarkPane);
         assert_eq!(p("break").unwrap(), PromptCommand::BreakPane);
-        assert_eq!(p("join").unwrap(), PromptCommand::JoinPane(SplitDir::Vertical));
-        assert_eq!(p("join v").unwrap(), PromptCommand::JoinPane(SplitDir::Vertical));
-        assert_eq!(p("join h").unwrap(), PromptCommand::JoinPane(SplitDir::Horizontal));
-        assert_eq!(p("join-pane h").unwrap(), PromptCommand::JoinPane(SplitDir::Horizontal));
+        assert_eq!(
+            p("join").unwrap(),
+            PromptCommand::JoinPane(SplitDir::Vertical)
+        );
+        assert_eq!(
+            p("join v").unwrap(),
+            PromptCommand::JoinPane(SplitDir::Vertical)
+        );
+        assert_eq!(
+            p("join h").unwrap(),
+            PromptCommand::JoinPane(SplitDir::Horizontal)
+        );
+        assert_eq!(
+            p("join-pane h").unwrap(),
+            PromptCommand::JoinPane(SplitDir::Horizontal)
+        );
         assert!(p("join x").is_err());
         assert_eq!(p("swap").unwrap(), PromptCommand::SwapMarked);
-        assert_eq!(p("swap next").unwrap(), PromptCommand::SwapPane(SwapTarget::Next));
-        assert_eq!(p("swap prev").unwrap(), PromptCommand::SwapPane(SwapTarget::Prev));
-        assert_eq!(p("swap-pane next").unwrap(), PromptCommand::SwapPane(SwapTarget::Next));
+        assert_eq!(
+            p("swap next").unwrap(),
+            PromptCommand::SwapPane(SwapTarget::Next)
+        );
+        assert_eq!(
+            p("swap prev").unwrap(),
+            PromptCommand::SwapPane(SwapTarget::Prev)
+        );
+        assert_eq!(
+            p("swap-pane next").unwrap(),
+            PromptCommand::SwapPane(SwapTarget::Next)
+        );
         assert!(p("swap sideways").is_err());
     }
 
@@ -575,17 +755,27 @@ mod tests {
     fn set_buffer_takes_rest_verbatim() {
         assert_eq!(
             p("set-buffer some literal   text").unwrap(),
-            PromptCommand::SetBuffer { text: "some literal   text".into() }
+            PromptCommand::SetBuffer {
+                text: "some literal   text".into()
+            }
         );
-        assert_eq!(p("set-buffer").unwrap_err().to_string(), "set-buffer: expected text");
-        assert_eq!(p("set-buffer   ").unwrap_err().to_string(), "set-buffer: expected text");
+        assert_eq!(
+            p("set-buffer").unwrap_err().to_string(),
+            "set-buffer: expected text"
+        );
+        assert_eq!(
+            p("set-buffer   ").unwrap_err().to_string(),
+            "set-buffer: expected text"
+        );
     }
 
     #[test]
     fn load_buffer_takes_rest_as_path() {
         assert_eq!(
             p("load-buffer /tmp/my snippet.txt").unwrap(),
-            PromptCommand::LoadBuffer { path: "/tmp/my snippet.txt".into() }
+            PromptCommand::LoadBuffer {
+                path: "/tmp/my snippet.txt".into()
+            }
         );
         assert_eq!(
             p("load-buffer").unwrap_err().to_string(),
@@ -598,13 +788,19 @@ mod tests {
         // No leading buffer name: the whole tail is the path (spaces preserved).
         assert_eq!(
             p("save-buffer /tmp/my yank.txt").unwrap(),
-            PromptCommand::SaveBuffer { name: None, path: "/tmp/my yank.txt".into() }
+            PromptCommand::SaveBuffer {
+                name: None,
+                path: "/tmp/my yank.txt".into()
+            }
         );
         // First token matches `^buffer[0-9]+$`: it names the buffer, the rest
         // is the path (extra separating spaces collapse, internal ones stay).
         assert_eq!(
             p("save-buffer buffer3 /tmp/old.txt").unwrap(),
-            PromptCommand::SaveBuffer { name: Some("buffer3".into()), path: "/tmp/old.txt".into() }
+            PromptCommand::SaveBuffer {
+                name: Some("buffer3".into()),
+                path: "/tmp/old.txt".into()
+            }
         );
         assert_eq!(
             p("save-buffer buffer0   /tmp/with space.txt").unwrap(),
@@ -616,21 +812,33 @@ mod tests {
         // Shape, not state: `bufferX` has no digits, so the whole tail is a path.
         assert_eq!(
             p("save-buffer bufferX /tmp/old.txt").unwrap(),
-            PromptCommand::SaveBuffer { name: None, path: "bufferX /tmp/old.txt".into() }
+            PromptCommand::SaveBuffer {
+                name: None,
+                path: "bufferX /tmp/old.txt".into()
+            }
         );
         // Edge: a lone `bufferN` is a missing path, not a path.
         assert_eq!(
             p("save-buffer buffer3").unwrap_err().to_string(),
             "save-buffer: expected a path"
         );
-        assert_eq!(p("save-buffer").unwrap_err().to_string(), "save-buffer: expected a path");
+        assert_eq!(
+            p("save-buffer").unwrap_err().to_string(),
+            "save-buffer: expected a path"
+        );
     }
 
     #[test]
     fn monitor_verbs() {
-        assert_eq!(p("monitor-activity").unwrap(), PromptCommand::ToggleMonitorActivity);
+        assert_eq!(
+            p("monitor-activity").unwrap(),
+            PromptCommand::ToggleMonitorActivity
+        );
         assert_eq!(p("monitor-bell").unwrap(), PromptCommand::ToggleMonitorBell);
-        assert_eq!(p("monitor-command").unwrap(), PromptCommand::ToggleMonitorCommand);
+        assert_eq!(
+            p("monitor-command").unwrap(),
+            PromptCommand::ToggleMonitorCommand
+        );
         assert!(p("monitor-activity x").is_err());
         assert!(p("monitor-command x").is_err());
     }
@@ -638,10 +846,19 @@ mod tests {
     #[test]
     fn monitor_silence_arity_and_errors() {
         // No arg / 0 disables (None).
-        assert_eq!(p("monitor-silence").unwrap(), PromptCommand::MonitorSilence(None));
-        assert_eq!(p("monitor-silence 0").unwrap(), PromptCommand::MonitorSilence(None));
+        assert_eq!(
+            p("monitor-silence").unwrap(),
+            PromptCommand::MonitorSilence(None)
+        );
+        assert_eq!(
+            p("monitor-silence 0").unwrap(),
+            PromptCommand::MonitorSilence(None)
+        );
         // A positive number arms the threshold.
-        assert_eq!(p("monitor-silence 30").unwrap(), PromptCommand::MonitorSilence(Some(30)));
+        assert_eq!(
+            p("monitor-silence 30").unwrap(),
+            PromptCommand::MonitorSilence(Some(30))
+        );
         // Exactly zero or one argument: a second token is rejected like `win 1 2`.
         assert_eq!(
             p("monitor-silence 30 x").unwrap_err().to_string(),
@@ -678,13 +895,20 @@ mod tests {
     fn verbs_are_sorted() {
         let mut sorted = VERBS.to_vec();
         sorted.sort_unstable();
-        assert_eq!(VERBS, sorted.as_slice(), "VERBS must stay sorted for completion");
+        assert_eq!(
+            VERBS,
+            sorted.as_slice(),
+            "VERBS must stay sorted for completion"
+        );
     }
 
     #[test]
     fn parses_popup_verb() {
         assert_eq!(p("popup").unwrap(), PromptCommand::Popup(None));
-        assert_eq!(p("popup lazygit").unwrap(), PromptCommand::Popup(Some("lazygit".into())));
+        assert_eq!(
+            p("popup lazygit").unwrap(),
+            PromptCommand::Popup(Some("lazygit".into()))
+        );
         assert_eq!(
             p("popup git log --oneline").unwrap(),
             PromptCommand::Popup(Some("git log --oneline".into()))
@@ -720,7 +944,10 @@ mod tests {
     #[test]
     fn parses_layout_verb() {
         use crate::LayoutPreset;
-        assert_eq!(p("layout tiled").unwrap(), PromptCommand::Layout(LayoutPreset::Tiled));
+        assert_eq!(
+            p("layout tiled").unwrap(),
+            PromptCommand::Layout(LayoutPreset::Tiled)
+        );
         assert_eq!(
             p("layout main-vertical").unwrap(),
             PromptCommand::Layout(LayoutPreset::MainVertical)
@@ -730,14 +957,20 @@ mod tests {
     #[test]
     fn layout_verb_errors_name_the_valid_set() {
         let msg = p("layout").unwrap_err().to_string();
-        assert!(msg.contains("even-horizontal") && msg.contains("tiled"), "{msg}");
+        assert!(
+            msg.contains("even-horizontal") && msg.contains("tiled"),
+            "{msg}"
+        );
         let msg = p("layout bogus").unwrap_err().to_string();
         assert!(msg.contains("bogus") && msg.contains("tiled"), "{msg}");
     }
 
     #[test]
     fn unknown_verb() {
-        assert_eq!(p("frobnicate").unwrap_err().to_string(), "unknown command: frobnicate");
+        assert_eq!(
+            p("frobnicate").unwrap_err().to_string(),
+            "unknown command: frobnicate"
+        );
     }
 
     #[test]
@@ -749,12 +982,18 @@ mod tests {
         // command incorrectly errors. (Survivors: line 202 guard mutated to false.)
         assert_eq!(
             p("save-buffer /path/no-space").unwrap(),
-            PromptCommand::SaveBuffer { name: None, path: "/path/no-space".into() }
+            PromptCommand::SaveBuffer {
+                name: None,
+                path: "/path/no-space".into()
+            }
         );
         // Same check with a relative path.
         assert_eq!(
             p("save-buffer output.txt").unwrap(),
-            PromptCommand::SaveBuffer { name: None, path: "output.txt".into() }
+            PromptCommand::SaveBuffer {
+                name: None,
+                path: "output.txt".into()
+            }
         );
     }
 
@@ -768,14 +1007,20 @@ mod tests {
         // "rename" and "rename-pane" share "rename".
         assert_eq!(complete("ren", VERBS), Completion::Partial("rename".into()));
         // "next" and "new" share "ne".
-        assert_eq!(complete("n", &["new", "next", "prev"]), Completion::Partial("ne".into()));
+        assert_eq!(
+            complete("n", &["new", "next", "prev"]),
+            Completion::Partial("ne".into())
+        );
     }
 
     #[test]
     fn complete_none_when_no_match_or_no_progress() {
         assert_eq!(complete("zzz", VERBS), Completion::None);
         // Common prefix already fully typed, so no progress (no unique winner).
-        assert_eq!(complete("rename", &["rename", "rename-pane"]), Completion::None);
+        assert_eq!(
+            complete("rename", &["rename", "rename-pane"]),
+            Completion::None
+        );
     }
 
     #[test]

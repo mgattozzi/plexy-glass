@@ -2,9 +2,8 @@
 //! Under ModifyOtherKeys(2), codepoint keys (non-empty mods) take the symmetric
 //! 27-form and functional keys round-trip via legacy CSI/SS3/tilde.
 
-use hegel::generators as gs;
-use hegel::TestCase;
-use plexy_glass_keys::{encode, KeyParseOutput, KeyParser, KeyboardProtocol, KeyboardTarget};
+use hegel::{TestCase, generators as gs};
+use plexy_glass_keys::{KeyParseOutput, KeyParser, KeyboardProtocol, KeyboardTarget, encode};
 use plexy_glass_mux::{Direction, Key, KeyEvent, Modifiers};
 
 /// Drive bytes through the parser and return the last decoded event.
@@ -66,9 +65,19 @@ fn draw_event(tc: &TestCase) -> KeyEvent {
 fn mok2_decode_encode_round_trips(tc: TestCase) {
     let ev = draw_event(&tc);
     tc.note(&format!("event = {ev:?}"));
-    let bytes = encode(&ev, KeyboardTarget::ModifyOtherKeys(2), /*app_cursor=*/ false);
-    assert!(!bytes.is_empty(), "round-trippable event must encode to non-empty bytes");
+    let bytes = encode(
+        &ev,
+        KeyboardTarget::ModifyOtherKeys(2),
+        /*app_cursor=*/ false,
+    );
+    assert!(
+        !bytes.is_empty(),
+        "round-trippable event must encode to non-empty bytes"
+    );
     let got = decode(&bytes, KeyboardProtocol::ModifyOtherKeys)
         .unwrap_or_else(|| panic!("{ev:?} encoded to {bytes:?} but did not re-decode"));
-    assert_eq!(got, ev, "decode∘encode must be the identity on the round-trippable subset");
+    assert_eq!(
+        got, ev,
+        "decode∘encode must be the identity on the round-trippable subset"
+    );
 }

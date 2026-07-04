@@ -73,7 +73,10 @@ mod tests {
         // nu is built-in: the snippet points at the flag, not raw marks.
         let nu = shell_integration_snippet("nu").expect("nu");
         assert!(nu.contains("osc133"), "nu mentions the built-in flag");
-        assert_eq!(shell_integration_snippet("nushell"), shell_integration_snippet("nu"));
+        assert_eq!(
+            shell_integration_snippet("nushell"),
+            shell_integration_snippet("nu")
+        );
         assert!(shell_integration_snippet("powershell").is_none());
     }
 }

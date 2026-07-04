@@ -4,8 +4,7 @@
 //! defect lives in `crates/emulator/src/emulator.rs`; these assert the general
 //! invariants across arbitrary cursor positions and grid sizes.
 
-use hegel::TestCase;
-use hegel::generators as gs;
+use hegel::{TestCase, generators as gs};
 use plexy_glass_emulator::parser::Parser;
 use plexy_glass_emulator::{Emulator, Screen};
 
@@ -43,8 +42,15 @@ fn ind_matches_lf_position_away_from_bottom_margin(tc: TestCase) {
         (ind_screen.cursor.row, ind_screen.cursor.col),
         "IND must land at the same cursor position as a single LF"
     );
-    assert_eq!(ind_screen.cursor.row, row + 1, "IND must move exactly one row down");
-    assert_eq!(ind_screen.cursor.col, col, "IND must preserve the column (no carriage return)");
+    assert_eq!(
+        ind_screen.cursor.row,
+        row + 1,
+        "IND must move exactly one row down"
+    );
+    assert_eq!(
+        ind_screen.cursor.col, col,
+        "IND must preserve the column (no carriage return)"
+    );
 }
 
 /// P2: NEL is equivalent to CR then IND, so the column resets to 0 and the row
@@ -97,8 +103,13 @@ fn cursor_row_stays_in_bounds_under_vertical_motion_sequence(tc: TestCase) {
     }
     e.advance(b"\x1b[m"); // flush any pending trailing grapheme
 
-    tc.note(&format!("rows={rows} cols={cols} steps={steps} log={log:?}"));
+    tc.note(&format!(
+        "rows={rows} cols={cols} steps={steps} log={log:?}"
+    ));
 
     let row = e.screen().cursor.row;
-    assert!(row < rows, "cursor row {row} must stay within [0, {rows}) after {log:?}");
+    assert!(
+        row < rows,
+        "cursor row {row} must stay within [0, {rows}) after {log:?}"
+    );
 }

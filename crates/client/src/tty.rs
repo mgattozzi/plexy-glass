@@ -1,13 +1,15 @@
-use crate::error::ClientError;
-use crate::negotiate::EnabledCaps;
+use std::io::{self, Write};
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::panic;
+
 use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, Signal};
 use nix::sys::termios::{
     self, ControlFlags, InputFlags, LocalFlags, OutputFlags, SetArg, SpecialCharacterIndices,
     Termios,
 };
-use std::io::{self, Write};
-use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
-use std::panic;
+
+use crate::error::ClientError;
+use crate::negotiate::EnabledCaps;
 
 /// RAII handle for the host TTY. Saves termios on construction and restores
 /// it on Drop. Also resets cursor + alt-screen state on Drop.
@@ -115,8 +117,8 @@ pub fn current_size(fd: BorrowedFd<'_>) -> Result<plexy_glass_protocol::PtySize,
     })
 }
 
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 static EMERGENCY_INSTALLED: OnceLock<()> = OnceLock::new();
 static EMERGENCY_FD: OnceLock<RawFd> = OnceLock::new();
@@ -171,7 +173,10 @@ pub fn install_emergency_restore(fd: BorrowedFd<'_>, snapshot: &Termios) {
             _ = sigterm.recv() => ("SIGTERM", Signal::SIGTERM),
             _ = sighup.recv() => ("SIGHUP", Signal::SIGHUP),
         };
-        tracing::warn!(signal = sig, "received signal, restoring tty and re-raising");
+        tracing::warn!(
+            signal = sig,
+            "received signal, restoring tty and re-raising"
+        );
         restore_from_static();
         // Reset disposition and re-raise so the parent shell sees the
         // canonical exit signal.
@@ -180,11 +185,7 @@ pub fn install_emergency_restore(fd: BorrowedFd<'_>, snapshot: &Termios) {
         unsafe {
             let _ = signal::sigaction(
                 num,
-                &SigAction::new(
-                    SigHandler::SigDfl,
-                    SaFlags::empty(),
-                    SigSet::empty(),
-                ),
+                &SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty()),
             );
         }
         let _ = signal::raise(num);
@@ -215,9 +216,11 @@ fn restore_from_static() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use nix::pty::openpty;
     use std::os::fd::AsFd;
+
+    use nix::pty::openpty;
+
+    use super::*;
 
     #[test]
     fn enter_raw_then_drop_restores_termios() {

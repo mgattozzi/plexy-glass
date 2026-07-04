@@ -1,8 +1,10 @@
-use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
-use async_trait::async_trait;
-use smol_str::SmolStr;
 use std::fmt;
 use std::time::Duration;
+
+use async_trait::async_trait;
+use smol_str::SmolStr;
+
+use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
 
 pub struct TimeWidget {
     pub format: String,
@@ -79,7 +81,10 @@ mod tests {
         };
         let out = w.evaluate(&ctx_empty()).await;
         let text: String = out.segments.iter().map(|s| s.text.as_str()).collect();
-        assert!(text.starts_with("\u{25f7} "), "leads with clock + space: {text:?}");
+        assert!(
+            text.starts_with("\u{25f7} "),
+            "leads with clock + space: {text:?}"
+        );
     }
 
     #[tokio::test]
@@ -125,7 +130,10 @@ mod tests {
         };
         let out = w.evaluate(&ctx_empty()).await;
         let text = out.segments[0].text.as_str();
-        assert!(text.contains("UTC"), "UTC clock %Z must render `UTC`: {text:?}");
+        assert!(
+            text.contains("UTC"),
+            "UTC clock %Z must render `UTC`: {text:?}"
+        );
         assert!(text.contains(':'), "24h time present: {text:?}");
     }
 }

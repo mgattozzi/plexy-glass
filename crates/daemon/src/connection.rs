@@ -1,32 +1,33 @@
 //! One connection from a client.
 
-use crate::{
-    InputEvent, InputRouter, error::DaemonError, input_router::decode_protocol,
-    registry::SessionRegistry, renderer::Renderer, session::Session,
+use std::cmp::Ordering as CmpOrdering;
+use std::io::Error;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use std::{env, fs, future, mem};
+
+use plexy_glass_mux::{
+    Command, Keymap, KeymapAction, PromptCommand, VirtualScreen, block_mode, blocks,
+    command_prompt, copy_mode, hint,
 };
-use plexy_glass_mux::{Command, Keymap, KeymapAction, PromptCommand, VirtualScreen};
+use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
     ClientMsg, Codec, ProtocolError, PtySize, ServerMsg, SpawnSpec, server_handshake,
 };
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
-use crate::osc_actions;
-use crate::declared::expand_tilde;
-use crate::session::{SessionHistory, SessionTree};
-use crate::window_manager::{OverlayKeyResult, Severity};
-use plexy_glass_mux::{block_mode, blocks, command_prompt, copy_mode, hint};
-use plexy_glass_protocol::errors::CodecError;
-use std::cmp::Ordering as CmpOrdering;
-use std::env;
-use std::fs;
-use std::future;
-use std::io::Error;
-use std::mem;
-use std::path::PathBuf;
-use std::time::Duration;
 use tokio::{io, task, time};
+
+use crate::declared::expand_tilde;
+use crate::error::DaemonError;
+use crate::input_router::decode_protocol;
+use crate::registry::SessionRegistry;
+use crate::renderer::Renderer;
+use crate::session::{Session, SessionHistory, SessionTree};
+use crate::window_manager::{OverlayKeyResult, Severity};
+use crate::{InputEvent, InputRouter, osc_actions};
 
 pub async fn serve<S>(
     stream: S,
@@ -40,11 +41,11 @@ where
     let (mut reader, mut writer) = io::split(stream);
     let client_hello = server_handshake(&mut reader, &mut writer, daemon_pid).await?;
 
-    let frame = Codec::read_frame(&mut reader).await?.ok_or_else(|| {
-        DaemonError::Io(Error::other("client closed before first message"))
-    })?;
-    let msg: ClientMsg = postcard::from_bytes(&frame)
-        .map_err(|e| CodecError::Decode(e.to_string()))?;
+    let frame = Codec::read_frame(&mut reader)
+        .await?
+        .ok_or_else(|| DaemonError::Io(Error::other("client closed before first message")))?;
+    let msg: ClientMsg =
+        postcard::from_bytes(&frame).map_err(|e| CodecError::Decode(e.to_string()))?;
 
     match msg {
         ClientMsg::ListSessions => {
@@ -59,9 +60,21 @@ where
             }
             Err(e) => Err(e),
         },
-        ClientMsg::AttachOrCreate { name, create_if_missing, cmd, size } => {
+        ClientMsg::AttachOrCreate {
+            name,
+            create_if_missing,
+            cmd,
+            size,
+        } => {
             serve_attach(
-                reader, writer, registry, name, create_if_missing, cmd, size, config,
+                reader,
+                writer,
+                registry,
+                name,
+                create_if_missing,
+                cmd,
+                size,
+                config,
                 client_hello,
             )
             .await
@@ -98,7 +111,10 @@ where
             // `PaneCapture`, every error replies `CommandResult{ok:false}`,
             // and the CLI client matches on either.
             let reply = match resolve_session(&registry, session).await {
-                Err(msg) => ServerMsg::CommandResult { ok: false, message: Some(msg) },
+                Err(msg) => ServerMsg::CommandResult {
+                    ok: false,
+                    message: Some(msg),
+                },
                 Ok(sess) => {
                     let text = {
                         let manager = sess.window_manager.lock().await;
@@ -126,7 +142,10 @@ where
             // block) replies `CommandResult{ok:false}`, and the CLI client
             // matches on either.
             let reply = match resolve_session(&registry, session).await {
-                Err(msg) => ServerMsg::CommandResult { ok: false, message: Some(msg) },
+                Err(msg) => ServerMsg::CommandResult {
+                    ok: false,
+                    message: Some(msg),
+                },
                 Ok(sess) => {
                     let text = {
                         let manager = sess.window_manager.lock().await;
@@ -149,8 +168,20 @@ where
             send_msg(&mut writer, &reply).await?;
             Ok(())
         }
-        ClientMsg::ExecCommand { session, text, timeout_ms } => {
-            serve_exec(&mut reader, &mut writer, &registry, session, text, timeout_ms).await
+        ClientMsg::ExecCommand {
+            session,
+            text,
+            timeout_ms,
+        } => {
+            serve_exec(
+                &mut reader,
+                &mut writer,
+                &registry,
+                session,
+                text,
+                timeout_ms,
+            )
+            .await
         }
         ClientMsg::CaptureLastBlock { session } => {
             // Response-type asymmetry by design: success replies
@@ -158,37 +189,37 @@ where
             // block) replies `CommandResult{ok:false}`, and the CLI client
             // matches on either.
             let reply = match resolve_session(&registry, session).await {
-                Err(msg) => ServerMsg::CommandResult { ok: false, message: Some(msg) },
+                Err(msg) => ServerMsg::CommandResult {
+                    ok: false,
+                    message: Some(msg),
+                },
                 Ok(sess) => {
                     let parts = {
                         let manager = sess.window_manager.lock().await;
                         manager.input_target_pane().and_then(|p| {
                             p.with_screen(|s| {
-                                blocks::last_completed_prompt(s).map(
-                                    |prompt| {
-                                        // `block_output_range` only returns None when no
-                                        // `PROMPT_START` exists at or above the line, and
-                                        // `prompt` IS a `PROMPT_START` line, so the fallback is
-                                        // unreachable. Kept defensive per the no-unwrap rule.
-                                        let range =
-                                            plexy_glass_mux::block_output_range(s, prompt)
-                                                .unwrap_or((prompt, prompt));
-                                        (
-                                            plexy_glass_mux::block_text(s, range),
-                                            blocks::closing_exit(s, prompt),
-                                            blocks::block_command_line(
-                                                s, prompt,
-                                            ),
-                                        )
-                                    },
-                                )
+                                blocks::last_completed_prompt(s).map(|prompt| {
+                                    // `block_output_range` only returns None when no
+                                    // `PROMPT_START` exists at or above the line, and
+                                    // `prompt` IS a `PROMPT_START` line, so the fallback is
+                                    // unreachable. Kept defensive per the no-unwrap rule.
+                                    let range = plexy_glass_mux::block_output_range(s, prompt)
+                                        .unwrap_or((prompt, prompt));
+                                    (
+                                        plexy_glass_mux::block_text(s, range),
+                                        blocks::closing_exit(s, prompt),
+                                        blocks::block_command_line(s, prompt),
+                                    )
+                                })
                             })
                         })
                     };
                     match parts {
-                        Some((text, exit, command_line)) => {
-                            ServerMsg::BlockCapture { text, exit, command_line }
-                        }
+                        Some((text, exit, command_line)) => ServerMsg::BlockCapture {
+                            text,
+                            exit,
+                            command_line,
+                        },
                         None => ServerMsg::CommandResult {
                             ok: false,
                             message: Some(NO_BLOCKS_MSG.into()),
@@ -214,8 +245,7 @@ async fn send_msg<W>(writer: &mut W, msg: &ServerMsg) -> Result<(), DaemonError>
 where
     W: AsyncWrite + Unpin,
 {
-    let bytes = postcard::to_allocvec(msg)
-        .map_err(|e| CodecError::Encode(e.to_string()))?;
+    let bytes = postcard::to_allocvec(msg).map_err(|e| CodecError::Encode(e.to_string()))?;
     Codec::write_frame(writer, &bytes).await?;
     Ok(())
 }
@@ -245,28 +275,30 @@ where
 
     // Resolve or create the session. `session` is reassigned in place by
     // `switch_session` when the client switches to another session.
-    let mut session = if let Some(n) = name { match registry.get(&n).await {
-        Some(s) => s,
-        None if create_if_missing => {
-            let spec = cmd.unwrap_or_else(default_spawn_spec);
-            let cfg = Arc::clone(&config);
-            // `attach_or_create` restores from disk if a saved file exists.
-            match registry.attach_or_create(n.clone(), spec, size, cfg).await {
-                Ok(s) => s,
-                Err(DaemonError::Protocol(perr)) => {
-                    return send_msg(&mut writer, &ServerMsg::Error(perr)).await;
+    let mut session = if let Some(n) = name {
+        match registry.get(&n).await {
+            Some(s) => s,
+            None if create_if_missing => {
+                let spec = cmd.unwrap_or_else(default_spawn_spec);
+                let cfg = Arc::clone(&config);
+                // `attach_or_create` restores from disk if a saved file exists.
+                match registry.attach_or_create(n.clone(), spec, size, cfg).await {
+                    Ok(s) => s,
+                    Err(DaemonError::Protocol(perr)) => {
+                        return send_msg(&mut writer, &ServerMsg::Error(perr)).await;
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
+            }
+            None => {
+                return send_msg(
+                    &mut writer,
+                    &ServerMsg::Error(ProtocolError::SessionNotFound { name: n }),
+                )
+                .await;
             }
         }
-        None => {
-            return send_msg(
-                &mut writer,
-                &ServerMsg::Error(ProtocolError::SessionNotFound { name: n }),
-            )
-            .await;
-        }
-    } } else {
+    } else {
         // No name means the default session "main": attach-or-create,
         // deterministic regardless of what else is running. (The old
         // sole-session fallback silently attached to a config-declared
@@ -274,7 +306,10 @@ where
         let spec = cmd.unwrap_or_else(default_spawn_spec);
         let cfg = Arc::clone(&config);
         // `attach_or_create` restores "main" from disk if saved.
-        match registry.attach_or_create("main".into(), spec, size, cfg).await {
+        match registry
+            .attach_or_create("main".into(), spec, size, cfg)
+            .await
+        {
             Ok(s) => s,
             Err(DaemonError::Protocol(perr)) => {
                 return send_msg(&mut writer, &ServerMsg::Error(perr)).await;
@@ -311,7 +346,10 @@ where
 
     send_msg(
         &mut writer,
-        &ServerMsg::Attached { session_name, client_id },
+        &ServerMsg::Attached {
+            session_name,
+            client_id,
+        },
     )
     .await?;
 
@@ -477,8 +515,7 @@ where
                         break;
                     }
                 }
-                if let (Some(before), Some(after)) =
-                    (focus_before, session.active_pane_id().await)
+                if let (Some(before), Some(after)) = (focus_before, session.active_pane_id().await)
                     && before != after
                 {
                     session.synthesize_focus_transition(before, after).await;
@@ -673,9 +710,7 @@ async fn dispatch_input_event(
                             pane_opt.and_then(|p| {
                                 let screen = p.with_screen(Clone::clone);
                                 p.with_copy_mode_mut(|state| {
-                                    copy_mode::handle(
-                                        &event_ke, state, &screen,
-                                    )
+                                    copy_mode::handle(&event_ke, state, &screen)
                                 })
                             })
                         };
@@ -691,13 +726,11 @@ async fn dispatch_input_event(
                                 ctx.session.notify.notify_one();
                             }
                             Some(plexy_glass_mux::CopyModeAction::Yank(text)) => {
-                                let wrote =
-                                    osc_actions::write_clipboard(text.as_bytes()).await;
+                                let wrote = osc_actions::write_clipboard(text.as_bytes()).await;
                                 // Honest message: a failed clipboard write must not
                                 // claim "✓ copied". The text is still in the paste
                                 // buffer, so the warn points at Ctrl+a ].
-                                let (msg, sev) =
-                                    osc_actions::yank_status(wrote, &text, true);
+                                let (msg, sev) = osc_actions::yank_status(wrote, &text, true);
                                 // Also push a paste buffer (before re-taking the
                                 // WM lock, so the registry await isn't held under it).
                                 ctx.registry.push_paste_buffer(text.into_bytes()).await;
@@ -719,9 +752,7 @@ async fn dispatch_input_event(
                             pane_opt.and_then(|p| {
                                 let screen = p.with_screen(Clone::clone);
                                 p.with_block_mode_mut(|state| {
-                                    block_mode::handle(
-                                        &event_ke, state, &screen,
-                                    )
+                                    block_mode::handle(&event_ke, state, &screen)
                                 })
                             })
                         };
@@ -737,12 +768,10 @@ async fn dispatch_input_event(
                                 ctx.session.notify.notify_one();
                             }
                             Some(plexy_glass_mux::BlockModeAction::Yank(text)) => {
-                                let wrote =
-                                    osc_actions::write_clipboard(text.as_bytes()).await;
+                                let wrote = osc_actions::write_clipboard(text.as_bytes()).await;
                                 // Honest message (see copy-mode yank above); the
                                 // text is in the paste buffer, so warn points there.
-                                let (msg, sev) =
-                                    osc_actions::yank_status(wrote, &text, true);
+                                let (msg, sev) = osc_actions::yank_status(wrote, &text, true);
                                 // STAY in block mode (unlike copy mode's yank).
                                 ctx.registry.push_paste_buffer(text.into_bytes()).await;
                                 ctx.session.set_status_message(msg, sev).await;
@@ -805,8 +834,13 @@ async fn dispatch_input_event(
                     Err(Command::CommandPrompt) => {
                         // Opened here (not in handle_command) because it needs
                         // the live session list for `switch ` Tab-completion.
-                        let names: Vec<String> =
-                            ctx.registry.list().await.into_iter().map(|e| e.name).collect();
+                        let names: Vec<String> = ctx
+                            .registry
+                            .list()
+                            .await
+                            .into_iter()
+                            .map(|e| e.name)
+                            .collect();
                         {
                             let mut m = ctx.session.window_manager.lock().await;
                             m.open_command_prompt(names);
@@ -927,22 +961,25 @@ impl ClientCtx<'_> {
                     }
                 }
             } else {
-                self.session.set_status_error(format!("no session: {name}")).await;
+                self.session
+                    .set_status_error(format!("no session: {name}"))
+                    .await;
                 return false;
             }
         };
         if target.name() == self.session.name() {
-            self.session.set_status_info(format!("already on {name}")).await;
+            self.session
+                .set_status_info(format!("already on {name}"))
+                .await;
             return false;
         }
         // `register_client` takes a `blocking_lock` internally, so keep it off the runtime.
         let target_for_register = Arc::clone(&target);
         let size = self.size;
         let prefix_armed = Arc::clone(self.prefix_armed);
-        let Ok(Ok(new_handle)) = task::spawn_blocking(move || {
-            target_for_register.register_client(size, prefix_armed)
-        })
-        .await
+        let Ok(Ok(new_handle)) =
+            task::spawn_blocking(move || target_for_register.register_client(size, prefix_armed))
+                .await
         else {
             self.session
                 .set_status_error(format!("cannot switch to {name}"))
@@ -954,7 +991,9 @@ impl ClientCtx<'_> {
         let old = mem::replace(self.session, target);
         let old_id = mem::replace(self.client_id, new_handle.client_id);
         let _ = task::spawn_blocking(move || old.deregister_client(old_id)).await;
-        self.session.set_status_info(format!("switched to {name}")).await;
+        self.session
+            .set_status_info(format!("switched to {name}"))
+            .await;
         true
     }
 }
@@ -974,7 +1013,11 @@ async fn open_session_picker_overlay(session: &Arc<Session>, registry: &Arc<Sess
                 e.name, e.windows, e.panes, e.clients
             );
             let is_current = e.name == current;
-            plexy_glass_mux::PickerEntry { name: e.name, label, is_current }
+            plexy_glass_mux::PickerEntry {
+                name: e.name,
+                label,
+                is_current,
+            }
         })
         .collect();
     entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1010,10 +1053,7 @@ async fn open_tree_overlay(session: &Arc<Session>, registry: &Arc<SessionRegistr
 /// from per-session snapshots. Pure so the `is_current`/label/index logic is
 /// unit-testable. Only the current session's path is marked `is_current`: the
 /// session itself, its active window, and that window's active pane.
-fn build_tree_nodes(
-    snaps: &[SessionTree],
-    current: &str,
-) -> Vec<plexy_glass_mux::TreeNode> {
+fn build_tree_nodes(snaps: &[SessionTree], current: &str) -> Vec<plexy_glass_mux::TreeNode> {
     use plexy_glass_mux::{TreeNode, pane_label, session_label, window_label};
     let mut nodes: Vec<TreeNode> = Vec::new();
     for st in snaps {
@@ -1158,7 +1198,11 @@ fn build_history_entries(
     // (newest-first per pane) is preserved.
     ranked.sort_by_key(|(r, _)| *r);
     if ranked.len() > HISTORY_ENTRY_CAP {
-        tracing::info!(total = ranked.len(), cap = HISTORY_ENTRY_CAP, "history palette truncated");
+        tracing::info!(
+            total = ranked.len(),
+            cap = HISTORY_ENTRY_CAP,
+            "history palette truncated"
+        );
         ranked.truncate(HISTORY_ENTRY_CAP);
     }
     ranked.into_iter().map(|(_, e)| e).collect()
@@ -1172,7 +1216,11 @@ impl ClientCtx<'_> {
     async fn dispatch_tree_action(&mut self, action: plexy_glass_mux::TreeAction) {
         use plexy_glass_mux::TreeAction;
         match action {
-            TreeAction::Switch { session: tgt, window, pane } => {
+            TreeAction::Switch {
+                session: tgt,
+                window,
+                pane,
+            } => {
                 // Only focus the chosen window/pane when the client is actually
                 // on the target session: either it was already there, or the
                 // switch succeeded. On a failed switch the client stays on the
@@ -1201,7 +1249,10 @@ impl ClientCtx<'_> {
                 }
                 self.session.notify.notify_one();
             }
-            TreeAction::KillWindow { session: tgt, window } => {
+            TreeAction::KillWindow {
+                session: tgt,
+                window,
+            } => {
                 if let Some(t) = self.registry.get(&tgt).await {
                     {
                         let mut m = t.window_manager.lock().await;
@@ -1209,7 +1260,9 @@ impl ClientCtx<'_> {
                     }
                     t.notify.notify_one();
                 } else {
-                    self.session.set_status_error(format!("no session: {tgt}")).await;
+                    self.session
+                        .set_status_error(format!("no session: {tgt}"))
+                        .await;
                 }
                 self.session.notify.notify_one();
             }
@@ -1221,11 +1274,17 @@ impl ClientCtx<'_> {
                     }
                     t.notify.notify_one();
                 } else {
-                    self.session.set_status_error(format!("no session: {tgt}")).await;
+                    self.session
+                        .set_status_error(format!("no session: {tgt}"))
+                        .await;
                 }
                 self.session.notify.notify_one();
             }
-            TreeAction::RenameWindow { session: tgt, window, name } => {
+            TreeAction::RenameWindow {
+                session: tgt,
+                window,
+                name,
+            } => {
                 if let Some(t) = self.registry.get(&tgt).await {
                     {
                         let mut m = t.window_manager.lock().await;
@@ -1233,11 +1292,17 @@ impl ClientCtx<'_> {
                     }
                     t.notify.notify_one();
                 } else {
-                    self.session.set_status_error(format!("no session: {tgt}")).await;
+                    self.session
+                        .set_status_error(format!("no session: {tgt}"))
+                        .await;
                 }
                 self.session.notify.notify_one();
             }
-            TreeAction::RenamePane { session: tgt, pane, name } => {
+            TreeAction::RenamePane {
+                session: tgt,
+                pane,
+                name,
+            } => {
                 if let Some(t) = self.registry.get(&tgt).await {
                     {
                         let mut m = t.window_manager.lock().await;
@@ -1245,7 +1310,9 @@ impl ClientCtx<'_> {
                     }
                     t.notify.notify_one();
                 } else {
-                    self.session.set_status_error(format!("no session: {tgt}")).await;
+                    self.session
+                        .set_status_error(format!("no session: {tgt}"))
+                        .await;
                 }
                 self.session.notify.notify_one();
             }
@@ -1303,9 +1370,10 @@ impl ClientCtx<'_> {
             match m.active_window().pane(target.pane) {
                 Some(pane) => {
                     let state = pane.with_screen(|s| {
-                        let line = blocks::find_block_by_command(s, &target.command, target.prompt_line)
-                            .or_else(|| blocks::prompt_at_or_above(s, target.prompt_line))
-                            .or_else(|| blocks::first_prompt_line(s));
+                        let line =
+                            blocks::find_block_by_command(s, &target.command, target.prompt_line)
+                                .or_else(|| blocks::prompt_at_or_above(s, target.prompt_line))
+                                .or_else(|| blocks::first_prompt_line(s));
                         line.and_then(|l| BlockMode::new_at(s, s.active.num_rows(), l))
                     });
                     match state {
@@ -1338,7 +1406,9 @@ impl ClientCtx<'_> {
                 // Mirror the copy-mode yank path: system clipboard + paste buffer.
                 let wrote = osc_actions::write_clipboard(pick.text.as_bytes()).await;
                 let msg = osc_actions::copied_message(&pick.text);
-                self.registry.push_paste_buffer(pick.text.into_bytes()).await;
+                self.registry
+                    .push_paste_buffer(pick.text.into_bytes())
+                    .await;
                 // Be honest: only claim "copied" if the OS clipboard write landed;
                 // otherwise the content is still in the paste buffer, so point there.
                 if wrote {
@@ -1441,10 +1511,7 @@ impl ConnVerb {
 /// The attach-time status notice (the first-run onboarding moved to the welcome
 /// modal). A broken config (running defaults) outranks a dropped-binding
 /// warning. Pure, so the precedence is unit-testable.
-fn attach_notice(
-    has_config_error: bool,
-    skip_count: usize,
-) -> Option<(Severity, String)> {
+fn attach_notice(has_config_error: bool, skip_count: usize) -> Option<(Severity, String)> {
     use Severity;
     if has_config_error {
         Some((
@@ -1477,11 +1544,7 @@ fn reload_notice(error: Option<&str>, skip_count: usize) -> (Severity, String) {
 
 /// Execute a connection-layer verb. Returns `true` for `Detach`, which the
 /// caller (who owns the input loop) must translate into its own `break`.
-async fn run_connection_verb(
-    ctx: &mut ClientCtx<'_>,
-    keymap: &mut Keymap,
-    verb: ConnVerb,
-) -> bool {
+async fn run_connection_verb(ctx: &mut ClientCtx<'_>, keymap: &mut Keymap, verb: ConnVerb) -> bool {
     match verb {
         ConnVerb::Detach => return true,
         ConnVerb::Reload => {
@@ -1543,12 +1606,10 @@ async fn run_connection_verb(
                 Err(m) => ctx.session.set_status_error(m).await,
             }
         }
-        ConnVerb::LoadBuffer(path) => {
-            match load_buffer(ctx.registry, &path).await {
-                Ok(m) => ctx.session.set_status_ok(m).await,
-                Err(m) => ctx.session.set_status_error(m).await,
-            }
-        }
+        ConnVerb::LoadBuffer(path) => match load_buffer(ctx.registry, &path).await {
+            Ok(m) => ctx.session.set_status_ok(m).await,
+            Err(m) => ctx.session.set_status_error(m).await,
+        },
     }
     false
 }
@@ -1603,25 +1664,23 @@ async fn apply_overlay_result(
                 }
             }
         }
-        OverlayKeyResult::Command(line) => {
-            match command_prompt::parse(&line) {
-                Err(e) => {
-                    ctx.session.set_status_error(e.to_string()).await;
-                }
-                Ok(cmd) => match ConnVerb::from_prompt(cmd) {
-                    Ok(verb) => return run_connection_verb(ctx, keymap, verb).await,
-                    Err(other) => match ctx.session.handle_prompt_command(other).await {
-                        Ok(Some(msg)) => {
-                            ctx.session.set_status_info(msg).await;
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            ctx.session.set_status_error(e.to_string()).await;
-                        }
-                    },
-                },
+        OverlayKeyResult::Command(line) => match command_prompt::parse(&line) {
+            Err(e) => {
+                ctx.session.set_status_error(e.to_string()).await;
             }
-        }
+            Ok(cmd) => match ConnVerb::from_prompt(cmd) {
+                Ok(verb) => return run_connection_verb(ctx, keymap, verb).await,
+                Err(other) => match ctx.session.handle_prompt_command(other).await {
+                    Ok(Some(msg)) => {
+                        ctx.session.set_status_info(msg).await;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        ctx.session.set_status_error(e.to_string()).await;
+                    }
+                },
+            },
+        },
     }
     false
 }
@@ -1645,7 +1704,12 @@ async fn resolve_session(
     registry: &Arc<SessionRegistry>,
     name: Option<String>,
 ) -> Result<Arc<Session>, String> {
-    if let Some(n) = name { registry.get(&n).await.ok_or_else(|| format!("no session \"{n}\"")) } else {
+    if let Some(n) = name {
+        registry
+            .get(&n)
+            .await
+            .ok_or_else(|| format!("no session \"{n}\""))
+    } else {
         let entries = registry.list().await;
         match entries.as_slice() {
             [] => Err("no sessions running".into()),
@@ -1654,8 +1718,11 @@ async fn resolve_session(
                 .await
                 .ok_or_else(|| format!("no session \"{}\"", only.name)),
             many => {
-                let names =
-                    many.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", ");
+                let names = many
+                    .iter()
+                    .map(|e| e.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 Err(format!("multiple sessions running: {names} — use -n"))
             }
         }
@@ -1678,7 +1745,10 @@ enum ExecTick {
     Pending,
     /// Counter went backwards: the screen was rebuilt (RIS) mid-command.
     Reset,
-    Done { exit: Option<i32>, output: String },
+    Done {
+        exit: Option<i32>,
+        output: String,
+    },
 }
 
 /// Serve one `ExecCommand` (CLI `run`): check preconditions and read the
@@ -1705,8 +1775,10 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let refuse =
-        |message: String| ServerMsg::CommandResult { ok: false, message: Some(message) };
+    let refuse = |message: String| ServerMsg::CommandResult {
+        ok: false,
+        message: Some(message),
+    };
 
     let sess = match resolve_session(registry, session).await {
         Err(msg) => return send_msg(writer, &refuse(msg)).await,
@@ -1735,12 +1807,17 @@ where
         if !blocks::pane_at_prompt(s) {
             return ExecPre::Busy;
         }
-        ExecPre::Ready { baseline: s.blocks_completed }
+        ExecPre::Ready {
+            baseline: s.blocks_completed,
+        }
     });
     let baseline = match pre {
         ExecPre::AltScreen => {
-            return send_msg(writer, &refuse("pane is busy: alternate screen is active".into()))
-                .await;
+            return send_msg(
+                writer,
+                &refuse("pane is busy: alternate screen is active".into()),
+            )
+            .await;
         }
         ExecPre::NoMarks => return send_msg(writer, &refuse(NO_BLOCKS_MSG.into())).await,
         ExecPre::Busy => {
@@ -1793,7 +1870,10 @@ where
                 let output = plexy_glass_mux::last_completed_block(s)
                     .map(|range| plexy_glass_mux::block_text(s, range))
                     .unwrap_or_default();
-                ExecTick::Done { exit: s.last_block_exit, output }
+                ExecTick::Done {
+                    exit: s.last_block_exit,
+                    output,
+                }
             }
             CmpOrdering::Less => ExecTick::Reset,
             CmpOrdering::Equal => ExecTick::Pending,
@@ -1854,8 +1934,7 @@ async fn run_prompt_line(
         Ok(c) => c,
         Err(e) => return (false, Some(e.to_string())),
     };
-    let refuse =
-        |verb: &str| (false, Some(format!("{verb}: requires an attached client")));
+    let refuse = |verb: &str| (false, Some(format!("{verb}: requires an attached client")));
     match cmd {
         PromptCommand::Reload => match registry.reload_config().await {
             Ok(()) => (true, None),
@@ -1933,7 +2012,9 @@ async fn copy_last_output(session: &Arc<Session>, registry: &Arc<SessionRegistry
     if let Some(text) = text {
         let _ = osc_actions::write_clipboard(text.as_bytes()).await;
         registry.push_paste_buffer(text.into_bytes()).await;
-        session.set_status_ok("copied output of last command".into()).await;
+        session
+            .set_status_ok("copied output of last command".into())
+            .await;
         true
     } else {
         session.set_status_info(NO_BLOCKS_MSG.into()).await;
@@ -2054,7 +2135,11 @@ async fn save_buffer(
     };
     fs::write(&resolved, &content)
         .map_err(|e| format!("save-buffer: {}: {e}", resolved.display()))?;
-    Ok(format!("saved {buf_name} → {} ({} bytes)", resolved.display(), content.len()))
+    Ok(format!(
+        "saved {buf_name} → {} ({} bytes)",
+        resolved.display(),
+        content.len()
+    ))
 }
 
 /// `:load-buffer <path…>`: read a file into a new newest paste buffer.
@@ -2067,13 +2152,15 @@ async fn save_buffer(
 async fn load_buffer(registry: &Arc<SessionRegistry>, path: &str) -> Result<String, String> {
     let resolved = resolve_buffer_path("load-buffer", path)?;
     let disp = resolved.display();
-    let meta = fs::metadata(&resolved)
-        .map_err(|e| format!("load-buffer: {disp}: {e}"))?;
+    let meta = fs::metadata(&resolved).map_err(|e| format!("load-buffer: {disp}: {e}"))?;
     if !meta.is_file() {
         return Err(format!("load-buffer: {disp}: not a regular file"));
     }
     if meta.len() > LOAD_BUFFER_MAX_BYTES {
-        return Err(format!("load-buffer: {disp} is {} bytes (limit 10 MiB)", meta.len()));
+        return Err(format!(
+            "load-buffer: {disp} is {} bytes (limit 10 MiB)",
+            meta.len()
+        ));
     }
     // Belt-and-braces cap: the file may grow between stat and read; take(cap+1)
     // limits the actual bytes read so a race cannot OOM. If the read fills the
@@ -2114,14 +2201,16 @@ fn default_spawn_spec() -> SpawnSpec {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
+    use std::process;
+
+    use plexy_glass_protocol::{PROTOCOL_VERSION, PtySize, SpawnSpec, client_handshake};
+    use tokio::io::duplex;
+
     use super::*;
     use crate::pane::Pane;
     use crate::session::wrap_bracketed_paste;
     use crate::test_env::isolate;
-    use std::os::unix::fs::symlink;
-    use std::process;
-    use plexy_glass_protocol::{PROTOCOL_VERSION, PtySize, SpawnSpec, client_handshake};
-    use tokio::io::duplex;
 
     #[test]
     fn wrap_paste_wraps_with_bracketed_paste_escapes() {
@@ -2193,7 +2282,12 @@ mod tests {
                 env: vec![],
                 cwd: None,
             }),
-            size: PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 },
+            size: PtySize {
+                rows: 8,
+                cols: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
         };
         let bytes = postcard::to_allocvec(&attach).unwrap();
         Codec::write_frame(&mut cw, &bytes).await.unwrap();
@@ -2202,11 +2296,8 @@ mod tests {
         let mut saw_output = false;
         let deadline = time::Instant::now() + Duration::from_secs(3);
         while time::Instant::now() < deadline {
-            let Ok(Ok(Some(frame))) = time::timeout(
-                Duration::from_millis(500),
-                Codec::read_frame(&mut cr),
-            )
-            .await
+            let Ok(Ok(Some(frame))) =
+                time::timeout(Duration::from_millis(500), Codec::read_frame(&mut cr)).await
             else {
                 break;
             };
@@ -2233,11 +2324,17 @@ mod tests {
     async fn command_prompt_switch_moves_client_between_sessions() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 8,
+            cols: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let cat = || SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -2254,8 +2351,7 @@ mod tests {
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -2289,7 +2385,8 @@ mod tests {
                     {
                         return;
                     }
-                    assert!(Instant::now() <= deadline, 
+                    assert!(
+                        Instant::now() <= deadline,
                         "timed out: a={:?} b={:?} (want a={want_a} b={want_b})",
                         clients_of(&entries, "a"),
                         clients_of(&entries, "b")
@@ -2321,6 +2418,7 @@ mod tests {
         // switches. No boot loop here, so "dev" is not live until the switch.
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
@@ -2331,11 +2429,24 @@ mod tests {
             )
             .unwrap(),
         );
-        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
-        let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+        let size = PtySize {
+            rows: 8,
+            cols: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
 
         // "dev" is not live yet.
-        assert!(registry.get("dev").await.is_none(), "precondition: dev not built");
+        assert!(
+            registry.get("dev").await.is_none(),
+            "precondition: dev not built"
+        );
 
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
@@ -2350,7 +2461,9 @@ mod tests {
             cmd: Some(cat()),
             size,
         };
-        Codec::write_frame(&mut cw, &postcard::to_allocvec(&attach).unwrap()).await.unwrap();
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&attach).unwrap())
+            .await
+            .unwrap();
         tokio::spawn(async move {
             let mut buf = [0u8; 4096];
             while cr.read(&mut buf).await.unwrap_or(0) > 0 {}
@@ -2370,7 +2483,10 @@ mod tests {
                         assert_eq!(dev.panes, 2, "auto-built from the 2-pane template");
                         return;
                     }
-                    assert!(Instant::now() <= deadline, "dev never auto-created + switched: {entries:?}");
+                    assert!(
+                        Instant::now() <= deadline,
+                        "dev never auto-created + switched: {entries:?}"
+                    );
                     time::sleep(Duration::from_millis(20)).await;
                 }
             }
@@ -2379,7 +2495,9 @@ mod tests {
         // Give the attach a moment, then switch to the declared-not-running name.
         time::sleep(Duration::from_millis(100)).await;
         let input = ClientMsg::Input(bytes::Bytes::from_static(b"\x01:switch dev\r"));
-        Codec::write_frame(&mut cw, &postcard::to_allocvec(&input).unwrap()).await.unwrap();
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&input).unwrap())
+            .await
+            .unwrap();
 
         wait_dev_has_client().await;
         server.abort();
@@ -2392,11 +2510,17 @@ mod tests {
     async fn prefix_press_arms_session_follow_up_key_disarms() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 8,
+            cols: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let cat = SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -2407,8 +2531,7 @@ mod tests {
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -2478,11 +2601,17 @@ mod tests {
     async fn session_picker_filters_and_switches() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 10, cols: 40, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 10,
+            cols: 40,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let cat = || SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -2497,8 +2626,7 @@ mod tests {
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -2530,7 +2658,8 @@ mod tests {
                     {
                         return;
                     }
-                    assert!(Instant::now() <= deadline, 
+                    assert!(
+                        Instant::now() <= deadline,
                         "timed out: alpha={:?} beta={:?}",
                         clients_of(&entries, "alpha"),
                         clients_of(&entries, "beta")
@@ -2558,11 +2687,17 @@ mod tests {
     async fn choose_tree_switches_sessions() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 16,
+            cols: 60,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let cat = || SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -2577,8 +2712,7 @@ mod tests {
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -2610,7 +2744,8 @@ mod tests {
                     {
                         return;
                     }
-                    assert!(Instant::now() <= deadline, 
+                    assert!(
+                        Instant::now() <= deadline,
                         "timed out: alpha={:?} beta={:?}",
                         clients_of(&entries, "alpha"),
                         clients_of(&entries, "beta")
@@ -2637,7 +2772,12 @@ mod tests {
         let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 16,
+            cols: 60,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let mut session = registry
             .attach_or_create("h".into(), script_cat(), size, Arc::clone(&cfg))
             .await
@@ -2700,8 +2840,9 @@ mod tests {
 
     #[test]
     fn build_history_entries_orders_current_pane_first_newest_first() {
-        use crate::session::{HistoryBlock, SessionHistory};
         use plexy_glass_mux::{PaneId, WindowId};
+
+        use crate::session::{HistoryBlock, SessionHistory};
         let blk = |pane: u32, line: u32, cmd: &str| HistoryBlock {
             window: WindowId(0),
             window_idx: 0,
@@ -2722,7 +2863,10 @@ mod tests {
                     blk(0, 5, "cur-p0"),
                 ],
             },
-            SessionHistory { name: "other".into(), blocks: vec![blk(0, 7, "other")] },
+            SessionHistory {
+                name: "other".into(),
+                blocks: vec![blk(0, 7, "other")],
+            },
         ];
         let entries = build_history_entries(&snaps, "cur", Some(PaneId(1)));
         // Current pane (1) first, newest-first; then current session's pane 0;
@@ -2779,12 +2923,17 @@ mod tests {
         // Selection defaults to the newest current-pane block ("pwd"); Enter jumps.
         let result = {
             let mut m = session.window_manager.lock().await;
-            m.handle_overlay_key(&plexy_glass_mux::KeyEvent::plain(plexy_glass_mux::Key::Enter))
+            m.handle_overlay_key(&plexy_glass_mux::KeyEvent::plain(
+                plexy_glass_mux::Key::Enter,
+            ))
         };
         match result {
             OverlayKeyResult::History(t) => {
                 assert_eq!(t.session, "h");
-                assert_eq!(t.command, "pwd", "newest current-pane block selected by default");
+                assert_eq!(
+                    t.command, "pwd",
+                    "newest current-pane block selected by default"
+                );
             }
             other => panic!("expected History jump, got {other:?}"),
         }
@@ -2910,8 +3059,9 @@ mod tests {
 
     #[test]
     fn build_tree_nodes_marks_only_current_path() {
-        use crate::session::{SessionTree, WindowTree};
         use plexy_glass_mux::{PaneId, WindowId};
+
+        use crate::session::{SessionTree, WindowTree};
         let snaps = vec![
             SessionTree {
                 name: "cur".into(),
@@ -2951,15 +3101,30 @@ mod tests {
         // Current session node + its active window (index 1 → WindowId(1)) + that
         // window's active pane (PaneId(2)) are the only marked nodes in "cur".
         assert!(find(&|n| n.session == "cur" && n.window.is_none()).is_current);
-        assert!(find(&|n| n.session == "cur" && n.window == Some(WindowId(1)) && n.pane.is_none()).is_current);
-        assert!(!find(&|n| n.session == "cur" && n.window == Some(WindowId(0)) && n.pane.is_none()).is_current);
+        assert!(
+            find(&|n| n.session == "cur" && n.window == Some(WindowId(1)) && n.pane.is_none())
+                .is_current
+        );
+        assert!(
+            !find(&|n| n.session == "cur" && n.window == Some(WindowId(0)) && n.pane.is_none())
+                .is_current
+        );
         assert!(find(&|n| n.pane == Some(PaneId(2))).is_current);
         assert!(!find(&|n| n.session == "cur" && n.pane == Some(PaneId(1))).is_current);
         // Label formats.
         assert_eq!(find(&|n| n.pane == Some(PaneId(2))).label, "pane 2: p");
-        assert_eq!(find(&|n| n.session == "cur" && n.window == Some(WindowId(1)) && n.pane.is_none()).label, "2: w1");
+        assert_eq!(
+            find(&|n| n.session == "cur" && n.window == Some(WindowId(1)) && n.pane.is_none())
+                .label,
+            "2: w1"
+        );
         // The other (non-current) session's whole subtree is unmarked.
-        assert!(nodes.iter().filter(|n| n.session == "other").all(|n| !n.is_current));
+        assert!(
+            nodes
+                .iter()
+                .filter(|n| n.session == "other")
+                .all(|n| !n.is_current)
+        );
     }
 
     // `Ctrl+a W` then navigate to the *beta* window node and rename it, a
@@ -2969,11 +3134,17 @@ mod tests {
     async fn choose_tree_renames_window_in_other_session() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 16,
+            cols: 60,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let cat = || SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -2988,8 +3159,7 @@ mod tests {
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3011,10 +3181,18 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let entries = registry.list().await;
-            if entries.iter().find(|e| e.name == "alpha").map(|e| e.clients) == Some(1) {
+            if entries
+                .iter()
+                .find(|e| e.name == "alpha")
+                .map(|e| e.clients)
+                == Some(1)
+            {
                 break;
             }
-            assert!(Instant::now() <= deadline, "alpha never registered a client");
+            assert!(
+                Instant::now() <= deadline,
+                "alpha never registered a client"
+            );
             time::sleep(Duration::from_millis(20)).await;
         }
 
@@ -3062,7 +3240,12 @@ mod tests {
         use plexy_glass_mux::{NodeKey, Overlay, TreeAction, TreeKind, session_label};
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 16,
+            cols: 60,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let cat = || SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -3108,11 +3291,21 @@ mod tests {
         })
         .await;
 
-        assert!(registry.get("beta").await.is_none(), "registry re-keyed away from old");
-        assert!(registry.get("gamma").await.is_some(), "registry resolves the new name");
+        assert!(
+            registry.get("beta").await.is_none(),
+            "registry re-keyed away from old"
+        );
+        assert!(
+            registry.get("gamma").await.is_some(),
+            "registry resolves the new name"
+        );
 
         let mut m = session.window_manager.lock().await;
-        assert_eq!(m.take_active_message(), None, "success sets no status message");
+        assert_eq!(
+            m.take_active_message(),
+            None,
+            "success sets no status message"
+        );
         let Some(Overlay::Tree(state)) = m.overlay() else {
             panic!("tree overlay must still be open after a rename");
         };
@@ -3160,7 +3353,12 @@ mod tests {
         use plexy_glass_mux::{Overlay, TreeAction};
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 16,
+            cols: 60,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let cat = || SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -3202,9 +3400,14 @@ mod tests {
         .await;
 
         assert!(registry.get("alpha").await.is_some());
-        assert!(registry.get("beta").await.is_some(), "failed rename leaves the key alone");
+        assert!(
+            registry.get("beta").await.is_some(),
+            "failed rename leaves the key alone"
+        );
         let mut m = session.window_manager.lock().await;
-        let msg = m.take_active_message().expect("collision must set a status message");
+        let msg = m
+            .take_active_message()
+            .expect("collision must set a status message");
         assert!(
             msg.contains("already exists"),
             "status message carries the registry error; got {msg:?}"
@@ -3212,7 +3415,10 @@ mod tests {
         let Some(Overlay::Tree(state)) = m.overlay() else {
             panic!("tree overlay must still be open");
         };
-        assert_eq!(state.nodes, nodes_before, "failed rename leaves the tree untouched");
+        assert_eq!(
+            state.nodes, nodes_before,
+            "failed rename leaves the tree untouched"
+        );
     }
 
     // RenameSession refusal path: renaming TO a config-declared session name
@@ -3230,7 +3436,12 @@ mod tests {
             plexy_glass_config::parse_config(r#"session "dev" { window "w" { pane } }"#)
                 .expect("declared-session config"),
         );
-        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 16,
+            cols: 60,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let cat = || SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -3259,10 +3470,18 @@ mod tests {
         })
         .await;
 
-        assert!(registry.get("alpha").await.is_some(), "refused rename leaves the key alone");
-        assert!(registry.get("dev").await.is_none(), "no session appears under the declared name");
+        assert!(
+            registry.get("alpha").await.is_some(),
+            "refused rename leaves the key alone"
+        );
+        assert!(
+            registry.get("dev").await.is_none(),
+            "no session appears under the declared name"
+        );
         let mut m = session.window_manager.lock().await;
-        let msg = m.take_active_message().expect("refusal must set a status message");
+        let msg = m
+            .take_active_message()
+            .expect("refusal must set a status message");
         assert_eq!(msg, "'dev' is a declared session name — choose another");
     }
 
@@ -3274,11 +3493,17 @@ mod tests {
     async fn break_and_join_panes_via_keys() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 16,
+            cols: 60,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let cat = || SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -3289,8 +3514,7 @@ mod tests {
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3327,7 +3551,9 @@ mod tests {
                             }
                             None => (0, 0),
                         };
-                        panic!("timed out: windows={w} panes={p} (want w={want_windows} p={want_panes})");
+                        panic!(
+                            "timed out: windows={w} panes={p} (want w={want_windows} p={want_panes})"
+                        );
                     }
                     time::sleep(Duration::from_millis(20)).await;
                 }
@@ -3364,7 +3590,11 @@ mod tests {
             ids.contains(&plexy_glass_mux::PaneId(0)) && ids.contains(&plexy_glass_mux::PaneId(1)),
             "both panes back in one window: {ids:?}"
         );
-        assert_eq!(st.windows[0].active_pane, plexy_glass_mux::PaneId(1), "joined pane is active");
+        assert_eq!(
+            st.windows[0].active_pane,
+            plexy_glass_mux::PaneId(1),
+            "joined pane is active"
+        );
 
         server.abort();
     }
@@ -3376,11 +3606,17 @@ mod tests {
     async fn paste_buffer_reaches_pane_and_chooser_deletes() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 16,
+            cols: 60,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let cat = || SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -3391,8 +3627,7 @@ mod tests {
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3422,8 +3657,7 @@ mod tests {
         // Ctrl+a ] pastes the newest buffer into the cat pane.
         Codec::write_frame(
             &mut cw,
-            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01]")))
-                .unwrap(),
+            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01]"))).unwrap(),
         )
         .await
         .unwrap();
@@ -3474,7 +3708,10 @@ mod tests {
             if registry.list_paste_buffers().await.len() == 1 {
                 break;
             }
-            assert!(Instant::now() <= deadline, "chooser delete did not drop the buffer count");
+            assert!(
+                Instant::now() <= deadline,
+                "chooser delete did not drop the buffer count"
+            );
             time::sleep(Duration::from_millis(20)).await;
         }
 
@@ -3488,18 +3725,28 @@ mod tests {
     async fn paste_swallowed_behind_overlay_but_reaches_pane_without_one() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
-        let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+        let size = PtySize {
+            rows: 16,
+            cols: 60,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
 
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3509,7 +3756,9 @@ mod tests {
             cmd: Some(cat()),
             size,
         };
-        Codec::write_frame(&mut cw, &postcard::to_allocvec(&attach).unwrap()).await.unwrap();
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&attach).unwrap())
+            .await
+            .unwrap();
         tokio::spawn(async move {
             let mut b = [0u8; 4096];
             while cr.read(&mut b).await.unwrap_or(0) > 0 {}
@@ -3547,8 +3796,7 @@ mod tests {
         //    modal overlay it must be DISCARDED, so cat never sees it.
         Codec::write_frame(
             &mut cw,
-            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01?")))
-                .unwrap(),
+            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01?"))).unwrap(),
         )
         .await
         .unwrap();
@@ -3591,11 +3839,17 @@ mod tests {
     async fn copy_mode_yank_pushes_a_paste_buffer() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 16,
+            cols: 60,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let cat = || SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -3606,8 +3860,7 @@ mod tests {
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3645,7 +3898,10 @@ mod tests {
             if !registry.list_paste_buffers().await.is_empty() {
                 break;
             }
-            assert!(Instant::now() <= deadline, "copy-mode yank did not push a paste buffer");
+            assert!(
+                Instant::now() <= deadline,
+                "copy-mode yank did not push a paste buffer"
+            );
             time::sleep(Duration::from_millis(20)).await;
         }
 
@@ -3659,11 +3915,17 @@ mod tests {
     async fn background_bell_flags_window_via_coordinator() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 16, cols: 60, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 16,
+            cols: 60,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let cat = || SpawnSpec {
             program: "/bin/cat".into(),
             args: vec![],
@@ -3674,8 +3936,7 @@ mod tests {
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3745,15 +4006,17 @@ mod tests {
             if flagged {
                 break;
             }
-            assert!(Instant::now() <= deadline, "the coordinator never flagged the background window's bell");
+            assert!(
+                Instant::now() <= deadline,
+                "the coordinator never flagged the background window's bell"
+            );
             time::sleep(Duration::from_millis(20)).await;
         }
 
         // Switching to window 1 (Ctrl+a n) clears its flag.
         Codec::write_frame(
             &mut cw,
-            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01n")))
-                .unwrap(),
+            &postcard::to_allocvec(&ClientMsg::Input(bytes::Bytes::from_static(b"\x01n"))).unwrap(),
         )
         .await
         .unwrap();
@@ -3767,7 +4030,10 @@ mod tests {
             if cleared {
                 break;
             }
-            assert!(Instant::now() <= deadline, "bell flag did not clear after switching to the window");
+            assert!(
+                Instant::now() <= deadline,
+                "bell flag did not clear after switching to the window"
+            );
             time::sleep(Duration::from_millis(20)).await;
         }
 
@@ -3781,18 +4047,28 @@ mod tests {
     async fn focus_in_reaches_only_a_subscribing_pane() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
-        let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+        let size = PtySize {
+            rows: 8,
+            cols: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
 
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3843,9 +4119,12 @@ mod tests {
                 m.active_window().active_pane().unwrap().subscribe_output()
             };
             // Send FocusIn now that we're subscribed so the echo is deterministic.
-            Codec::write_frame(&mut cw, &postcard::to_allocvec(&ClientMsg::FocusIn).unwrap())
-                .await
-                .unwrap();
+            Codec::write_frame(
+                &mut cw,
+                &postcard::to_allocvec(&ClientMsg::FocusIn).unwrap(),
+            )
+            .await
+            .unwrap();
             // Accumulate across chunks: the 4-byte echo can split across PTY
             // reads, so scan a growing buffer (a per-chunk scan misses an echo
             // that straddles two PTY reads).
@@ -3853,11 +4132,12 @@ mod tests {
             let mut seen = false;
             let deadline = Instant::now() + Duration::from_secs(5);
             while Instant::now() < deadline {
-                if let Ok(Ok(b)) =
-                    time::timeout(Duration::from_millis(200), rx.recv()).await
-                {
+                if let Ok(Ok(b)) = time::timeout(Duration::from_millis(200), rx.recv()).await {
                     acc.extend_from_slice(&b);
-                    if acc.windows(ECHOED_FOCUS_IN.len()).any(|w| w == ECHOED_FOCUS_IN) {
+                    if acc
+                        .windows(ECHOED_FOCUS_IN.len())
+                        .any(|w| w == ECHOED_FOCUS_IN)
+                    {
                         seen = true;
                         break;
                     }
@@ -3865,7 +4145,10 @@ mod tests {
             }
             seen
         };
-        assert!(got_focus_in, "subscribing pane never received \\e[I (as ^[[I)");
+        assert!(
+            got_focus_in,
+            "subscribing pane never received \\e[I (as ^[[I)"
+        );
 
         server.abort();
     }
@@ -3875,18 +4158,28 @@ mod tests {
     async fn focus_in_is_dropped_for_non_subscriber() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
-        let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+        let size = PtySize {
+            rows: 8,
+            cols: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
 
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3920,9 +4213,12 @@ mod tests {
             time::sleep(Duration::from_millis(20)).await;
         };
 
-        Codec::write_frame(&mut cw, &postcard::to_allocvec(&ClientMsg::FocusIn).unwrap())
-            .await
-            .unwrap();
+        Codec::write_frame(
+            &mut cw,
+            &postcard::to_allocvec(&ClientMsg::FocusIn).unwrap(),
+        )
+        .await
+        .unwrap();
 
         // No focus-in should ever reach a non-subscriber; give it a generous
         // window. The echo form is `^[[I` (see the sibling test for why).
@@ -3932,11 +4228,12 @@ mod tests {
             let mut leaked = false;
             let deadline = Instant::now() + Duration::from_millis(600);
             while Instant::now() < deadline {
-                if let Ok(Ok(b)) =
-                    time::timeout(Duration::from_millis(150), rx.recv()).await
-                {
+                if let Ok(Ok(b)) = time::timeout(Duration::from_millis(150), rx.recv()).await {
                     acc.extend_from_slice(&b);
-                    if acc.windows(ECHOED_FOCUS_IN.len()).any(|w| w == ECHOED_FOCUS_IN) {
+                    if acc
+                        .windows(ECHOED_FOCUS_IN.len())
+                        .any(|w| w == ECHOED_FOCUS_IN)
+                    {
                         leaked = true;
                         break;
                     }
@@ -3957,18 +4254,28 @@ mod tests {
     async fn color_scheme_reaches_only_a_subscribing_pane() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
-        let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+        let size = PtySize {
+            rows: 8,
+            cols: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
 
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -3996,7 +4303,8 @@ mod tests {
                 let m = s.window_manager.lock().await;
                 if let Some(p) = m.active_window().active_pane() {
                     p.with_screen_mut(|sc| {
-                        sc.modes.insert(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES);
+                        sc.modes
+                            .insert(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES);
                     });
                     break;
                 }
@@ -4027,9 +4335,7 @@ mod tests {
             let mut seen = false;
             let deadline = Instant::now() + Duration::from_secs(5);
             while Instant::now() < deadline {
-                if let Ok(Ok(b)) =
-                    time::timeout(Duration::from_millis(200), rx.recv()).await
-                {
+                if let Ok(Ok(b)) = time::timeout(Duration::from_millis(200), rx.recv()).await {
                     acc.extend_from_slice(&b);
                     if acc.windows(ECHOED_DARK.len()).any(|w| w == ECHOED_DARK) {
                         seen = true;
@@ -4039,7 +4345,10 @@ mod tests {
             }
             seen
         };
-        assert!(got, "subscribing pane never received \\e[?997;1n (as ^[[?997;1n)");
+        assert!(
+            got,
+            "subscribing pane never received \\e[?997;1n (as ^[[?997;1n)"
+        );
 
         server.abort();
     }
@@ -4049,18 +4358,28 @@ mod tests {
     async fn color_scheme_is_dropped_for_non_subscriber() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
-        let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+        let size = PtySize {
+            rows: 8,
+            cols: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
 
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -4110,9 +4429,7 @@ mod tests {
             let mut leaked = false;
             let deadline = Instant::now() + Duration::from_millis(600);
             while Instant::now() < deadline {
-                if let Ok(Ok(b)) =
-                    time::timeout(Duration::from_millis(150), rx.recv()).await
-                {
+                if let Ok(Ok(b)) = time::timeout(Duration::from_millis(150), rx.recv()).await {
                     acc.extend_from_slice(&b);
                     if acc.windows(ECHOED_DARK.len()).any(|w| w == ECHOED_DARK) {
                         leaked = true;
@@ -4136,18 +4453,28 @@ mod tests {
     async fn pane_switch_synthesizes_focus_in_to_destination() {
         let _g = isolate();
         use std::time::{Duration, Instant};
+
         use tokio::io::{AsyncReadExt, split};
 
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let size = PtySize { rows: 8, cols: 24, pixel_width: 0, pixel_height: 0 };
-        let cat = || SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+        let size = PtySize {
+            rows: 8,
+            cols: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let cat = || SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
 
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(&registry);
         let cfg2 = Arc::clone(&cfg);
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg2).await });
 
         let (mut cr, mut cw) = split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
@@ -4214,7 +4541,10 @@ mod tests {
             let s = registry.get("focusswap").await.unwrap();
             let mut rx = {
                 let m = s.window_manager.lock().await;
-                m.active_window().pane(plexy_glass_mux::PaneId(0)).unwrap().subscribe_output()
+                m.active_window()
+                    .pane(plexy_glass_mux::PaneId(0))
+                    .unwrap()
+                    .subscribe_output()
             };
             // Ctrl+a ; → select_last_pane, switching the active pane from
             // PaneId(1) back to PaneId(0); the batch snapshot then synthesizes
@@ -4232,11 +4562,12 @@ mod tests {
             let mut seen = false;
             let deadline = Instant::now() + Duration::from_secs(5);
             while Instant::now() < deadline {
-                if let Ok(Ok(b)) =
-                    time::timeout(Duration::from_millis(200), rx.recv()).await
-                {
+                if let Ok(Ok(b)) = time::timeout(Duration::from_millis(200), rx.recv()).await {
                     acc.extend_from_slice(&b);
-                    if acc.windows(ECHOED_FOCUS_IN.len()).any(|w| w == ECHOED_FOCUS_IN) {
+                    if acc
+                        .windows(ECHOED_FOCUS_IN.len())
+                        .any(|w| w == ECHOED_FOCUS_IN)
+                    {
                         seen = true;
                         break;
                     }
@@ -4244,7 +4575,10 @@ mod tests {
             }
             seen
         };
-        assert!(got_focus_in, "switched-to pane never received \\e[I (as ^[[I)");
+        assert!(
+            got_focus_in,
+            "switched-to pane never received \\e[I (as ^[[I)"
+        );
 
         server.abort();
     }
@@ -4252,11 +4586,21 @@ mod tests {
     // ── one-shot scripting verbs (RunCommand / SendInput / CapturePane) ─────
 
     fn script_cat() -> SpawnSpec {
-        SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None }
+        SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        }
     }
 
     fn script_size() -> PtySize {
-        PtySize { rows: 8, cols: 40, pixel_width: 0, pixel_height: 0 }
+        PtySize {
+            rows: 8,
+            cols: 40,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
     }
 
     /// Drive one one-shot scripting message through `serve` over a
@@ -4265,19 +4609,17 @@ mod tests {
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(registry);
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg).await });
         let (mut cr, mut cw) = io::split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
-        Codec::write_frame(&mut cw, &postcard::to_allocvec(msg).unwrap()).await.unwrap();
-        let frame = time::timeout(
-            Duration::from_secs(5),
-            Codec::read_frame(&mut cr),
-        )
-        .await
-        .expect("one-shot reply timed out")
-        .unwrap()
-        .expect("server closed without replying");
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(msg).unwrap())
+            .await
+            .unwrap();
+        let frame = time::timeout(Duration::from_secs(5), Codec::read_frame(&mut cr))
+            .await
+            .expect("one-shot reply timed out")
+            .unwrap()
+            .expect("server closed without replying");
         let reply: ServerMsg = postcard::from_bytes(&frame).unwrap();
         server.await.unwrap().unwrap();
         reply
@@ -4300,16 +4642,33 @@ mod tests {
             .await
             .unwrap();
         // Pin the split's spawn program so it never depends on `$SHELL`.
-        session.window_manager.lock().await.set_default_program("/bin/cat");
+        session
+            .window_manager
+            .lock()
+            .await
+            .set_default_program("/bin/cat");
 
         let reply = one_shot(
             &registry,
-            &ClientMsg::RunCommand { session: Some("s1".into()), line: "split v".into() },
+            &ClientMsg::RunCommand {
+                session: Some("s1".into()),
+                line: "split v".into(),
+            },
         )
         .await;
         let (ok, message) = expect_command_result(reply);
         assert!(ok, "split v over the wire failed: {message:?}");
-        assert_eq!(session.window_manager.lock().await.active_window().layout().panes().len(), 2);
+        assert_eq!(
+            session
+                .window_manager
+                .lock()
+                .await
+                .active_window()
+                .layout()
+                .panes()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4317,17 +4676,26 @@ mod tests {
         let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        registry.attach_or_create("s1".into(), script_cat(), script_size(), cfg).await.unwrap();
+        registry
+            .attach_or_create("s1".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
 
         let reply = one_shot(
             &registry,
-            &ClientMsg::RunCommand { session: Some("s1".into()), line: "bogusverb".into() },
+            &ClientMsg::RunCommand {
+                session: Some("s1".into()),
+                line: "bogusverb".into(),
+            },
         )
         .await;
         let (ok, message) = expect_command_result(reply);
         assert!(!ok);
         let msg = message.expect("parse error must carry a message");
-        assert!(msg.contains("unknown command"), "unexpected parse error text: {msg}");
+        assert!(
+            msg.contains("unknown command"),
+            "unexpected parse error text: {msg}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4335,12 +4703,18 @@ mod tests {
         let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        registry.attach_or_create("s1".into(), script_cat(), script_size(), cfg).await.unwrap();
+        registry
+            .attach_or_create("s1".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
 
         for line in ["detach", "switch x", "help", "sessions", "tree", "buffers"] {
             let reply = one_shot(
                 &registry,
-                &ClientMsg::RunCommand { session: Some("s1".into()), line: line.into() },
+                &ClientMsg::RunCommand {
+                    session: Some("s1".into()),
+                    line: line.into(),
+                },
             )
             .await;
             let (ok, message) = expect_command_result(reply);
@@ -4378,9 +4752,22 @@ mod tests {
         // Refused: these act on the calling client (detach/switch), open modal
         // overlays (help/sessions/tree/buffers), or are interactive per-pane
         // modal navigation (block-mode).
-        for line in ["detach", "switch x", "sessions", "tree", "history", "hints", "buffers", "help", "block-mode"] {
+        for line in [
+            "detach",
+            "switch x",
+            "sessions",
+            "tree",
+            "history",
+            "hints",
+            "buffers",
+            "help",
+            "block-mode",
+        ] {
             let (ok, message) = run_prompt_line(&session, &registry, line).await;
-            assert!(!ok, "`{line}` must be refused headless, not silently succeed");
+            assert!(
+                !ok,
+                "`{line}` must be refused headless, not silently succeed"
+            );
             let msg = message.unwrap_or_default();
             assert!(
                 msg.contains("requires an attached client"),
@@ -4404,7 +4791,10 @@ mod tests {
         let (ok, message) = run_prompt_line(&session, &registry, "copy-output").await;
         assert!(!ok, "copy-output with no blocks must not claim success");
         let msg = message.unwrap_or_default();
-        assert!(msg.contains("no command blocks"), "wrong no-blocks text: {msg}");
+        assert!(
+            msg.contains("no command blocks"),
+            "wrong no-blocks text: {msg}"
+        );
 
         // The buffer-file verbs are specially handled with real effects:
         // set pushes (with a confirmation message), save writes the file,
@@ -4414,16 +4804,27 @@ mod tests {
         let out = dir.path().join("guard.txt");
         let (ok, message) = run_prompt_line(&session, &registry, "set-buffer guard text").await;
         assert!(ok, "headless set-buffer failed: {message:?}");
-        assert!(message.unwrap_or_default().contains("buffer set"), "set-buffer must confirm");
-        let (ok, message) =
-            run_prompt_line(&session, &registry, &format!("save-buffer {}", out.display())).await;
+        assert!(
+            message.unwrap_or_default().contains("buffer set"),
+            "set-buffer must confirm"
+        );
+        let (ok, message) = run_prompt_line(
+            &session,
+            &registry,
+            &format!("save-buffer {}", out.display()),
+        )
+        .await;
         assert!(ok, "headless save-buffer failed: {message:?}");
         assert!(
             message.unwrap_or_default().contains("saved "),
             "save-buffer must confirm with 'saved …'"
         );
-        let (ok, message) =
-            run_prompt_line(&session, &registry, &format!("load-buffer {}", out.display())).await;
+        let (ok, message) = run_prompt_line(
+            &session,
+            &registry,
+            &format!("load-buffer {}", out.display()),
+        )
+        .await;
         assert!(ok, "headless load-buffer failed: {message:?}");
         assert!(
             message.unwrap_or_default().contains("loaded "),
@@ -4432,7 +4833,10 @@ mod tests {
         let (ok, message) = run_prompt_line(&session, &registry, "paste buffer999").await;
         assert!(!ok, "paste of an unknown buffer must not claim success");
         let msg = message.unwrap_or_default();
-        assert!(msg.contains("no buffer named buffer999"), "wrong unknown-name text: {msg}");
+        assert!(
+            msg.contains("no buffer named buffer999"),
+            "wrong unknown-name text: {msg}"
+        );
     }
 
     // ── paste buffers v2: set-buffer / save-buffer / load-buffer / paste-by-name ──
@@ -4473,7 +4877,10 @@ mod tests {
 
         let reply = one_shot(
             &registry,
-            &ClientMsg::RunCommand { session: Some("s1".into()), line: "paste buffer0".into() },
+            &ClientMsg::RunCommand {
+                session: Some("s1".into()),
+                line: "paste buffer0".into(),
+            },
         )
         .await;
         let (ok, message) = expect_command_result(reply);
@@ -4561,10 +4968,16 @@ mod tests {
         registry.push_paste_buffer(b"x".to_vec()).await;
 
         // Unknown buffer name.
-        let line = format!("save-buffer buffer99 {}", dir.path().join("x.out").display());
+        let line = format!(
+            "save-buffer buffer99 {}",
+            dir.path().join("x.out").display()
+        );
         let (ok, message) = run_prompt_line(&session, &registry, &line).await;
         assert!(!ok);
-        assert_eq!(message.as_deref(), Some("save-buffer: no buffer named buffer99"));
+        assert_eq!(
+            message.as_deref(),
+            Some("save-buffer: no buffer named buffer99")
+        );
 
         // io error: the message names the RESOLVED path and the os error.
         let missing = dir.path().join("no-such-subdir").join("x.out");
@@ -4611,7 +5024,10 @@ mod tests {
             message.as_deref(),
             Some(format!("loaded {} (15 bytes)", file.display()).as_str())
         );
-        assert_eq!(registry.paste_buffer_top().await.as_deref(), Some(b"bin\xFFary\ncontent".as_slice()));
+        assert_eq!(
+            registry.paste_buffer_top().await.as_deref(),
+            Some(b"bin\xFFary\ncontent".as_slice())
+        );
 
         // Empty file → empty buffer.
         let empty = dir.path().join("empty.txt");
@@ -4619,7 +5035,10 @@ mod tests {
         let line = format!("load-buffer {}", empty.display());
         let (ok, message) = run_prompt_line(&session, &registry, &line).await;
         assert!(ok, "load-buffer of an empty file failed: {message:?}");
-        assert_eq!(registry.paste_buffer_top().await.as_deref(), Some(b"".as_slice()));
+        assert_eq!(
+            registry.paste_buffer_top().await.as_deref(),
+            Some(b"".as_slice())
+        );
     }
 
     /// The load gates: FIFOs, directories, oversize files, and relative
@@ -4671,8 +5090,11 @@ mod tests {
         assert_eq!(
             message.as_deref(),
             Some(
-                format!("load-buffer: {} is 10485761 bytes (limit 10 MiB)", big.display())
-                    .as_str()
+                format!(
+                    "load-buffer: {} is 10485761 bytes (limit 10 MiB)",
+                    big.display()
+                )
+                .as_str()
             )
         );
 
@@ -4686,7 +5108,10 @@ mod tests {
                  working directory is not yours; use an absolute or ~ path"
             )
         );
-        assert!(registry.list_paste_buffers().await.is_empty(), "no refusal may push a buffer");
+        assert!(
+            registry.list_paste_buffers().await.is_empty(),
+            "no refusal may push a buffer"
+        );
     }
 
     /// A symlink to a regular file is followed (the headline case is
@@ -4731,9 +5156,7 @@ mod tests {
         assert!(!ok, "symlink-to-FIFO must be refused");
         assert_eq!(
             message.as_deref(),
-            Some(
-                format!("load-buffer: {}: not a regular file", fifo_link.display()).as_str()
-            )
+            Some(format!("load-buffer: {}: not a regular file", fifo_link.display()).as_str())
         );
     }
 
@@ -4782,7 +5205,10 @@ mod tests {
             "the block's output text must be pushed as a paste buffer"
         );
         let mut m = session.window_manager.lock().await;
-        assert_eq!(m.take_active_message(), Some("copied output of last command"));
+        assert_eq!(
+            m.take_active_message(),
+            Some("copied output of last command")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4790,11 +5216,17 @@ mod tests {
         let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        registry.attach_or_create("s1".into(), script_cat(), script_size(), cfg).await.unwrap();
+        registry
+            .attach_or_create("s1".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
 
         let reply = one_shot(
             &registry,
-            &ClientMsg::RunCommand { session: Some("s1".into()), line: "copy-output".into() },
+            &ClientMsg::RunCommand {
+                session: Some("s1".into()),
+                line: "copy-output".into(),
+            },
         )
         .await;
         let (ok, message) = expect_command_result(reply);
@@ -4812,13 +5244,19 @@ mod tests {
         let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        registry.attach_or_create("s1".into(), script_cat(), script_size(), cfg).await.unwrap();
+        registry
+            .attach_or_create("s1".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
 
         // `load_or_default` treats a missing config file as Ok-with-defaults
         // (`load.rs`), so a reload succeeds without any config on disk.
         let reply = one_shot(
             &registry,
-            &ClientMsg::RunCommand { session: Some("s1".into()), line: "reload".into() },
+            &ClientMsg::RunCommand {
+                session: Some("s1".into()),
+                line: "reload".into(),
+            },
         )
         .await;
         let (ok, message) = expect_command_result(reply);
@@ -4848,15 +5286,31 @@ mod tests {
 
         let reply = one_shot(
             &registry,
-            &ClientMsg::RunCommand { session: Some("s1".into()), line: "split v".into() },
+            &ClientMsg::RunCommand {
+                session: Some("s1".into()),
+                line: "split v".into(),
+            },
         )
         .await;
         let (ok, message) = expect_command_result(reply);
         assert!(!ok, "split with an unspawnable program must report failure");
         let msg = message.expect("dispatch error must carry a message");
-        assert!(msg.contains("spawn"), "unexpected dispatch error text: {msg}");
+        assert!(
+            msg.contains("spawn"),
+            "unexpected dispatch error text: {msg}"
+        );
         // The failed split must not have left a half-created pane behind.
-        assert_eq!(session.window_manager.lock().await.active_window().layout().panes().len(), 1);
+        assert_eq!(
+            session
+                .window_manager
+                .lock()
+                .await
+                .active_window()
+                .layout()
+                .panes()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4868,7 +5322,10 @@ mod tests {
         // Zero sessions + no name.
         let reply = one_shot(
             &registry,
-            &ClientMsg::RunCommand { session: None, line: "split v".into() },
+            &ClientMsg::RunCommand {
+                session: None,
+                line: "split v".into(),
+            },
         )
         .await;
         let (ok, message) = expect_command_result(reply);
@@ -4878,7 +5335,10 @@ mod tests {
         // Explicit miss.
         let reply = one_shot(
             &registry,
-            &ClientMsg::RunCommand { session: Some("nope".into()), line: "split v".into() },
+            &ClientMsg::RunCommand {
+                session: Some("nope".into()),
+                line: "split v".into(),
+            },
         )
         .await;
         let (ok, message) = expect_command_result(reply);
@@ -4890,16 +5350,30 @@ mod tests {
             .attach_or_create("a".into(), script_cat(), script_size(), Arc::clone(&cfg))
             .await
             .unwrap();
-        session_a.window_manager.lock().await.set_default_program("/bin/cat");
+        session_a
+            .window_manager
+            .lock()
+            .await
+            .set_default_program("/bin/cat");
         let reply = one_shot(
             &registry,
-            &ClientMsg::RunCommand { session: None, line: "split v".into() },
+            &ClientMsg::RunCommand {
+                session: None,
+                line: "split v".into(),
+            },
         )
         .await;
         let (ok, message) = expect_command_result(reply);
         assert!(ok, "sole-session resolution failed: {message:?}");
         assert_eq!(
-            session_a.window_manager.lock().await.active_window().layout().panes().len(),
+            session_a
+                .window_manager
+                .lock()
+                .await
+                .active_window()
+                .layout()
+                .panes()
+                .len(),
             2
         );
 
@@ -4910,14 +5384,23 @@ mod tests {
             .unwrap();
         let reply = one_shot(
             &registry,
-            &ClientMsg::RunCommand { session: None, line: "split v".into() },
+            &ClientMsg::RunCommand {
+                session: None,
+                line: "split v".into(),
+            },
         )
         .await;
         let (ok, message) = expect_command_result(reply);
         assert!(!ok);
         let msg = message.unwrap_or_default();
-        assert!(msg.contains('a') && msg.contains('b'), "ambiguity must list names: {msg}");
-        assert!(msg.contains("multiple sessions"), "unexpected ambiguity text: {msg}");
+        assert!(
+            msg.contains('a') && msg.contains('b'),
+            "ambiguity must list names: {msg}"
+        );
+        assert!(
+            msg.contains("multiple sessions"),
+            "unexpected ambiguity text: {msg}"
+        );
     }
 
     /// Poll `pane`'s screen until `screen_text` contains `marker`.
@@ -4929,7 +5412,10 @@ mod tests {
             if text.contains(marker) {
                 return;
             }
-            assert!(Instant::now() < deadline, "screen never showed {marker:?}; got:\n{text}");
+            assert!(
+                Instant::now() < deadline,
+                "screen never showed {marker:?}; got:\n{text}"
+            );
             time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -4972,7 +5458,10 @@ mod tests {
         use std::time::{Duration, Instant};
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        registry.attach_or_create("cap".into(), script_cat(), script_size(), cfg).await.unwrap();
+        registry
+            .attach_or_create("cap".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
 
         // Content arrives via the real path: send to cat over the wire, then
         // poll capture (point-in-time) until the echo shows up.
@@ -4988,9 +5477,13 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let reply =
-                one_shot(&registry, &ClientMsg::CapturePane { session: Some("cap".into()) })
-                    .await;
+            let reply = one_shot(
+                &registry,
+                &ClientMsg::CapturePane {
+                    session: Some("cap".into()),
+                },
+            )
+            .await;
             let text = match reply {
                 ServerMsg::PaneCapture { text } => text,
                 other => panic!("expected PaneCapture, got {other:?}"),
@@ -4998,7 +5491,10 @@ mod tests {
             if text.contains("capture_marker") {
                 break;
             }
-            assert!(Instant::now() < deadline, "capture never showed the marker; got:\n{text}");
+            assert!(
+                Instant::now() < deadline,
+                "capture never showed the marker; got:\n{text}"
+            );
             time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -5017,9 +5513,15 @@ mod tests {
             .await
             .unwrap();
         // Pin the popup's `$SHELL -c …` to `/bin/sh` so it never depends on the user's shell.
-        session.window_manager.lock().await.set_default_program("/bin/sh");
         session
-            .handle_command(plexy_glass_mux::Command::OpenPopup { command: Some("cat".into()) })
+            .window_manager
+            .lock()
+            .await
+            .set_default_program("/bin/sh");
+        session
+            .handle_command(plexy_glass_mux::Command::OpenPopup {
+                command: Some("cat".into()),
+            })
             .await
             .unwrap();
         let popup_pane = {
@@ -5043,9 +5545,13 @@ mod tests {
         // ...and capture reads the popup, not the layout pane.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let reply =
-                one_shot(&registry, &ClientMsg::CapturePane { session: Some("pop".into()) })
-                    .await;
+            let reply = one_shot(
+                &registry,
+                &ClientMsg::CapturePane {
+                    session: Some("pop".into()),
+                },
+            )
+            .await;
             let text = match reply {
                 ServerMsg::PaneCapture { text } => text,
                 other => panic!("expected PaneCapture, got {other:?}"),
@@ -5053,12 +5559,18 @@ mod tests {
             if text.contains("popup_marker") {
                 break;
             }
-            assert!(Instant::now() < deadline, "popup capture missed the marker; got:\n{text}");
+            assert!(
+                Instant::now() < deadline,
+                "popup capture missed the marker; got:\n{text}"
+            );
             time::sleep(Duration::from_millis(20)).await;
         }
 
         // Kill the popup child so it doesn't outlive the test.
-        session.handle_command(plexy_glass_mux::Command::ClosePopup).await.unwrap();
+        session
+            .handle_command(plexy_glass_mux::Command::ClosePopup)
+            .await
+            .unwrap();
     }
 
     // `CaptureLastCommand` with no completed block returns `CommandResult{ok:false}`
@@ -5075,11 +5587,16 @@ mod tests {
 
         let reply = one_shot(
             &registry,
-            &ClientMsg::CaptureLastCommand { session: Some("noblk".into()) },
+            &ClientMsg::CaptureLastCommand {
+                session: Some("noblk".into()),
+            },
         )
         .await;
         let (ok, message) = expect_command_result(reply);
-        assert!(!ok, "CaptureLastCommand with no blocks must return ok:false");
+        assert!(
+            !ok,
+            "CaptureLastCommand with no blocks must return ok:false"
+        );
         let msg = message.expect("no-blocks path must carry a message");
         assert!(
             msg.contains("no command blocks"),
@@ -5122,7 +5639,9 @@ mod tests {
 
         let reply = one_shot(
             &registry,
-            &ClientMsg::CaptureLastCommand { session: Some("blk".into()) },
+            &ClientMsg::CaptureLastCommand {
+                session: Some("blk".into()),
+            },
         )
         .await;
         let text = match reply {
@@ -5132,9 +5651,18 @@ mod tests {
         // The output range covers the OUTPUT_START row ("out1") through the
         // row before the next PROMPT_START, which is row 1. Row 2 belongs to
         // the NEXT block's prompt and must NOT appear in the capture.
-        assert!(text.contains("out1"), "block text must include output: {text}");
-        assert!(!text.contains("$ next"), "next-prompt row must not appear in capture: {text}");
-        assert!(!text.contains("$ echo hi"), "prompt row must not appear (output range only): {text}");
+        assert!(
+            text.contains("out1"),
+            "block text must include output: {text}"
+        );
+        assert!(
+            !text.contains("$ next"),
+            "next-prompt row must not appear in capture: {text}"
+        );
+        assert!(
+            !text.contains("$ echo hi"),
+            "prompt row must not appear (output range only): {text}"
+        );
     }
 
     // `CaptureLastCommand` for a non-existent session returns `CommandResult{ok:false}`.
@@ -5145,7 +5673,9 @@ mod tests {
 
         let reply = one_shot(
             &registry,
-            &ClientMsg::CaptureLastCommand { session: Some("nosuchsession".into()) },
+            &ClientMsg::CaptureLastCommand {
+                session: Some("nosuchsession".into()),
+            },
         )
         .await;
         let (ok, message) = expect_command_result(reply);
@@ -5194,16 +5724,23 @@ mod tests {
             .expect("session has a pane")
             .clone();
         wait_screen_state(&pane, "seeded block completed with exit 4", |s| {
-            blocks::last_completed_prompt(s)
-                .is_some_and(|p| blocks::closing_exit(s, p) == Some(4))
+            blocks::last_completed_prompt(s).is_some_and(|p| blocks::closing_exit(s, p) == Some(4))
         })
         .await;
 
-        let reply =
-            one_shot(&registry, &ClientMsg::CaptureLastBlock { session: Some("lblk".into()) })
-                .await;
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::CaptureLastBlock {
+                session: Some("lblk".into()),
+            },
+        )
+        .await;
         let (text, exit, command_line) = match reply {
-            ServerMsg::BlockCapture { text, exit, command_line } => (text, exit, command_line),
+            ServerMsg::BlockCapture {
+                text,
+                exit,
+                command_line,
+            } => (text, exit, command_line),
             other => panic!("expected BlockCapture, got {other:?}"),
         };
         assert!(text.contains("OUT_J3"), "block output missing: {text:?}");
@@ -5244,16 +5781,23 @@ mod tests {
             .expect("session has a pane")
             .clone();
         wait_screen_state(&pane, "seeded no-B block completed with exit 4", |s| {
-            blocks::last_completed_prompt(s)
-                .is_some_and(|p| blocks::closing_exit(s, p) == Some(4))
+            blocks::last_completed_prompt(s).is_some_and(|p| blocks::closing_exit(s, p) == Some(4))
         })
         .await;
 
-        let reply =
-            one_shot(&registry, &ClientMsg::CaptureLastBlock { session: Some("noB".into()) })
-                .await;
+        let reply = one_shot(
+            &registry,
+            &ClientMsg::CaptureLastBlock {
+                session: Some("noB".into()),
+            },
+        )
+        .await;
         let (text, exit, command_line) = match reply {
-            ServerMsg::BlockCapture { text, exit, command_line } => (text, exit, command_line),
+            ServerMsg::BlockCapture {
+                text,
+                exit,
+                command_line,
+            } => (text, exit, command_line),
             other => panic!("expected BlockCapture, got {other:?}"),
         };
         assert!(text.contains("OUT_J3"), "block output missing: {text:?}");
@@ -5275,13 +5819,18 @@ mod tests {
 
         let reply = one_shot(
             &registry,
-            &ClientMsg::CaptureLastBlock { session: Some("noblk2".into()) },
+            &ClientMsg::CaptureLastBlock {
+                session: Some("noblk2".into()),
+            },
         )
         .await;
         let (ok, message) = expect_command_result(reply);
         assert!(!ok, "CaptureLastBlock with no blocks must return ok:false");
         let msg = message.expect("no-blocks path must carry a message");
-        assert!(msg.contains("no command blocks"), "unexpected no-blocks text: {msg}");
+        assert!(
+            msg.contains("no command blocks"),
+            "unexpected no-blocks text: {msg}"
+        );
     }
 
     // `CaptureLastBlock` for a non-existent session returns `CommandResult{ok:false}`.
@@ -5292,13 +5841,18 @@ mod tests {
 
         let reply = one_shot(
             &registry,
-            &ClientMsg::CaptureLastBlock { session: Some("nosuchsession".into()) },
+            &ClientMsg::CaptureLastBlock {
+                session: Some("nosuchsession".into()),
+            },
         )
         .await;
         let (ok, message) = expect_command_result(reply);
         assert!(!ok, "missing session must return ok:false");
         let msg = message.expect("session-miss must carry a message");
-        assert!(msg.contains("no session"), "unexpected session-miss text: {msg}");
+        assert!(
+            msg.contains("no session"),
+            "unexpected session-miss text: {msg}"
+        );
     }
 
     // ── ExecCommand (CLI `run`) ──────────────────────────────────────────────
@@ -5319,7 +5873,10 @@ mod tests {
             if pane.with_screen(&pred) {
                 return;
             }
-            assert!(Instant::now() < deadline, "screen never reached state: {desc}");
+            assert!(
+                Instant::now() < deadline,
+                "screen never reached state: {desc}"
+            );
             time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -5332,10 +5889,7 @@ mod tests {
     /// Create a cat-backed session, seed a `133;A` prompt mark over the wire,
     /// and poll until the pane is observably at a prompt (the mark must be
     /// *processed*, not merely sent, because the tty echo races cat's verbatim copy).
-    async fn exec_fixture(
-        registry: &Arc<crate::SessionRegistry>,
-        name: &str,
-    ) -> Pane {
+    async fn exec_fixture(registry: &Arc<crate::SessionRegistry>, name: &str) -> Pane {
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         let session = registry
             .attach_or_create(name.into(), script_cat(), script_size(), cfg)
@@ -5349,7 +5903,10 @@ mod tests {
             },
         )
         .await;
-        assert!(expect_command_result(reply).0, "seeding the prompt mark failed");
+        assert!(
+            expect_command_result(reply).0,
+            "seeding the prompt mark failed"
+        );
         let pane = session
             .window_manager
             .lock()
@@ -5366,7 +5923,11 @@ mod tests {
 
     fn expect_exec_done(reply: ServerMsg) -> (Option<i32>, String, bool) {
         match reply {
-            ServerMsg::ExecDone { exit, output, timed_out } => (exit, output, timed_out),
+            ServerMsg::ExecDone {
+                exit,
+                output,
+                timed_out,
+            } => (exit, output, timed_out),
             other => panic!("expected ExecDone, got {other:?}"),
         }
     }
@@ -5391,7 +5952,10 @@ mod tests {
         let (exit, output, timed_out) = expect_exec_done(reply);
         assert_eq!(exit, Some(3));
         assert!(!timed_out);
-        assert!(output.contains("EXEC_OUT_1"), "block output missing: {output:?}");
+        assert!(
+            output.contains("EXEC_OUT_1"),
+            "block output missing: {output:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5412,7 +5976,10 @@ mod tests {
         let (exit, output, timed_out) = expect_exec_done(reply);
         assert_eq!(exit, Some(0));
         assert!(!timed_out);
-        assert!(output.contains("EXEC_OUT_OK"), "block output missing: {output:?}");
+        assert!(
+            output.contains("EXEC_OUT_OK"),
+            "block output missing: {output:?}"
+        );
     }
 
     // A bare `133;D` (no exit payload) completes the wait with exit None,
@@ -5435,7 +6002,10 @@ mod tests {
         let (exit, output, timed_out) = expect_exec_done(reply);
         assert_eq!(exit, None);
         assert!(!timed_out);
-        assert!(output.contains("EXEC_OUT_ND"), "block output missing: {output:?}");
+        assert!(
+            output.contains("EXEC_OUT_ND"),
+            "block output missing: {output:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5443,7 +6013,10 @@ mod tests {
         let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        registry.attach_or_create("nomark".into(), script_cat(), script_size(), cfg).await.unwrap();
+        registry
+            .attach_or_create("nomark".into(), script_cat(), script_size(), cfg)
+            .await
+            .unwrap();
 
         let reply = one_shot(
             &registry,
@@ -5491,7 +6064,10 @@ mod tests {
         .await;
         let (ok, message) = expect_command_result(reply);
         assert!(!ok);
-        assert_eq!(message.as_deref(), Some("pane is busy: a command is running"));
+        assert_eq!(
+            message.as_deref(),
+            Some("pane is busy: a command is running")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5535,7 +6111,10 @@ mod tests {
         .await;
         let (ok, message) = expect_command_result(reply);
         assert!(!ok);
-        assert_eq!(message.as_deref(), Some("pane is busy: alternate screen is active"));
+        assert_eq!(
+            message.as_deref(),
+            Some("pane is busy: alternate screen is active")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5574,7 +6153,10 @@ mod tests {
         )
         .await;
         let (exit, output, timed_out) = expect_exec_done(reply);
-        assert!(timed_out, "50 ms timeout with no D must be structural timed_out");
+        assert!(
+            timed_out,
+            "50 ms timeout with no D must be structural timed_out"
+        );
         assert_eq!(exit, None);
         assert_eq!(output, "");
     }
@@ -5627,7 +6209,10 @@ mod tests {
         )
         .await;
         let (exit, _output, timed_out) = expect_exec_done(reply);
-        assert!(timed_out, "the stale D;9 must not satisfy the new run's wait");
+        assert!(
+            timed_out,
+            "the stale D;9 must not satisfy the new run's wait"
+        );
         assert_ne!(exit, Some(9), "stale exit code leaked into the reply");
     }
 
@@ -5644,11 +6229,12 @@ mod tests {
         let (server_side, client_side) = duplex(64 * 1024);
         let reg = Arc::clone(registry);
         let cfg = Arc::new(plexy_glass_config::built_in_default());
-        let server =
-            tokio::spawn(async move { serve(server_side, 7, reg, cfg).await });
+        let server = tokio::spawn(async move { serve(server_side, 7, reg, cfg).await });
         let (mut cr, mut cw) = io::split(client_side);
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
-        Codec::write_frame(&mut cw, &postcard::to_allocvec(msg).unwrap()).await.unwrap();
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(msg).unwrap())
+            .await
+            .unwrap();
         (server, cr, cw)
     }
 
@@ -5674,14 +6260,11 @@ mod tests {
         wait_screen_contains(&pane, "EXEC_HOLD_1").await;
         pane.kill_child();
 
-        let frame = time::timeout(
-            Duration::from_secs(5),
-            Codec::read_frame(&mut cr),
-        )
-        .await
-        .expect("no reply after child exit")
-        .unwrap()
-        .expect("server closed without replying");
+        let frame = time::timeout(Duration::from_secs(5), Codec::read_frame(&mut cr))
+            .await
+            .expect("no reply after child exit")
+            .unwrap()
+            .expect("server closed without replying");
         let reply: ServerMsg = postcard::from_bytes(&frame).unwrap();
         let (ok, message) = expect_command_result(reply);
         assert!(!ok);
@@ -5742,7 +6325,10 @@ mod tests {
             },
         )
         .await;
-        assert!(expect_command_result(reply).0, "seeding completed block failed");
+        assert!(
+            expect_command_result(reply).0,
+            "seeding completed block failed"
+        );
         let pane = session
             .window_manager
             .lock()
@@ -5785,14 +6371,11 @@ mod tests {
         assert!(expect_command_result(ris_reply).0, "RIS SendInput failed");
 
         // The exec serve task must observe the reset and reply with a refusal.
-        let frame = time::timeout(
-            Duration::from_secs(5),
-            Codec::read_frame(&mut cr),
-        )
-        .await
-        .expect("no reply after RIS reset")
-        .unwrap()
-        .expect("server closed without replying");
+        let frame = time::timeout(Duration::from_secs(5), Codec::read_frame(&mut cr))
+            .await
+            .expect("no reply after RIS reset")
+            .unwrap()
+            .expect("server closed without replying");
         let reply: ServerMsg = postcard::from_bytes(&frame).unwrap();
         let (ok, message) = expect_command_result(reply);
         assert!(!ok);
@@ -5829,18 +6412,18 @@ mod tests {
         .await
         .unwrap();
 
-        let frame = time::timeout(
-            Duration::from_secs(5),
-            Codec::read_frame(&mut cr),
-        )
-        .await
-        .expect("no reply after unexpected frame")
-        .unwrap()
-        .expect("server closed without replying");
+        let frame = time::timeout(Duration::from_secs(5), Codec::read_frame(&mut cr))
+            .await
+            .expect("no reply after unexpected frame")
+            .unwrap()
+            .expect("server closed without replying");
         let reply: ServerMsg = postcard::from_bytes(&frame).unwrap();
         let (ok, message) = expect_command_result(reply);
         assert!(!ok);
-        assert_eq!(message.as_deref(), Some("run: unexpected message during wait"));
+        assert_eq!(
+            message.as_deref(),
+            Some("run: unexpected message during wait")
+        );
         server.await.unwrap().unwrap();
     }
 }

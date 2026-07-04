@@ -1,8 +1,9 @@
 //! Compile a `KeymapConfig` into a runtime `Keymap`.
 
-use crate::spec::{ChordSpec, parse_chord_seq, parse_chord_seq_with_prefix, parse_command};
 use plexy_glass_config::{KeymapConfig, built_in_keymap};
 use plexy_glass_mux::{Key, Keymap, Modifiers};
+
+use crate::spec::{ChordSpec, parse_chord_seq, parse_chord_seq_with_prefix, parse_command};
 
 /// The default fallback prefix: `Ctrl+a`.
 ///
@@ -54,7 +55,12 @@ pub fn build_keymap_with_skips(cfg: &KeymapConfig) -> (Keymap, Vec<String>) {
     let mut km = Keymap::new();
     let mut skipped = Vec::new();
     if cfg.inherit_defaults {
-        apply(&mut km, &built_in_keymap().bindings, prefix, &mut Vec::new());
+        apply(
+            &mut km,
+            &built_in_keymap().bindings,
+            prefix,
+            &mut Vec::new(),
+        );
     }
     apply(&mut km, &cfg.bindings, prefix, &mut skipped);
     (km, skipped)
@@ -67,7 +73,10 @@ fn apply(
     skipped: &mut Vec<String>,
 ) {
     for (i, b) in bindings.iter().enumerate() {
-        match (parse_chord_seq_with_prefix(&b.keys, prefix), parse_command(&b.command)) {
+        match (
+            parse_chord_seq_with_prefix(&b.keys, prefix),
+            parse_command(&b.command),
+        ) {
             (Ok(chords), Ok(command)) => {
                 km.bind(&chords, command);
             }
@@ -95,9 +104,10 @@ fn apply(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plexy_glass_config::{KeymapBinding, KeymapConfig};
     use plexy_glass_mux::{Command, Key, KeyEvent, KeymapAction, Modifiers};
+
+    use super::*;
 
     #[test]
     fn build_from_default_inherits_defaults() {
@@ -138,21 +148,33 @@ mod tests {
             prefix: "Ctrl+a".into(),
             inherit_defaults: false,
             bindings: vec![
-                KeymapBinding { keys: "Ctrl+a c".into(), command: "new_window".into() },
-                KeymapBinding { keys: "Ctrl+a x".into(), command: "frobnicate".into() },
+                KeymapBinding {
+                    keys: "Ctrl+a c".into(),
+                    command: "new_window".into(),
+                },
+                KeymapBinding {
+                    keys: "Ctrl+a x".into(),
+                    command: "frobnicate".into(),
+                },
             ],
         };
         let mut km = build_keymap(&cfg);
         // The valid binding fires.
         km.consume(KeyEvent::new(Key::Char('a'), Modifiers::CTRL), vec![0x01]);
         assert!(matches!(
-            km.consume(KeyEvent::new(Key::Char('c'), Modifiers::empty()), b"c".to_vec()),
+            km.consume(
+                KeyEvent::new(Key::Char('c'), Modifiers::empty()),
+                b"c".to_vec()
+            ),
             KeymapAction::Command(Command::NewWindow)
         ));
         // The bogus-command chord never registered: Ctrl+a is a prefix, then 'x'
         // is unbound under it → Cancel (nothing fired, frobnicate was skipped).
         km.consume(KeyEvent::new(Key::Char('a'), Modifiers::CTRL), vec![0x01]);
-        let action = km.consume(KeyEvent::new(Key::Char('x'), Modifiers::empty()), b"x".to_vec());
+        let action = km.consume(
+            KeyEvent::new(Key::Char('x'), Modifiers::empty()),
+            b"x".to_vec(),
+        );
         assert!(matches!(action, KeymapAction::Cancel), "got {action:?}");
     }
 
@@ -162,13 +184,26 @@ mod tests {
             prefix: "Ctrl+a".into(),
             inherit_defaults: true, // defaults must NOT count toward skips
             bindings: vec![
-                KeymapBinding { keys: "Ctrl+a c".into(), command: "new_window".into() }, // valid
-                KeymapBinding { keys: "Ctrl+a x".into(), command: "frobnicate".into() }, // bad verb
-                KeymapBinding { keys: "@@@nope".into(), command: "detach".into() },       // bad chord
+                KeymapBinding {
+                    keys: "Ctrl+a c".into(),
+                    command: "new_window".into(),
+                }, // valid
+                KeymapBinding {
+                    keys: "Ctrl+a x".into(),
+                    command: "frobnicate".into(),
+                }, // bad verb
+                KeymapBinding {
+                    keys: "@@@nope".into(),
+                    command: "detach".into(),
+                }, // bad chord
             ],
         };
         let (_km, skips) = build_keymap_with_skips(&cfg);
-        assert_eq!(skips.len(), 2, "exactly the two invalid user bindings; got {skips:?}");
+        assert_eq!(
+            skips.len(),
+            2,
+            "exactly the two invalid user bindings; got {skips:?}"
+        );
     }
 
     #[test]
@@ -248,7 +283,10 @@ mod tests {
             );
             let e2 = KeyEvent::new(Key::Char('c'), Modifiers::empty());
             assert!(
-                matches!(km.consume(e2, b"c".to_vec()), KeymapAction::Command(Command::NewWindow)),
+                matches!(
+                    km.consume(e2, b"c".to_vec()),
+                    KeymapAction::Command(Command::NewWindow)
+                ),
                 "NewWindow after Ctrl+a c (bad prefix={bad_prefix:?})"
             );
         }
@@ -278,7 +316,10 @@ mod tests {
         );
         let e2 = KeyEvent::new(Key::Char('c'), Modifiers::empty());
         assert!(
-            matches!(km.consume(e2, b"c".to_vec()), KeymapAction::Command(Command::NewWindow)),
+            matches!(
+                km.consume(e2, b"c".to_vec()),
+                KeymapAction::Command(Command::NewWindow)
+            ),
             "Ctrl+b c should fire NewWindow"
         );
 

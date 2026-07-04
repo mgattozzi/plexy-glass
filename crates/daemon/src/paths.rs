@@ -138,9 +138,18 @@ mod tests {
                 None => env::remove_var("PLEXY_GLASS_DIR"),
             }
         }
-        assert_eq!(paths.socket, PathBuf::from("/tmp/plexy-instance/run/daemon.sock"));
-        assert_eq!(paths.pidfile, PathBuf::from("/tmp/plexy-instance/run/daemon.pid"));
-        assert_eq!(paths.log_file, PathBuf::from("/tmp/plexy-instance/logs/daemon.log"));
+        assert_eq!(
+            paths.socket,
+            PathBuf::from("/tmp/plexy-instance/run/daemon.sock")
+        );
+        assert_eq!(
+            paths.pidfile,
+            PathBuf::from("/tmp/plexy-instance/run/daemon.pid")
+        );
+        assert_eq!(
+            paths.log_file,
+            PathBuf::from("/tmp/plexy-instance/logs/daemon.log")
+        );
     }
 
     #[test]

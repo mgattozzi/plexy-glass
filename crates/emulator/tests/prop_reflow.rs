@@ -4,10 +4,9 @@
 //! tests leave uncovered. The strategy is to generate simple ASCII-only content
 //! so the expected shape is easy to compute independently of the implementation.
 
-use hegel::TestCase;
-use hegel::generators as gs;
-use plexy_glass_emulator::{Cell, Cursor, Grid, Row, RowMark, Scrollback, WrapOrigin};
+use hegel::{TestCase, generators as gs};
 use plexy_glass_emulator::reflow::reflow;
+use plexy_glass_emulator::{Cell, Cursor, Grid, Row, RowMark, Scrollback, WrapOrigin};
 use smol_str::SmolStr;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -45,7 +44,6 @@ fn row_text(r: &Row) -> String {
         .trim_end()
         .to_string()
 }
-
 
 /// Draw a small column count in [1, 40].
 fn draw_cols(tc: &TestCase) -> u16 {
@@ -125,7 +123,9 @@ fn single_line_round_trip_preserves_text(tc: TestCase) {
     // Use enough rows to hold all the wrapped content so we don't spill into
     // scrollback.
     let rows_needed = text_len.div_ceil(narrow_cols) + 2;
-    tc.note(&format!("text={text:?} narrow={narrow_cols} wide={wide_cols} rows_needed={rows_needed}"));
+    tc.note(&format!(
+        "text={text:?} narrow={narrow_cols} wide={wide_cols} rows_needed={rows_needed}"
+    ));
 
     // Narrow: wraps into multiple rows.
     reflow(&mut active, &mut sb, &mut c, rows_needed, narrow_cols);
@@ -189,7 +189,9 @@ fn multi_hard_line_count_preserved(tc: TestCase) {
         .filter(|r| r.wrap_origin == WrapOrigin::Hard && !row_text(r).is_empty())
         .count();
 
-    tc.note(&format!("n={n} new_cols={new_cols} new_rows={new_rows} content_hard={content_hard}"));
+    tc.note(&format!(
+        "n={n} new_cols={new_cols} new_rows={new_rows} content_hard={content_hard}"
+    ));
 
     assert_eq!(
         content_hard, n,
@@ -219,7 +221,10 @@ fn cursor_stays_in_bounds_after_reflow(tc: TestCase) {
 
     tc.note(&format!(
         "cursor after reflow: ({}, {}) grid: {}x{}",
-        c.row, c.col, active.num_rows(), active.num_cols()
+        c.row,
+        c.col,
+        active.num_rows(),
+        active.num_cols()
     ));
 
     assert!(
@@ -378,7 +383,10 @@ fn cursor_at_start_of_single_char_line_stays_at_zero(tc: TestCase) {
     assert!(c.row < active.num_rows(), "cursor.row out of bounds");
     assert!(c.col < active.num_cols(), "cursor.col out of bounds");
     // The 'X' is always the first cell of its row, so col should be 0.
-    assert_eq!(c.col, 0, "cursor at col 0 of the first char must stay at col 0");
+    assert_eq!(
+        c.col, 0,
+        "cursor at col 0 of the first char must stay at col 0"
+    );
 }
 
 /// P8: Zero-width combining marks do not expand the column count.
@@ -455,7 +463,9 @@ fn multi_line_round_trip_preserves_content_and_order(tc: TestCase) {
     let lines: Vec<String> = (0..n)
         .map(|i| {
             let len = tc.draw(gs::integers::<u16>().min_value(1).max_value(6));
-            (0..len).map(|j| char::from(b'a' + ((i * 7 + j as usize) % 26) as u8)).collect()
+            (0..len)
+                .map(|j| char::from(b'a' + ((i * 7 + j as usize) % 26) as u8))
+                .collect()
         })
         .collect();
     let wide_cols: u16 = 8; // ≥ longest line, so each rejoins onto one row
@@ -468,19 +478,31 @@ fn multi_line_round_trip_preserves_content_and_order(tc: TestCase) {
     let mut sb = Scrollback::with_cap(1000);
     let mut c = Cursor::default();
     // Enough rows that no line is evicted to scrollback after wrapping.
-    let rows_needed: u16 = lines.iter().map(|l| (l.len() as u16).div_ceil(narrow_cols)).sum::<u16>() + 4;
-    tc.note(&format!("lines={lines:?} narrow={narrow_cols} rows_needed={rows_needed}"));
+    let rows_needed: u16 = lines
+        .iter()
+        .map(|l| (l.len() as u16).div_ceil(narrow_cols))
+        .sum::<u16>()
+        + 4;
+    tc.note(&format!(
+        "lines={lines:?} narrow={narrow_cols} rows_needed={rows_needed}"
+    ));
 
     reflow(&mut active, &mut sb, &mut c, rows_needed, narrow_cols);
     reflow(&mut active, &mut sb, &mut c, rows_needed, wide_cols);
 
     // The content hard-origin rows, in order (scrollback then active), must be the
     // original lines in order.
-    let got: Vec<String> = sb.rows().iter().chain(active.rows.iter())
+    let got: Vec<String> = sb
+        .rows()
+        .iter()
+        .chain(active.rows.iter())
         .filter(|r| r.wrap_origin == WrapOrigin::Hard && !row_text(r).is_empty())
         .map(row_text)
         .collect();
-    assert_eq!(got, lines, "round-trip must preserve every logical line's text AND order");
+    assert_eq!(
+        got, lines,
+        "round-trip must preserve every logical line's text AND order"
+    );
 }
 
 /// P12: With N marked logical lines, each carrying a DISTINCT exit code, a
@@ -494,21 +516,36 @@ fn multi_mark_rides_correct_line(tc: TestCase) {
     let narrow_cols = tc.draw(gs::integers::<u16>().min_value(1).max_value(wide_cols));
 
     // Line i gets unique text (so we can find its row later) AND a unique exit code i.
-    let lines: Vec<String> = (0..n).map(|i| {
-        let len = tc.draw(gs::integers::<u16>().min_value(1).max_value(6));
-        (0..len).map(|j| char::from(b'a' + ((i * 5 + j as usize) % 26) as u8)).collect()
-    }).collect();
-    let rows: Vec<Row> = lines.iter().enumerate().map(|(i, l)| {
-        let mut r = ascii_row(l, wide_cols);
-        r.mark.set(RowMark::PROMPT_START);
-        r.mark.set_exit(Some(i as i32));
-        r
-    }).collect();
+    let lines: Vec<String> = (0..n)
+        .map(|i| {
+            let len = tc.draw(gs::integers::<u16>().min_value(1).max_value(6));
+            (0..len)
+                .map(|j| char::from(b'a' + ((i * 5 + j as usize) % 26) as u8))
+                .collect()
+        })
+        .collect();
+    let rows: Vec<Row> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let mut r = ascii_row(l, wide_cols);
+            r.mark.set(RowMark::PROMPT_START);
+            r.mark.set_exit(Some(i as i32));
+            r
+        })
+        .collect();
 
-    let mut active = Grid { cols: wide_cols, rows };
+    let mut active = Grid {
+        cols: wide_cols,
+        rows,
+    };
     let mut sb = Scrollback::with_cap(1000);
     let mut c = Cursor::default();
-    let rows_needed: u16 = lines.iter().map(|l| (l.len() as u16).div_ceil(narrow_cols)).sum::<u16>() + 4;
+    let rows_needed: u16 = lines
+        .iter()
+        .map(|l| (l.len() as u16).div_ceil(narrow_cols))
+        .sum::<u16>()
+        + 4;
     tc.note(&format!("lines={lines:?} narrow={narrow_cols}"));
 
     reflow(&mut active, &mut sb, &mut c, rows_needed, narrow_cols);
@@ -519,11 +556,24 @@ fn multi_mark_rides_correct_line(tc: TestCase) {
     for r in sb.rows().iter().chain(active.rows.iter()) {
         let t = row_text(r);
         if r.wrap_origin == WrapOrigin::Hard && !t.is_empty() {
-            let idx = lines.iter().position(|l| *l == t).expect("row text must match a source line");
-            assert!(r.mark.contains(RowMark::PROMPT_START), "line {idx:?} lost its PROMPT_START");
-            assert_eq!(r.mark.exit(), Some(idx as i32), "line {t:?} carries the wrong exit code");
+            let idx = lines
+                .iter()
+                .position(|l| *l == t)
+                .expect("row text must match a source line");
+            assert!(
+                r.mark.contains(RowMark::PROMPT_START),
+                "line {idx:?} lost its PROMPT_START"
+            );
+            assert_eq!(
+                r.mark.exit(),
+                Some(idx as i32),
+                "line {t:?} carries the wrong exit code"
+            );
         } else {
-            assert!(!r.mark.contains(RowMark::PROMPT_START), "a soft/blank row carries a mark: {t:?}");
+            assert!(
+                !r.mark.contains(RowMark::PROMPT_START),
+                "a soft/blank row carries a mark: {t:?}"
+            );
         }
     }
 }
@@ -534,10 +584,16 @@ fn multi_mark_rides_correct_line(tc: TestCase) {
 #[hegel::test(test_cases = 500)]
 fn mark_payload_survives_reflow(tc: TestCase) {
     let len = tc.draw(gs::integers::<u16>().min_value(1).max_value(6));
-    let text: String = (0..len).map(|j| char::from(b'a' + (j as usize % 26) as u8)).collect();
+    let text: String = (0..len)
+        .map(|j| char::from(b'a' + (j as usize % 26) as u8))
+        .collect();
     let exit = tc.draw(gs::integers::<i32>().min_value(-1).max_value(255));
     let dur = tc.draw(gs::integers::<u32>().min_value(0).max_value(600_000));
-    let pe = tc.draw(gs::integers::<u16>().min_value(0).max_value(len.saturating_sub(1)));
+    let pe = tc.draw(
+        gs::integers::<u16>()
+            .min_value(0)
+            .max_value(len.saturating_sub(1)),
+    );
 
     let wide_cols: u16 = 8;
     let narrow_cols = tc.draw(gs::integers::<u16>().min_value(1).max_value(wide_cols));
@@ -547,21 +603,33 @@ fn mark_payload_survives_reflow(tc: TestCase) {
     row.mark.set_duration(Some(dur));
     row.mark.set_prompt_end(pe);
 
-    let mut active = Grid { cols: wide_cols, rows: vec![row] };
+    let mut active = Grid {
+        cols: wide_cols,
+        rows: vec![row],
+    };
     let mut sb = Scrollback::with_cap(1000);
     let mut c = Cursor::default();
     let rows_needed = len.div_ceil(narrow_cols) + 4;
-    tc.note(&format!("text={text:?} exit={exit} dur={dur} pe={pe} narrow={narrow_cols}"));
+    tc.note(&format!(
+        "text={text:?} exit={exit} dur={dur} pe={pe} narrow={narrow_cols}"
+    ));
 
     reflow(&mut active, &mut sb, &mut c, rows_needed, narrow_cols);
     reflow(&mut active, &mut sb, &mut c, rows_needed, wide_cols);
 
-    let row = sb.rows().iter().chain(active.rows.iter())
+    let row = sb
+        .rows()
+        .iter()
+        .chain(active.rows.iter())
         .find(|r| r.wrap_origin == WrapOrigin::Hard && !row_text(r).is_empty())
         .expect("content row");
     assert_eq!(row.mark.exit(), Some(exit), "exit code lost in reflow");
     assert_eq!(row.mark.duration_ms(), Some(dur), "duration lost in reflow");
-    assert_eq!(row.mark.prompt_end_col(), Some(pe), "prompt-end col lost in reflow");
+    assert_eq!(
+        row.mark.prompt_end_col(),
+        Some(pe),
+        "prompt-end col lost in reflow"
+    );
 }
 
 /// P10: The wrap behavior is correct at the exact boundary: a line of exactly
@@ -598,10 +666,19 @@ fn line_fitting_exactly_in_cols_does_not_wrap(tc: TestCase) {
 
     // Blank padding rows also have Hard origin, so don't assert on the total hard count.
     // The key invariant: no soft continuation rows should exist (the line fits exactly).
-    assert_eq!(soft_count, 0, "exactly-fitting line must not generate soft continuation rows");
+    assert_eq!(
+        soft_count, 0,
+        "exactly-fitting line must not generate soft continuation rows"
+    );
     // And there must be exactly one content hard row (the fitted line itself).
-    let content_hard = active.rows.iter().chain(sb.rows().iter())
+    let content_hard = active
+        .rows
+        .iter()
+        .chain(sb.rows().iter())
         .filter(|r| r.wrap_origin == WrapOrigin::Hard && !row_text(r).is_empty())
         .count();
-    assert_eq!(content_hard, 1, "exactly-fitting line must produce exactly one content row");
+    assert_eq!(
+        content_hard, 1,
+        "exactly-fitting line must produce exactly one content row"
+    );
 }

@@ -1,11 +1,13 @@
 //! Cell-level diff renderer: compares the current `VirtualScreen` against the
 //! previous one and emits minimal ANSI to bring the host TTY up to date.
 
-use crate::virtual_screen::{VirtualScreen, VisiblePlacement};
-use plexy_glass_emulator::{Attrs, Cell, Color, UnderlineStyle};
-use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+
+use plexy_glass_emulator::{Attrs, Cell, Color, UnderlineStyle};
+
+use crate::virtual_screen::{VirtualScreen, VisiblePlacement};
 
 /// Which inline-graphics protocols the *outer* terminal of a given client
 /// supports. Negotiated per client (Phase 2 Task 4). The renderer emits a
@@ -157,7 +159,9 @@ impl DiffRenderer {
                 // Equivalent note: `< → <=` at 143:25 is equivalent, the extra iteration
                 // calls `current.cell(r, cols)` which returns `None` and we break.
                 while c < current.cols {
-                    let Some(cell) = current.cell(r, c) else { break };
+                    let Some(cell) = current.cell(r, c) else {
+                        break;
+                    };
                     // Equivalent note: spacer-skip (146:27) is dead code in this full-repaint
                     // loop: wide chars advance `c` by `grapheme_advance()`=2, so the cursor
                     // always jumps over the spacer position and the `+= 1` branch (`-=` and
@@ -197,7 +201,9 @@ impl DiffRenderer {
                     // Equivalent note: `< → <=` at 175:29 is equivalent, same reason: the
                     // extra iteration gets `None` and we break.
                     while c < current.cols {
-                        let Some(cell) = current.cell(r, c) else { break };
+                        let Some(cell) = current.cell(r, c) else {
+                            break;
+                        };
                         if Some(cell) == prev.cell(r, c) {
                             break;
                         }
@@ -297,7 +303,12 @@ impl DiffRenderer {
             }
         }
         // Delete placements that vanished this frame.
-        let gone: Vec<u64> = self.placed.keys().copied().filter(|k| !seen.contains(k)).collect();
+        let gone: Vec<u64> = self
+            .placed
+            .keys()
+            .copied()
+            .filter(|k| !seen.contains(k))
+            .collect();
         for k in gone {
             if let Some(rect) = self.placed.remove(&k) {
                 emit_delete(out, rect.image_id, rect.placement_id);
@@ -362,21 +373,40 @@ impl DiffRenderer {
 
         // ── Step 1: repaint stale regions (box + data), recording the rects. ──
         let mut repainted: Vec<PlacedRect> = Vec::new();
-        let box_seen: HashSet<u64> = current.placements.iter().filter(|p| is_box(p)).map(|p| p.key).collect();
-        let data_seen: HashSet<u64> = current.placements.iter().filter(|p| is_data(p)).map(|p| p.key).collect();
+        let box_seen: HashSet<u64> = current
+            .placements
+            .iter()
+            .filter(|p| is_box(p))
+            .map(|p| p.key)
+            .collect();
+        let data_seen: HashSet<u64> = current
+            .placements
+            .iter()
+            .filter(|p| is_data(p))
+            .map(|p| p.key)
+            .collect();
         for (k, prev) in self.boxed.iter().chain(self.placed_data.iter()) {
             let live = current.placements.iter().find(|p| p.key == *k);
             let stale = match live {
                 None => true,
-                Some(p) => (prev.host_row, prev.host_col, prev.rows, prev.cols)
-                    != (p.host_row, p.host_col, p.rows, p.cols),
+                Some(p) => {
+                    (prev.host_row, prev.host_col, prev.rows, prev.cols)
+                        != (p.host_row, p.host_col, p.rows, p.cols)
+                }
             };
             if stale {
                 repainted.push(*prev);
             }
         }
         for rect in &repainted {
-            paint_cells_rect(out, current, rect.host_row, rect.host_col, rect.rows, rect.cols);
+            paint_cells_rect(
+                out,
+                current,
+                rect.host_row,
+                rect.host_col,
+                rect.rows,
+                rect.cols,
+            );
         }
         self.boxed.retain(|k, _| box_seen.contains(k));
         self.placed_data.retain(|k, _| data_seen.contains(k));
@@ -421,7 +451,14 @@ impl DiffRenderer {
             }
             seen.insert(vp.key);
             if self.transmitted_virtual.get(&vp.image_id) != Some(&vp.generation) {
-                emit_transmit_bytes(out, vp.image_id, vp.format.kitty_f(), vp.pixel_w, vp.pixel_h, &vp.data_b64);
+                emit_transmit_bytes(
+                    out,
+                    vp.image_id,
+                    vp.format.kitty_f(),
+                    vp.pixel_w,
+                    vp.pixel_h,
+                    &vp.data_b64,
+                );
                 self.transmitted_virtual.insert(vp.image_id, vp.generation);
             }
             if let Entry::Vacant(slot) = self.virtual_placed.entry(vp.key) {
@@ -438,7 +475,12 @@ impl DiffRenderer {
             }
         }
         // Delete virtual placements that vanished this frame.
-        let gone: Vec<u64> = self.virtual_placed.keys().copied().filter(|k| !seen.contains(k)).collect();
+        let gone: Vec<u64> = self
+            .virtual_placed
+            .keys()
+            .copied()
+            .filter(|k| !seen.contains(k))
+            .collect();
         for k in gone {
             if let Some((img, pid)) = self.virtual_placed.remove(&k) {
                 emit_delete(out, img, pid);
@@ -450,7 +492,6 @@ impl DiffRenderer {
             self.reset_images = true;
         }
     }
-
 }
 
 /// Do two cell rectangles overlap?
@@ -465,7 +506,11 @@ const fn rects_overlap(a: &PlacedRect, b: &PlacedRect) -> bool {
 /// `current`? We use this to redraw a data image when an in-place redraw (status
 /// line, prompt, spinner) repainted a cell under it. A `None` previous is treated
 /// as changed (first frame; handled as a fresh emit anyway).
-fn footprint_cells_changed(prev: Option<&VirtualScreen>, current: &VirtualScreen, rect: &PlacedRect) -> bool {
+fn footprint_cells_changed(
+    prev: Option<&VirtualScreen>,
+    current: &VirtualScreen,
+    rect: &PlacedRect,
+) -> bool {
     let Some(prev) = prev else { return true };
     for r in rect.host_row..rect.host_row.saturating_add(rect.rows) {
         for c in rect.host_col..rect.host_col.saturating_add(rect.cols) {
@@ -502,7 +547,14 @@ fn emit_data_image(out: &mut String, p: &VisiblePlacement) {
 
 /// Repaint a rectangle of cells from `screen` (used to clear a placeholder box
 /// when its placement vanishes or moves).
-fn paint_cells_rect(out: &mut String, screen: &VirtualScreen, r0: u16, c0: u16, rows: u16, cols: u16) {
+fn paint_cells_rect(
+    out: &mut String,
+    screen: &VirtualScreen,
+    r0: u16,
+    c0: u16,
+    rows: u16,
+    cols: u16,
+) {
     let mut attrs = CellAttrs::default();
     out.push_str("\x1b[0m");
     for r in r0..r0.saturating_add(rows).min(screen.rows) {
@@ -594,11 +646,25 @@ fn emit_placeholder_box(out: &mut String, p: &VisiblePlacement) {
 
 /// Transmit an image's data once (`a=t`), re-chunked to ≤4096 base64 bytes.
 fn emit_transmit(out: &mut String, p: &VisiblePlacement) {
-    emit_transmit_bytes(out, p.image_id, p.format.kitty_f(), p.pixel_w, p.pixel_h, &p.data_b64);
+    emit_transmit_bytes(
+        out,
+        p.image_id,
+        p.format.kitty_f(),
+        p.pixel_w,
+        p.pixel_h,
+        &p.data_b64,
+    );
 }
 
 /// Shared transmit emitter (classic + virtual placements).
-fn emit_transmit_bytes(out: &mut String, image_id: u32, f: u32, pixel_w: u32, pixel_h: u32, data: &[u8]) {
+fn emit_transmit_bytes(
+    out: &mut String,
+    image_id: u32,
+    f: u32,
+    pixel_w: u32,
+    pixel_h: u32,
+    data: &[u8],
+) {
     if data.is_empty() {
         return;
     }
@@ -630,11 +696,14 @@ fn emit_transmit_bytes(out: &mut String, image_id: u32, f: u32, pixel_w: u32, pi
 /// edges), include the Kitty source crop keys `x/y/w/h`.
 fn emit_place(out: &mut String, p: &VisiblePlacement) {
     let _ = write!(out, "\x1b[{};{}H", p.host_row + 1, p.host_col + 1);
-    let cropped =
-        p.src_x > 0 || p.src_y > 0 || p.src_w < p.pixel_w || p.src_h < p.pixel_h;
+    let cropped = p.src_x > 0 || p.src_y > 0 || p.src_w < p.pixel_w || p.src_h < p.pixel_h;
     let _ = write!(out, "\x1b_Ga=p,i={},p={}", p.image_id, p.placement_id);
     if cropped {
-        let _ = write!(out, ",x={},y={},w={},h={}", p.src_x, p.src_y, p.src_w, p.src_h);
+        let _ = write!(
+            out,
+            ",x={},y={},w={},h={}",
+            p.src_x, p.src_y, p.src_w, p.src_h
+        );
     }
     let _ = write!(out, ",r={},c={},q=2\x1b\\", p.rows, p.cols);
 }
@@ -762,10 +831,12 @@ fn apply_sgr_delta(out: &mut String, prev: &CellAttrs, cell: &Cell) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
-    use crate::virtual_screen::VisibleVirtualPlacement;
+
     use smol_str::SmolStr;
+
+    use super::*;
+    use crate::virtual_screen::VisibleVirtualPlacement;
 
     fn lettered(cells: &[(u16, u16, &str)], rows: u16, cols: u16) -> VirtualScreen {
         let mut v = VirtualScreen::blank(rows, cols);
@@ -785,7 +856,10 @@ mod tests {
         let v = lettered(&[(0, 0, "A")], 2, 2);
         let bytes = d.render(&v);
         let s = String::from_utf8_lossy(&bytes);
-        assert!(s.starts_with("\x1b[2J\x1b[H"), "expected initial clear: {s:?}");
+        assert!(
+            s.starts_with("\x1b[2J\x1b[H"),
+            "expected initial clear: {s:?}"
+        );
         assert!(s.contains('A'));
     }
 
@@ -811,7 +885,10 @@ mod tests {
         let bytes = d.render(&v2);
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.contains('B'));
-        assert!(s.contains("\x1b[2;2H"), "expected CUP to row 2 col 2: {s:?}");
+        assert!(
+            s.contains("\x1b[2;2H"),
+            "expected CUP to row 2 col 2: {s:?}"
+        );
     }
 
     #[test]
@@ -860,53 +937,133 @@ mod tests {
     fn wide_grapheme_full_repaint_skips_spacer() {
         let mut d = DiffRenderer::new();
         let mut v = VirtualScreen::blank(1, 4);
-        v.put(0, 0, Cell { grapheme: SmolStr::new("世"), ..Cell::default() });
+        v.put(
+            0,
+            0,
+            Cell {
+                grapheme: SmolStr::new("世"),
+                ..Cell::default()
+            },
+        );
         v.put(0, 1, Cell::wide_spacer());
-        v.put(0, 2, Cell { grapheme: SmolStr::new("X"), ..Cell::default() });
+        v.put(
+            0,
+            2,
+            Cell {
+                grapheme: SmolStr::new("X"),
+                ..Cell::default()
+            },
+        );
         let bytes = d.render(&v);
         let s = String::from_utf8_lossy(&bytes);
-        assert_eq!(s.matches('世').count(), 1, "wide grapheme emitted once: {s:?}");
-        assert!(s.contains("世X"), "spacer skipped; X immediately follows 世: {s:?}");
-        assert!(!s.contains("世 X"), "no stray space painted for the spacer: {s:?}");
+        assert_eq!(
+            s.matches('世').count(),
+            1,
+            "wide grapheme emitted once: {s:?}"
+        );
+        assert!(
+            s.contains("世X"),
+            "spacer skipped; X immediately follows 世: {s:?}"
+        );
+        assert!(
+            !s.contains("世 X"),
+            "no stray space painted for the spacer: {s:?}"
+        );
     }
 
     #[test]
     fn wide_grapheme_incremental_diff_targets_only_changed_cell() {
         let mut d = DiffRenderer::new();
         let mut v1 = VirtualScreen::blank(1, 4);
-        v1.put(0, 0, Cell { grapheme: SmolStr::new("世"), ..Cell::default() });
+        v1.put(
+            0,
+            0,
+            Cell {
+                grapheme: SmolStr::new("世"),
+                ..Cell::default()
+            },
+        );
         v1.put(0, 1, Cell::wide_spacer());
-        v1.put(0, 2, Cell { grapheme: SmolStr::new("a"), ..Cell::default() });
+        v1.put(
+            0,
+            2,
+            Cell {
+                grapheme: SmolStr::new("a"),
+                ..Cell::default()
+            },
+        );
         let _ = d.render(&v1);
         let mut v2 = VirtualScreen::blank(1, 4);
-        v2.put(0, 0, Cell { grapheme: SmolStr::new("世"), ..Cell::default() });
+        v2.put(
+            0,
+            0,
+            Cell {
+                grapheme: SmolStr::new("世"),
+                ..Cell::default()
+            },
+        );
         v2.put(0, 1, Cell::wide_spacer());
-        v2.put(0, 2, Cell { grapheme: SmolStr::new("b"), ..Cell::default() });
+        v2.put(
+            0,
+            2,
+            Cell {
+                grapheme: SmolStr::new("b"),
+                ..Cell::default()
+            },
+        );
         let bytes = d.render(&v2);
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.contains('b'), "changed cell emitted: {s:?}");
-        assert!(!s.contains('世'), "unchanged wide grapheme not re-emitted: {s:?}");
-        assert!(s.contains("\x1b[1;3H"), "CUP targets the changed cell at col 3: {s:?}");
+        assert!(
+            !s.contains('世'),
+            "unchanged wide grapheme not re-emitted: {s:?}"
+        );
+        assert!(
+            s.contains("\x1b[1;3H"),
+            "CUP targets the changed cell at col 3: {s:?}"
+        );
     }
 
     #[test]
     fn underline_color_rgb_emits_58_2() {
         let mut d = DiffRenderer::new();
         let mut v = VirtualScreen::blank(1, 2);
-        v.put(0, 0, Cell { grapheme: SmolStr::new("U"), underline_color: Color::Rgb(10, 20, 30), ..Cell::default() });
+        v.put(
+            0,
+            0,
+            Cell {
+                grapheme: SmolStr::new("U"),
+                underline_color: Color::Rgb(10, 20, 30),
+                ..Cell::default()
+            },
+        );
         let bytes = d.render(&v);
         let s = String::from_utf8_lossy(&bytes);
-        assert!(s.contains("\x1b[58:2:10:20:30m"), "expected RGB underline-color SGR: {s:?}");
+        assert!(
+            s.contains("\x1b[58:2:10:20:30m"),
+            "expected RGB underline-color SGR: {s:?}"
+        );
     }
 
     #[test]
     fn underline_color_indexed_emits_58_5() {
         let mut d = DiffRenderer::new();
         let mut v = VirtualScreen::blank(1, 2);
-        v.put(0, 0, Cell { grapheme: SmolStr::new("U"), underline_color: Color::Indexed(9), ..Cell::default() });
+        v.put(
+            0,
+            0,
+            Cell {
+                grapheme: SmolStr::new("U"),
+                underline_color: Color::Indexed(9),
+                ..Cell::default()
+            },
+        );
         let bytes = d.render(&v);
         let s = String::from_utf8_lossy(&bytes);
-        assert!(s.contains("\x1b[58:5:9m"), "expected indexed underline-color SGR: {s:?}");
+        assert!(
+            s.contains("\x1b[58:5:9m"),
+            "expected indexed underline-color SGR: {s:?}"
+        );
     }
 
     #[test]
@@ -915,38 +1072,55 @@ mod tests {
         let v = lettered(&[(0, 0, "A")], 1, 2);
         let bytes = d.render(&v);
         let s = String::from_utf8_lossy(&bytes);
-        assert!(!s.contains("\x1b[58"), "default underline color must emit no 58: {s:?}");
+        assert!(
+            !s.contains("\x1b[58"),
+            "default underline color must emit no 58: {s:?}"
+        );
     }
 
     #[test]
     fn underline_style_curly_emits_4_3() {
         let mut d = DiffRenderer::new();
         let mut v = VirtualScreen::blank(1, 2);
-        v.put(0, 0, Cell {
-            grapheme: SmolStr::new("U"),
-            attrs: Attrs::UNDERLINE,
-            underline_style: UnderlineStyle::Curly,
-            ..Cell::default()
-        });
+        v.put(
+            0,
+            0,
+            Cell {
+                grapheme: SmolStr::new("U"),
+                attrs: Attrs::UNDERLINE,
+                underline_style: UnderlineStyle::Curly,
+                ..Cell::default()
+            },
+        );
         let bytes = d.render(&v);
         let s = String::from_utf8_lossy(&bytes);
-        assert!(s.contains("\x1b[4:3m"), "expected curly underline SGR: {s:?}");
+        assert!(
+            s.contains("\x1b[4:3m"),
+            "expected curly underline SGR: {s:?}"
+        );
     }
 
     #[test]
     fn underline_style_single_emits_plain_4() {
         let mut d = DiffRenderer::new();
         let mut v = VirtualScreen::blank(1, 2);
-        v.put(0, 0, Cell {
-            grapheme: SmolStr::new("U"),
-            attrs: Attrs::UNDERLINE,
-            underline_style: UnderlineStyle::Single,
-            ..Cell::default()
-        });
+        v.put(
+            0,
+            0,
+            Cell {
+                grapheme: SmolStr::new("U"),
+                attrs: Attrs::UNDERLINE,
+                underline_style: UnderlineStyle::Single,
+                ..Cell::default()
+            },
+        );
         let bytes = d.render(&v);
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.contains("\x1b[4m"), "expected plain underline SGR: {s:?}");
-        assert!(!s.contains("\x1b[4:"), "single must not emit a colon form: {s:?}");
+        assert!(
+            !s.contains("\x1b[4:"),
+            "single must not emit a colon form: {s:?}"
+        );
     }
 
     #[test]
@@ -955,8 +1129,14 @@ mod tests {
         let v = lettered(&[(0, 0, "A")], 1, 2);
         let bytes = d.render(&v);
         let s = String::from_utf8_lossy(&bytes);
-        assert!(!s.contains("\x1b[4m"), "no-underline cell must emit no 4: {s:?}");
-        assert!(!s.contains("\x1b[4:"), "no-underline cell must emit no 4:N: {s:?}");
+        assert!(
+            !s.contains("\x1b[4m"),
+            "no-underline cell must emit no 4: {s:?}"
+        );
+        assert!(
+            !s.contains("\x1b[4:"),
+            "no-underline cell must emit no 4:N: {s:?}"
+        );
     }
 
     #[test]
@@ -968,12 +1148,16 @@ mod tests {
         let v1 = VirtualScreen::blank(1, 2);
         let _ = d.render(&v1);
         let mut v2 = VirtualScreen::blank(1, 2);
-        v2.put(0, 0, Cell {
-            grapheme: SmolStr::new("U"),
-            attrs: Attrs::UNDERLINE,
-            underline_style: UnderlineStyle::Curly,
-            ..Cell::default()
-        });
+        v2.put(
+            0,
+            0,
+            Cell {
+                grapheme: SmolStr::new("U"),
+                attrs: Attrs::UNDERLINE,
+                underline_style: UnderlineStyle::Curly,
+                ..Cell::default()
+            },
+        );
         let bytes = d.render(&v2);
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.contains("\x1b[4:3m"), "diff path must emit 4:3: {s:?}");
@@ -999,12 +1183,21 @@ mod tests {
         );
         let bytes = d.render(&v2);
         let s = String::from_utf8_lossy(&bytes);
-        assert!(s.contains("\x1b[58:2:1:2:3m"), "diff path must emit 58: {s:?}");
+        assert!(
+            s.contains("\x1b[58:2:1:2:3m"),
+            "diff path must emit 58: {s:?}"
+        );
     }
 
     // ── inline-image placement diff ───────────────────────────────────────────
 
-    fn vp(key: u64, image_id: u32, placement_id: u32, host_row: u16, host_col: u16) -> VisiblePlacement {
+    fn vp(
+        key: u64,
+        image_id: u32,
+        placement_id: u32,
+        host_row: u16,
+        host_col: u16,
+    ) -> VisiblePlacement {
         VisiblePlacement {
             key,
             image_id,
@@ -1030,7 +1223,11 @@ mod tests {
     /// A renderer with Kitty graphics enabled (the default is now all-off).
     fn kitty_renderer() -> DiffRenderer {
         let mut d = DiffRenderer::new();
-        d.set_graphics_caps(GraphicsCaps { kitty: true, sixel: false, iterm2: false });
+        d.set_graphics_caps(GraphicsCaps {
+            kitty: true,
+            sixel: false,
+            iterm2: false,
+        });
         d
     }
 
@@ -1048,9 +1245,15 @@ mod tests {
     fn first_frame_transmits_then_places() {
         let mut d = kitty_renderer();
         let s = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
-        assert!(s.contains("\x1b_Gi=7,a=t,f=100,s=30,v=40"), "transmit once: {s:?}");
+        assert!(
+            s.contains("\x1b_Gi=7,a=t,f=100,s=30,v=40"),
+            "transmit once: {s:?}"
+        );
         // Place at host (row 3, col 4) 1-based, by id, forcing r/c.
-        assert!(s.contains("\x1b[3;4H\x1b_Ga=p,i=7,p=1,r=2,c=3,q=2\x1b\\"), "place by id: {s:?}");
+        assert!(
+            s.contains("\x1b[3;4H\x1b_Ga=p,i=7,p=1,r=2,c=3,q=2\x1b\\"),
+            "place by id: {s:?}"
+        );
     }
 
     #[test]
@@ -1059,7 +1262,10 @@ mod tests {
         let f = frame_with(vec![vp(1, 7, 1, 2, 3)]);
         render_str(&mut d, &f);
         let s = render_str(&mut d, &f);
-        assert!(!s.contains("\x1b_G"), "no graphics re-emitted for an unchanged frame: {s:?}");
+        assert!(
+            !s.contains("\x1b_G"),
+            "no graphics re-emitted for an unchanged frame: {s:?}"
+        );
     }
 
     #[test]
@@ -1068,8 +1274,14 @@ mod tests {
         render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
         let s = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 4, 3)])); // moved down 2 rows
         assert!(!s.contains("a=t"), "image already transmitted: {s:?}");
-        assert!(s.contains("\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\"), "delete old placement: {s:?}");
-        assert!(s.contains("\x1b[5;4H\x1b_Ga=p,i=7,p=1"), "re-place at new row: {s:?}");
+        assert!(
+            s.contains("\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\"),
+            "delete old placement: {s:?}"
+        );
+        assert!(
+            s.contains("\x1b[5;4H\x1b_Ga=p,i=7,p=1"),
+            "re-place at new row: {s:?}"
+        );
     }
 
     #[test]
@@ -1077,15 +1289,25 @@ mod tests {
         let mut d = kitty_renderer();
         render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
         let s = render_str(&mut d, &frame_with(vec![]));
-        assert!(s.contains("\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\"), "delete vanished placement: {s:?}");
+        assert!(
+            s.contains("\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\"),
+            "delete vanished placement: {s:?}"
+        );
     }
 
     #[test]
     fn non_kitty_client_emits_no_graphics() {
         let mut d = DiffRenderer::new();
-        d.set_graphics_caps(GraphicsCaps { kitty: false, sixel: false, iterm2: false });
+        d.set_graphics_caps(GraphicsCaps {
+            kitty: false,
+            sixel: false,
+            iterm2: false,
+        });
         let s = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
-        assert!(!s.contains("\x1b_G"), "no graphics bytes for a non-kitty client: {s:?}");
+        assert!(
+            !s.contains("\x1b_G"),
+            "no graphics bytes for a non-kitty client: {s:?}"
+        );
     }
 
     #[test]
@@ -1094,7 +1316,10 @@ mod tests {
         render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
         d.invalidate(); // session switch / re-point
         let s = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
-        assert!(s.contains("\x1b_Ga=d,d=A,q=2\x1b\\"), "reset deletes all images: {s:?}");
+        assert!(
+            s.contains("\x1b_Ga=d,d=A,q=2\x1b\\"),
+            "reset deletes all images: {s:?}"
+        );
         assert!(s.contains("a=t"), "re-transmits after reset: {s:?}");
     }
 
@@ -1108,7 +1333,10 @@ mod tests {
         p.generation = 2;
         p.data_b64 = Arc::from(&b"WFla"[..]);
         let s = render_str(&mut d, &frame_with(vec![p]));
-        assert!(s.contains("a=t"), "changed content re-transmits id 7: {s:?}");
+        assert!(
+            s.contains("a=t"),
+            "changed content re-transmits id 7: {s:?}"
+        );
     }
 
     #[test]
@@ -1120,9 +1348,15 @@ mod tests {
         let mut empty = vp(1, 7, 1, 2, 3);
         empty.data_b64 = Arc::from(&b""[..]);
         let s = render_str(&mut d, &frame_with(vec![empty]));
-        assert!(!s.contains("\x1b_G"), "no graphics for an empty-data image: {s:?}");
+        assert!(
+            !s.contains("\x1b_G"),
+            "no graphics for an empty-data image: {s:?}"
+        );
         let s2 = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
-        assert!(s2.contains("a=t"), "real data still transmits id 7 later: {s2:?}");
+        assert!(
+            s2.contains("a=t"),
+            "real data still transmits id 7 later: {s2:?}"
+        );
     }
 
     #[test]
@@ -1134,7 +1368,10 @@ mod tests {
         let mut bigger = VirtualScreen::blank(10, 24); // different size → full repaint
         bigger.placements = vec![vp(1, 7, 1, 2, 3)];
         let s = render_str(&mut d, &bigger);
-        assert!(s.contains("\x1b_Ga=d,d=A,q=2\x1b\\"), "full repaint drops old images: {s:?}");
+        assert!(
+            s.contains("\x1b_Ga=d,d=A,q=2\x1b\\"),
+            "full repaint drops old images: {s:?}"
+        );
         assert!(s.contains("a=t"), "re-transmits after the repaint: {s:?}");
         assert!(s.contains("a=p,i=7"), "re-places the image: {s:?}");
     }
@@ -1144,7 +1381,10 @@ mod tests {
         // Full source -> minimal place (no x/y/w/h).
         let mut d = kitty_renderer();
         let s = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)]));
-        assert!(s.contains("\x1b_Ga=p,i=7,p=1,r=2,c=3,q=2"), "full place minimal: {s:?}");
+        assert!(
+            s.contains("\x1b_Ga=p,i=7,p=1,r=2,c=3,q=2"),
+            "full place minimal: {s:?}"
+        );
         assert!(!s.contains(",x="), "no crop keys for a full image: {s:?}");
 
         // Cropped source → x/y/w/h present.
@@ -1193,9 +1433,15 @@ mod tests {
     fn non_kitty_client_draws_placeholder_box() {
         let mut d = DiffRenderer::new(); // default caps: no graphics
         let s = render_str(&mut d, &frame_with(vec![boxed_vp(3, 10)]));
-        assert!(s.contains('┌') && s.contains('┐') && s.contains('└') && s.contains('┘'), "box border: {s:?}");
+        assert!(
+            s.contains('┌') && s.contains('┐') && s.contains('└') && s.contains('┘'),
+            "box border: {s:?}"
+        );
         assert!(s.contains("30x40"), "centred WxH label: {s:?}");
-        assert!(!s.contains("\x1b_G"), "no Kitty bytes for a non-graphics client: {s:?}");
+        assert!(
+            !s.contains("\x1b_G"),
+            "no Kitty bytes for a non-graphics client: {s:?}"
+        );
     }
 
     /// Snapshot the placeholder box rendered by a non-graphics client.
@@ -1213,8 +1459,14 @@ mod tests {
     fn kitty_client_draws_no_placeholder_box() {
         let mut d = kitty_renderer();
         let s = render_str(&mut d, &frame_with(vec![boxed_vp(3, 10)]));
-        assert!(s.contains("a=t"), "Kitty client transmits the real image: {s:?}");
-        assert!(!s.contains('┌'), "no placeholder box for a Kitty client: {s:?}");
+        assert!(
+            s.contains("a=t"),
+            "Kitty client transmits the real image: {s:?}"
+        );
+        assert!(
+            !s.contains('┌'),
+            "no placeholder box for a Kitty client: {s:?}"
+        );
     }
 
     #[test]
@@ -1222,7 +1474,10 @@ mod tests {
         let mut d = DiffRenderer::new();
         render_str(&mut d, &frame_with(vec![boxed_vp(3, 10)]));
         let s = render_str(&mut d, &frame_with(vec![]));
-        assert!(s.contains("\x1b[3;4H"), "repaints the vacated box region: {s:?}");
+        assert!(
+            s.contains("\x1b[3;4H"),
+            "repaints the vacated box region: {s:?}"
+        );
         assert!(!s.contains('┌'), "box not redrawn after vanish: {s:?}");
     }
 
@@ -1242,19 +1497,44 @@ mod tests {
         let mut d = DiffRenderer::new();
         render_str(&mut d, &frame_with(vec![boxed_vp(3, 10)]));
         let mut f2 = frame_with(vec![boxed_vp(3, 10)]);
-        f2.put(2, 3, Cell { grapheme: SmolStr::new("X"), ..Cell::default() }); // under the box
+        f2.put(
+            2,
+            3,
+            Cell {
+                grapheme: SmolStr::new("X"),
+                ..Cell::default()
+            },
+        ); // under the box
         let s = render_str(&mut d, &f2);
-        assert!(s.contains('┌'), "box redrawn over the changed cell (no hole): {s:?}");
+        assert!(
+            s.contains('┌'),
+            "box redrawn over the changed cell (no hole): {s:?}"
+        );
     }
 
     #[test]
     fn surviving_box_redrawn_when_overlapping_neighbor_vanishes() {
         let mut d = DiffRenderer::new();
-        let a = { let mut p = boxed_vp(3, 10); p.key = 1; p.host_row = 2; p.host_col = 3; p };
-        let b = { let mut p = boxed_vp(3, 10); p.key = 2; p.host_row = 3; p.host_col = 4; p }; // overlaps A
+        let a = {
+            let mut p = boxed_vp(3, 10);
+            p.key = 1;
+            p.host_row = 2;
+            p.host_col = 3;
+            p
+        };
+        let b = {
+            let mut p = boxed_vp(3, 10);
+            p.key = 2;
+            p.host_row = 3;
+            p.host_col = 4;
+            p
+        }; // overlaps A
         render_str(&mut d, &frame_with(vec![a, b.clone()]));
         let s = render_str(&mut d, &frame_with(vec![b])); // A vanishes
-        assert!(s.contains('┌'), "surviving overlapping box B redrawn after A vanished: {s:?}");
+        assert!(
+            s.contains('┌'),
+            "surviving overlapping box B redrawn after A vanished: {s:?}"
+        );
     }
 
     #[test]
@@ -1262,9 +1542,16 @@ mod tests {
         // Per-protocol gating: a Kitty image on a client that only speaks Sixel
         // can't be rendered, so it gets a placeholder box and no Kitty bytes.
         let mut d = DiffRenderer::new();
-        d.set_graphics_caps(GraphicsCaps { kitty: false, sixel: true, iterm2: false });
+        d.set_graphics_caps(GraphicsCaps {
+            kitty: false,
+            sixel: true,
+            iterm2: false,
+        });
         let s = render_str(&mut d, &frame_with(vec![boxed_vp(3, 10)]));
-        assert!(s.contains('┌'), "kitty image boxed on a sixel-only client: {s:?}");
+        assert!(
+            s.contains('┌'),
+            "kitty image boxed on a sixel-only client: {s:?}"
+        );
         assert!(!s.contains("\x1b_G"), "no kitty bytes: {s:?}");
     }
 
@@ -1275,7 +1562,10 @@ mod tests {
         let mut moved = boxed_vp(3, 10);
         moved.host_row = 4;
         let s = render_str(&mut d, &frame_with(vec![moved]));
-        assert!(s.contains("\x1b[3;4H"), "repaints the old rect (row 3): {s:?}");
+        assert!(
+            s.contains("\x1b[3;4H"),
+            "repaints the old rect (row 3): {s:?}"
+        );
         assert!(s.contains("\x1b[5;4H"), "draws the new box (row 5): {s:?}");
     }
 
@@ -1308,10 +1598,16 @@ mod tests {
         let s = render_str(&mut d, &frame_with_virtual(vec![vvp(1, 7)]));
         // Transmitted under the RAW id (placeholder cells reference it), no fold.
         assert!(s.contains("\x1b_Gi=7,a=t,f=100"), "transmit raw id: {s:?}");
-        assert!(s.contains("\x1b_Ga=p,U=1,i=7,p=1,c=3,r=2,q=2\x1b\\"), "virtual place: {s:?}");
+        assert!(
+            s.contains("\x1b_Ga=p,U=1,i=7,p=1,c=3,r=2,q=2\x1b\\"),
+            "virtual place: {s:?}"
+        );
         // Second identical frame re-emits nothing.
         let s2 = render_str(&mut d, &frame_with_virtual(vec![vvp(1, 7)]));
-        assert!(!s2.contains("\x1b_G"), "unchanged virtual frame is silent: {s2:?}");
+        assert!(
+            !s2.contains("\x1b_G"),
+            "unchanged virtual frame is silent: {s2:?}"
+        );
     }
 
     #[test]
@@ -1319,7 +1615,10 @@ mod tests {
         let mut d = kitty_renderer();
         render_str(&mut d, &frame_with_virtual(vec![vvp(1, 7)]));
         let s = render_str(&mut d, &frame_with_virtual(vec![]));
-        assert!(s.contains("\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\"), "delete vanished virtual placement: {s:?}");
+        assert!(
+            s.contains("\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\"),
+            "delete vanished virtual placement: {s:?}"
+        );
     }
 
     // ── Sixel data placements ──────────────────────────────────────────────────
@@ -1332,7 +1631,11 @@ mod tests {
     }
 
     fn sixel_caps() -> GraphicsCaps {
-        GraphicsCaps { kitty: false, sixel: true, iterm2: false }
+        GraphicsCaps {
+            kitty: false,
+            sixel: true,
+            iterm2: false,
+        }
     }
 
     #[test]
@@ -1341,7 +1644,10 @@ mod tests {
         d.set_graphics_caps(sixel_caps());
         let s = render_str(&mut d, &frame_with(vec![sixel_vp(1, 2, 3)]));
         assert!(s.contains("\x1bP0q"), "sixel data emitted: {s:?}");
-        assert!(s.contains("\x1b[3;4H"), "positioned at the host cell: {s:?}");
+        assert!(
+            s.contains("\x1b[3;4H"),
+            "positioned at the host cell: {s:?}"
+        );
         assert!(!s.contains('┌'), "no box for a sixel-capable client: {s:?}");
     }
 
@@ -1370,7 +1676,10 @@ mod tests {
         render_str(&mut d, &frame_with(vec![sixel_vp(1, 2, 3)]));
         let s = render_str(&mut d, &frame_with(vec![sixel_vp(1, 5, 3)])); // moved down
         assert!(s.contains("\x1b[3;4H"), "repaints old rect (row 3): {s:?}");
-        assert!(s.contains("\x1bP0q"), "re-emits sixel at the new position: {s:?}");
+        assert!(
+            s.contains("\x1bP0q"),
+            "re-emits sixel at the new position: {s:?}"
+        );
     }
 
     #[test]
@@ -1381,9 +1690,19 @@ mod tests {
         d.set_graphics_caps(sixel_caps());
         render_str(&mut d, &frame_with(vec![sixel_vp(1, 2, 3)]));
         let mut f2 = frame_with(vec![sixel_vp(1, 2, 3)]);
-        f2.put(2, 3, Cell { grapheme: SmolStr::new("X"), ..Cell::default() }); // under the sixel
+        f2.put(
+            2,
+            3,
+            Cell {
+                grapheme: SmolStr::new("X"),
+                ..Cell::default()
+            },
+        ); // under the sixel
         let s = render_str(&mut d, &f2);
-        assert!(s.contains("\x1bP0q"), "sixel re-emitted over the changed cell (no hole): {s:?}");
+        assert!(
+            s.contains("\x1bP0q"),
+            "sixel re-emitted over the changed cell (no hole): {s:?}"
+        );
     }
 
     #[test]
@@ -1392,8 +1711,14 @@ mod tests {
         d.set_graphics_caps(sixel_caps());
         render_str(&mut d, &frame_with(vec![sixel_vp(1, 2, 3)]));
         let s = render_str(&mut d, &frame_with(vec![]));
-        assert!(s.contains("\x1b[3;4H"), "repaints the vacated sixel rect: {s:?}");
-        assert!(!s.contains("\x1bP0q"), "vanished sixel not re-emitted: {s:?}");
+        assert!(
+            s.contains("\x1b[3;4H"),
+            "repaints the vacated sixel rect: {s:?}"
+        );
+        assert!(
+            !s.contains("\x1bP0q"),
+            "vanished sixel not re-emitted: {s:?}"
+        );
     }
 
     #[test]
@@ -1407,7 +1732,10 @@ mod tests {
         let kitty = vp(2, 9, 1, 2, 3); // Kitty proto → boxed here, overlaps the sixel
         render_str(&mut d, &frame_with(vec![sixel.clone(), kitty]));
         let s = render_str(&mut d, &frame_with(vec![sixel])); // box vanishes
-        assert!(s.contains("\x1bP0q"), "overlapping sixel re-emitted after the box vanished: {s:?}");
+        assert!(
+            s.contains("\x1bP0q"),
+            "overlapping sixel re-emitted after the box vanished: {s:?}"
+        );
     }
 
     #[test]
@@ -1417,7 +1745,10 @@ mod tests {
         render_str(&mut d, &frame_with(vec![sixel_vp(1, 2, 3)]));
         d.invalidate(); // reattach / session switch
         let s = render_str(&mut d, &frame_with(vec![sixel_vp(1, 2, 3)]));
-        assert!(s.contains("\x1bP0q"), "sixel re-emitted after invalidate: {s:?}");
+        assert!(
+            s.contains("\x1bP0q"),
+            "sixel re-emitted after invalidate: {s:?}"
+        );
     }
 
     // ── iTerm2 data placements ─────────────────────────────────────────────────
@@ -1433,18 +1764,34 @@ mod tests {
     #[test]
     fn iterm2_placement_emitted_for_iterm2_client() {
         let mut d = DiffRenderer::new();
-        d.set_graphics_caps(GraphicsCaps { kitty: false, sixel: false, iterm2: true });
+        d.set_graphics_caps(GraphicsCaps {
+            kitty: false,
+            sixel: false,
+            iterm2: true,
+        });
         let s = render_str(&mut d, &frame_with(vec![iterm_vp(1, 2, 3)]));
-        assert!(s.contains("\x1b]1337;File=inline=1;width=10px:QUJD\x07"), "iterm2 sequence: {s:?}");
-        assert!(s.contains("\x1b[3;4H"), "positioned at the host cell: {s:?}");
-        assert!(!s.contains('┌'), "no box for an iterm2-capable client: {s:?}");
+        assert!(
+            s.contains("\x1b]1337;File=inline=1;width=10px:QUJD\x07"),
+            "iterm2 sequence: {s:?}"
+        );
+        assert!(
+            s.contains("\x1b[3;4H"),
+            "positioned at the host cell: {s:?}"
+        );
+        assert!(
+            !s.contains('┌'),
+            "no box for an iterm2-capable client: {s:?}"
+        );
     }
 
     #[test]
     fn iterm2_placement_boxed_for_kitty_only_client() {
         let mut d = kitty_renderer();
         let s = render_str(&mut d, &frame_with(vec![iterm_vp(1, 2, 3)]));
-        assert!(s.contains('┌'), "iterm2 boxed on a kitty-only client: {s:?}");
+        assert!(
+            s.contains('┌'),
+            "iterm2 boxed on a kitty-only client: {s:?}"
+        );
         assert!(!s.contains("1337"), "no iterm2 bytes: {s:?}");
     }
 
@@ -1453,11 +1800,18 @@ mod tests {
         // An all-capable client renders each placement in its native protocol:
         // no boxes, no cross-pass interference (non-overlapping footprints).
         let mut d = DiffRenderer::new();
-        d.set_graphics_caps(GraphicsCaps { kitty: true, sixel: true, iterm2: true });
+        d.set_graphics_caps(GraphicsCaps {
+            kitty: true,
+            sixel: true,
+            iterm2: true,
+        });
         let mut v = VirtualScreen::blank(10, 20);
         v.placements = vec![vp(1, 7, 1, 0, 0), sixel_vp(2, 3, 0), iterm_vp(3, 6, 0)];
         let s = render_str(&mut d, &v);
-        assert!(s.contains("a=t") && s.contains("a=p,i=7"), "kitty emitted: {s:?}");
+        assert!(
+            s.contains("a=t") && s.contains("a=p,i=7"),
+            "kitty emitted: {s:?}"
+        );
         assert!(s.contains("\x1bP0q"), "sixel emitted: {s:?}");
         assert!(s.contains("\x1b]1337;File="), "iterm2 emitted: {s:?}");
         assert!(!s.contains('┌'), "no box for any supported protocol: {s:?}");
@@ -1469,15 +1823,25 @@ mod tests {
         let mut v = VirtualScreen::blank(10, 20);
         v.placements = vec![vp(1, 7, 1, 0, 0), sixel_vp(2, 3, 0), iterm_vp(3, 6, 0)];
         let s = render_str(&mut d, &v);
-        assert!(!s.contains("\x1b_G") && !s.contains("\x1bP0q") && !s.contains("1337"), "no graphics: {s:?}");
-        assert_eq!(s.matches('┌').count(), 3, "all three placements boxed: {s:?}");
+        assert!(
+            !s.contains("\x1b_G") && !s.contains("\x1bP0q") && !s.contains("1337"),
+            "no graphics: {s:?}"
+        );
+        assert_eq!(
+            s.matches('┌').count(),
+            3,
+            "all three placements boxed: {s:?}"
+        );
     }
 
     #[test]
     fn non_kitty_client_emits_no_virtual_graphics() {
         let mut d = DiffRenderer::new(); // no graphics caps
         let s = render_str(&mut d, &frame_with_virtual(vec![vvp(1, 7)]));
-        assert!(!s.contains("\x1b_G"), "no graphics for a non-kitty client: {s:?}");
+        assert!(
+            !s.contains("\x1b_G"),
+            "no graphics for a non-kitty client: {s:?}"
+        );
     }
 
     #[test]
@@ -1488,7 +1852,10 @@ mod tests {
         vp.generation = 2;
         vp.data_b64 = Arc::from(&b"WFla"[..]);
         let s = render_str(&mut d, &frame_with_virtual(vec![vp]));
-        assert!(s.contains("a=t"), "changed content re-transmits the virtual image: {s:?}");
+        assert!(
+            s.contains("a=t"),
+            "changed content re-transmits the virtual image: {s:?}"
+        );
     }
 
     #[test]
@@ -1497,10 +1864,16 @@ mod tests {
         let mut vp = vvp(1, 7);
         vp.data_b64 = Arc::from(&b""[..]);
         let s = render_str(&mut d, &frame_with_virtual(vec![vp]));
-        assert!(!s.contains("\x1b_G"), "no transmit/place for an empty-data virtual placement: {s:?}");
+        assert!(
+            !s.contains("\x1b_G"),
+            "no transmit/place for an empty-data virtual placement: {s:?}"
+        );
         // A later real-data frame still works (raw-id cache not poisoned).
         let s2 = render_str(&mut d, &frame_with_virtual(vec![vvp(1, 7)]));
-        assert!(s2.contains("a=t") && s2.contains("U=1"), "real data transmits + places: {s2:?}");
+        assert!(
+            s2.contains("a=t") && s2.contains("U=1"),
+            "real data transmits + places: {s2:?}"
+        );
     }
 
     #[test]
@@ -1510,7 +1883,10 @@ mod tests {
         vp.cols = 0;
         vp.rows = 0;
         let s = render_str(&mut d, &frame_with_virtual(vec![vp]));
-        assert!(s.contains("\x1b_Ga=p,U=1,i=7,p=1,q=2\x1b\\"), "no c=/r= when zero: {s:?}");
+        assert!(
+            s.contains("\x1b_Ga=p,U=1,i=7,p=1,q=2\x1b\\"),
+            "no c=/r= when zero: {s:?}"
+        );
     }
 
     #[test]
@@ -1525,7 +1901,10 @@ mod tests {
         assert!(s.contains("a=p,i=7"), "classic place present: {s:?}");
         assert!(s.contains("U=1,i=7"), "virtual place present: {s:?}");
         // Both transmitted (classic under host fold, virtual under raw 7).
-        assert!(s.matches("a=t").count() >= 2, "both images transmitted: {s:?}");
+        assert!(
+            s.matches("a=t").count() >= 2,
+            "both images transmitted: {s:?}"
+        );
     }
 
     fn placeholder_vp(rows: u16, cols: u16) -> VisiblePlacement {
@@ -1559,7 +1938,10 @@ mod tests {
         // border path with rows=0 and producing erroneous output.
         let mut out = String::new();
         emit_placeholder_box(&mut out, &placeholder_vp(0, 5));
-        assert_eq!(out, "\x1b[0m", "zero-rows must early-return (only reset): {out:?}");
+        assert_eq!(
+            out, "\x1b[0m",
+            "zero-rows must early-return (only reset): {out:?}"
+        );
     }
 
     #[test]
@@ -1567,7 +1949,10 @@ mod tests {
         // Symmetric: cols=0, rows>0.
         let mut out = String::new();
         emit_placeholder_box(&mut out, &placeholder_vp(5, 0));
-        assert_eq!(out, "\x1b[0m", "zero-cols must early-return (only reset): {out:?}");
+        assert_eq!(
+            out, "\x1b[0m",
+            "zero-cols must early-return (only reset): {out:?}"
+        );
     }
 
     #[test]

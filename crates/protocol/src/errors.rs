@@ -1,5 +1,6 @@
-use serde::{Deserialize, Serialize};
 use std::io;
+
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Errors carried inside `ServerMsg::Error`. Clients can observe these,

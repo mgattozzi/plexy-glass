@@ -6,9 +6,8 @@
 //! terminal-trust-hardening spec, Phase 1.
 
 use std::any::Any;
-use std::panic;
 use std::sync::Once;
-use std::thread;
+use std::{panic, thread};
 
 static INSTALLED: Once = Once::new();
 
@@ -38,7 +37,9 @@ pub fn install_panic_logging() {
         panic::set_hook(Box::new(move |info| {
             let thread = thread::current();
             let name = thread.name().unwrap_or("unnamed").to_string();
-            let location = info.location().map(|l| format!("{}:{}", l.file(), l.line()));
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()));
             let message = payload_str(info.payload());
             tracing::error!(target: "panic", "{}", format_panic(&name, location, message));
             previous(info);
@@ -62,6 +63,9 @@ mod tests {
     fn format_panic_handles_unknown_location() {
         let line = format_panic("main", None, "kaboom");
         assert!(line.contains("kaboom"));
-        assert!(line.contains("<unknown>"), "must mark missing location: {line}");
+        assert!(
+            line.contains("<unknown>"),
+            "must mark missing location: {line}"
+        );
     }
 }

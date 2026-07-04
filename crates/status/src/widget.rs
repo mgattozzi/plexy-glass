@@ -1,6 +1,8 @@
-use crate::{ClickAction, ResolvedStyle};
-use smol_str::SmolStr;
 use std::time::Duration;
+
+use smol_str::SmolStr;
+
+use crate::{ClickAction, ResolvedStyle};
 
 #[derive(Debug, Clone)]
 pub struct Segment {

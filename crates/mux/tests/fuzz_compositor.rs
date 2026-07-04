@@ -5,7 +5,8 @@
 //! generation); deep runs use `cargo +nightly bolero test`.
 
 use plexy_glass_emulator::Emulator;
-use plexy_glass_mux::{PaneDragRole, PaneId, PaneView, Rect, StatusPlacement, compositor::compose};
+use plexy_glass_mux::compositor::compose;
+use plexy_glass_mux::{PaneDragRole, PaneId, PaneView, Rect, StatusPlacement};
 
 #[test]
 fn fuzz_compose_does_not_panic() {

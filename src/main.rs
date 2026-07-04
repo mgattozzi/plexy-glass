@@ -3,7 +3,11 @@ use std::process;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "plexy-glass", about = "A terminal multiplexer with first-class OSC handling", version)]
+#[command(
+    name = "plexy-glass",
+    about = "A terminal multiplexer with first-class OSC handling",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Subcommands>,
@@ -116,30 +120,32 @@ async fn main() -> anyhow::Result<()> {
         Subcommands::List => {
             plexy_glass_client::client_list().await?;
         }
-        Subcommands::Kill { name, all } => if let Some(session_name) = name {
-            plexy_glass_client::client_kill_session(session_name).await?;
-        } else {
-            // No `-n`: stop the daemon. Default scopes to this runtime dir's
-            // daemon; `--all` sweeps every daemon for the user.
-            let outcome = if all {
-                plexy_glass_client::kill_all().await?
+        Subcommands::Kill { name, all } => {
+            if let Some(session_name) = name {
+                plexy_glass_client::client_kill_session(session_name).await?;
             } else {
-                plexy_glass_client::kill().await?
-            };
-            match outcome {
-                plexy_glass_client::KillOutcome::NoDaemon => println!("no daemon running"),
-                plexy_glass_client::KillOutcome::Stopped { count } => {
-                    let plural = if count == 1 { "" } else { "s" };
-                    println!("stopped {count} daemon{plural}");
-                }
-                plexy_glass_client::KillOutcome::ForceKilled { count } => {
-                    let plural = if count == 1 { "" } else { "s" };
-                    println!(
-                        "force-killed {count} daemon{plural} (SIGTERM ignored, sent SIGKILL)"
-                    );
+                // No `-n`: stop the daemon. Default scopes to this runtime dir's
+                // daemon; `--all` sweeps every daemon for the user.
+                let outcome = if all {
+                    plexy_glass_client::kill_all().await?
+                } else {
+                    plexy_glass_client::kill().await?
+                };
+                match outcome {
+                    plexy_glass_client::KillOutcome::NoDaemon => println!("no daemon running"),
+                    plexy_glass_client::KillOutcome::Stopped { count } => {
+                        let plural = if count == 1 { "" } else { "s" };
+                        println!("stopped {count} daemon{plural}");
+                    }
+                    plexy_glass_client::KillOutcome::ForceKilled { count } => {
+                        let plural = if count == 1 { "" } else { "s" };
+                        println!(
+                            "force-killed {count} daemon{plural} (SIGTERM ignored, sent SIGKILL)"
+                        );
+                    }
                 }
             }
-        },
+        }
         Subcommands::Reload => {
             plexy_glass_client::client_reload_config().await?;
         }
@@ -167,7 +173,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Subcommands::Capture { name, last_command, json } => {
+        Subcommands::Capture {
+            name,
+            last_command,
+            json,
+        } => {
             let result = if json {
                 plexy_glass_client::client_capture_block(name).await
             } else {
@@ -182,7 +192,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Subcommands::Run { name, timeout, json, text } => {
+        Subcommands::Run {
+            name,
+            timeout,
+            json,
+            text,
+        } => {
             match plexy_glass_client::client_exec(name, text.join(" "), timeout, json).await {
                 // 0 falls through to the normal `Ok(())` return; any other code
                 // (command exit passthrough, 124 timeout, 1 refusal) exits now.
@@ -194,10 +209,14 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Subcommands::ShellIntegration { shell } => if let Some(snippet) = plexy_glass_client::shell_integration_snippet(&shell) { print!("{snippet}") } else {
-            eprintln!("plexy-glass: unknown shell {shell:?} (try bash, zsh, fish, or nu)");
-            process::exit(1);
-        },
+        Subcommands::ShellIntegration { shell } => {
+            if let Some(snippet) = plexy_glass_client::shell_integration_snippet(&shell) {
+                print!("{snippet}");
+            } else {
+                eprintln!("plexy-glass: unknown shell {shell:?} (try bash, zsh, fish, or nu)");
+                process::exit(1);
+            }
+        }
         Subcommands::Daemon(args) => {
             plexy_glass_daemon::run(args).await?;
         }

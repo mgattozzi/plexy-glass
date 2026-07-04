@@ -1,11 +1,13 @@
 //! Per-pane copy-mode state and a pure handler that consumes typed key
 //! events to navigate scrollback, select content, and search.
 
-use crate::{Direction, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseKind};
-use plexy_glass_emulator::Screen;
-use crate::blocks;
-use crate::selection;
 use std::mem;
+
+use plexy_glass_emulator::Screen;
+
+use crate::{
+    Direction, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseKind, blocks, selection,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchSpan {
@@ -96,15 +98,19 @@ impl CopyMode {
             }
             // Vertical wheel only scrolls copy mode; a horizontal wheel falls
             // through to the no-op arm rather than scrolling the wrong axis.
-            (MouseKind::Wheel { delta, horizontal: false }, _) => {
+            (
+                MouseKind::Wheel {
+                    delta,
+                    horizontal: false,
+                },
+                _,
+            ) => {
                 // Equivalent note (100:26): `> → >=` is equivalent because when delta == 0 the
                 // else branch scrolls by 0 (no change), same as the if branch.
                 if delta > 0 {
                     self.viewport_top = self.viewport_top.saturating_sub(delta as u32);
                 } else {
-                    let max_top = self
-                        .total_lines
-                        .saturating_sub(u32::from(self.pane_rows));
+                    let max_top = self.total_lines.saturating_sub(u32::from(self.pane_rows));
                     self.viewport_top = (self.viewport_top + (-delta) as u32).min(max_top);
                 }
                 CopyModeAction::Render
@@ -117,7 +123,9 @@ impl CopyMode {
     /// cells outward on the unified line.
     fn select_word_at_cursor(&mut self, screen: &Screen) {
         let (line, col) = self.cursor;
-        let Some(cells) = unified_line_cells(screen, line) else { return };
+        let Some(cells) = unified_line_cells(screen, line) else {
+            return;
+        };
         let cols = cells.len();
         if (col as usize) >= cols {
             return;
@@ -127,7 +135,11 @@ impl CopyMode {
                 .get(c)
                 .is_some_and(|cell| selection::is_word_char(cell.grapheme.as_str()))
         };
-        let is_spacer = |c: usize| cells.get(c).is_some_and(plexy_glass_emulator::Cell::is_wide_spacer);
+        let is_spacer = |c: usize| {
+            cells
+                .get(c)
+                .is_some_and(plexy_glass_emulator::Cell::is_wide_spacer)
+        };
         // A wide (CJK/emoji) grapheme occupies its cell plus a wide-spacer in the
         // next column. A click on that spacer (the glyph's right half) targets the
         // owning grapheme, and the outward walks must STEP OVER spacers, since
@@ -135,14 +147,22 @@ impl CopyMode {
         // truncate the word at the first wide glyph. Mirrors selection.rs::word_at
         // (the quick-select path).
         let col = col as usize;
-        let col = if col > 0 && is_spacer(col) { col - 1 } else { col };
+        let col = if col > 0 && is_spacer(col) {
+            col - 1
+        } else {
+            col
+        };
         if !is_word(col) {
             return;
         }
         let mut start = col;
         while start > 0 {
             let candidate = start - 1;
-            let grapheme = if candidate > 0 && is_spacer(candidate) { candidate - 1 } else { candidate };
+            let grapheme = if candidate > 0 && is_spacer(candidate) {
+                candidate - 1
+            } else {
+                candidate
+            };
             if is_word(grapheme) {
                 start = grapheme;
             } else {
@@ -150,11 +170,19 @@ impl CopyMode {
             }
         }
         // Include the click grapheme's own trailing spacer, then walk right.
-        let mut end = if col + 1 < cols && is_spacer(col + 1) { col + 1 } else { col };
+        let mut end = if col + 1 < cols && is_spacer(col + 1) {
+            col + 1
+        } else {
+            col
+        };
         while end + 1 < cols {
             let candidate = end + 1;
             if is_word(candidate) {
-                end = if candidate + 1 < cols && is_spacer(candidate + 1) { candidate + 1 } else { candidate };
+                end = if candidate + 1 < cols && is_spacer(candidate + 1) {
+                    candidate + 1
+                } else {
+                    candidate
+                };
             } else {
                 break;
             }
@@ -166,7 +194,9 @@ impl CopyMode {
     /// Expand cursor + anchor to span the entire line (col 0 → last non-blank).
     fn select_line_at_cursor(&mut self, screen: &Screen) {
         let line = self.cursor.0;
-        let Some(cells) = unified_line_cells(screen, line) else { return };
+        let Some(cells) = unified_line_cells(screen, line) else {
+            return;
+        };
         let mut last = None;
         for (i, cell) in cells.iter().enumerate() {
             if !cell.is_blank() {
@@ -202,9 +232,7 @@ pub fn handle(event: &KeyEvent, state: &mut CopyMode, screen: &Screen) -> CopyMo
     //   1. Close prompt → Render
     //   2. Clear selection anchor → Render
     //   3. Exit copy mode
-    if event.mods.is_empty()
-        && matches!(event.key, Key::Escape | Key::Char('q'))
-    {
+    if event.mods.is_empty() && matches!(event.key, Key::Escape | Key::Char('q')) {
         if state.search.prompt_active {
             state.search.prompt_active = false;
             state.search.prompt_buf.clear();
@@ -292,9 +320,7 @@ pub fn handle(event: &KeyEvent, state: &mut CopyMode, screen: &Screen) -> CopyMo
         }
         (m, Key::Char('o')) if m.is_empty() => {
             // Select the current block's output region; `y` then yanks it.
-            if let Some((start, end)) =
-                blocks::block_output_range(screen, state.cursor.0)
-            {
+            if let Some((start, end)) = blocks::block_output_range(screen, state.cursor.0) {
                 state.anchor = Some((start, 0));
                 state.cursor = (end, cols.saturating_sub(1));
                 ensure_visible(state);
@@ -361,7 +387,9 @@ fn unified_line_cells(screen: &Screen, line: u32) -> Option<Vec<plexy_glass_emul
 /// Extract the selected (or current-line) text from the unified
 /// scrollback + active grid line space.
 fn extract_selection(state: &CopyMode, screen: &Screen) -> String {
-    let (start, end) = if let Some(anchor) = state.anchor { normalize(anchor, state.cursor) } else {
+    let (start, end) = if let Some(anchor) = state.anchor {
+        normalize(anchor, state.cursor)
+    } else {
         let line = state.cursor.0;
         (
             (line, 0),
@@ -378,7 +406,9 @@ fn extract_selection(state: &CopyMode, screen: &Screen) -> String {
         } else {
             cols.saturating_sub(1)
         };
-        let Some(cells) = unified_line_cells(screen, line) else { continue };
+        let Some(cells) = unified_line_cells(screen, line) else {
+            continue;
+        };
         // Trim trailing blanks in this row.
         let mut last_significant = row_start;
         for c in row_start..=row_end {
@@ -407,11 +437,7 @@ fn normalize(a: (u32, u16), b: (u32, u16)) -> ((u32, u16), (u32, u16)) {
     if a <= b { (a, b) } else { (b, a) }
 }
 
-fn handle_search_prompt(
-    event: &KeyEvent,
-    state: &mut CopyMode,
-    screen: &Screen,
-) -> CopyModeAction {
+fn handle_search_prompt(event: &KeyEvent, state: &mut CopyMode, screen: &Screen) -> CopyModeAction {
     match (event.mods, event.key) {
         (m, Key::Enter) if m.is_empty() => {
             state.search.query = mem::take(&mut state.search.prompt_buf);
@@ -482,7 +508,9 @@ fn find_matches(screen: &Screen, query: &str) -> Vec<MatchSpan> {
     let cols = screen.active.num_cols();
     let total = screen.scrollback.rows().len() as u32 + u32::from(screen.active.num_rows());
     for line_idx in 0..total {
-        let Some(cells) = unified_line_cells(screen, line_idx) else { continue };
+        let Some(cells) = unified_line_cells(screen, line_idx) else {
+            continue;
+        };
         // Build the line's text from non-spacer cells, recording where each
         // grapheme starts in BOTH the text (byte offset) and the grid (column).
         // A cell's grid column is its index, since the cells vector includes the
@@ -513,7 +541,11 @@ fn find_matches(screen: &Screen, query: &str) -> Vec<MatchSpan> {
             let col_end = col_start
                 .saturating_add(span.saturating_sub(1))
                 .min(cols.saturating_sub(1));
-            out.push(MatchSpan { line_idx, col_start, col_end });
+            out.push(MatchSpan {
+                line_idx,
+                col_start,
+                col_end,
+            });
             start += idx + query.len();
         }
     }
@@ -522,9 +554,10 @@ fn find_matches(screen: &Screen, query: &str) -> Vec<MatchSpan> {
 
 #[cfg(test)]
 mod tests {
+    use plexy_glass_emulator::Emulator;
+
     use super::*;
     use crate::MouseModifiers;
-    use plexy_glass_emulator::Emulator;
 
     fn screen(rows: u16, cols: u16) -> Screen {
         let mut e = Emulator::new(rows, cols);
@@ -579,7 +612,9 @@ mod tests {
 
     #[test]
     fn new_clamps_cursor_to_total_lines() {
-        let cm = CopyMode::new(/*total*/ 5, /*rows*/ 3, /*start_line*/ 10, /*start_col*/ 0);
+        let cm = CopyMode::new(
+            /*total*/ 5, /*rows*/ 3, /*start_line*/ 10, /*start_col*/ 0,
+        );
         assert_eq!(cm.cursor.0, 4);
     }
 
@@ -996,8 +1031,7 @@ mod tests {
         let scr = marked_screen();
         let mut s = CopyMode::new(total(&scr), 8, 2, 3);
         handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
-        let action =
-            handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
+        let action = handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
         match action {
             CopyModeAction::Yank(text) => assert_eq!(text, "hello\nworld"),
             other => panic!("expected Yank, got {other:?}"),
@@ -1012,8 +1046,7 @@ mod tests {
         handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
         assert_eq!(s.anchor, Some((0, 0)));
         assert_eq!(s.cursor, (3, 19));
-        let action =
-            handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
+        let action = handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
         match action {
             CopyModeAction::Yank(text) => assert_eq!(text, "p1\no1\no2\no3"),
             other => panic!("expected Yank, got {other:?}"),
@@ -1077,7 +1110,10 @@ mod tests {
         s.viewport_top = 5;
         handle(&ev(Modifiers::empty(), Key::Char('j')), &mut s, &scr);
         assert_eq!(s.cursor.0, 10);
-        assert_eq!(s.viewport_top, 6, "viewport must scroll down to keep cursor visible");
+        assert_eq!(
+            s.viewport_top, 6,
+            "viewport must scroll down to keep cursor visible"
+        );
     }
 
     #[test]
@@ -1128,7 +1164,11 @@ mod tests {
         s.viewport_top = 0;
         let me = mouse_ev(MouseKind::Press, MouseButton::Left, 0, 8);
         s.handle_mouse(&me, 2, &scr);
-        assert_eq!(s.anchor, Some((0, 6)), "anchor must walk back to word start");
+        assert_eq!(
+            s.anchor,
+            Some((0, 6)),
+            "anchor must walk back to word start"
+        );
         assert_eq!(s.cursor.1, 10, "cursor must reach word end");
     }
 
@@ -1172,7 +1212,11 @@ mod tests {
         s.viewport_top = 0;
         let me = mouse_ev(MouseKind::Press, MouseButton::Left, 0, 5);
         s.handle_mouse(&me, 2, &scr);
-        assert_eq!(s.anchor, Some((0, 0)), "left walk crosses 中's spacer to word start");
+        assert_eq!(
+            s.anchor,
+            Some((0, 0)),
+            "left walk crosses 中's spacer to word start"
+        );
         assert_eq!(s.cursor.1, 5, "cursor at 'd'");
         let action = handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
         match action {
@@ -1201,8 +1245,13 @@ mod tests {
         let mut s = CopyMode::new(20, 10, 0, 0);
         s.viewport_top = 10;
         let me = mouse_ev(
-            MouseKind::Wheel { delta: 3, horizontal: false },
-            MouseButton::None, 0, 0,
+            MouseKind::Wheel {
+                delta: 3,
+                horizontal: false,
+            },
+            MouseButton::None,
+            0,
+            0,
         );
         s.handle_mouse(&me, 1, &scr);
         assert_eq!(s.viewport_top, 7, "positive delta decreases viewport_top");
@@ -1215,11 +1264,19 @@ mod tests {
         let mut s = CopyMode::new(20, 10, 0, 0);
         s.viewport_top = 5;
         let me = mouse_ev(
-            MouseKind::Wheel { delta: -3, horizontal: false },
-            MouseButton::None, 0, 0,
+            MouseKind::Wheel {
+                delta: -3,
+                horizontal: false,
+            },
+            MouseButton::None,
+            0,
+            0,
         );
         s.handle_mouse(&me, 1, &scr);
-        assert_eq!(s.viewport_top, 8, "negative delta increases viewport_top by |delta|");
+        assert_eq!(
+            s.viewport_top, 8,
+            "negative delta increases viewport_top by |delta|"
+        );
     }
 
     #[test]
@@ -1231,7 +1288,7 @@ mod tests {
         let scr = screen_with_lines(2, 20, &["hello world", "more"]);
         let mut s = CopyMode::new(2, 2, 0, 0);
         s.anchor = Some((0, 6)); // 'w'
-        s.cursor = (0, 7);       // 'o'
+        s.cursor = (0, 7); // 'o'
         let action = handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
         match action {
             CopyModeAction::Yank(text) => assert_eq!(text, "wo"),
@@ -1295,12 +1352,23 @@ mod tests {
 
         // Ctrl+/ must NOT open the search prompt
         handle(&ev(Modifiers::CTRL, Key::Char('/')), &mut s, &scr);
-        assert!(!s.search.prompt_active, "Ctrl+/ must not open search prompt");
+        assert!(
+            !s.search.prompt_active,
+            "Ctrl+/ must not open search prompt"
+        );
 
         // Ctrl+n with pre-set matches: must NOT advance search.current
         s.search.matches = vec![
-            MatchSpan { line_idx: 5, col_start: 0, col_end: 2 },
-            MatchSpan { line_idx: 15, col_start: 0, col_end: 2 },
+            MatchSpan {
+                line_idx: 5,
+                col_start: 0,
+                col_end: 2,
+            },
+            MatchSpan {
+                line_idx: 15,
+                col_start: 0,
+                col_end: 2,
+            },
         ];
         s.search.current = 0;
         handle(&ev(Modifiers::CTRL, Key::Char('n')), &mut s, &scr);
@@ -1327,8 +1395,16 @@ mod tests {
 
         // Ctrl+N with pre-set matches: must NOT cycle to prev match
         s.search.matches = vec![
-            MatchSpan { line_idx: 5, col_start: 0, col_end: 2 },
-            MatchSpan { line_idx: 15, col_start: 0, col_end: 2 },
+            MatchSpan {
+                line_idx: 5,
+                col_start: 0,
+                col_end: 2,
+            },
+            MatchSpan {
+                line_idx: 15,
+                col_start: 0,
+                col_end: 2,
+            },
         ];
         s.search.current = 1;
         handle(&ev(Modifiers::CTRL, Key::Char('N')), &mut s, &scr);
@@ -1398,16 +1474,28 @@ mod tests {
         // Ctrl+Enter must NOT commit the query
         handle(&ev(Modifiers::CTRL, Key::Enter), &mut s, &scr);
         assert!(s.search.prompt_active, "Ctrl+Enter must not commit search");
-        assert_eq!(s.search.prompt_buf, "abc", "prompt_buf unchanged after Ctrl+Enter");
+        assert_eq!(
+            s.search.prompt_buf, "abc",
+            "prompt_buf unchanged after Ctrl+Enter"
+        );
 
         // Ctrl+Backspace must NOT pop a char
         handle(&ev(Modifiers::CTRL, Key::Backspace), &mut s, &scr);
-        assert_eq!(s.search.prompt_buf, "abc", "Ctrl+Backspace must not pop from prompt");
+        assert_eq!(
+            s.search.prompt_buf, "abc",
+            "Ctrl+Backspace must not pop from prompt"
+        );
 
         // Ctrl+Char must NOT push a char
         handle(&ev(Modifiers::CTRL, Key::Char('x')), &mut s, &scr);
-        assert_eq!(s.search.prompt_buf, "abc", "Ctrl+Char must not push to prompt");
-        assert!(s.search.prompt_active, "must still be in search prompt mode");
+        assert_eq!(
+            s.search.prompt_buf, "abc",
+            "Ctrl+Char must not push to prompt"
+        );
+        assert!(
+            s.search.prompt_active,
+            "must still be in search prompt mode"
+        );
     }
 
     #[test]
@@ -1421,11 +1509,17 @@ mod tests {
 
         // Shift+F: must push 'F' (capital letters arrive as Shift+char under Kitty)
         handle(&ev(Modifiers::SHIFT, Key::Char('F')), &mut s, &scr);
-        assert_eq!(s.search.prompt_buf, "F", "Shift+Char must be accepted in search prompt");
+        assert_eq!(
+            s.search.prompt_buf, "F",
+            "Shift+Char must be accepted in search prompt"
+        );
 
         // Ctrl+x: must NOT push (CTRL rejected by the guard)
         handle(&ev(Modifiers::CTRL, Key::Char('x')), &mut s, &scr);
-        assert_eq!(s.search.prompt_buf, "F", "Ctrl+Char must be rejected in search prompt");
+        assert_eq!(
+            s.search.prompt_buf, "F",
+            "Ctrl+Char must be rejected in search prompt"
+        );
     }
 
     #[test]
@@ -1440,6 +1534,9 @@ mod tests {
         s.search.prompt_active = true;
         s.search.prompt_buf = "foo".into();
         handle(&ev(Modifiers::empty(), Key::Enter), &mut s, &scr);
-        assert_eq!(s.cursor.0, 2, "should jump to first match at/after cursor row (row 2 not row 0)");
+        assert_eq!(
+            s.cursor.0, 2,
+            "should jump to first match at/after cursor row (row 2 not row 0)"
+        );
     }
 }

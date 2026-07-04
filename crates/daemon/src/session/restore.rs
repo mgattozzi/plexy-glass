@@ -3,11 +3,15 @@
 //! The daemon no longer restores sessions from disk; a fresh daemon builds
 //! config-declared sessions here and otherwise creates sessions on demand.
 
-use super::Session;
-use crate::{declared, error::DaemonError, window_manager::WindowManager};
-use plexy_glass_protocol::PtySize;
 use std::io;
 use std::sync::Arc;
+
+use plexy_glass_protocol::PtySize;
+
+use super::Session;
+use crate::declared;
+use crate::error::DaemonError;
+use crate::window_manager::WindowManager;
 
 impl Session {
     /// Build a `Session` fresh from a config-declared template (Feature B).
@@ -28,11 +32,9 @@ impl Session {
         })?;
         let bin0 = declared::to_binary(&first_window.layout);
         let leaves0 = declared::bin_leaves(&bin0);
-        let win0_home =
-            declared::home_base(first_window.cwd.as_deref(), template.cwd.as_deref());
+        let win0_home = declared::home_base(first_window.cwd.as_deref(), template.cwd.as_deref());
         // invariant: a PaneNode always has >= 1 leaf, so leaves0[0] exists.
-        let first_env =
-            declared::merge_env(&template.env, &first_window.env, &leaves0[0].env);
+        let first_env = declared::merge_env(&template.env, &first_window.env, &leaves0[0].env);
         let first_spec = declared::pane_spec(leaves0[0], win0_home.as_deref(), first_env);
 
         let session = Self::new(template.name.clone(), first_spec, size, Arc::clone(&config))?;
@@ -58,7 +60,15 @@ impl Session {
                 let first = declared::pane_spec(leaves[0], home.as_deref(), env);
                 wm.new_window_with_spec(first, w.name.clone())?;
                 wm.set_window_home_cwd(wi, home.clone());
-                build_window_from_bin(&mut wm, wi, &bin, &leaves, home.as_deref(), &template.env, w)?;
+                build_window_from_bin(
+                    &mut wm,
+                    wi,
+                    &bin,
+                    &leaves,
+                    home.as_deref(),
+                    &template.env,
+                    w,
+                )?;
             }
             // Focus the declared active window (else window 0). The per-window
             // active pane was set inside build_window_from_bin.

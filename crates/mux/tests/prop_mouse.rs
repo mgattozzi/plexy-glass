@@ -3,8 +3,7 @@
 //! drift between `encode_for_child` and `MouseParser` (the class of the
 //! wheel-modifier and horizontal-wheel bugs).
 
-use hegel::TestCase;
-use hegel::generators as gs;
+use hegel::{TestCase, generators as gs};
 use plexy_glass_mux::{
     MouseButton, MouseEncoding, MouseEvent, MouseKind, MouseModifiers, MouseParseAction,
     MouseParser, encode_for_child,
@@ -46,15 +45,27 @@ fn draw_event(tc: &TestCase) -> MouseEvent {
         1 => (MouseKind::Release, draw_button(tc)),
         2 => (MouseKind::Move, draw_button(tc)),
         3 => (
-            MouseKind::Wheel { delta: 3, horizontal: tc.draw(gs::booleans()) },
+            MouseKind::Wheel {
+                delta: 3,
+                horizontal: tc.draw(gs::booleans()),
+            },
             MouseButton::None,
         ),
         _ => (
-            MouseKind::Wheel { delta: -3, horizontal: tc.draw(gs::booleans()) },
+            MouseKind::Wheel {
+                delta: -3,
+                horizontal: tc.draw(gs::booleans()),
+            },
             MouseButton::None,
         ),
     };
-    MouseEvent { kind, button, modifiers, row, col }
+    MouseEvent {
+        kind,
+        button,
+        modifiers,
+        row,
+        col,
+    }
 }
 
 /// `encode_for_child(_, Sgr)` followed by `MouseParser` must reproduce the event

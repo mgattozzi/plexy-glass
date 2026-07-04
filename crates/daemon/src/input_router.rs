@@ -176,9 +176,10 @@ impl InputRouter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plexy_glass_keys::KeyboardProtocol;
     use plexy_glass_mux::{Direction, Key, Modifiers};
+
+    use super::*;
 
     #[test]
     fn wrapped_paste_emits_paste_event_with_inner_bytes() {
@@ -194,7 +195,10 @@ mod tests {
         assert_eq!(pastes, vec![b"echo HELLO".as_slice()]);
         // No Key events from inside the paste.
         for e in &events {
-            assert!(!matches!(e, InputEvent::Key(..)), "unexpected Key inside paste: {e:?}");
+            assert!(
+                !matches!(e, InputEvent::Key(..)),
+                "unexpected Key inside paste: {e:?}"
+            );
         }
     }
 
@@ -237,12 +241,18 @@ mod tests {
     fn decode_protocol_maps_negotiated_kbd() {
         use plexy_glass_keys::KeyboardProtocol;
         use plexy_glass_protocol::NegotiatedKbd;
-        assert_eq!(decode_protocol(NegotiatedKbd::Legacy), KeyboardProtocol::Legacy);
+        assert_eq!(
+            decode_protocol(NegotiatedKbd::Legacy),
+            KeyboardProtocol::Legacy
+        );
         assert_eq!(
             decode_protocol(NegotiatedKbd::ModifyOtherKeys(2)),
             KeyboardProtocol::ModifyOtherKeys
         );
-        assert_eq!(decode_protocol(NegotiatedKbd::Kitty(31)), KeyboardProtocol::Kitty);
+        assert_eq!(
+            decode_protocol(NegotiatedKbd::Kitty(31)),
+            KeyboardProtocol::Kitty
+        );
     }
 
     #[test]
@@ -250,7 +260,10 @@ mod tests {
         let mut r = InputRouter::new();
         assert!(!r.has_pending(), "idle parser is not pending");
         let events = r.classify(b"\x1b");
-        assert!(events.is_empty(), "lone ESC parks pending, emits nothing yet");
+        assert!(
+            events.is_empty(),
+            "lone ESC parks pending, emits nothing yet"
+        );
         assert!(r.has_pending(), "mid-escape after a lone \\x1b");
         match r.flush_keys() {
             Some(InputEvent::Key(ke, _)) => assert_eq!(ke.key, Key::Escape),

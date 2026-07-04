@@ -3,10 +3,11 @@
 //! `pump.rs`; this module owns the negotiation handshake and its precise
 //! inverse.
 
-use plexy_glass_protocol::{GraphicsCaps, NegotiatedKbd};
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::{Duration, Instant};
+
+use plexy_glass_protocol::{GraphicsCaps, NegotiatedKbd};
 
 /// The probe we write to the outer terminal: query Kitty flags (`\e[?u`),
 /// XTVERSION (`\e[>q`), a Kitty graphics query (`\e_G…a=q…\e\\`), then DA1
@@ -16,8 +17,7 @@ use std::time::{Duration, Instant};
 /// (XTVERSION DCS or graphics APC) into a pane. The graphics query transmits a
 /// 1×1 RGB pixel with `a=q` (query, no display); a capable terminal answers
 /// `\e_Gi=31;OK\e\\`.
-pub const PROBE: &[u8] =
-    b"\x1b[?u\x1b[>q\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
+pub const PROBE: &[u8] = b"\x1b[?u\x1b[>q\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
 
 /// Kitty flags we PUSH on a Kitty-capable outer terminal. Deliberately
 /// conservative: only `disambiguate` (0b1). We do NOT enable `report_event_types`
@@ -140,10 +140,7 @@ fn da1_lists_sixel(reply: &[u8]) -> bool {
     };
     // Find the start of this DA1 reply (`\e[?`) before `end`.
     let prefix = &reply[..end];
-    let Some(start) = prefix
-        .windows(3)
-        .rposition(|w| w == [0x1b, b'[', b'?'])
-    else {
+    let Some(start) = prefix.windows(3).rposition(|w| w == [0x1b, b'[', b'?']) else {
         return false;
     };
     // Params are between `\e[?` and the trailing `c`, separated by `;`.
@@ -300,7 +297,10 @@ mod tests {
         // but enable only the conservative disambiguate flag (not 31).
         let reply = b"\x1b[?1;2c\x1b[?31u";
         assert_eq!(classify(reply), NegotiatedKbd::Kitty(OUTER_KITTY_FLAGS));
-        assert_eq!(OUTER_KITTY_FLAGS, 1, "only disambiguate — no release/all-keys flood");
+        assert_eq!(
+            OUTER_KITTY_FLAGS, 1,
+            "only disambiguate — no release/all-keys flood"
+        );
     }
 
     #[test]
@@ -316,7 +316,9 @@ mod tests {
         // sentinel must NOT fire until the trailing DA1 `c` is present, so the
         // XTVERSION DCS is fully captured (never leaked into a pane).
         assert!(!da1_reply_seen(b"\x1b[?31u\x1bP>|ghostty 1.3.1\x1b\\"));
-        assert!(da1_reply_seen(b"\x1b[?31u\x1bP>|ghostty 1.3.1\x1b\\\x1b[?1;2c"));
+        assert!(da1_reply_seen(
+            b"\x1b[?31u\x1bP>|ghostty 1.3.1\x1b\\\x1b[?1;2c"
+        ));
         // A bare `c` in a version string must NOT be mistaken for DA1.
         assert!(!da1_reply_seen(b"\x1bP>|contour 1.0\x1b\\"));
     }

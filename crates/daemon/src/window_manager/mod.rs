@@ -1,21 +1,23 @@
 //! Owns all windows for one attached client.
 
-use crate::declared;
-use crate::pane::Pane;
-use crate::popup::{self, Popup};
-use crate::window::CompletionEvent;
-use crate::{error::DaemonError, window::Window};
-use mouse::{ClickHistory, PaneDrag, ResizeDrag, TabDrag};
-use plexy_glass_mux::{Overlay, PaneId, Rect, Selection, SplitDir, WindowId};
-use plexy_glass_protocol::{PtySize, SpawnSpec};
-use plexy_glass_config::GlyphTier;
 use std::io::Error;
 use std::sync::Arc;
 use std::time::Duration;
+
+use mouse::{ClickHistory, PaneDrag, ResizeDrag, TabDrag};
+use plexy_glass_config::GlyphTier;
+use plexy_glass_mux::{Overlay, PaneId, Rect, Selection, SplitDir, WindowId};
+use plexy_glass_protocol::{PtySize, SpawnSpec};
 // See window.rs: tokio::time::Instant is used so unit tests with
 // start_paused = true / time::advance control silence checks without real sleeps.
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
+
+use crate::declared;
+use crate::error::DaemonError;
+use crate::pane::Pane;
+use crate::popup::{self, Popup};
+use crate::window::{CompletionEvent, Window};
 
 /// How long a transient status-line message stays visible before it is cleared
 /// on the next recompose. Mirrored by the `Session` wake timer.
@@ -487,12 +489,18 @@ impl WindowManager {
                 w.clear_alerts();
             } else {
                 if acted && w.monitor_activity() && w.set_activity() {
-                    message =
-                        Some(format!("activity in window {} ({})", i + 1, w.display_name(auto_rename)));
+                    message = Some(format!(
+                        "activity in window {} ({})",
+                        i + 1,
+                        w.display_name(auto_rename)
+                    ));
                 }
                 if belled && w.monitor_bell() && w.set_bell() {
-                    message =
-                        Some(format!("bell in window {} ({})", i + 1, w.display_name(auto_rename)));
+                    message = Some(format!(
+                        "bell in window {} ({})",
+                        i + 1,
+                        w.display_name(auto_rename)
+                    ));
                 }
                 if let Some(exit) = done_edge {
                     let name = w.display_name(auto_rename);
@@ -511,7 +519,10 @@ impl WindowManager {
         } else {
             false
         };
-        MonitorDrain { alert_edge, notifications }
+        MonitorDrain {
+            alert_edge,
+            notifications,
+        }
     }
 
     /// Whether any window currently arms silence monitoring. The session uses
@@ -539,8 +550,11 @@ impl WindowManager {
                 continue;
             }
             if w.check_silence(now) {
-                message =
-                    Some(format!("silence in window {} ({})", i + 1, w.display_name(auto_rename)));
+                message = Some(format!(
+                    "silence in window {} ({})",
+                    i + 1,
+                    w.display_name(auto_rename)
+                ));
             }
         }
         if let Some(text) = message {
@@ -627,9 +641,11 @@ impl WindowManager {
             .get_mut(window_idx)
             .ok_or_else(|| DaemonError::Io(Error::other(format!("window {window_idx} missing"))))?;
         let leaves = win.layout().dfs_leaves();
-        let target_pane = *leaves
-            .get(target_dfs_idx as usize)
-            .ok_or_else(|| DaemonError::Io(Error::other(format!("dfs idx {target_dfs_idx} out of range"))))?;
+        let target_pane = *leaves.get(target_dfs_idx as usize).ok_or_else(|| {
+            DaemonError::Io(Error::other(format!(
+                "dfs idx {target_dfs_idx} out of range"
+            )))
+        })?;
         win.split_at(
             target_pane,
             dir,
@@ -783,8 +799,10 @@ impl WindowManager {
         let viewport = self.viewport();
         let win = self.active_window_mut();
         let mut panes = win.layout().dfs_leaves();
-        if matches!(preset, LayoutPreset::MainHorizontal | LayoutPreset::MainVertical)
-            && let Some(pos) = panes.iter().position(|p| *p == win.active())
+        if matches!(
+            preset,
+            LayoutPreset::MainHorizontal | LayoutPreset::MainVertical
+        ) && let Some(pos) = panes.iter().position(|p| *p == win.active())
         {
             let active = panes.remove(pos);
             panes.insert(0, active);

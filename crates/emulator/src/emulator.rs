@@ -1,12 +1,10 @@
 //! Top-level `Emulator`: composes `Parser` + `Screen` behind a small public API.
 
-use crate::{
-    cursor::Cursor,
-    parser::Parser,
-    reflow::reflow,
-    scrollback::Scrollback,
-    screen::{ColorQuery, Screen},
-};
+use crate::cursor::Cursor;
+use crate::parser::Parser;
+use crate::reflow::reflow;
+use crate::screen::{ColorQuery, Screen};
+use crate::scrollback::Scrollback;
 
 pub struct Emulator {
     parser: Parser,
@@ -78,7 +76,6 @@ impl Emulator {
         self.screen.scroll_region = (0, rows.saturating_sub(1));
     }
 
-
     pub const fn screen(&self) -> &Screen {
         &self.screen
     }
@@ -140,7 +137,10 @@ mod tests {
         e.parser.flush(&mut e.screen);
         e.resize(4, 16);
         assert_eq!(e.screen().active.num_cols(), 16);
-        assert_eq!(e.screen().active.get_cell(0, 0).unwrap().grapheme.as_str(), "h");
+        assert_eq!(
+            e.screen().active.get_cell(0, 0).unwrap().grapheme.as_str(),
+            "h"
+        );
     }
 
     #[test]
@@ -151,18 +151,14 @@ mod tests {
         let mut e = Emulator::new(4, 8);
         e.advance(b"\x1b]133;B\x07"); // cursor col 0, row 0
         assert!(
-            e.screen().active.rows[0]
-                .mark
-                .contains(RowMark::PROMPT_END),
+            e.screen().active.rows[0].mark.contains(RowMark::PROMPT_END),
             "PROMPT_END must be set on row 0 before resize"
         );
         e.resize(4, 16);
         // After reflow the logical line maps to the first physical row; the
         // mark is still there.
         assert!(
-            e.screen().active.rows[0]
-                .mark
-                .contains(RowMark::PROMPT_END),
+            e.screen().active.rows[0].mark.contains(RowMark::PROMPT_END),
             "PROMPT_END must survive reflow"
         );
     }
@@ -317,5 +313,4 @@ mod tests {
             "IND at the bottom margin must scroll like LF, retiring the top row"
         );
     }
-
 }

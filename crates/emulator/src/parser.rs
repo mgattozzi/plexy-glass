@@ -2,6 +2,7 @@
 //! parser can be unit-tested independently of `Screen`.
 
 use std::mem;
+
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Operations the parser invokes on a screen-like sink. `Screen` will impl this.
@@ -332,8 +333,9 @@ impl<S: ScreenOps> vte::Perform for Performer<'_, S> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::iter;
+
+    use super::*;
 
     /// A captured DCS dispatch: (intermediates, action, params, payload).
     type DcsRecord = (Vec<u8>, u8, Vec<Vec<u16>>, Vec<u8>);
@@ -555,7 +557,11 @@ mod tests {
         // ESCs into the payload and never terminate.
         let input = b"\x1b_Gdata\x1b\x1b\\"; // ESC _ G d a t a ESC ESC \
         let s = drive(input);
-        assert_eq!(s.graphics.len(), 1, "double-ESC terminated APC must be captured");
+        assert_eq!(
+            s.graphics.len(),
+            1,
+            "double-ESC terminated APC must be captured"
+        );
         // framed = ESC _ (2) + [G,d,a,t,a,ESC] (6) + ESC \ (2) = 10 bytes
         assert_eq!(
             s.graphics[0], b"\x1b_Gdata\x1b\x1b\\",

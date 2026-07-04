@@ -1,19 +1,21 @@
 //! Daemon-wide registry of named sessions.
 
-use crate::paste_buffers::PasteBufferStore;
-use crate::{LockExt, error::DaemonError, session::Session};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+
 use plexy_glass_mux::BufferEntry;
 use plexy_glass_protocol::{ProtocolError, PtySize, SessionEntry, SpawnSpec};
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio::task;
 
+use crate::LockExt;
+use crate::error::DaemonError;
+use crate::paste_buffers::PasteBufferStore;
+use crate::session::Session;
+
 /// Maximum retained paste buffers (tmux-style; oldest evicted past this).
 const PASTE_BUFFER_CAP: usize = 50;
-
 
 pub struct SessionRegistry {
     inner: Mutex<HashMap<String, Arc<Session>>>,
@@ -72,12 +74,20 @@ impl SessionRegistry {
 
     /// Clone out the most-recent buffer's content, if any.
     pub async fn paste_buffer_top(&self) -> Option<Vec<u8>> {
-        self.paste_buffers.lock().await.top().map(|b| b.content.clone())
+        self.paste_buffers
+            .lock()
+            .await
+            .top()
+            .map(|b| b.content.clone())
     }
 
     /// Clone out a named buffer's content, if present.
     pub async fn paste_buffer_get(&self, name: &str) -> Option<Vec<u8>> {
-        self.paste_buffers.lock().await.get(name).map(|b| b.content.clone())
+        self.paste_buffers
+            .lock()
+            .await
+            .get(name)
+            .map(|b| b.content.clone())
     }
 
     /// Clone out the most-recent buffer's `(name, content)`, `save-buffer`'s
@@ -137,7 +147,9 @@ impl SessionRegistry {
         validate_name(&name)?;
         let mut map = self.inner.lock().await;
         if map.contains_key(&name) {
-            return Err(DaemonError::Protocol(ProtocolError::SessionAlreadyExists { name }));
+            return Err(DaemonError::Protocol(ProtocolError::SessionAlreadyExists {
+                name,
+            }));
         }
         let session = Session::new(name.clone(), cmd, size, config)?;
         map.insert(name, Arc::clone(&session));
@@ -176,13 +188,12 @@ impl SessionRegistry {
     /// logged and skipped, it never aborts the rest. Shared by daemon boot and
     /// `reload_config`; both pass the 24×80 default `size` (resized when a
     /// client later attaches).
-    pub async fn build_declared(
-        &self,
-        config: &Arc<plexy_glass_config::Config>,
-        size: PtySize,
-    ) {
+    pub async fn build_declared(&self, config: &Arc<plexy_glass_config::Config>, size: PtySize) {
         for template in &config.sessions {
-            match self.create_declared(template, Arc::clone(config), size).await {
+            match self
+                .create_declared(template, Arc::clone(config), size)
+                .await
+            {
                 Ok(_) => tracing::info!(session = %template.name, "built declared session"),
                 Err(e) => {
                     tracing::warn!(session = %template.name, error = %e, "skipping declared session");
@@ -229,7 +240,9 @@ impl SessionRegistry {
         // `cmd` is intentionally unused, declared panes come from the template +
         // the daemon default shell.)
         if let Some(template) = config.sessions.iter().find(|t| t.name == name) {
-            return self.create_declared(template, Arc::clone(&config), size).await;
+            return self
+                .create_declared(template, Arc::clone(&config), size)
+                .await;
         }
         // The daemon is memory-only, there is no on-disk restore, so build fresh.
         self.create(name, cmd, size, config).await
@@ -247,7 +260,9 @@ impl SessionRegistry {
             }));
         }
         let session = map.remove(old).ok_or_else(|| {
-            DaemonError::Protocol(ProtocolError::SessionNotFound { name: old.to_string() })
+            DaemonError::Protocol(ProtocolError::SessionNotFound {
+                name: old.to_string(),
+            })
         })?;
         // Key and live name move together, under the same lock hold.
         session.set_name(new.to_string());
@@ -259,7 +274,9 @@ impl SessionRegistry {
         let session = {
             let mut map = self.inner.lock().await;
             map.remove(name).ok_or_else(|| {
-                DaemonError::Protocol(ProtocolError::SessionNotFound { name: name.to_string() })
+                DaemonError::Protocol(ProtocolError::SessionNotFound {
+                    name: name.to_string(),
+                })
             })?
         };
         // Set closing + abort the Arc-pinning tasks (death/tick), signal the
@@ -319,7 +336,12 @@ impl SessionRegistry {
         // build (after kill + reattach), and a removed-but-live name is left
         // alone. The reload build has no client size, so it uses the same
         // 24×80 default as boot (resized on the first attach).
-        let reload_size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
+        let reload_size = PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         self.build_declared(&new_config, reload_size).await;
         // A clean reload clears the error state.
         self.set_config_error(None);
@@ -337,17 +359,23 @@ fn validate_name(name: &str) -> Result<(), DaemonError> {
     if name.is_empty() || name.len() > 64 {
         return Err(DaemonError::Protocol(ProtocolError::EmptyName));
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-        return Err(DaemonError::Protocol(ProtocolError::InvalidName { name: name.to_string() }));
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(DaemonError::Protocol(ProtocolError::InvalidName {
+            name: name.to_string(),
+        }));
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ptr;
+
     use super::*;
     use crate::test_env;
-    use std::ptr;
 
     fn spec() -> SpawnSpec {
         SpawnSpec {
@@ -359,7 +387,12 @@ mod tests {
     }
 
     fn size() -> PtySize {
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
     }
 
     fn cfg() -> Arc<plexy_glass_config::Config> {
@@ -370,7 +403,10 @@ mod tests {
     async fn create_then_get() {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let s = r.create("main".into(), spec(), size(), cfg()).await.unwrap();
+        let s = r
+            .create("main".into(), spec(), size(), cfg())
+            .await
+            .unwrap();
         assert_eq!(s.name(), "main");
         let got = r.get("main").await.unwrap();
         assert_eq!(got.name(), "main");
@@ -389,7 +425,10 @@ mod tests {
     #[test]
     fn take_welcome_is_true_exactly_once_per_daemon() {
         let r = SessionRegistry::new();
-        assert!(r.take_welcome(), "first attach to a fresh daemon shows the welcome");
+        assert!(
+            r.take_welcome(),
+            "first attach to a fresh daemon shows the welcome"
+        );
         assert!(!r.take_welcome(), "shown once — subsequent attaches do not");
         assert!(!r.take_welcome(), "stays false for this daemon lifetime");
     }
@@ -398,18 +437,30 @@ mod tests {
     async fn duplicate_create_fails() {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        r.create("main".into(), spec(), size(), cfg()).await.unwrap();
-        let err =
-            r.create("main".into(), spec(), size(), cfg()).await.map(|_| ()).unwrap_err();
-        assert!(matches!(err, DaemonError::Protocol(ProtocolError::SessionAlreadyExists { .. })));
+        r.create("main".into(), spec(), size(), cfg())
+            .await
+            .unwrap();
+        let err = r
+            .create("main".into(), spec(), size(), cfg())
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            DaemonError::Protocol(ProtocolError::SessionAlreadyExists { .. })
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn list_returns_sorted_entries() {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        r.create("zeta".into(), spec(), size(), cfg()).await.unwrap();
-        r.create("alpha".into(), spec(), size(), cfg()).await.unwrap();
+        r.create("zeta".into(), spec(), size(), cfg())
+            .await
+            .unwrap();
+        r.create("alpha".into(), spec(), size(), cfg())
+            .await
+            .unwrap();
         let entries = r.list().await;
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "alpha");
@@ -421,15 +472,25 @@ mod tests {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
         let err = r.kill("ghost").await.unwrap_err();
-        assert!(matches!(err, DaemonError::Protocol(ProtocolError::SessionNotFound { .. })));
+        assert!(matches!(
+            err,
+            DaemonError::Protocol(ProtocolError::SessionNotFound { .. })
+        ));
     }
 
     #[tokio::test]
     async fn name_validation_rejects_empty() {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let err = r.create(String::new(), spec(), size(), cfg()).await.map(|_| ()).unwrap_err();
-        assert!(matches!(err, DaemonError::Protocol(ProtocolError::EmptyName)));
+        let err = r
+            .create(String::new(), spec(), size(), cfg())
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            DaemonError::Protocol(ProtocolError::EmptyName)
+        ));
     }
 
     #[tokio::test]
@@ -441,14 +502,20 @@ mod tests {
             .await
             .map(|_| ())
             .unwrap_err();
-        assert!(matches!(err, DaemonError::Protocol(ProtocolError::InvalidName { .. })));
+        assert!(matches!(
+            err,
+            DaemonError::Protocol(ProtocolError::InvalidName { .. })
+        ));
     }
 
     #[tokio::test]
     async fn closing_sessions_are_pruned_on_get() {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let s = r.create("dead".into(), spec(), size(), cfg()).await.unwrap();
+        let s = r
+            .create("dead".into(), spec(), size(), cfg())
+            .await
+            .unwrap();
         s.closing.store(true, Ordering::SeqCst);
         let got = r.get("dead").await;
         assert!(got.is_none(), "closing session should be pruned on get");
@@ -458,7 +525,10 @@ mod tests {
     async fn attach_or_create_replaces_a_closing_entry() {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let s = r.create("main".into(), spec(), size(), cfg()).await.unwrap();
+        let s = r
+            .create("main".into(), spec(), size(), cfg())
+            .await
+            .unwrap();
         // Mark closing DIRECTLY (not via get/list, which would prune it) to
         // reproduce the lingering-entry state after a natural session close.
         s.closing.store(true, Ordering::SeqCst);
@@ -476,7 +546,10 @@ mod tests {
     async fn reload_config_swaps_session_config() {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let s = r.create("test".into(), spec(), size(), cfg()).await.unwrap();
+        let s = r
+            .create("test".into(), spec(), size(), cfg())
+            .await
+            .unwrap();
         // Reload re-reads from disk via `load_or_default()` (the platform config
         // dir). `isolate()` only sandboxes the state dir, not the HOME-derived
         // config path, so a developer with a real `config.kdl` (custom status
@@ -501,26 +574,39 @@ mod tests {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
         // Session running a customized config.
-        let s = r.create("test".into(), spec(), size(), custom_cfg(999_999)).await.unwrap();
+        let s = r
+            .create("test".into(), spec(), size(), custom_cfg(999_999))
+            .await
+            .unwrap();
         // A parse error: the loader hands back the built-in DEFAULT + `Some(err)`.
         // Applying that default would wipe the custom config, which is the bug.
         // The fix keeps the running config untouched.
-        let err = Some(plexy_glass_config::ConfigError::Kdl("line 3:1: boom".into()));
-        let result = r.apply_reload(plexy_glass_config::built_in_default(), err).await;
+        let err = Some(plexy_glass_config::ConfigError::Kdl(
+            "line 3:1: boom".into(),
+        ));
+        let result = r
+            .apply_reload(plexy_glass_config::built_in_default(), err)
+            .await;
         assert!(result.is_err(), "a broken reload reports failure");
         assert_eq!(
             s.config_snapshot().blocks.duration_threshold_ms,
             999_999,
             "custom config must survive a failed reload (not revert to default)"
         );
-        assert!(r.has_config_error(), "the failure is surfaced on the next attach");
+        assert!(
+            r.has_config_error(),
+            "the failure is surfaced on the next attach"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn clean_reload_still_swaps_config() {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let s = r.create("test".into(), spec(), size(), custom_cfg(999_999)).await.unwrap();
+        let s = r
+            .create("test".into(), spec(), size(), custom_cfg(999_999))
+            .await
+            .unwrap();
         // A legitimate reload (no error) must still apply the new config.
         let mut good = plexy_glass_config::built_in_default();
         good.blocks.duration_threshold_ms = 12_345;
@@ -530,14 +616,20 @@ mod tests {
             12_345,
             "a clean reload swaps in the new config"
         );
-        assert!(!r.has_config_error(), "a clean reload clears any prior error");
+        assert!(
+            !r.has_config_error(),
+            "a clean reload clears any prior error"
+        );
     }
 
     #[tokio::test]
     async fn rename_session_rekeys_map_and_live_name() {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let s = r.create("before".into(), spec(), size(), cfg()).await.unwrap();
+        let s = r
+            .create("before".into(), spec(), size(), cfg())
+            .await
+            .unwrap();
         r.rename_session("before", "after").await.unwrap();
         assert!(r.get("before").await.is_none(), "old key must be gone");
         let got = r.get("after").await.expect("new key resolves");
@@ -566,8 +658,14 @@ mod tests {
         let r = Arc::new(SessionRegistry::new());
         r.create("a".into(), spec(), size(), cfg()).await.unwrap();
         let err = r.rename_session("a", "has space").await.unwrap_err();
-        assert!(matches!(err, DaemonError::Protocol(ProtocolError::InvalidName { .. })));
-        assert!(r.get("a").await.is_some(), "failed rename leaves the session keyed as before");
+        assert!(matches!(
+            err,
+            DaemonError::Protocol(ProtocolError::InvalidName { .. })
+        ));
+        assert!(
+            r.get("a").await.is_some(),
+            "failed rename leaves the session keyed as before"
+        );
     }
 
     #[tokio::test]
@@ -575,15 +673,22 @@ mod tests {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
         let err = r.rename_session("ghost", "x").await.unwrap_err();
-        assert!(matches!(err, DaemonError::Protocol(ProtocolError::SessionNotFound { .. })));
+        assert!(matches!(
+            err,
+            DaemonError::Protocol(ProtocolError::SessionNotFound { .. })
+        ));
     }
 
     #[tokio::test]
     async fn rename_session_rekeys_to_new_name() {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        r.create("fresh".into(), spec(), size(), cfg()).await.unwrap();
-        r.rename_session("fresh", "moved").await.expect("rename succeeds");
+        r.create("fresh".into(), spec(), size(), cfg())
+            .await
+            .unwrap();
+        r.rename_session("fresh", "moved")
+            .await
+            .expect("rename succeeds");
         assert!(r.get("moved").await.is_some());
         assert!(r.get("fresh").await.is_none());
     }
@@ -596,7 +701,10 @@ mod tests {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
         let cfg = cfg_with_session(r#"session "dev" { window "w" { pane } }"#);
-        let s = r.create_declared(&cfg.sessions[0], Arc::clone(&cfg), size()).await.unwrap();
+        let s = r
+            .create_declared(&cfg.sessions[0], Arc::clone(&cfg), size())
+            .await
+            .unwrap();
         assert_eq!(s.name(), "dev");
         assert!(r.get("dev").await.is_some());
         s.terminate_panes().await;
@@ -623,8 +731,12 @@ mod tests {
         // (the reload "live sessions are never rebuilt" guarantee).
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let cfg_v1 = cfg_with_session(r#"session "dev" { window "w" { split vertical { pane; pane } } }"#);
-        let live = r.create_declared(&cfg_v1.sessions[0], Arc::clone(&cfg_v1), size()).await.unwrap();
+        let cfg_v1 =
+            cfg_with_session(r#"session "dev" { window "w" { split vertical { pane; pane } } }"#);
+        let live = r
+            .create_declared(&cfg_v1.sessions[0], Arc::clone(&cfg_v1), size())
+            .await
+            .unwrap();
         let live_ptr = Arc::as_ptr(&live);
         {
             let wm = live.window_manager.lock().await;
@@ -634,10 +746,17 @@ mod tests {
         let cfg_v2 = cfg_with_session(r#"session "dev" { window "w" { pane } }"#);
         r.build_declared(&cfg_v2, size()).await;
         let still = r.get("dev").await.expect("dev still live");
-        assert!(ptr::eq(Arc::as_ptr(&still), live_ptr), "same session Arc (not rebuilt)");
+        assert!(
+            ptr::eq(Arc::as_ptr(&still), live_ptr),
+            "same session Arc (not rebuilt)"
+        );
         {
             let wm = still.window_manager.lock().await;
-            assert_eq!(wm.windows()[0].layout().panes().len(), 2, "live shape unchanged by reload");
+            assert_eq!(
+                wm.windows()[0].layout().panes().len(),
+                2,
+                "live shape unchanged by reload"
+            );
         }
         live.terminate_panes().await;
     }
@@ -646,10 +765,14 @@ mod tests {
     async fn attach_or_create_routes_declared_name_to_template() {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let cfg = cfg_with_session(r#"session "dev" { window "w" { split vertical { pane; pane } } }"#);
+        let cfg =
+            cfg_with_session(r#"session "dev" { window "w" { split vertical { pane; pane } } }"#);
         // No saved file, no live session: attach must build the 2-pane template,
         // not a 1-pane fresh `create`.
-        let s = r.attach_or_create("dev".into(), spec(), size(), Arc::clone(&cfg)).await.unwrap();
+        let s = r
+            .attach_or_create("dev".into(), spec(), size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
         {
             let wm = s.window_manager.lock().await;
             assert_eq!(wm.windows()[0].layout().panes().len(), 2);
@@ -663,7 +786,10 @@ mod tests {
         let cfg = cfg_with_session(r#"session "dev" { window "w" { pane } }"#);
         // "other" isn't declared, so this is a normal fresh create (1 pane from
         // `spec()`).
-        let s = r.attach_or_create("other".into(), spec(), size(), Arc::clone(&cfg)).await.unwrap();
+        let s = r
+            .attach_or_create("other".into(), spec(), size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
         {
             let wm = s.window_manager.lock().await;
             assert_eq!(wm.windows().len(), 1);
@@ -676,8 +802,14 @@ mod tests {
     async fn closing_sessions_are_pruned_on_list() {
         let _g = test_env::isolate();
         let r = Arc::new(SessionRegistry::new());
-        let alive = r.create("alive".into(), spec(), size(), cfg()).await.unwrap();
-        let dead = r.create("dead".into(), spec(), size(), cfg()).await.unwrap();
+        let alive = r
+            .create("alive".into(), spec(), size(), cfg())
+            .await
+            .unwrap();
+        let dead = r
+            .create("dead".into(), spec(), size(), cfg())
+            .await
+            .unwrap();
         dead.closing.store(true, Ordering::SeqCst);
         let entries = r.list().await;
         assert_eq!(entries.len(), 1);

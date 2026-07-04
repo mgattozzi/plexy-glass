@@ -211,7 +211,11 @@ impl KeyParser {
         }
         // invariant: just ensured at least one param exists above.
         let p = self.params.last_mut().expect("param pushed above");
-        p.sub.push(if self.cur_sub_seen { self.cur_sub } else { None });
+        p.sub.push(if self.cur_sub_seen {
+            self.cur_sub
+        } else {
+            None
+        });
         self.cur_sub = None;
         self.cur_sub_seen = false;
     }
@@ -275,17 +279,31 @@ impl KeyParser {
             (b'F', None, None) => Some(KeyEvent::plain(Key::End)),
             (b'~', Some(n), None) => key_from_tilde(n).map(KeyEvent::plain),
             (b'Z', None, None) => Some(KeyEvent::new(Key::Tab, Modifiers::SHIFT)),
-            (b'A', Some(1), Some(m)) => Some(KeyEvent::new(Key::Arrow(Direction::Up),    decode_xterm_mods(m))),
-            (b'B', Some(1), Some(m)) => Some(KeyEvent::new(Key::Arrow(Direction::Down),  decode_xterm_mods(m))),
-            (b'C', Some(1), Some(m)) => Some(KeyEvent::new(Key::Arrow(Direction::Right), decode_xterm_mods(m))),
-            (b'D', Some(1), Some(m)) => Some(KeyEvent::new(Key::Arrow(Direction::Left),  decode_xterm_mods(m))),
+            (b'A', Some(1), Some(m)) => Some(KeyEvent::new(
+                Key::Arrow(Direction::Up),
+                decode_xterm_mods(m),
+            )),
+            (b'B', Some(1), Some(m)) => Some(KeyEvent::new(
+                Key::Arrow(Direction::Down),
+                decode_xterm_mods(m),
+            )),
+            (b'C', Some(1), Some(m)) => Some(KeyEvent::new(
+                Key::Arrow(Direction::Right),
+                decode_xterm_mods(m),
+            )),
+            (b'D', Some(1), Some(m)) => Some(KeyEvent::new(
+                Key::Arrow(Direction::Left),
+                decode_xterm_mods(m),
+            )),
             (b'H', Some(1), Some(m)) => Some(KeyEvent::new(Key::Home, decode_xterm_mods(m))),
-            (b'F', Some(1), Some(m)) => Some(KeyEvent::new(Key::End,  decode_xterm_mods(m))),
+            (b'F', Some(1), Some(m)) => Some(KeyEvent::new(Key::End, decode_xterm_mods(m))),
             (b'P', Some(1), Some(m)) => Some(KeyEvent::new(Key::Function(1), decode_xterm_mods(m))),
             (b'Q', Some(1), Some(m)) => Some(KeyEvent::new(Key::Function(2), decode_xterm_mods(m))),
             (b'R', Some(1), Some(m)) => Some(KeyEvent::new(Key::Function(3), decode_xterm_mods(m))),
             (b'S', Some(1), Some(m)) => Some(KeyEvent::new(Key::Function(4), decode_xterm_mods(m))),
-            (b'~', Some(n), Some(m)) => key_from_tilde(n).map(|k| KeyEvent::new(k, decode_xterm_mods(m))),
+            (b'~', Some(n), Some(m)) => {
+                key_from_tilde(n).map(|k| KeyEvent::new(k, decode_xterm_mods(m)))
+            }
             (b'u', Some(_), _) => self.decode_kitty_u(params),
             _ => None,
         }
@@ -295,7 +313,10 @@ impl KeyParser {
         // CSI-u isn't the wire form for a Legacy or modifyOtherKeys client, so
         // those strict modes ignore it (bail to raw bytes). Kitty and Permissive
         // accept it.
-        if matches!(self.protocol, KeyboardProtocol::ModifyOtherKeys | KeyboardProtocol::Legacy) {
+        if matches!(
+            self.protocol,
+            KeyboardProtocol::ModifyOtherKeys | KeyboardProtocol::Legacy
+        ) {
             return None;
         }
         let key_param = params.first()?;
@@ -307,7 +328,8 @@ impl KeyParser {
         // param is 1-based; `.max(1)` only guards a malformed 0 (decode_xterm_mods
         // already maps both 0 and 1 to "no modifiers").
         let mods = params
-            .get(1).map_or_else(Modifiers::empty, |p| decode_xterm_mods(p.primary().max(1)));
+            .get(1)
+            .map_or_else(Modifiers::empty, |p| decode_xterm_mods(p.primary().max(1)));
         let kind = match params.get(1).and_then(|p| p.sub_at(1)).unwrap_or(1) {
             2 => KeyEventKind::Repeat,
             3 => KeyEventKind::Release,
@@ -654,7 +676,12 @@ mod tests {
             assert!(
                 !matches!(
                     e.key,
-                    Key::Arrow(_) | Key::End | Key::Insert | Key::Home | Key::PageUp | Key::PageDown
+                    Key::Arrow(_)
+                        | Key::End
+                        | Key::Insert
+                        | Key::Home
+                        | Key::PageUp
+                        | Key::PageDown
                 ),
                 "kitty code {code} mis-decoded as a navigation key: {:?}",
                 e.key
@@ -681,13 +708,22 @@ mod tests {
 
     #[test]
     fn kitty_event_type_repeat_decoded() {
-        assert_eq!(last_event(b"\x1b[97;5:2u").kind, plexy_glass_mux::KeyEventKind::Repeat);
+        assert_eq!(
+            last_event(b"\x1b[97;5:2u").kind,
+            plexy_glass_mux::KeyEventKind::Repeat
+        );
     }
 
     #[test]
     fn kitty_event_type_press_default() {
-        assert_eq!(last_event(b"\x1b[97;5u").kind, plexy_glass_mux::KeyEventKind::Press);
-        assert_eq!(last_event(b"\x1b[97;5:1u").kind, plexy_glass_mux::KeyEventKind::Press);
+        assert_eq!(
+            last_event(b"\x1b[97;5u").kind,
+            plexy_glass_mux::KeyEventKind::Press
+        );
+        assert_eq!(
+            last_event(b"\x1b[97;5:1u").kind,
+            plexy_glass_mux::KeyEventKind::Press
+        );
     }
 
     #[test]
@@ -835,7 +871,7 @@ mod tests {
     fn mok_27_form_round_trips_with_encoder() {
         // Symmetric with `encode::modify_other_keys_bytes`: encode a key to its
         // 27-form, parse it back, get the same KeyEvent shape.
-        use crate::encode::{encode, KeyboardTarget};
+        use crate::encode::{KeyboardTarget, encode};
         for (key, mods) in [
             (Key::Char('a'), Modifiers::CTRL),
             (Key::Enter, Modifiers::SHIFT),
@@ -843,7 +879,10 @@ mod tests {
         ] {
             let original = KeyEvent::new(key, mods);
             let bytes = encode(&original, KeyboardTarget::ModifyOtherKeys(2), false);
-            assert!(bytes.starts_with(b"\x1b[27;"), "expected 27-form for {key:?}/{mods:?}, got {bytes:?}");
+            assert!(
+                bytes.starts_with(b"\x1b[27;"),
+                "expected 27-form for {key:?}/{mods:?}, got {bytes:?}"
+            );
             let mut p = KeyParser::new().with_protocol(KeyboardProtocol::ModifyOtherKeys);
             let mut got = None;
             for &b in &bytes {
@@ -880,7 +919,10 @@ mod tests {
         assert!(matches!(p.consume(0x1b), KeyParseOutput::Pending));
         assert!(matches!(p.consume(b'['), KeyParseOutput::Pending));
         assert!(p.is_mid_sequence(), "still mid-sequence after \\x1b[");
-        assert!(p.flush().is_none(), "flush must not synthesize Escape mid-CSI");
+        assert!(
+            p.flush().is_none(),
+            "flush must not synthesize Escape mid-CSI"
+        );
         // The real CSI can still complete after the flush no-op.
         let e = {
             let mut last = None;

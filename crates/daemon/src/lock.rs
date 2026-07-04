@@ -7,8 +7,7 @@
 //! pane's failure into a session-wide render wedge. See the
 //! terminal-trust-hardening spec, Phase 1.
 
-use std::sync::{Mutex, MutexGuard};
-use std::sync::PoisonError;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 pub trait LockExt<T> {
     /// Lock, recovering the guard from a poisoned lock instead of panicking.
@@ -24,9 +23,10 @@ impl<T> LockExt<T> for Mutex<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::{Arc, Mutex};
     use std::thread;
+
+    use super::*;
 
     #[test]
     fn lock_recover_returns_inner_after_poison() {

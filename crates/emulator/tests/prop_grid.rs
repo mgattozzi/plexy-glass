@@ -2,8 +2,7 @@
 //! through scrollback, eviction, and reflow. Setters must round-trip and `merge`
 //! must union flags (the reflow merge depends on both).
 
-use hegel::TestCase;
-use hegel::generators as gs;
+use hegel::{TestCase, generators as gs};
 use plexy_glass_emulator::RowMark;
 
 fn draw_flag(tc: &TestCase) -> u8 {
@@ -19,7 +18,11 @@ fn draw_flag(tc: &TestCase) -> u8 {
 fn prompt_end_col_round_trips(tc: TestCase) {
     let col = tc.draw(gs::integers::<u16>());
     let mut m = RowMark::default();
-    assert_eq!(m.prompt_end_col(), None, "default carries no prompt-end col");
+    assert_eq!(
+        m.prompt_end_col(),
+        None,
+        "default carries no prompt-end col"
+    );
     m.set_prompt_end(col);
     assert_eq!(m.prompt_end_col(), Some(col));
     assert!(m.contains(RowMark::PROMPT_END));

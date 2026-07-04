@@ -1,8 +1,10 @@
-use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
+use std::time::Duration;
+
 use async_trait::async_trait;
 use battery::units::ratio::percent;
 use smol_str::SmolStr;
-use std::time::Duration;
+
+use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
 
 pub struct CpuLoadWidget {
     pub style: ResolvedStyle,

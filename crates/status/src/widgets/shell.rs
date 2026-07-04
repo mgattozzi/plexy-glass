@@ -1,10 +1,12 @@
-use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
-use async_trait::async_trait;
-use smol_str::SmolStr;
 use std::process::Stdio;
 use std::time::Duration;
+
+use async_trait::async_trait;
+use smol_str::SmolStr;
 use tokio::process::Command;
 use tokio::time;
+
+use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
 
 const OUTPUT_CAP: usize = 200;
 

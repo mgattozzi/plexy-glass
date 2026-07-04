@@ -1,7 +1,9 @@
-use crate::errors::ProtocolError;
+use std::time::SystemTime;
+
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::time::SystemTime;
+
+use crate::errors::ProtocolError;
 
 /// Window dimensions, in cells and pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,7 +23,6 @@ pub struct SessionEntry {
     pub clients: u8,
     pub created: SystemTime,
 }
-
 
 /// What the daemon should spawn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,7 +117,9 @@ pub enum ClientMsg {
         size: PtySize,
     },
     ListSessions,
-    KillSession { name: String },
+    KillSession {
+        name: String,
+    },
     Input(Bytes),
     Resize(PtySize),
     Detach,
@@ -129,17 +132,27 @@ pub enum ClientMsg {
     /// Outer terminal reported its color scheme (`\e[?997;Xn`).
     ColorScheme(ColorScheme),
     /// Run one command-prompt line against a session (CLI `cmd`).
-    RunCommand { session: Option<String>, line: String },
+    RunCommand {
+        session: Option<String>,
+        line: String,
+    },
     /// Write raw bytes into a session's input path (CLI `send`).
-    SendInput { session: Option<String>, bytes: Bytes },
+    SendInput {
+        session: Option<String>,
+        bytes: Bytes,
+    },
     /// Capture the focused pane's visible screen text (CLI `capture`).
-    CapturePane { session: Option<String> },
+    CapturePane {
+        session: Option<String>,
+    },
     /// Capture the last completed OSC 133 command block's output text
     /// (scrollback-inclusive). Replies with `PaneCapture` on success or
     /// `CommandResult { ok: false }` when no completed block exists.
     ///
     /// **Postcard-positional**: always appended at the end of the enum.
-    CaptureLastCommand { session: Option<String> },
+    CaptureLastCommand {
+        session: Option<String>,
+    },
     /// Execute `text` synchronously in a session's input target pane (CLI
     /// `run`): the daemon injects `text` + `\r`, waits for the OSC 133
     /// completion mark, and replies `ExecDone`, or
@@ -147,31 +160,53 @@ pub enum ClientMsg {
     /// busy pane, alt screen, child exit, mid-command reset).
     ///
     /// **Postcard-positional**: always appended at the end of the enum.
-    ExecCommand { session: Option<String>, text: String, timeout_ms: Option<u64> },
+    ExecCommand {
+        session: Option<String>,
+        text: String,
+        timeout_ms: Option<u64>,
+    },
     /// Capture the last completed OSC 133 command block as structured parts
     /// (CLI `capture --last-command --json`). Replies with `BlockCapture` on
     /// success or `CommandResult { ok: false }` when no completed block
     /// exists.
     ///
     /// **Postcard-positional**: always appended at the end of the enum.
-    CaptureLastBlock { session: Option<String> },
+    CaptureLastBlock {
+        session: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ServerMsg {
-    Attached { session_name: String, client_id: u64 },
-    SessionList { entries: Vec<SessionEntry> },
-    SessionKilled { name: String },
+    Attached {
+        session_name: String,
+        client_id: u64,
+    },
+    SessionList {
+        entries: Vec<SessionEntry>,
+    },
+    SessionKilled {
+        name: String,
+    },
     Output(Bytes),
-    Exited { status: ExitStatus },
+    Exited {
+        status: ExitStatus,
+    },
     Error(ProtocolError),
-    ConfigReloaded { error: Option<String> },
+    ConfigReloaded {
+        error: Option<String>,
+    },
     /// Outcome of `RunCommand` / `SendInput`: `ok` drives the CLI exit code;
     /// `message` is the confirmation or error text.
-    CommandResult { ok: bool, message: Option<String> },
+    CommandResult {
+        ok: bool,
+        message: Option<String>,
+    },
     /// `CapturePane` response.
-    PaneCapture { text: String },
+    PaneCapture {
+        text: String,
+    },
     /// `ExecCommand` outcome: the command's recorded exit code (`None` when the
     /// `133;D` mark carried no payload), the completed block's output text,
     /// and whether the daemon-side wait timed out. Timeout is **structural**
@@ -179,14 +214,22 @@ pub enum ServerMsg {
     /// exit 124.
     ///
     /// **Postcard-positional**: always appended at the end of the enum.
-    ExecDone { exit: Option<i32>, output: String, timed_out: bool },
+    ExecDone {
+        exit: Option<i32>,
+        output: String,
+        timed_out: bool,
+    },
     /// `CaptureLastBlock` response: the block's output text (same region as
     /// `CaptureLastCommand`), the closing `133;D` exit code (`None` when the
     /// mark carried no payload), and the command line typed at the prompt
     /// (`None` when the shell never emitted `133;B`/`133;C`).
     ///
     /// **Postcard-positional**: always appended at the end of the enum.
-    BlockCapture { text: String, exit: Option<i32>, command_line: Option<String> },
+    BlockCapture {
+        text: String,
+        exit: Option<i32>,
+        command_line: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -195,7 +238,12 @@ mod tests {
 
     #[test]
     fn pty_size_round_trips_through_postcard() {
-        let size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let bytes = postcard::to_allocvec(&size).expect("serialize");
         let decoded: PtySize = postcard::from_bytes(&bytes).expect("deserialize");
         assert_eq!(size, decoded);
@@ -216,7 +264,12 @@ mod tests {
 
     #[test]
     fn exit_status_variants_round_trip() {
-        for status in [ExitStatus::Code(0), ExitStatus::Code(137), ExitStatus::Signal(9), ExitStatus::Unknown] {
+        for status in [
+            ExitStatus::Code(0),
+            ExitStatus::Code(137),
+            ExitStatus::Signal(9),
+            ExitStatus::Unknown,
+        ] {
             let bytes = postcard::to_allocvec(&status).expect("serialize");
             let decoded: ExitStatus = postcard::from_bytes(&bytes).expect("deserialize");
             assert_eq!(status, decoded);
@@ -243,12 +296,22 @@ mod tests {
                     env: vec![],
                     cwd: None,
                 }),
-                size: PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+                size: PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
             },
             ClientMsg::ListSessions,
             ClientMsg::KillSession { name: "old".into() },
             ClientMsg::Input(Bytes::from_static(b"ls\n")),
-            ClientMsg::Resize(PtySize { rows: 50, cols: 200, pixel_width: 0, pixel_height: 0 }),
+            ClientMsg::Resize(PtySize {
+                rows: 50,
+                cols: 200,
+                pixel_width: 0,
+                pixel_height: 0,
+            }),
             ClientMsg::Detach,
             ClientMsg::Shutdown,
         ];
@@ -263,11 +326,16 @@ mod tests {
     fn server_msgs_round_trip_without_error_variant() {
         // Error variant is covered once `ProtocolError` lands.
         let cases = vec![
-            ServerMsg::Attached { session_name: "main".into(), client_id: 0 },
+            ServerMsg::Attached {
+                session_name: "main".into(),
+                client_id: 0,
+            },
             ServerMsg::SessionList { entries: vec![] },
             ServerMsg::SessionKilled { name: "old".into() },
             ServerMsg::Output(Bytes::from_static(b"hello")),
-            ServerMsg::Exited { status: ExitStatus::Code(0) },
+            ServerMsg::Exited {
+                status: ExitStatus::Code(0),
+            },
         ];
         for msg in cases {
             let bytes = postcard::to_allocvec(&msg).expect("serialize");
@@ -284,7 +352,10 @@ mod tests {
             kbd: NegotiatedKbd::Legacy,
             graphics: GraphicsCaps::default(),
         };
-        let server = ServerHello { version: PROTOCOL_VERSION, daemon_pid: 12345 };
+        let server = ServerHello {
+            version: PROTOCOL_VERSION,
+            daemon_pid: 12345,
+        };
 
         let cb = postcard::to_allocvec(&client).expect("serialize");
         let sb = postcard::to_allocvec(&server).expect("serialize");
@@ -312,7 +383,11 @@ mod tests {
             version: PROTOCOL_VERSION,
             term: "xterm-ghostty".into(),
             kbd: NegotiatedKbd::Kitty(31),
-            graphics: GraphicsCaps { kitty: true, sixel: false, iterm2: false },
+            graphics: GraphicsCaps {
+                kitty: true,
+                sixel: false,
+                iterm2: false,
+            },
         };
         let bytes = postcard::to_allocvec(&hello).expect("serialize");
         let decoded: ClientHello = postcard::from_bytes(&bytes).expect("deserialize");
@@ -348,19 +423,38 @@ mod tests {
     #[test]
     fn scripting_messages_round_trip() {
         let msgs = [
-            ClientMsg::RunCommand { session: Some("w".into()), line: "split v".into() },
-            ClientMsg::RunCommand { session: None, line: "layout tiled".into() },
-            ClientMsg::SendInput { session: None, bytes: Bytes::from_static(b"ls\r") },
-            ClientMsg::CapturePane { session: Some("w".into()) },
+            ClientMsg::RunCommand {
+                session: Some("w".into()),
+                line: "split v".into(),
+            },
+            ClientMsg::RunCommand {
+                session: None,
+                line: "layout tiled".into(),
+            },
+            ClientMsg::SendInput {
+                session: None,
+                bytes: Bytes::from_static(b"ls\r"),
+            },
+            ClientMsg::CapturePane {
+                session: Some("w".into()),
+            },
         ];
         for m in msgs {
             let enc = postcard::to_allocvec(&m).unwrap();
             assert_eq!(postcard::from_bytes::<ClientMsg>(&enc).unwrap(), m);
         }
         let outs = [
-            ServerMsg::CommandResult { ok: true, message: None },
-            ServerMsg::CommandResult { ok: false, message: Some("nope".into()) },
-            ServerMsg::PaneCapture { text: "hello\nworld".into() },
+            ServerMsg::CommandResult {
+                ok: true,
+                message: None,
+            },
+            ServerMsg::CommandResult {
+                ok: false,
+                message: Some("nope".into()),
+            },
+            ServerMsg::PaneCapture {
+                text: "hello\nworld".into(),
+            },
         ];
         for m in outs {
             let enc = postcard::to_allocvec(&m).unwrap();
@@ -372,7 +466,9 @@ mod tests {
     fn capture_last_command_round_trips() {
         // New variant in v7; appended at the end of the enum (postcard is positional).
         let cases = [
-            ClientMsg::CaptureLastCommand { session: Some("work".into()) },
+            ClientMsg::CaptureLastCommand {
+                session: Some("work".into()),
+            },
             ClientMsg::CaptureLastCommand { session: None },
         ];
         for m in cases {
@@ -381,7 +477,9 @@ mod tests {
         }
         // Daemon replies reuse `PaneCapture` (success) and `CommandResult` (failure).
         for reply in [
-            ServerMsg::PaneCapture { text: "out1\nout2".into() },
+            ServerMsg::PaneCapture {
+                text: "out1\nout2".into(),
+            },
             ServerMsg::CommandResult {
                 ok: false,
                 message: Some(
@@ -399,7 +497,9 @@ mod tests {
     fn capture_last_block_round_trips() {
         // New pair in v9; appended at the end of their enums (postcard is positional).
         let requests = [
-            ClientMsg::CaptureLastBlock { session: Some("work".into()) },
+            ClientMsg::CaptureLastBlock {
+                session: Some("work".into()),
+            },
             ClientMsg::CaptureLastBlock { session: None },
         ];
         for m in requests {
@@ -423,7 +523,11 @@ mod tests {
                 exit: None,
                 command_line: Some("true".into()),
             },
-            ServerMsg::BlockCapture { text: String::new(), exit: None, command_line: None },
+            ServerMsg::BlockCapture {
+                text: String::new(),
+                exit: None,
+                command_line: None,
+            },
         ];
         for m in replies {
             let enc = postcard::to_allocvec(&m).unwrap();
@@ -461,12 +565,28 @@ mod tests {
             assert_eq!(postcard::from_bytes::<ClientMsg>(&enc).unwrap(), m);
         }
         let replies = [
-            ServerMsg::ExecDone { exit: Some(0), output: "ok\n".into(), timed_out: false },
-            ServerMsg::ExecDone { exit: Some(124), output: "partial".into(), timed_out: false },
+            ServerMsg::ExecDone {
+                exit: Some(0),
+                output: "ok\n".into(),
+                timed_out: false,
+            },
+            ServerMsg::ExecDone {
+                exit: Some(124),
+                output: "partial".into(),
+                timed_out: false,
+            },
             // D mark with no exit payload.
-            ServerMsg::ExecDone { exit: None, output: "out".into(), timed_out: false },
+            ServerMsg::ExecDone {
+                exit: None,
+                output: "out".into(),
+                timed_out: false,
+            },
             // Structural timeout: no exit, empty output.
-            ServerMsg::ExecDone { exit: None, output: String::new(), timed_out: true },
+            ServerMsg::ExecDone {
+                exit: None,
+                output: String::new(),
+                timed_out: true,
+            },
         ];
         for m in replies {
             let enc = postcard::to_allocvec(&m).unwrap();

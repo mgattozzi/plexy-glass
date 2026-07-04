@@ -4,10 +4,11 @@
 //! per-pane `SpawnSpec` construction. The `Session` wiring is in
 //! `session::build_from_template`.
 
+use std::env;
+
 use plexy_glass_config::{PaneNode, PaneTemplate, SplitDirection};
 use plexy_glass_mux::SplitDir;
 use plexy_glass_protocol::SpawnSpec;
-use std::env;
 
 /// A binary layout tree (the engine's split model) with a pane template at each
 /// leaf. An N-ary config split folds into a right-leaning chain of binary splits.
@@ -67,7 +68,10 @@ pub(crate) fn preorder_ratios(node: &PaneNode) -> Vec<f32> {
 }
 
 fn push_preorder_ratios(node: &PaneNode, out: &mut Vec<f32>) {
-    let PaneNode::Split { children, weights, .. } = node else {
+    let PaneNode::Split {
+        children, weights, ..
+    } = node
+    else {
         return;
     };
     push_split_chain_ratios(children, weights, out);
@@ -198,7 +202,11 @@ pub(crate) fn home_base(window_cwd: Option<&str>, session_cwd: Option<&str>) -> 
 /// (tilde-expanded), else the window `home_cwd` (already expanded). `env` is the
 /// effective overlay (session ∪ window ∪ pane, already merged) set ON TOP of
 /// the inherited daemon environment by the spawn path.
-pub(crate) fn pane_spec(pt: &PaneTemplate, home_cwd: Option<&str>, env: Vec<(String, String)>) -> SpawnSpec {
+pub(crate) fn pane_spec(
+    pt: &PaneTemplate,
+    home_cwd: Option<&str>,
+    env: Vec<(String, String)>,
+) -> SpawnSpec {
     let home = env::var("HOME").ok();
     make_spec(&default_shell(), pt, home_cwd, home.as_deref(), env)
 }
@@ -218,7 +226,12 @@ fn make_spec(
         Some(c) => Some(expand_tilde(c, home)),
         None => home_cwd.map(str::to_string),
     };
-    SpawnSpec { program: shell.to_string(), args, env, cwd }
+    SpawnSpec {
+        program: shell.to_string(),
+        args,
+        env,
+        cwd,
+    }
 }
 
 /// Merge env overlays in inheritance order (session, then window, then pane),
@@ -265,8 +278,9 @@ pub(crate) fn expand_tilde(path: &str, home: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plexy_glass_config::{PaneNode, PaneTemplate, SplitDirection};
+
+    use super::*;
 
     fn leaf(cmd: Option<&str>) -> PaneNode {
         PaneNode::Leaf(PaneTemplate {
@@ -280,7 +294,13 @@ mod tests {
 
     #[test]
     fn make_spec_command_runs_via_shell_dash_c() {
-        let pt = PaneTemplate { command: Some("npm run dev".into()), cwd: None, name: None, active: false, env: vec![] };
+        let pt = PaneTemplate {
+            command: Some("npm run dev".into()),
+            cwd: None,
+            name: None,
+            active: false,
+            env: vec![],
+        };
         let s = make_spec("/bin/zsh", &pt, None, None, vec![]);
         assert_eq!(s.program, "/bin/zsh");
         assert_eq!(s.args, vec!["-c".to_string(), "npm run dev".to_string()]);
@@ -290,7 +310,13 @@ mod tests {
 
     #[test]
     fn make_spec_no_command_is_interactive_shell() {
-        let pt = PaneTemplate { command: None, cwd: None, name: None, active: false, env: vec![] };
+        let pt = PaneTemplate {
+            command: None,
+            cwd: None,
+            name: None,
+            active: false,
+            env: vec![],
+        };
         let s = make_spec("/bin/sh", &pt, None, None, vec![]);
         assert_eq!(s.program, "/bin/sh");
         assert!(s.args.is_empty());
@@ -300,24 +326,48 @@ mod tests {
     fn make_spec_cwd_precedence_and_tilde() {
         // `home_cwd` is already resolved (`resolve_home_cwd` expanded the tilde upstream).
         let home_cwd = Some("/home/u/proj");
-        let pt_override = PaneTemplate { command: None, cwd: Some("~/proj/sub".into()), name: None, active: false, env: vec![] };
+        let pt_override = PaneTemplate {
+            command: None,
+            cwd: Some("~/proj/sub".into()),
+            name: None,
+            active: false,
+            env: vec![],
+        };
         let s = make_spec("/bin/sh", &pt_override, home_cwd, Some("/home/u"), vec![]);
         assert_eq!(s.cwd.as_deref(), Some("/home/u/proj/sub"));
-        let pt_inherit = PaneTemplate { command: None, cwd: None, name: None, active: false, env: vec![] };
+        let pt_inherit = PaneTemplate {
+            command: None,
+            cwd: None,
+            name: None,
+            active: false,
+            env: vec![],
+        };
         let s2 = make_spec("/bin/sh", &pt_inherit, home_cwd, Some("/home/u"), vec![]);
         assert_eq!(s2.cwd.as_deref(), Some("/home/u/proj"));
     }
 
     fn pt(cwd: Option<&str>) -> PaneTemplate {
-        PaneTemplate { command: None, cwd: cwd.map(str::to_string), name: None, active: false, env: vec![] }
+        PaneTemplate {
+            command: None,
+            cwd: cwd.map(str::to_string),
+            name: None,
+            active: false,
+            env: vec![],
+        }
     }
 
     #[test]
     fn resolve_home_cwd_window_wins_then_session() {
         // window cwd wins over session cwd; tilde expands.
-        assert_eq!(resolve_home_cwd(Some("~/w"), Some("~/s"), Some("/home/u")), Some("/home/u/w".into()));
+        assert_eq!(
+            resolve_home_cwd(Some("~/w"), Some("~/s"), Some("/home/u")),
+            Some("/home/u/w".into())
+        );
         // no window cwd → session cwd.
-        assert_eq!(resolve_home_cwd(None, Some("~/s"), Some("/home/u")), Some("/home/u/s".into()));
+        assert_eq!(
+            resolve_home_cwd(None, Some("~/s"), Some("/home/u")),
+            Some("/home/u/s".into())
+        );
         // neither → None.
         assert_eq!(resolve_home_cwd(None, None, Some("/home/u")), None);
     }
@@ -325,10 +375,22 @@ mod tests {
     #[test]
     fn make_spec_pane_cwd_overrides_home_base() {
         // pane cwd wins over the resolved home base.
-        let s = make_spec("/bin/sh", &pt(Some("~/pane")), Some("/home/u/home_base"), Some("/home/u"), vec![]);
+        let s = make_spec(
+            "/bin/sh",
+            &pt(Some("~/pane")),
+            Some("/home/u/home_base"),
+            Some("/home/u"),
+            vec![],
+        );
         assert_eq!(s.cwd.as_deref(), Some("/home/u/pane"));
         // no pane cwd → home base (already expanded; not re-expanded).
-        let s = make_spec("/bin/sh", &pt(None), Some("/home/u/home_base"), Some("/home/u"), vec![]);
+        let s = make_spec(
+            "/bin/sh",
+            &pt(None),
+            Some("/home/u/home_base"),
+            Some("/home/u"),
+            vec![],
+        );
         assert_eq!(s.cwd.as_deref(), Some("/home/u/home_base"));
         // no pane cwd, no home base → None.
         let s = make_spec("/bin/sh", &pt(None), None, Some("/home/u"), vec![]);
@@ -366,7 +428,10 @@ mod tests {
         let bin = to_binary(&node);
         let leaves = bin_leaves(&bin);
         assert_eq!(
-            leaves.iter().map(|p| p.command.as_deref()).collect::<Vec<_>>(),
+            leaves
+                .iter()
+                .map(|p| p.command.as_deref())
+                .collect::<Vec<_>>(),
             vec![Some("a"), Some("b"), Some("c")]
         );
         let ops = collect_ops(&bin);
@@ -393,7 +458,10 @@ mod tests {
         };
         let bin = to_binary(&node);
         assert_eq!(
-            bin_leaves(&bin).iter().map(|p| p.command.as_deref()).collect::<Vec<_>>(),
+            bin_leaves(&bin)
+                .iter()
+                .map(|p| p.command.as_deref())
+                .collect::<Vec<_>>(),
             vec![Some("a"), Some("b"), Some("c")]
         );
         let ops = collect_ops(&bin);
@@ -413,7 +481,11 @@ mod tests {
     // --- v2: preorder ratios ---
 
     fn split(children: Vec<PaneNode>, weights: Vec<u32>) -> PaneNode {
-        PaneNode::Split { dir: SplitDirection::Vertical, children, weights }
+        PaneNode::Split {
+            dir: SplitDirection::Vertical,
+            children,
+            weights,
+        }
     }
 
     #[test]
@@ -514,7 +586,10 @@ mod tests {
     // --- v2: env merge ---
 
     fn kv(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -524,7 +599,12 @@ mod tests {
         let pane = kv(&[("C", "p")]);
         let merged = merge_env(&session, &window, &pane);
         // A from session, B overridden by window, C overridden by pane, D from window.
-        let lookup = |k: &str| merged.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.as_str());
+        let lookup = |k: &str| {
+            merged
+                .iter()
+                .find(|(ek, _)| ek == k)
+                .map(|(_, v)| v.as_str())
+        };
         assert_eq!(lookup("A"), Some("s"));
         assert_eq!(lookup("B"), Some("w"));
         assert_eq!(lookup("C"), Some("p"));
@@ -539,7 +619,11 @@ mod tests {
         let pane = kv(&[("A", "3"), ("C", "4")]);
         let merged = merge_env(&session, &window, &pane);
         let keys: Vec<&str> = merged.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, vec!["A", "B", "C"], "A keeps its first-seen slot but takes pane's value");
+        assert_eq!(
+            keys,
+            vec!["A", "B", "C"],
+            "A keeps its first-seen slot but takes pane's value"
+        );
         assert_eq!(merged[0].1, "3");
     }
 }

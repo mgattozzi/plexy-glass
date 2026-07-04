@@ -14,7 +14,12 @@ pub struct Rect {
 
 impl Rect {
     pub const fn new(row: u16, col: u16, rows: u16, cols: u16) -> Self {
-        Self { row, col, rows, cols }
+        Self {
+            row,
+            col,
+            rows,
+            cols,
+        }
     }
 
     pub const fn contains(self, r: u16, c: u16) -> bool {

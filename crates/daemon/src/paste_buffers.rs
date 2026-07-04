@@ -2,9 +2,10 @@
 //! stack of named byte buffers. Pushed by copy-mode yanks; read by `paste-buffer`
 //! and the choose-buffer overlay. Held behind a `Mutex` on `SessionRegistry`.
 
+use std::collections::VecDeque;
+
 use plexy_glass_emulator::truncate_to_width;
 use plexy_glass_mux::BufferEntry;
-use std::collections::VecDeque;
 
 /// Display-column cap for a buffer's one-line preview in the chooser. A
 /// daemon-side cap independent of the overlay box width (the compositor re-clips
@@ -27,7 +28,11 @@ pub struct PasteBufferStore {
 
 impl PasteBufferStore {
     pub fn new(cap: usize) -> Self {
-        Self { buffers: VecDeque::new(), next_id: 0, cap: cap.max(1) }
+        Self {
+            buffers: VecDeque::new(),
+            next_id: 0,
+            cap: cap.max(1),
+        }
     }
 
     /// Push `content` as a new newest buffer; evict the oldest past `cap`.
@@ -60,7 +65,10 @@ impl PasteBufferStore {
     pub fn entries(&self) -> Vec<BufferEntry> {
         self.buffers
             .iter()
-            .map(|b| BufferEntry { name: b.name.clone(), preview: preview(&b.content) })
+            .map(|b| BufferEntry {
+                name: b.name.clone(),
+                preview: preview(&b.content),
+            })
             .collect()
     }
 }
@@ -82,7 +90,10 @@ fn preview(content: &[u8]) -> String {
     let scan = &content[..content.len().min(PREVIEW_SCAN_BYTES)];
     let first_line = scan.split(|&b| b == b'\n').next().unwrap_or(&[]);
     let s = String::from_utf8_lossy(first_line);
-    let cleaned: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
     truncate_to_width(&cleaned, PREVIEW_WIDTH).to_string()
 }
 
@@ -98,7 +109,11 @@ mod tests {
         s.push(b"three".to_vec()); // evicts "one"
         assert_eq!(s.top().unwrap().content, b"three");
         let names: Vec<_> = s.entries().into_iter().map(|e| e.name).collect();
-        assert_eq!(names, vec!["buffer2", "buffer1"], "newest-first, oldest evicted");
+        assert_eq!(
+            names,
+            vec!["buffer2", "buffer1"],
+            "newest-first, oldest evicted"
+        );
     }
 
     #[test]
@@ -119,7 +134,10 @@ mod tests {
         let mut s = PasteBufferStore::new(10);
         s.push(b"first line\r\tx\nsecond line".to_vec());
         let p = &s.entries()[0].preview;
-        assert!(!p.contains('\n') && !p.contains('\r') && !p.contains('\t'), "controls stripped: {p:?}");
+        assert!(
+            !p.contains('\n') && !p.contains('\r') && !p.contains('\t'),
+            "controls stripped: {p:?}"
+        );
         assert!(p.starts_with("first line"));
         assert!(!p.contains("second"), "only the first line is previewed");
 
@@ -127,7 +145,10 @@ mod tests {
         let wide = "字".repeat(60);
         s.push(wide.into_bytes());
         let p2 = &s.entries()[0].preview;
-        assert!(plexy_glass_emulator::display_width(p2) <= 40, "preview truncated to width");
+        assert!(
+            plexy_glass_emulator::display_width(p2) <= 40,
+            "preview truncated to width"
+        );
     }
 
     #[test]

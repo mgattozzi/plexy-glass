@@ -1,8 +1,7 @@
 //! Property tests for the command-block helpers: FoldProjection (visible↔unified
 //! line mapping), the visible-space scroll geometry, and format_duration.
 
-use hegel::generators as gs;
-use hegel::TestCase;
+use hegel::{TestCase, generators as gs};
 use plexy_glass_emulator::{Emulator, Screen};
 use plexy_glass_mux::blocks::{self, FoldProjection};
 
@@ -16,7 +15,10 @@ fn format_duration_total_and_well_formed(tc: TestCase) {
     if ms < 1000 {
         assert!(s.ends_with("ms"), "sub-second must be ms form");
     } else {
-        assert!(s.ends_with('s') && !s.ends_with("ms"), "≥1s must be a seconds form");
+        assert!(
+            s.ends_with('s') && !s.ends_with("ms"),
+            "≥1s must be a seconds form"
+        );
     }
     // No "10.0s" artifact: a tenths form's integer part is a single 1..=9 digit.
     if let Some(dot) = s.find('.') {
@@ -104,7 +106,9 @@ fn fold_projection_visible_unified_round_trip(tc: TestCase) {
     }
     // `from_unified` is a bijection visible-unified ↔ [0, vt): exactly vt unified
     // lines map to `Some`, and the images are exactly {0..vt}.
-    let visible_count = (0..total).filter(|&u| proj.from_unified(u).is_some()).count() as u32;
+    let visible_count = (0..total)
+        .filter(|&u| proj.from_unified(u).is_some())
+        .count() as u32;
     assert_eq!(
         visible_count, vt,
         "exactly visible_total unified lines must be visible"

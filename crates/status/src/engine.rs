@@ -1,20 +1,21 @@
+use std::future::Future;
+use std::ops::Range;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use plexy_glass_config::{PaletteConfig, StatusConfig, WidgetSpec};
+use smol_str::SmolStr;
+use tokio::sync::{Mutex, Notify};
+use tokio::task::JoinHandle;
+use tokio::time;
+
 use crate::widget::{Segment, StyledText, Widget};
 use crate::widgets::{
     AttachedClientsWidget, BatteryWidget, CpuLoadWidget, CwdWidget, GitBranchWidget,
     HostnameWidget, MemoryWidget, PrefixIndicatorWidget, SeparatorWidget, SessionWidget,
     ShellWidget, TextWidget, TimeWidget, WindowListWidget,
 };
-use crate::resolve_style;
-use crate::GlyphSet;
-use plexy_glass_config::{PaletteConfig, StatusConfig, WidgetSpec};
-use smol_str::SmolStr;
-use std::future::Future;
-use std::ops::Range;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Notify};
-use tokio::task::JoinHandle;
-use tokio::time;
+use crate::{GlyphSet, resolve_style};
 
 #[derive(Debug, Clone)]
 pub struct WindowSummary {
@@ -67,9 +68,21 @@ pub struct EngineInner {
 
 impl StatusEngine {
     pub fn new(cfg: &StatusConfig, palette: &PaletteConfig, glyphs: &GlyphSet) -> Self {
-        let left = cfg.left.iter().map(|s| build_slot(s, palette, glyphs)).collect();
-        let middle = cfg.middle.iter().map(|s| build_slot(s, palette, glyphs)).collect();
-        let right = cfg.right.iter().map(|s| build_slot(s, palette, glyphs)).collect();
+        let left = cfg
+            .left
+            .iter()
+            .map(|s| build_slot(s, palette, glyphs))
+            .collect();
+        let middle = cfg
+            .middle
+            .iter()
+            .map(|s| build_slot(s, palette, glyphs))
+            .collect();
+        let right = cfg
+            .right
+            .iter()
+            .map(|s| build_slot(s, palette, glyphs))
+            .collect();
         Self {
             inner: Arc::new(EngineInner {
                 left: Mutex::new(left),
@@ -93,7 +106,10 @@ fn build_slot(spec: &WidgetSpec, palette: &PaletteConfig, glyphs: &GlyphSet) -> 
             pad_right: padding.right,
             icon: SmolStr::new(glyphs.session),
         }),
-        WidgetSpec::WindowList { active_style, inactive_style } => Box::new(WindowListWidget {
+        WidgetSpec::WindowList {
+            active_style,
+            inactive_style,
+        } => Box::new(WindowListWidget {
             active_style: resolve_style(active_style, palette),
             inactive_style: resolve_style(inactive_style, palette),
         }),
@@ -107,32 +123,36 @@ fn build_slot(spec: &WidgetSpec, palette: &PaletteConfig, glyphs: &GlyphSet) -> 
             min_count: *min_count,
             icon: SmolStr::new(glyphs.clients),
         }),
-        WidgetSpec::Time { format, interval, style, utc } => Box::new(TimeWidget {
+        WidgetSpec::Time {
+            format,
+            interval,
+            style,
+            utc,
+        } => Box::new(TimeWidget {
             format: format.clone(),
             interval: *interval,
             style: resolve_style(style, palette),
             icon: SmolStr::new(glyphs.clock),
             utc: *utc,
         }),
-        WidgetSpec::Hostname { style, interval } => {
-            Box::new(HostnameWidget::new(
-                resolve_style(style, palette),
-                *interval,
-                SmolStr::new(glyphs.host),
-            ))
-        }
-        WidgetSpec::Cwd { style, max_components } => Box::new(CwdWidget {
+        WidgetSpec::Hostname { style, interval } => Box::new(HostnameWidget::new(
+            resolve_style(style, palette),
+            *interval,
+            SmolStr::new(glyphs.host),
+        )),
+        WidgetSpec::Cwd {
+            style,
+            max_components,
+        } => Box::new(CwdWidget {
             style: resolve_style(style, palette),
             max_components: *max_components,
             icon: SmolStr::new(glyphs.cwd),
         }),
-        WidgetSpec::GitBranch { style, interval } => {
-            Box::new(GitBranchWidget::new(
-                resolve_style(style, palette),
-                *interval,
-                SmolStr::new(glyphs.git_branch),
-            ))
-        }
+        WidgetSpec::GitBranch { style, interval } => Box::new(GitBranchWidget::new(
+            resolve_style(style, palette),
+            *interval,
+            SmolStr::new(glyphs.git_branch),
+        )),
         WidgetSpec::Battery { style, interval } => Box::new(BatteryWidget {
             style: resolve_style(style, palette),
             interval: *interval,
@@ -143,13 +163,11 @@ fn build_slot(spec: &WidgetSpec, palette: &PaletteConfig, glyphs: &GlyphSet) -> 
             interval: *interval,
             icon: SmolStr::new(glyphs.cpu),
         }),
-        WidgetSpec::Memory { style, interval } => {
-            Box::new(MemoryWidget::new(
-                resolve_style(style, palette),
-                *interval,
-                SmolStr::new(glyphs.mem),
-            ))
-        }
+        WidgetSpec::Memory { style, interval } => Box::new(MemoryWidget::new(
+            resolve_style(style, palette),
+            *interval,
+            SmolStr::new(glyphs.mem),
+        )),
         WidgetSpec::Text { value, style } => Box::new(TextWidget {
             text: SmolStr::new(value),
             style: resolve_style(style, palette),
@@ -158,7 +176,13 @@ fn build_slot(spec: &WidgetSpec, palette: &PaletteConfig, glyphs: &GlyphSet) -> 
             ch: *char,
             style: resolve_style(style, palette),
         }),
-        WidgetSpec::Shell { command, args, interval, timeout, style } => Box::new(ShellWidget {
+        WidgetSpec::Shell {
+            command,
+            args,
+            interval,
+            timeout,
+            style,
+        } => Box::new(ShellWidget {
             command: command.clone(),
             args: args.clone(),
             interval: *interval,
@@ -211,11 +235,7 @@ impl StatusEngine {
     /// The task signals `notify.notify_one()` after each refresh batch so
     /// the render coordinator wakes up. The returned `JoinHandle` should
     /// be aborted by the owner on session shutdown.
-    pub fn spawn_tick_task<F, Fut>(
-        &self,
-        notify: Arc<Notify>,
-        snapshot_ctx: F,
-    ) -> JoinHandle<()>
+    pub fn spawn_tick_task<F, Fut>(&self, notify: Arc<Notify>, snapshot_ctx: F) -> JoinHandle<()>
     where
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = SnapshotCtx> + Send,
@@ -313,7 +333,11 @@ impl EngineInner {
             .iter()
             .map(|s| s.cached.segments.clone())
             .collect();
-        SegmentSnapshot { left, middle, right }
+        SegmentSnapshot {
+            left,
+            middle,
+            right,
+        }
     }
 }
 
@@ -385,9 +409,10 @@ pub struct StatusHit {
 
 #[cfg(test)]
 mod tests {
+    use plexy_glass_config::built_in_default;
+
     use super::*;
     use crate::GlyphSet;
-    use plexy_glass_config::built_in_default;
 
     #[tokio::test]
     async fn engine_builds_from_default_config() {
@@ -453,7 +478,13 @@ mod tests {
         let inner = engine.inner();
         let ctx = EvalContext {
             session_name: "demo",
-            windows: &[WindowSummary { name: "shell0".into(), activity: false, bell: false, done: None, silence: false }],
+            windows: &[WindowSummary {
+                name: "shell0".into(),
+                activity: false,
+                bell: false,
+                done: None,
+                silence: false,
+            }],
             active_window: 0,
             attached_clients: 1,
             prefix_active: false,

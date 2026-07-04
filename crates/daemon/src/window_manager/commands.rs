@@ -1,9 +1,11 @@
-use super::{Severity, WindowManager};
-use crate::{error::DaemonError, window::Window};
-use plexy_glass_mux::blocks;
-use plexy_glass_mux::{Command, SplitDir, WindowId};
 use std::sync::Arc;
 use std::time::Duration;
+
+use plexy_glass_mux::{Command, SplitDir, WindowId, blocks};
+
+use super::{Severity, WindowManager};
+use crate::error::DaemonError;
+use crate::window::Window;
 
 impl WindowManager {
     pub fn handle_command(&mut self, cmd: Command) -> Result<(), DaemonError> {
@@ -26,9 +28,8 @@ impl WindowManager {
                 let notify = Arc::clone(&self.notify);
                 let death = self.death_tx.clone();
                 let config = Arc::clone(&self.config);
-                self.active_window_mut().split(
-                    dir, new_id, spec, viewport, notify, death, config,
-                )?;
+                self.active_window_mut()
+                    .split(dir, new_id, spec, viewport, notify, death, config)?;
             }
             Command::SelectNextPane => self.active_window_mut().select_next(),
             Command::SelectPrevPane => self.active_window_mut().select_prev(),
@@ -128,11 +129,13 @@ impl WindowManager {
                         .detach_pane(active)
                         .expect("active pane present");
                     self.active_window_mut().resize(viewport)?; // surviving source
-                    let name =
-                        pane.name().unwrap_or_else(|| format!("shell{}", self.next_window_id));
+                    let name = pane
+                        .name()
+                        .unwrap_or_else(|| format!("shell{}", self.next_window_id));
                     let id = WindowId(self.next_window_id);
                     self.next_window_id += 1;
-                    let mut w = Window::from_pane(id, name, pane, super::host_cell_px(self.host_size));
+                    let mut w =
+                        Window::from_pane(id, name, pane, super::host_cell_px(self.host_size));
                     w.resize(viewport)?;
                     self.windows.push(w);
                     self.last_active_window = Some(self.active);
@@ -152,7 +155,10 @@ impl WindowManager {
                     let act_idx = self.active;
                     let act_pane = self.windows[act_idx].active();
                     if marked == act_pane {
-                        self.set_status_message("marked pane is the active pane".into(), Severity::Info);
+                        self.set_status_message(
+                            "marked pane is the active pane".into(),
+                            Severity::Info,
+                        );
                     } else if let Some(src_idx) =
                         self.windows.iter().position(|w| w.pane(marked).is_some())
                     {
@@ -175,8 +181,7 @@ impl WindowManager {
                             }
                             let act_idx = self.active;
                             let act_pane = self.windows[act_idx].active();
-                            self.windows[act_idx]
-                                .adopt_split(act_pane, dir, pane, viewport)?;
+                            self.windows[act_idx].adopt_split(act_pane, dir, pane, viewport)?;
                             self.marked_pane = None;
                         }
                     } else {

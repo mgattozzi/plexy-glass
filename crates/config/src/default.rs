@@ -1,8 +1,9 @@
+use std::time::Duration;
+
 use crate::{
     BlocksConfig, Config, GlyphTier, HintsConfig, KeymapBinding, KeymapConfig, MouseConfig,
-    NotificationsConfig, PaletteConfig, Padding, Position, StatusConfig, StyleConfig, WidgetSpec,
+    NotificationsConfig, Padding, PaletteConfig, Position, StatusConfig, StyleConfig, WidgetSpec,
 };
-use std::time::Duration;
 
 pub fn kanagawa_dragon_palette() -> PaletteConfig {
     // Mirrors the upstream tmux-kanagawa "dragon" mapping
@@ -214,17 +215,48 @@ mod tests {
     fn default_status_is_lean_and_divider_free() {
         let c = built_in_default();
         // right cluster: CpuLoad, Battery, Hostname, Shell(weather), no Text dividers
-        assert!(c.status.right.iter().all(|w| !matches!(w, WidgetSpec::Text { .. })));
-        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::CpuLoad { .. })));
-        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::Battery { .. })));
-        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::Hostname { .. })));
+        assert!(
+            c.status
+                .right
+                .iter()
+                .all(|w| !matches!(w, WidgetSpec::Text { .. }))
+        );
+        assert!(
+            c.status
+                .right
+                .iter()
+                .any(|w| matches!(w, WidgetSpec::CpuLoad { .. }))
+        );
+        assert!(
+            c.status
+                .right
+                .iter()
+                .any(|w| matches!(w, WidgetSpec::Battery { .. }))
+        );
+        assert!(
+            c.status
+                .right
+                .iter()
+                .any(|w| matches!(w, WidgetSpec::Hostname { .. }))
+        );
         // far-right clock present
-        assert!(c.status.right.iter().any(|w| matches!(w, WidgetSpec::Time { .. })));
+        assert!(
+            c.status
+                .right
+                .iter()
+                .any(|w| matches!(w, WidgetSpec::Time { .. }))
+        );
         // git/cwd/weather are not in the shipped default right cluster
         // (weather is a network widget, opt in via your own config)
-        assert!(c.status.right.iter().all(
-            |w| !matches!(w, WidgetSpec::GitBranch { .. } | WidgetSpec::Cwd { .. } | WidgetSpec::Shell { .. })
-        ));
-        assert!(c.status.left.iter().all(|w| !matches!(w, WidgetSpec::Text { value, .. } if value.trim().is_empty())));
+        assert!(c.status.right.iter().all(|w| !matches!(
+            w,
+            WidgetSpec::GitBranch { .. } | WidgetSpec::Cwd { .. } | WidgetSpec::Shell { .. }
+        )));
+        assert!(
+            c.status
+                .left
+                .iter()
+                .all(|w| !matches!(w, WidgetSpec::Text { value, .. } if value.trim().is_empty()))
+        );
     }
 }

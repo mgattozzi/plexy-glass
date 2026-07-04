@@ -1,16 +1,17 @@
 //! Side-effecting handlers for OSC sequences: opening URLs, writing the
 //! system clipboard, and synthesizing keystrokes for click-to-position.
 
-use crate::error::DaemonError;
-use crate::pane::Pane;
-use crate::window_manager::Severity;
-use bytes::Bytes;
-
 use std::process::Stdio;
 use std::time::Duration;
+
+use bytes::Bytes;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time;
+
+use crate::error::DaemonError;
+use crate::pane::Pane;
+use crate::window_manager::Severity;
 
 /// Build the user-facing acknowledgement for a clipboard write. A multi-line
 /// copy reports the line count; a single line reports the width-truncated text.
@@ -36,11 +37,7 @@ pub(crate) fn copied_message(text: &str) -> String {
 /// pushed to a paste buffer (`paste_fallback`), it points the user at `Ctrl+a ]`.
 /// Shared by every yank site (copy-mode Enter, block-mode, copy-mode mouse,
 /// mouse-drag release) so the honesty is decided in one tested place.
-pub(crate) fn yank_status(
-    wrote: bool,
-    text: &str,
-    paste_fallback: bool,
-) -> (String, Severity) {
+pub(crate) fn yank_status(wrote: bool, text: &str, paste_fallback: bool) -> (String, Severity) {
     use crate::window_manager::Severity;
     if wrote {
         (copied_message(text), Severity::Success)
@@ -119,7 +116,9 @@ pub async fn write_clipboard(payload: &[u8]) -> bool {
             }
             let _ = child.wait().await;
         };
-        if time::timeout(Duration::from_secs(2), write_and_wait).await == Ok(()) { return true }
+        if time::timeout(Duration::from_secs(2), write_and_wait).await == Ok(()) {
+            return true;
+        }
         tracing::warn!(program, "clipboard write timed out");
         return false; // child killed on drop; don't multiply the stall
     }
@@ -212,8 +211,10 @@ pub async fn click_to_position(
         // (skipping wide spacers) so the arrows land on the click target instead
         // of overshooting by one per wide char.
         let (lo, hi) = (cursor.col.min(click_col), cursor.col.max(click_col));
-        let count = row
-            .map_or_else(|| usize::from(hi - lo), |r| graphemes_in_span(&r.cells, lo, hi));
+        let count = row.map_or_else(
+            || usize::from(hi - lo),
+            |r| graphemes_in_span(&r.cells, lo, hi),
+        );
         Some((click_col > cursor.col, count))
     });
 
@@ -245,10 +246,10 @@ fn graphemes_in_span(cells: &[plexy_glass_emulator::Cell], lo: u16, hi: u16) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::env;
-    use std::fs;
     use std::time::Instant;
+    use std::{env, fs};
+
+    use super::*;
 
     #[test]
     fn copied_message_reports_lines_or_truncated_text() {
@@ -290,7 +291,10 @@ mod tests {
         unsafe { env::set_var("PATH", dir.path()) };
         let r = open_url("about:blank").await;
         unsafe { env::set_var("PATH", old) };
-        assert!(r.is_err(), "no opener on PATH must surface as Err, not a silent Ok");
+        assert!(
+            r.is_err(),
+            "no opener on PATH must surface as Err, not a silent Ok"
+        );
     }
 
     #[tokio::test]
@@ -369,13 +373,25 @@ mod tests {
     }
 
     fn cat_pane() -> Pane {
-        use crate::pane::Pane;
+        use std::sync::Arc;
+
         use plexy_glass_mux::PaneId;
         use plexy_glass_protocol::{PtySize, SpawnSpec};
-        use std::sync::Arc;
         use tokio::sync::Notify;
-        let size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
-        let spec = SpawnSpec { program: "/bin/cat".into(), args: vec![], env: vec![], cwd: None };
+
+        use crate::pane::Pane;
+        let size = PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let spec = SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
         let cfg = Arc::new(plexy_glass_config::built_in_default());
         Pane::spawn(PaneId(0), spec, size, Arc::new(Notify::new()), None, cfg).unwrap()
     }

@@ -4,9 +4,10 @@
 //! An armed prefix waits indefinitely for the rest of its chord (tmux
 //! semantics, no timeout); a non-matching key cancels it.
 
-use crate::{Direction, Key, KeyEvent, KeyEventKind, Modifiers, SplitDir};
 use std::collections::HashMap;
+
 use crate::preset::LayoutPreset;
+use crate::{Direction, Key, KeyEvent, KeyEventKind, Modifiers, SplitDir};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -71,7 +72,9 @@ pub enum Command {
     /// Open a floating popup pane running `command` via `$SHELL -c` (`None` =
     /// the default interactive shell), centered over the layout. Last-wins if
     /// a popup is already open.
-    OpenPopup { command: Option<String> },
+    OpenPopup {
+        command: Option<String>,
+    },
     /// Close the floating popup, killing its child.
     ClosePopup,
     /// Rearrange the active window's panes into a preset layout.
@@ -149,7 +152,9 @@ impl Keymap {
         }
         // Lock modifiers (CapsLock/NumLock) are not part of any binding, so mask
         // them before lookup and a binding matches regardless of lock state.
-        let lookup_mods = event.mods.difference(Modifiers::CAPS_LOCK | Modifiers::NUM_LOCK);
+        let lookup_mods = event
+            .mods
+            .difference(Modifiers::CAPS_LOCK | Modifiers::NUM_LOCK);
         let chord = (lookup_mods, event.key);
         let node = self.descend();
         if let Some(child) = node.children.get(&chord) {
@@ -196,9 +201,10 @@ impl Default for Keymap {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::thread::sleep;
     use std::time::Duration;
+
+    use super::*;
 
     fn chord(mods: Modifiers, key: Key) -> Chord {
         (mods, key)
@@ -225,7 +231,10 @@ mod tests {
         );
         let (e, b) = ev(Modifiers::ALT, Key::Arrow(Direction::Right), b"\x1b[1;3C");
         let action = k.consume(e, b);
-        assert!(matches!(action, KeymapAction::Command(Command::SelectPane(Direction::Right))));
+        assert!(matches!(
+            action,
+            KeymapAction::Command(Command::SelectPane(Direction::Right))
+        ));
     }
 
     #[test]
@@ -234,7 +243,10 @@ mod tests {
         // still fires when CapsLock happens to be on.
         let mut k = Keymap::new();
         k.bind(
-            &[chord(Modifiers::CTRL, Key::Char('a')), chord(Modifiers::empty(), Key::Char('c'))],
+            &[
+                chord(Modifiers::CTRL, Key::Char('a')),
+                chord(Modifiers::empty(), Key::Char('c')),
+            ],
             Command::NewWindow,
         );
         let mut e1 = KeyEvent::new(Key::Char('a'), Modifiers::CTRL | Modifiers::CAPS_LOCK);
@@ -242,7 +254,10 @@ mod tests {
         assert!(matches!(k.consume(e1, vec![0x01]), KeymapAction::Pending));
         let mut e2 = KeyEvent::new(Key::Char('c'), Modifiers::NUM_LOCK);
         e2.kind = KeyEventKind::Press;
-        assert!(matches!(k.consume(e2, b"c".to_vec()), KeymapAction::Command(Command::NewWindow)));
+        assert!(matches!(
+            k.consume(e2, b"c".to_vec()),
+            KeymapAction::Command(Command::NewWindow)
+        ));
     }
 
     #[test]
@@ -255,7 +270,10 @@ mod tests {
         );
         let mut e = KeyEvent::new(Key::Arrow(Direction::Right), Modifiers::ALT);
         e.kind = KeyEventKind::Release;
-        assert!(matches!(k.consume(e, b"\x1b[1;3C".to_vec()), KeymapAction::PassThrough(..)));
+        assert!(matches!(
+            k.consume(e, b"\x1b[1;3C".to_vec()),
+            KeymapAction::PassThrough(..)
+        ));
     }
 
     #[test]
@@ -267,7 +285,10 @@ mod tests {
         );
         let mut e = KeyEvent::new(Key::Arrow(Direction::Right), Modifiers::ALT);
         e.kind = KeyEventKind::Repeat;
-        assert!(matches!(k.consume(e, b"\x1b[1;3C".to_vec()), KeymapAction::PassThrough(..)));
+        assert!(matches!(
+            k.consume(e, b"\x1b[1;3C".to_vec()),
+            KeymapAction::PassThrough(..)
+        ));
     }
 
     #[test]
@@ -296,20 +317,29 @@ mod tests {
     fn prefix_sequence_fires_on_second_chord() {
         let mut k = Keymap::new();
         k.bind(
-            &[chord(Modifiers::CTRL, Key::Char('a')), chord(Modifiers::empty(), Key::Char('c'))],
+            &[
+                chord(Modifiers::CTRL, Key::Char('a')),
+                chord(Modifiers::empty(), Key::Char('c')),
+            ],
             Command::NewWindow,
         );
         let (e1, b1) = ev(Modifiers::CTRL, Key::Char('a'), &[0x01]);
         assert!(matches!(k.consume(e1, b1), KeymapAction::Pending));
         let (e2, b2) = ev(Modifiers::empty(), Key::Char('c'), b"c");
-        assert!(matches!(k.consume(e2, b2), KeymapAction::Command(Command::NewWindow)));
+        assert!(matches!(
+            k.consume(e2, b2),
+            KeymapAction::Command(Command::NewWindow)
+        ));
     }
 
     #[test]
     fn prefix_non_matching_followup_cancels() {
         let mut k = Keymap::new();
         k.bind(
-            &[chord(Modifiers::CTRL, Key::Char('a')), chord(Modifiers::empty(), Key::Char('c'))],
+            &[
+                chord(Modifiers::CTRL, Key::Char('a')),
+                chord(Modifiers::empty(), Key::Char('c')),
+            ],
             Command::NewWindow,
         );
         let (e1, b1) = ev(Modifiers::CTRL, Key::Char('a'), &[0x01]);
@@ -327,7 +357,10 @@ mod tests {
         // the regression IS time-dependence.
         let mut k = Keymap::new();
         k.bind(
-            &[chord(Modifiers::CTRL, Key::Char('a')), chord(Modifiers::empty(), Key::Char('c'))],
+            &[
+                chord(Modifiers::CTRL, Key::Char('a')),
+                chord(Modifiers::empty(), Key::Char('c')),
+            ],
             Command::NewWindow,
         );
         let (e1, b1) = ev(Modifiers::CTRL, Key::Char('a'), &[0x01]);
@@ -335,7 +368,9 @@ mod tests {
         sleep(Duration::from_millis(1100));
         assert!(k.prefix_active(), "prefix must stay armed while waiting");
         let (e2, b2) = ev(Modifiers::empty(), Key::Char('c'), b"c");
-        assert!(matches!(k.consume(e2, b2), KeymapAction::Command(Command::NewWindow)));
+        assert!(matches!(
+            k.consume(e2, b2),
+            KeymapAction::Command(Command::NewWindow)
+        ));
     }
-
 }

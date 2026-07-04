@@ -105,7 +105,10 @@ mod tests {
             Modes::MOUSE_SGR,
         ] {
             let m = bit;
-            assert!(m.any_mouse_mode_active(), "{bit:?} should mark mouse reporting active");
+            assert!(
+                m.any_mouse_mode_active(),
+                "{bit:?} should mark mouse reporting active"
+            );
         }
         // Non-mouse bits do not.
         let m = Modes::ALT_SCREEN | Modes::AUTOWRAP;

@@ -1,10 +1,12 @@
-use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
-use async_trait::async_trait;
-use smol_str::SmolStr;
 use std::process::Stdio;
 use std::time::Duration;
+
+use async_trait::async_trait;
+use smol_str::SmolStr;
 use tokio::process::Command;
 use tokio::time;
+
+use crate::{EvalContext, ResolvedStyle, StyledText, Widget};
 
 pub struct GitBranchWidget {
     pub style: ResolvedStyle,
@@ -14,7 +16,11 @@ pub struct GitBranchWidget {
 
 impl GitBranchWidget {
     pub const fn new(style: ResolvedStyle, interval: Option<Duration>, icon: SmolStr) -> Self {
-        Self { style, interval, icon }
+        Self {
+            style,
+            interval,
+            icon,
+        }
     }
 }
 
@@ -72,11 +78,10 @@ impl Widget for GitBranchWidget {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::env;
-    use std::fs;
-    use std::process;
     use std::time::Instant;
+    use std::{env, fs, process};
+
+    use super::*;
 
     fn ctx_with_cwd(cwd: &str) -> EvalContext<'_> {
         EvalContext {
@@ -107,7 +112,11 @@ mod tests {
         // Regression: the old cwd-keyed cache pinned the branch forever, so a
         // `git checkout` in the same directory showed the stale branch. With the
         // cache gone, a second evaluation of the same cwd reports the new branch.
-        if process::Command::new("git").arg("--version").output().is_err() {
+        if process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             return; // needs a real git; skip where unavailable
         }
         let dir = tempfile::tempdir().unwrap();
@@ -132,9 +141,16 @@ mod tests {
         let mut w = GitBranchWidget::new(ResolvedStyle::default(), None, SmolStr::new(""));
         let first = w.evaluate(&ctx_with_cwd(&cwd)).await;
         let first_branch = first.segments[0].text.as_str().trim().to_string();
-        assert!(!first_branch.is_empty(), "expected a branch on the fresh repo");
+        assert!(
+            !first_branch.is_empty(),
+            "expected a branch on the fresh repo"
+        );
 
-        assert!(git(&["checkout", "-q", "-b", "feature-xyz"]).status.success());
+        assert!(
+            git(&["checkout", "-q", "-b", "feature-xyz"])
+                .status
+                .success()
+        );
         let second = w.evaluate(&ctx_with_cwd(&cwd)).await;
         assert_eq!(second.segments[0].text.as_str().trim(), "feature-xyz");
         assert_ne!(first_branch, "feature-xyz");

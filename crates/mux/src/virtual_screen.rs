@@ -1,8 +1,9 @@
 //! In-memory composite output grid. The compositor builds one; the
 //! diff-renderer compares two to produce ANSI bytes.
 
-use plexy_glass_emulator::{Cell, ImageFormat, ImageProtocol};
 use std::sync::Arc;
+
+use plexy_glass_emulator::{Cell, ImageFormat, ImageProtocol};
 
 /// An image placement resolved to host (terminal) coordinates, ready for the
 /// per-client renderer to transmit (once) and place. Built by the compositor
@@ -117,8 +118,9 @@ impl VirtualScreen {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use smol_str::SmolStr;
+
+    use super::*;
 
     #[test]
     fn blank_dimensions() {

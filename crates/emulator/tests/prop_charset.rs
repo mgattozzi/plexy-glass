@@ -6,10 +6,9 @@
 //!      unchanged; bytes INSIDE the range are translated to a single non-ASCII
 //!      glyph (never equal to the source byte).
 
-use hegel::TestCase;
-use hegel::generators as gs;
-use plexy_glass_emulator::parser::Parser;
+use hegel::{TestCase, generators as gs};
 use plexy_glass_emulator::Screen;
+use plexy_glass_emulator::parser::Parser;
 
 /// Print one raw byte after an optional charset-setup prefix; return the (0,0) cell text.
 fn cell0_after(prefix: &[u8], byte: u8) -> String {
@@ -30,7 +29,11 @@ fn default_charset_is_identity(tc: TestCase) {
     let byte = tc.draw(gs::integers::<u8>().min_value(0x20).max_value(0x7e)) as u8;
     let got = cell0_after(b"", byte);
     tc.note(&format!("byte=0x{byte:02x} got={got:?}"));
-    assert_eq!(got, (byte as char).to_string(), "ASCII charset must not translate");
+    assert_eq!(
+        got,
+        (byte as char).to_string(),
+        "ASCII charset must not translate"
+    );
 }
 
 /// P2: under DEC Special Graphics, only 0x60..=0x7e is translated; every other
@@ -43,10 +46,21 @@ fn special_graphics_translates_only_the_line_drawing_range(tc: TestCase) {
     tc.note(&format!("byte=0x{byte:02x} got={got:?}"));
 
     if (0x60..=0x7e).contains(&byte) {
-        assert_ne!(got, (byte as char).to_string(), "in-range byte must be translated");
-        assert!(!got.is_ascii(), "translated glyph must be non-ASCII, got {got:?}");
+        assert_ne!(
+            got,
+            (byte as char).to_string(),
+            "in-range byte must be translated"
+        );
+        assert!(
+            !got.is_ascii(),
+            "translated glyph must be non-ASCII, got {got:?}"
+        );
         assert_eq!(got.chars().count(), 1, "translated glyph is a single char");
     } else {
-        assert_eq!(got, (byte as char).to_string(), "out-of-range byte passes through");
+        assert_eq!(
+            got,
+            (byte as char).to_string(),
+            "out-of-range byte passes through"
+        );
     }
 }

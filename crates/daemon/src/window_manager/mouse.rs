@@ -1,13 +1,13 @@
+use std::time::{Duration, Instant};
+
+use plexy_glass_mux::{
+    BorderHit, BorderSide, Command, MouseButton, MouseEncoding, MouseEvent, MouseKind, PaneId,
+    Rect, Selection, WindowId, blocks, encode_for_child, extract_text, prev_prompt_line,
+};
+
 use super::{Severity, WindowManager};
 use crate::error::DaemonError;
 use crate::osc_actions;
-use plexy_glass_mux::blocks;
-use plexy_glass_mux::{
-    BorderHit, BorderSide, Command, MouseButton, MouseEncoding, MouseEvent, MouseKind, PaneId,
-    Rect, Selection, WindowId, encode_for_child, extract_text, prev_prompt_line,
-};
-use std::time::Duration;
-use std::time::Instant;
 
 /// Active border drag-resize. Cleared on Release. While `Some`, all mouse
 /// events go to `handle_resize_drag_event`.
@@ -57,10 +57,7 @@ impl WindowManager {
     /// coordinator composes every frame under this same lock, so awaiting it
     /// here would freeze the session. The honest status message is set on
     /// re-lock (see yank_status).
-    pub async fn handle_mouse(
-        &mut self,
-        event: MouseEvent,
-    ) -> Result<Option<String>, DaemonError> {
+    pub async fn handle_mouse(&mut self, event: MouseEvent) -> Result<Option<String>, DaemonError> {
         // Overlay isolation: an open modal overlay (rename / help / picker /
         // choose-tree / history / hints) owns ALL input, mouse included. Keys,
         // Bytes and Paste are already discarded while an overlay is open (see
@@ -167,7 +164,10 @@ impl WindowManager {
                 plexy_glass_config::DragModifier::Ctrl => event.modifiers.ctrl,
             };
             if drag_held {
-                self.pane_drag = Some(PaneDrag { source: pane_id, target: None });
+                self.pane_drag = Some(PaneDrag {
+                    source: pane_id,
+                    target: None,
+                });
                 self.notify.notify_one();
                 return Ok(None);
             }
@@ -211,10 +211,7 @@ impl WindowManager {
         event
     }
 
-    async fn handle_status_bar_event(
-        &mut self,
-        event: MouseEvent,
-    ) -> Result<(), DaemonError> {
+    async fn handle_status_bar_event(&mut self, event: MouseEvent) -> Result<(), DaemonError> {
         if !matches!(event.kind, MouseKind::Press) || event.button != MouseButton::Left {
             return Ok(());
         }
@@ -271,10 +268,7 @@ impl WindowManager {
             .border_at(self.viewport(), row, col)
     }
 
-    async fn handle_resize_drag_event(
-        &mut self,
-        event: MouseEvent,
-    ) -> Result<(), DaemonError> {
+    async fn handle_resize_drag_event(&mut self, event: MouseEvent) -> Result<(), DaemonError> {
         let Some(drag) = self.resize_drag.as_mut() else {
             return Ok(());
         };
@@ -477,8 +471,7 @@ impl WindowManager {
                     && h.row == event.row
                     && h.col == event.col
                     && h.button == MouseButton::Left
-                    && now.saturating_duration_since(h.at)
-                        < Duration::from_millis(400)
+                    && now.saturating_duration_since(h.at) < Duration::from_millis(400)
             }
             None => false,
         };
@@ -573,7 +566,10 @@ impl WindowManager {
             // Only a vertical wheel scrolls scrollback; a horizontal wheel on a
             // non-mouse-mode pane is ignored (mouse-mode panes get it forwarded
             // verbatim via Rule 5 / encode_for_child).
-            MouseKind::Wheel { delta, horizontal: false } => {
+            MouseKind::Wheel {
+                delta,
+                horizontal: false,
+            } => {
                 self.handle_wheel(pane_id, delta);
                 None
             }
@@ -592,15 +588,12 @@ impl WindowManager {
         if bytes.is_empty() {
             return Ok(());
         }
-        let bracketed = self
-            .active_window()
-            .pane(pane_id)
-            .is_some_and(|p| {
-                p.with_screen(|s| {
-                    s.modes
-                        .contains(plexy_glass_emulator::Modes::BRACKETED_PASTE)
-                })
-            });
+        let bracketed = self.active_window().pane(pane_id).is_some_and(|p| {
+            p.with_screen(|s| {
+                s.modes
+                    .contains(plexy_glass_emulator::Modes::BRACKETED_PASTE)
+            })
+        });
         let to_send = if bracketed {
             let mut v = Vec::with_capacity(bytes.len() + 12);
             v.extend_from_slice(b"\x1b[200~");
@@ -665,8 +658,7 @@ impl WindowManager {
                     // Fold-aware: map the clicked display row to its unified line
                     // through the visible-space projection.
                     let rows = s.active.num_rows();
-                    let abs_line =
-                        blocks::scroll_line_at(s, rows, scroll_offset, local_row);
+                    let abs_line = blocks::scroll_line_at(s, rows, scroll_offset, local_row);
                     // is_prompt is private; use the public prev_prompt_line:
                     // prev_prompt_line(s, abs_line + 1) == Some(abs_line) iff
                     // abs_line itself carries PROMPT_START.
@@ -675,8 +667,7 @@ impl WindowManager {
                     if is_prompt {
                         // Put the prompt at the viewport top (visible-space offset;
                         // a line already in the live view saturates to 0).
-                        let new_offset =
-                            blocks::scroll_offset_for_top(s, rows, abs_line);
+                        let new_offset = blocks::scroll_offset_for_top(s, rows, abs_line);
                         let max = blocks::max_scroll_offset(s, rows);
                         Some((new_offset, max))
                     } else {
@@ -703,7 +694,12 @@ impl WindowManager {
                         // right cell) must read the hyperlink off the owning
                         // grapheme cell, which holds the id.
                         let mut c = local_col as usize;
-                        if c > 0 && row.cells.get(c).is_some_and(plexy_glass_emulator::Cell::is_wide_spacer) {
+                        if c > 0
+                            && row
+                                .cells
+                                .get(c)
+                                .is_some_and(plexy_glass_emulator::Cell::is_wide_spacer)
+                        {
                             c -= 1;
                         }
                         row.cells.get(c)
@@ -843,8 +839,7 @@ impl WindowManager {
         };
         // Visible-space max so each notch moves one visible line (folds skipped),
         // with no over-scroll dead zone.
-        let max_offset =
-            pane.with_screen(|s| blocks::max_scroll_offset(s, s.active.num_rows()));
+        let max_offset = pane.with_screen(|s| blocks::max_scroll_offset(s, s.active.num_rows()));
         // Wheel-up = positive delta = scroll INTO older history.
         pane.scroll_by(delta.into(), max_offset);
     }

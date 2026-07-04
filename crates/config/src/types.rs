@@ -109,7 +109,9 @@ pub struct MouseConfig {
 
 impl Default for MouseConfig {
     fn default() -> Self {
-        Self { drag_modifier: DragModifier::Alt }
+        Self {
+            drag_modifier: DragModifier::Alt,
+        }
     }
 }
 
@@ -124,7 +126,10 @@ pub struct NotificationsConfig {
 
 impl Default for NotificationsConfig {
     fn default() -> Self {
-        Self { enabled: true, min_duration_ms: 30_000 }
+        Self {
+            enabled: true,
+            min_duration_ms: 30_000,
+        }
     }
 }
 

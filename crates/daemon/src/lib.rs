@@ -28,6 +28,7 @@ pub(crate) mod test_env {
     use std::ffi::OsString;
     use std::sync::{MutexGuard, PoisonError};
     use std::time::{Duration, Instant};
+
     use tokio::time;
 
     /// Holds the crate-wide env lock, points `XDG_STATE_HOME` at a fresh
@@ -69,7 +70,12 @@ pub(crate) mod test_env {
             // it off; the var is test-only and never set in production).
             env::set_var("PLEXY_GLASS_NO_WELCOME", "1");
         }
-        EnvGuard { _lock: lock, old_xdg, old_shell, _tmp: tmp }
+        EnvGuard {
+            _lock: lock,
+            old_xdg,
+            old_shell,
+            _tmp: tmp,
+        }
     }
 
     impl Drop for EnvGuard {
@@ -97,10 +103,7 @@ pub(crate) mod test_env {
     /// Note that for *negative* assertions ("X did NOT happen") a poll cannot
     /// prove absence, so keep a short fixed sleep there and mark it with a
     /// comment.
-    pub async fn poll_until(
-        deadline: Duration,
-        mut cond: impl FnMut() -> bool,
-    ) -> bool {
+    pub async fn poll_until(deadline: Duration, mut cond: impl FnMut() -> bool) -> bool {
         let start = Instant::now();
         loop {
             if cond() {
@@ -123,11 +126,11 @@ pub mod listener;
 mod lock;
 pub mod osc_actions;
 pub mod pane;
+mod panic_hook;
 pub mod paste_buffers;
 pub mod paths;
 pub mod pipe;
 pub mod popup;
-mod panic_hook;
 pub mod registry;
 pub mod renderer;
 pub mod session;
@@ -142,7 +145,6 @@ pub use pane::Pane;
 pub use paths::RuntimePaths;
 pub use registry::SessionRegistry;
 pub use session::Session;
-
 use tracing::{error, info};
 
 pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
@@ -151,10 +153,9 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
 
     // Logs are already initialized by the top-level binary when foregrounded.
     if !args.foreground {
-        use tracing_subscriber::Layer;
-        use tracing_subscriber::fmt;
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
+        use tracing_subscriber::{Layer, fmt};
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -194,11 +195,19 @@ pub async fn run(args: DaemonArgs) -> Result<(), DaemonError> {
     // path (`reload_config`) reuses the same `build_declared` for
     // newly-declared names.
     {
-        let boot_size = plexy_glass_protocol::PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
+        let boot_size = plexy_glass_protocol::PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         registry.build_declared(&config, boot_size).await;
     }
 
-    info!(foreground = args.foreground, "daemon ready, entering accept loop");
+    info!(
+        foreground = args.foreground,
+        "daemon ready, entering accept loop"
+    );
     loop {
         let (stream, _addr) = match listener.socket.accept().await {
             Ok(p) => p,

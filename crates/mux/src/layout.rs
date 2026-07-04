@@ -4,15 +4,14 @@
 //! into a `Split` whose children are the original leaf and the new one.
 //! Closing a leaf removes it and promotes its sibling into the parent's slot.
 
-use crate::{
-    direction::SplitDir,
-    pane_id::PaneId,
-    rect::Rect,
-};
-use thiserror::Error;
-use crate::direction::Direction;
-use crate::preset::{self, LayoutPreset};
 use std::collections::HashSet;
+
+use thiserror::Error;
+
+use crate::direction::{Direction, SplitDir};
+use crate::pane_id::PaneId;
+use crate::preset::{self, LayoutPreset};
+use crate::rect::Rect;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LayoutNode {
@@ -72,7 +71,9 @@ pub struct LayoutTree {
 
 impl LayoutTree {
     pub const fn single(pane: PaneId) -> Self {
-        Self { root: Some(LayoutNode::Leaf(pane)) }
+        Self {
+            root: Some(LayoutNode::Leaf(pane)),
+        }
     }
 
     pub const fn is_empty(&self) -> bool {
@@ -155,7 +156,13 @@ impl LayoutTree {
     /// many were applied.
     pub fn set_ratios_preorder(&mut self, ratios: &[f32]) -> usize {
         fn walk(node: &mut LayoutNode, ratios: &[f32], i: &mut usize) {
-            if let LayoutNode::Split { ratio, first, second, .. } = node {
+            if let LayoutNode::Split {
+                ratio,
+                first,
+                second,
+                ..
+            } = node
+            {
                 let Some(r) = ratios.get(*i) else { return };
                 *ratio = r.clamp(0.1, 0.9);
                 *i += 1;
@@ -194,7 +201,12 @@ impl LayoutTree {
         match dir {
             Direction::Right => {
                 let target_col = src.right_edge_col().checked_add(2)?;
-                pick_neighbor(&panes, |r| r.col == target_col, src, /*horizontal=*/ true)
+                pick_neighbor(
+                    &panes,
+                    |r| r.col == target_col,
+                    src,
+                    /*horizontal=*/ true,
+                )
             }
             Direction::Left => {
                 let target_right = src.col.checked_sub(2)?;
@@ -207,7 +219,12 @@ impl LayoutTree {
             }
             Direction::Down => {
                 let target_row = src.bottom_edge_row().checked_add(2)?;
-                pick_neighbor(&panes, |r| r.row == target_row, src, /*horizontal=*/ false)
+                pick_neighbor(
+                    &panes,
+                    |r| r.row == target_row,
+                    src,
+                    /*horizontal=*/ false,
+                )
             }
             Direction::Up => {
                 let target_bottom = src.row.checked_sub(2)?;
@@ -333,7 +350,9 @@ impl LayoutTree {
         delta: i16,
         viewport: Rect,
     ) -> i16 {
-        let Some(root) = self.root.as_mut() else { return 0 };
+        let Some(root) = self.root.as_mut() else {
+            return 0;
+        };
         adjust_split_recurse(root, viewport, adjacent_pane, side, delta)
     }
 }
@@ -345,7 +364,12 @@ const MIN_PANE_CELLS: u16 = 4;
 fn border_at_recurse(node: &LayoutNode, viewport: Rect, row: u16, col: u16) -> Option<BorderHit> {
     match node {
         LayoutNode::Leaf(_) => None,
-        LayoutNode::Split { dir, ratio, first, second } => {
+        LayoutNode::Split {
+            dir,
+            ratio,
+            first,
+            second,
+        } => {
             let (a, b) = viewport.subdivide(*dir, *ratio);
             match dir {
                 SplitDir::Vertical => {
@@ -377,7 +401,9 @@ fn border_at_recurse(node: &LayoutNode, viewport: Rect, row: u16, col: u16) -> O
 fn rightmost_leaf(node: &LayoutNode) -> PaneId {
     match node {
         LayoutNode::Leaf(id) => *id,
-        LayoutNode::Split { dir, first, second, .. } => match dir {
+        LayoutNode::Split {
+            dir, first, second, ..
+        } => match dir {
             SplitDir::Vertical => rightmost_leaf(second),
             SplitDir::Horizontal => rightmost_leaf(first),
         },
@@ -387,7 +413,9 @@ fn rightmost_leaf(node: &LayoutNode) -> PaneId {
 fn bottommost_leaf(node: &LayoutNode) -> PaneId {
     match node {
         LayoutNode::Leaf(id) => *id,
-        LayoutNode::Split { dir, first, second, .. } => match dir {
+        LayoutNode::Split {
+            dir, first, second, ..
+        } => match dir {
             SplitDir::Horizontal => bottommost_leaf(second),
             SplitDir::Vertical => bottommost_leaf(first),
         },
@@ -401,7 +429,13 @@ fn adjust_split_recurse(
     side: BorderSide,
     delta: i16,
 ) -> i16 {
-    let LayoutNode::Split { dir, ratio, first, second } = node else {
+    let LayoutNode::Split {
+        dir,
+        ratio,
+        first,
+        second,
+    } = node
+    else {
         return 0;
     };
     let (a, b) = viewport.subdivide(*dir, *ratio);
@@ -488,7 +522,12 @@ where
             *idx += 1;
             r
         }
-        LayoutNode::Split { dir, ratio, first, second } => {
+        LayoutNode::Split {
+            dir,
+            ratio,
+            first,
+            second,
+        } => {
             let f = map_node(first, idx, leaf, split);
             let s = map_node(second, idx, leaf, split);
             split(*dir, *ratio, f, s)
@@ -505,7 +544,12 @@ fn pane_at_in(node: &LayoutNode, viewport: Rect, row: u16, col: u16) -> Option<P
                 None
             }
         }
-        LayoutNode::Split { dir, ratio, first, second } => {
+        LayoutNode::Split {
+            dir,
+            ratio,
+            first,
+            second,
+        } => {
             let (a, b) = viewport.subdivide(*dir, *ratio);
             if a.contains(row, col) {
                 pane_at_in(first, a, row, col)
@@ -580,7 +624,12 @@ fn resize_in(
 ) -> (LayoutNode, bool, bool) {
     match node {
         LayoutNode::Leaf(p) => (LayoutNode::Leaf(p), p == target, false),
-        LayoutNode::Split { dir, ratio, first, second } => {
+        LayoutNode::Split {
+            dir,
+            ratio,
+            first,
+            second,
+        } => {
             let (a_rect, b_rect) = viewport.subdivide(dir, ratio);
             let (new_first, in_first, handled_first) =
                 resize_in(*first, target, axis, delta_cells, a_rect);
@@ -654,7 +703,12 @@ fn split_in(
             )
         }
         LayoutNode::Leaf(p) => (LayoutNode::Leaf(p), false),
-        LayoutNode::Split { dir: sd, ratio, first, second } => {
+        LayoutNode::Split {
+            dir: sd,
+            ratio,
+            first,
+            second,
+        } => {
             let (new_first, found_first) = split_in(*first, target, dir, new_pane, position);
             if found_first {
                 return (
@@ -691,34 +745,37 @@ fn close_in(node: LayoutNode, target: PaneId) -> CloseResult {
     match node {
         LayoutNode::Leaf(p) if p == target => CloseResult::SamePane,
         LayoutNode::Leaf(p) => CloseResult::NotPresent(LayoutNode::Leaf(p)),
-        LayoutNode::Split { dir, ratio, first, second } => {
-            match close_in(*first, target) {
-                CloseResult::SamePane => CloseResult::Replaced(*second),
+        LayoutNode::Split {
+            dir,
+            ratio,
+            first,
+            second,
+        } => match close_in(*first, target) {
+            CloseResult::SamePane => CloseResult::Replaced(*second),
+            CloseResult::Replaced(n) => CloseResult::Replaced(LayoutNode::Split {
+                dir,
+                ratio,
+                first: Box::new(n),
+                second,
+            }),
+            CloseResult::NotPresent(orig_first) => match close_in(*second, target) {
+                CloseResult::SamePane => CloseResult::Replaced(orig_first),
                 CloseResult::Replaced(n) => CloseResult::Replaced(LayoutNode::Split {
                     dir,
                     ratio,
-                    first: Box::new(n),
-                    second,
+                    first: Box::new(orig_first),
+                    second: Box::new(n),
                 }),
-                CloseResult::NotPresent(orig_first) => match close_in(*second, target) {
-                    CloseResult::SamePane => CloseResult::Replaced(orig_first),
-                    CloseResult::Replaced(n) => CloseResult::Replaced(LayoutNode::Split {
+                CloseResult::NotPresent(orig_second) => {
+                    CloseResult::NotPresent(LayoutNode::Split {
                         dir,
                         ratio,
                         first: Box::new(orig_first),
-                        second: Box::new(n),
-                    }),
-                    CloseResult::NotPresent(orig_second) => CloseResult::NotPresent(
-                        LayoutNode::Split {
-                            dir,
-                            ratio,
-                            first: Box::new(orig_first),
-                            second: Box::new(orig_second),
-                        },
-                    ),
-                },
-            }
-        }
+                        second: Box::new(orig_second),
+                    })
+                }
+            },
+        },
     }
 }
 
@@ -726,7 +783,12 @@ fn rect_of_in(node: &LayoutNode, target: PaneId, viewport: Rect) -> Option<Rect>
     match node {
         LayoutNode::Leaf(p) if *p == target => Some(viewport),
         LayoutNode::Leaf(_) => None,
-        LayoutNode::Split { dir, ratio, first, second } => {
+        LayoutNode::Split {
+            dir,
+            ratio,
+            first,
+            second,
+        } => {
             let (a, b) = viewport.subdivide(*dir, *ratio);
             rect_of_in(first, target, a).or_else(|| rect_of_in(second, target, b))
         }
@@ -747,7 +809,13 @@ mod tests {
     #[test]
     fn split_makes_two_leaves() {
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After).unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Vertical,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
         let panes = t.panes();
         assert!(panes.contains(&PaneId(0)));
         assert!(panes.contains(&PaneId(1)));
@@ -757,14 +825,27 @@ mod tests {
     #[test]
     fn split_on_unknown_returns_error() {
         let mut t = LayoutTree::single(PaneId(0));
-        let err = t.split(PaneId(99), SplitDir::Vertical, PaneId(1), SplitPosition::After).unwrap_err();
+        let err = t
+            .split(
+                PaneId(99),
+                SplitDir::Vertical,
+                PaneId(1),
+                SplitPosition::After,
+            )
+            .unwrap_err();
         assert_eq!(err, LayoutError::PaneNotFound(PaneId(99)));
     }
 
     #[test]
     fn split_rect_distributes_columns() {
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After).unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Vertical,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
         let vp = Rect::new(0, 0, 24, 21);
         let r0 = t.rect_of(PaneId(0), vp).unwrap();
         let r1 = t.rect_of(PaneId(1), vp).unwrap();
@@ -776,7 +857,13 @@ mod tests {
     #[test]
     fn close_pane_collapses_split() {
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After).unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Vertical,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
         assert_eq!(t.close(PaneId(1)), CloseOutcome::SiblingPromoted);
         assert_eq!(t.panes(), vec![PaneId(0)]);
         let vp = Rect::new(0, 0, 24, 21);
@@ -799,7 +886,13 @@ mod tests {
 
     fn build_two_pane_vertical() -> LayoutTree {
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After).unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Vertical,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
         t
     }
 
@@ -815,8 +908,14 @@ mod tests {
     fn next_in_direction_finds_right_neighbor() {
         let t = build_two_pane_vertical();
         let vp = Rect::new(0, 0, 24, 21);
-        assert_eq!(t.next_in_direction(PaneId(0), vp, Direction::Right), Some(PaneId(1)));
-        assert_eq!(t.next_in_direction(PaneId(1), vp, Direction::Left), Some(PaneId(0)));
+        assert_eq!(
+            t.next_in_direction(PaneId(0), vp, Direction::Right),
+            Some(PaneId(1))
+        );
+        assert_eq!(
+            t.next_in_direction(PaneId(1), vp, Direction::Left),
+            Some(PaneId(0))
+        );
     }
 
     #[test]
@@ -843,10 +942,20 @@ mod tests {
         // boundary, pane A must be untouched. (Was: the ratio change compounded
         // across every same-axis ancestor and also shrank the unrelated pane A.)
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After)
-            .unwrap();
-        t.split(PaneId(1), SplitDir::Vertical, PaneId(2), SplitPosition::After)
-            .unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Vertical,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
+        t.split(
+            PaneId(1),
+            SplitDir::Vertical,
+            PaneId(2),
+            SplitPosition::After,
+        )
+        .unwrap();
         let vp = Rect::new(0, 0, 24, 80);
 
         let a_before = t.rect_of(PaneId(0), vp).unwrap();
@@ -873,10 +982,20 @@ mod tests {
     #[test]
     fn next_in_direction_handles_nested_split() {
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After)
-            .unwrap();
-        t.split(PaneId(1), SplitDir::Horizontal, PaneId(2), SplitPosition::After)
-            .unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Vertical,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
+        t.split(
+            PaneId(1),
+            SplitDir::Horizontal,
+            PaneId(2),
+            SplitPosition::After,
+        )
+        .unwrap();
         let vp = Rect::new(0, 0, 24, 80);
 
         // From L, Right should reach one of the two right-side panes.
@@ -911,8 +1030,13 @@ mod tests {
     #[test]
     fn border_at_returns_node_on_vertical_gutter() {
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After)
-            .unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Vertical,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
         let vp = Rect::new(0, 0, 10, 21);
         // 21 cols → usable 20 → first.cols ≈ 10 → gutter at col 10.
         let hit = t.border_at(vp, 5, 10).expect("on gutter");
@@ -923,8 +1047,13 @@ mod tests {
     #[test]
     fn border_at_returns_none_in_pane_interior() {
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After)
-            .unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Vertical,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
         let vp = Rect::new(0, 0, 10, 21);
         assert!(t.border_at(vp, 5, 5).is_none());
         assert!(t.border_at(vp, 5, 15).is_none());
@@ -933,8 +1062,13 @@ mod tests {
     #[test]
     fn border_at_on_horizontal_gutter() {
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Horizontal, PaneId(1), SplitPosition::After)
-            .unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Horizontal,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
         let vp = Rect::new(0, 0, 11, 20);
         // 11 rows → usable 10 → first.rows ≈ 5 → gutter at row 5.
         let hit = t.border_at(vp, 5, 10).expect("on horizontal gutter");
@@ -945,8 +1079,13 @@ mod tests {
     #[test]
     fn adjust_split_changes_ratio_for_matching_border() {
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After)
-            .unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Vertical,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
         let vp = Rect::new(0, 0, 10, 21);
         let before = t.rect_of(PaneId(0), vp).unwrap();
         let applied = t.adjust_split(PaneId(0), BorderSide::Right, 3, vp);
@@ -958,14 +1097,22 @@ mod tests {
     #[test]
     fn adjust_split_clamps_to_min_size() {
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After)
-            .unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Vertical,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
         let vp = Rect::new(0, 0, 10, 21);
         // Try to shrink the first pane below `MIN_PANE_CELLS` (4) with a huge
         // negative delta.
         let applied = t.adjust_split(PaneId(0), BorderSide::Right, -100, vp);
         // First pane started at ~10 cols and can shrink to 4, so delta no smaller than -6.
-        assert!(applied >= -6, "should clamp at MIN_PANE_CELLS; got {applied}");
+        assert!(
+            applied >= -6,
+            "should clamp at MIN_PANE_CELLS; got {applied}"
+        );
         assert!(applied < 0, "should still apply something");
     }
 
@@ -976,8 +1123,13 @@ mod tests {
         // actual painted border movement (driven by the ratio), not the cell-space
         // new_first, or the drag anchor desyncs from the border.
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After)
-            .unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Vertical,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
         let vp = Rect::new(0, 0, 10, 101);
         let before = t.rect_of(PaneId(0), vp).unwrap();
         let applied = t.adjust_split(PaneId(0), BorderSide::Right, 1000, vp);
@@ -1009,8 +1161,20 @@ mod tests {
     fn swap_panes_in_nested_tree_leaves_third_put() {
         // L | (TR / BR): vertical split, then horizontal split on the right.
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After).unwrap();
-        t.split(PaneId(1), SplitDir::Horizontal, PaneId(2), SplitPosition::After).unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Vertical,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
+        t.split(
+            PaneId(1),
+            SplitDir::Horizontal,
+            PaneId(2),
+            SplitPosition::After,
+        )
+        .unwrap();
         let vp = Rect::new(0, 0, 24, 80);
         let r0 = t.rect_of(PaneId(0), vp).unwrap();
         let r1 = t.rect_of(PaneId(1), vp).unwrap();
@@ -1018,7 +1182,11 @@ mod tests {
         assert!(t.swap_panes(PaneId(1), PaneId(2)));
         assert_eq!(t.rect_of(PaneId(1), vp).unwrap(), r2);
         assert_eq!(t.rect_of(PaneId(2), vp).unwrap(), r1);
-        assert_eq!(t.rect_of(PaneId(0), vp).unwrap(), r0, "untouched leaf keeps its rect");
+        assert_eq!(
+            t.rect_of(PaneId(0), vp).unwrap(),
+            r0,
+            "untouched leaf keeps its rect"
+        );
     }
 
     #[test]
@@ -1036,7 +1204,11 @@ mod tests {
         let r0 = t.rect_of(PaneId(0), vp).unwrap();
         let r1 = t.rect_of(PaneId(1), vp).unwrap();
         assert!(t.replace_leaf(PaneId(0), PaneId(5)));
-        assert_eq!(t.rect_of(PaneId(5), vp), Some(r0), "new id occupies the old slot");
+        assert_eq!(
+            t.rect_of(PaneId(5), vp),
+            Some(r0),
+            "new id occupies the old slot"
+        );
         assert_eq!(t.rect_of(PaneId(0), vp), None, "old id is gone");
         assert_eq!(t.rect_of(PaneId(1), vp), Some(r1), "other leaf untouched");
         let mut panes = t.panes();
@@ -1060,14 +1232,30 @@ mod tests {
     fn replace_leaf_in_nested_tree_leaves_others_put() {
         // L | (TR / BR): vertical split, then horizontal split on the right.
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After).unwrap();
-        t.split(PaneId(1), SplitDir::Horizontal, PaneId(2), SplitPosition::After).unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Vertical,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
+        t.split(
+            PaneId(1),
+            SplitDir::Horizontal,
+            PaneId(2),
+            SplitPosition::After,
+        )
+        .unwrap();
         let vp = Rect::new(0, 0, 24, 80);
         let r0 = t.rect_of(PaneId(0), vp).unwrap();
         let r1 = t.rect_of(PaneId(1), vp).unwrap();
         let r2 = t.rect_of(PaneId(2), vp).unwrap();
         assert!(t.replace_leaf(PaneId(1), PaneId(7)));
-        assert_eq!(t.rect_of(PaneId(7), vp), Some(r1), "replacement keeps the slot's rect");
+        assert_eq!(
+            t.rect_of(PaneId(7), vp),
+            Some(r1),
+            "replacement keeps the slot's rect"
+        );
         assert_eq!(t.rect_of(PaneId(1), vp), None);
         assert_eq!(t.rect_of(PaneId(0), vp), Some(r0));
         assert_eq!(t.rect_of(PaneId(2), vp), Some(r2));
@@ -1076,8 +1264,20 @@ mod tests {
     #[test]
     fn set_ratios_preorder_applies_in_order_and_clamps() {
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Vertical, PaneId(1), SplitPosition::After).unwrap();
-        t.split(PaneId(0), SplitDir::Horizontal, PaneId(2), SplitPosition::After).unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Vertical,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Horizontal,
+            PaneId(2),
+            SplitPosition::After,
+        )
+        .unwrap();
         // Preorder: root split, then the nested split under `first`.
         let applied = t.set_ratios_preorder(&[0.3, 0.95]);
         assert_eq!(applied, 2);
@@ -1106,8 +1306,10 @@ mod tests {
     #[test]
     fn is_empty_false_for_nonempty_tree() {
         // `is_empty → true` mutation at 76:9: would make `is_empty` always true.
-        assert!(!LayoutTree::single(PaneId(0)).is_empty(),
-            "a single-pane tree must not be empty");
+        assert!(
+            !LayoutTree::single(PaneId(0)).is_empty(),
+            "a single-pane tree must not be empty"
+        );
     }
 
     #[test]
@@ -1122,8 +1324,11 @@ mod tests {
         // `map_layout → None` mutation at 315:9: would return `None` always.
         let t = LayoutTree::single(PaneId(7));
         let result = t.map_layout(|id, _| id, |_, _, a, _| a);
-        assert_eq!(result, Some(PaneId(7)),
-            "map_layout on a nonempty tree must return Some");
+        assert_eq!(
+            result,
+            Some(PaneId(7)),
+            "map_layout on a nonempty tree must return Some"
+        );
     }
 
     #[test]
@@ -1134,8 +1339,10 @@ mod tests {
         // skips the guard, calls `swap_in`, and corrupts the tree (`b` becomes `a`).
         let mut t = build_two_pane_vertical(); // [PaneId(0), PaneId(1)]
         let before = t.panes();
-        assert!(!t.swap_panes(PaneId(99), PaneId(0)),
-            "absent first pane must return false");
+        assert!(
+            !t.swap_panes(PaneId(99), PaneId(0)),
+            "absent first pane must return false"
+        );
         assert_eq!(t.panes(), before, "tree must be unchanged");
 
         // Equivalent note: `&& → ||` at 263:17 (`found_a && found_b`): both flags
@@ -1151,10 +1358,14 @@ mod tests {
         let t = build_two_pane_vertical(); // [0] | [1], each full height
         let vp = Rect::new(0, 0, 10, 21); // 10 rows
         // Last valid row (9) must be a gutter hit; row 10 must not.
-        assert!(t.border_at(vp, 9, 10).is_some(),
-            "last valid gutter row must be a hit");
-        assert!(t.border_at(vp, 10, 10).is_none(),
-            "row=vp.rows is out of range and must not be a hit");
+        assert!(
+            t.border_at(vp, 9, 10).is_some(),
+            "last valid gutter row must be a hit"
+        );
+        assert!(
+            t.border_at(vp, 10, 10).is_none(),
+            "row=vp.rows is out of range and must not be a hit"
+        );
     }
 
     #[test]
@@ -1164,18 +1375,30 @@ mod tests {
         // - 366:58 `&& → ||`: fires for non-gutter rows too via the col range.
         // - 366:65 `< → <=`: extends col range by one past the right edge.
         let mut t = LayoutTree::single(PaneId(0));
-        t.split(PaneId(0), SplitDir::Horizontal, PaneId(1), SplitPosition::After).unwrap();
+        t.split(
+            PaneId(0),
+            SplitDir::Horizontal,
+            PaneId(1),
+            SplitPosition::After,
+        )
+        .unwrap();
         let vp = Rect::new(0, 0, 11, 20); // gutter at row 5, cols 0-19
         // Gutter row is a hit.
         assert!(t.border_at(vp, 5, 10).is_some(), "gutter row must be a hit");
         // Rows adjacent to the gutter are NOT hits (kills 366:42 and 366:58).
-        assert!(t.border_at(vp, 4, 10).is_none(),
-            "row before gutter must not be a hit");
-        assert!(t.border_at(vp, 6, 10).is_none(),
-            "row after gutter must not be a hit");
+        assert!(
+            t.border_at(vp, 4, 10).is_none(),
+            "row before gutter must not be a hit"
+        );
+        assert!(
+            t.border_at(vp, 6, 10).is_none(),
+            "row after gutter must not be a hit"
+        );
         // Column exactly at the right edge (col=a.cols=20) is NOT a hit (kills 366:65).
-        assert!(t.border_at(vp, 5, 20).is_none(),
-            "col=pane_width is out of range and must not be a hit");
+        assert!(
+            t.border_at(vp, 5, 20).is_none(),
+            "col=pane_width is out of range and must not be a hit"
+        );
     }
 
     #[test]
@@ -1189,6 +1412,9 @@ mod tests {
         let vp = Rect::new(0, 0, 10, 21);
         // BorderSide::Bottom makes no sense for a vertical split; must return 0.
         let applied = t.adjust_split(PaneId(0), BorderSide::Bottom, 5, vp);
-        assert_eq!(applied, 0, "wrong border side on a vertical split must be a noop");
+        assert_eq!(
+            applied, 0,
+            "wrong border side on a vertical split must be a noop"
+        );
     }
 }

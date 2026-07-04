@@ -8,10 +8,10 @@ mod paste;
 mod spec;
 
 pub use build::{build_keymap, build_keymap_with_skips};
-pub use encode::{encode, KeyboardTarget};
-pub use parser::{KeyboardProtocol, KeyParseOutput, KeyParser};
+pub use encode::{KeyboardTarget, encode};
+pub use parser::{KeyParseOutput, KeyParser, KeyboardProtocol};
 pub use paste::{PasteParseOutput, PasteParser};
 pub use spec::{
-    parse_chord, parse_chord_seq, parse_chord_seq_with_prefix, parse_command, ChordSpec,
-    KeyParseError,
+    ChordSpec, KeyParseError, parse_chord, parse_chord_seq, parse_chord_seq_with_prefix,
+    parse_command,
 };

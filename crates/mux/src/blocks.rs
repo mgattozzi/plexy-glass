@@ -87,7 +87,9 @@ pub fn last_prompt_line(screen: &Screen) -> Option<u32> {
 
 /// Every `PROMPT_START` line, ascending: the full block set in display order.
 pub fn all_prompt_lines(screen: &Screen) -> Vec<u32> {
-    (0..total_lines(screen)).filter(|&l| is_prompt(screen, l)).collect()
+    (0..total_lines(screen))
+        .filter(|&l| is_prompt(screen, l))
+        .collect()
 }
 
 /// The governing `PROMPT_START` at or above `line` (the block that contains
@@ -193,8 +195,7 @@ pub fn last_completed_block(screen: &Screen) -> Option<(u32, u32)> {
 /// `Screen::last_block_exit` when the newest block's rows have been evicted
 /// from scrollback.
 pub fn closing_exit(screen: &Screen, prompt_line: u32) -> Option<i32> {
-    closing_block_end_line(screen, prompt_line)
-        .and_then(|d| row_at(screen, d)?.mark.exit())
+    closing_block_end_line(screen, prompt_line).and_then(|d| row_at(screen, d)?.mark.exit())
 }
 
 /// True when `line` is the row a block's typed command sits on: the `OSC 133;B`
@@ -221,8 +222,7 @@ pub fn is_command_row(screen: &Screen, line: u32) -> bool {
 /// closing `OSC 133;D` recorded one. `None` when the block is unclosed, the row
 /// was evicted, or `C` never preceded `D`. Mirrors [`closing_exit`].
 pub fn closing_duration(screen: &Screen, prompt_line: u32) -> Option<u32> {
-    closing_block_end_line(screen, prompt_line)
-        .and_then(|d| row_at(screen, d)?.mark.duration_ms())
+    closing_block_end_line(screen, prompt_line).and_then(|d| row_at(screen, d)?.mark.duration_ms())
 }
 
 /// Lowercased "command\noutput" for the block at `prompt_line`, output soft-capped
@@ -233,7 +233,9 @@ pub fn block_search_text(screen: &Screen, prompt_line: u32, cap: usize) -> Strin
     if let Some((start, end)) = block_output_range(screen, prompt_line) {
         let mut out = String::new();
         'rows: for line in start..=end {
-            let Some(row) = row_at(screen, line) else { continue };
+            let Some(row) = row_at(screen, line) else {
+                continue;
+            };
             for cell in &row.cells {
                 out.push_str(cell.grapheme.as_str());
                 if out.len() >= cap {
@@ -378,7 +380,11 @@ pub fn block_command_line(screen: &Screen, prompt_line: u32) -> Option<String> {
     }
 
     let trimmed = result.trim().to_string();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 /// Per-visible-row block exit status for a viewport slice.
@@ -571,9 +577,8 @@ pub fn pane_at_prompt(screen: &Screen) -> bool {
         return false;
     };
     // The pane is at a prompt iff no OUTPUT_START exists strictly after it.
-    let has_output_after = (newest_prompt + 1..total).any(|l| {
-        row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::OUTPUT_START))
-    });
+    let has_output_after = (newest_prompt + 1..total)
+        .any(|l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::OUTPUT_START)));
     !has_output_after
 }
 
@@ -604,7 +609,9 @@ pub fn running_command(screen: &Screen) -> Option<String> {
 pub fn block_text(screen: &Screen, (start, end): (u32, u32)) -> String {
     let mut lines: Vec<String> = Vec::with_capacity((end.saturating_sub(start) + 1) as usize);
     for line in start..=end {
-        let Some(row) = row_at(screen, line) else { continue };
+        let Some(row) = row_at(screen, line) else {
+            continue;
+        };
         let mut text = String::new();
         for cell in &row.cells {
             text.push_str(cell.grapheme.as_str());
@@ -710,7 +717,10 @@ impl FoldProjection {
     /// An identity projection over `total` lines (nothing folded), used for panes
     /// where folds don't apply (copy mode, block mode).
     pub const fn identity(total: u32) -> Self {
-        Self { hidden: Vec::new(), total }
+        Self {
+            hidden: Vec::new(),
+            total,
+        }
     }
 
     /// Build from a screen's folded prompt rows.
@@ -736,7 +746,10 @@ impl FoldProjection {
                 _ => merged.push((s, e)),
             }
         }
-        Self { hidden: merged, total }
+        Self {
+            hidden: merged,
+            total,
+        }
     }
 
     /// True when nothing is folded (callers can take the cheap 1:1 path).
@@ -764,7 +777,11 @@ impl FoldProjection {
         // Equivalent note (755:58 `total - 1 → + / /`): clamping only differs
         // when u > total (visible_idx past visible_total), which never occurs
         // for valid callers, since u after the loop is always within [0, total-1].
-        if self.total == 0 { 0 } else { u.min(self.total - 1) }
+        if self.total == 0 {
+            0
+        } else {
+            u.min(self.total - 1)
+        }
     }
 
     /// The visible index of `unified`, or `None` when it falls inside a fold.
@@ -781,7 +798,6 @@ impl FoldProjection {
         }
         Some(vis)
     }
-
 }
 
 // ── Visible-space scroll geometry ────────────────────────────────────────────
@@ -822,8 +838,9 @@ pub fn scroll_offset_for_top(screen: &Screen, rows: u16, target_unified: u32) ->
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plexy_glass_emulator::Emulator;
+
+    use super::*;
 
     /// Feed raw bytes (text + OSC 133 sequences) through a real emulator.
     /// A trailing SGR-reset flushes the pending grapheme into the grid.
@@ -864,13 +881,23 @@ mod tests {
     #[test]
     fn is_command_row_picks_b_row_or_a_when_no_b() {
         // Multi-line prompt: 133;A on row 0, 133;B on row 1 (the command row).
-        let s = screen_from(8, 40, b"\x1b]133;A\x07p\r\n\x1b]133;B\x07ls\r\n\x1b]133;C\x07o\r\nx");
-        assert!(!is_command_row(&s, 0), "prompt-start row isn't the command row when a B exists");
+        let s = screen_from(
+            8,
+            40,
+            b"\x1b]133;A\x07p\r\n\x1b]133;B\x07ls\r\n\x1b]133;C\x07o\r\nx",
+        );
+        assert!(
+            !is_command_row(&s, 0),
+            "prompt-start row isn't the command row when a B exists"
+        );
         assert!(is_command_row(&s, 1), "the 133;B row is the command row");
         assert!(!is_command_row(&s, 2), "an output row is not a command row");
         // Single-line prompt with no B: the 133;A row IS the command row.
         let s2 = screen_from(8, 40, b"\x1b]133;A\x07$ ls\r\n\x1b]133;C\x07o\r\nx");
-        assert!(is_command_row(&s2, 0), "a no-B prompt row is the command row");
+        assert!(
+            is_command_row(&s2, 0),
+            "a no-B prompt row is the command row"
+        );
     }
 
     #[test]
@@ -898,7 +925,10 @@ mod tests {
         );
         let t = block_search_text(&s, 0, 4096);
         assert!(t.contains("one"), "command, lowercased: {t:?}");
-        assert!(t.contains("out1") && t.contains("out2"), "output, lowercased: {t:?}");
+        assert!(
+            t.contains("out1") && t.contains("out2"),
+            "output, lowercased: {t:?}"
+        );
         assert_eq!(t, t.to_lowercase());
     }
 
@@ -1133,11 +1163,26 @@ mod tests {
         let status = viewport_block_status(&s, 0, 8);
         assert_eq!(status.len(), 8);
         // Block 1 (lines 0..=2): Ok
-        assert_eq!(status[0], Some(BlockLineStatus::Ok), "prompt row of ok block");
-        assert_eq!(status[1], Some(BlockLineStatus::Ok), "output row 1 of ok block");
-        assert_eq!(status[2], Some(BlockLineStatus::Ok), "output row 2 of ok block");
+        assert_eq!(
+            status[0],
+            Some(BlockLineStatus::Ok),
+            "prompt row of ok block"
+        );
+        assert_eq!(
+            status[1],
+            Some(BlockLineStatus::Ok),
+            "output row 1 of ok block"
+        );
+        assert_eq!(
+            status[2],
+            Some(BlockLineStatus::Ok),
+            "output row 2 of ok block"
+        );
         // Line 3: D;0+A, the next block's prompt row (block 2 running) → None
-        assert_eq!(status[3], None, "shared D+A row shows NEXT block status (running)");
+        assert_eq!(
+            status[3], None,
+            "shared D+A row shows NEXT block status (running)"
+        );
         // Block 2 (lines 4..=7): running → None
         assert_eq!(status[4], None, "output row of running block");
         assert_eq!(status[7], None, "last row of running block");
@@ -1185,8 +1230,16 @@ mod tests {
         // Block 2: lines 2..=5 → None (running)
         let status = viewport_block_status(&s, 0, 6);
         assert_eq!(status.len(), 6);
-        assert_eq!(status[0], Some(BlockLineStatus::Failed), "prompt row of failed block");
-        assert_eq!(status[1], Some(BlockLineStatus::Failed), "output row of failed block");
+        assert_eq!(
+            status[0],
+            Some(BlockLineStatus::Failed),
+            "prompt row of failed block"
+        );
+        assert_eq!(
+            status[1],
+            Some(BlockLineStatus::Failed),
+            "output row of failed block"
+        );
         // Line 2 is the next block's prompt row (block 2, running) → None
         assert_eq!(status[2], None, "shared D+A row shows next block (running)");
         assert_eq!(status[3], None, "block 2 running");
@@ -1195,13 +1248,12 @@ mod tests {
     /// Running block (A+C, no D): all None.
     #[test]
     fn vbs_running_block_all_none() {
-        let s = screen_from(
-            4,
-            20,
-            b"\x1b]133;A\x07$ run\r\n\x1b]133;C\x07working",
-        );
+        let s = screen_from(4, 20, b"\x1b]133;A\x07$ run\r\n\x1b]133;C\x07working");
         let status = viewport_block_status(&s, 0, 4);
-        assert!(status.iter().all(Option::is_none), "running block → all None");
+        assert!(
+            status.iter().all(Option::is_none),
+            "running block → all None"
+        );
     }
 
     /// D without exit code → None (completed but unknown).
@@ -1254,7 +1306,10 @@ mod tests {
         // starts on line 3 and is still running → line 3 → None.
         let s = two_blocks();
         let status = viewport_block_status(&s, 0, 8);
-        assert_eq!(status[3], None, "shared D+A row belongs to next block (running)");
+        assert_eq!(
+            status[3], None,
+            "shared D+A row belongs to next block (running)"
+        );
         // Block 1 rows (0..=2) should be Ok.
         assert_eq!(status[0], Some(BlockLineStatus::Ok));
         assert_eq!(status[1], Some(BlockLineStatus::Ok));
@@ -1283,7 +1338,11 @@ mod tests {
         assert_eq!(status[0], Some(BlockLineStatus::Ok));
         assert_eq!(status[2], Some(BlockLineStatus::Ok));
         // Line 3: block 2 prompt row, block 2 is Failed → Failed
-        assert_eq!(status[3], Some(BlockLineStatus::Failed), "block 2 prompt row takes block 2 status");
+        assert_eq!(
+            status[3],
+            Some(BlockLineStatus::Failed),
+            "block 2 prompt row takes block 2 status"
+        );
         // Line 4: block 2 output → Failed
         assert_eq!(status[4], Some(BlockLineStatus::Failed));
         // Line 5: block 3 prompt row (running) → None
@@ -1299,9 +1358,17 @@ mod tests {
         let status = viewport_block_status(&s, 1, 4);
         assert_eq!(status.len(), 4);
         // row 0 → line 1 → block 1 → Ok
-        assert_eq!(status[0], Some(BlockLineStatus::Ok), "mid-block row at line 1");
+        assert_eq!(
+            status[0],
+            Some(BlockLineStatus::Ok),
+            "mid-block row at line 1"
+        );
         // row 1 → line 2 → block 1 → Ok
-        assert_eq!(status[1], Some(BlockLineStatus::Ok), "mid-block row at line 2");
+        assert_eq!(
+            status[1],
+            Some(BlockLineStatus::Ok),
+            "mid-block row at line 2"
+        );
         // row 2 → line 3 → block 2 prompt (running) → None
         assert_eq!(status[2], None, "block 2 prompt row");
         // row 3 → line 4 → block 2 output (running) → None
@@ -1356,7 +1423,11 @@ mod tests {
         assert_eq!(status[0], None, "line before first prompt");
         assert_eq!(status[1], None, "line before first prompt");
         // Line 2 is block 1's prompt, closed by D;0 on line 3 → Ok
-        assert_eq!(status[2], Some(BlockLineStatus::Ok), "prompt row of ok block");
+        assert_eq!(
+            status[2],
+            Some(BlockLineStatus::Ok),
+            "prompt row of ok block"
+        );
     }
 
     /// `top` beyond all marks → `None`.
@@ -1365,7 +1436,10 @@ mod tests {
         let s = two_blocks();
         // top = 1000 (beyond total_lines = 8)
         let status = viewport_block_status(&s, 1000, 4);
-        assert!(status.iter().all(Option::is_none), "top past total → all None");
+        assert!(
+            status.iter().all(Option::is_none),
+            "top past total → all None"
+        );
     }
 
     /// D on the prompt's own row (D;0 + A on line 0, no surviving prior block):
@@ -1377,8 +1451,10 @@ mod tests {
         // one. Block 1 (prompt at line 0) has no D strictly after it → running → None.
         let s = screen_from(4, 20, b"\x1b]133;D;0\x07\x1b]133;A\x07$ a\r\nrunning");
         let status = viewport_block_status(&s, 0, 4);
-        assert!(status.iter().all(Option::is_none),
-            "D on prompt's own row excluded from that block → all None");
+        assert!(
+            status.iter().all(Option::is_none),
+            "D on prompt's own row excluded from that block → all None"
+        );
     }
 
     /// `top` is exactly at `total_lines` → all `None`.
@@ -1387,7 +1463,10 @@ mod tests {
         let s = screen_from(4, 20, b"\x1b]133;A\x07$ cmd");
         // total_lines = 4; top = 4 → at end → all None
         let status = viewport_block_status(&s, 4, 4);
-        assert!(status.iter().all(Option::is_none), "top at total_lines → all None");
+        assert!(
+            status.iter().all(Option::is_none),
+            "top at total_lines → all None"
+        );
     }
 
     // ── pane_at_prompt tests ─────────────────────────────────────────────────
@@ -1443,7 +1522,10 @@ mod tests {
               \x1b]133;D;0\x07\x1b]133;A\x07$ two",
         );
         // Newest A is on line 3 (D+A). No C after line 3 → at prompt.
-        assert!(pane_at_prompt(&s), "shared D+A row newest, no C after → true");
+        assert!(
+            pane_at_prompt(&s),
+            "shared D+A row newest, no C after → true"
+        );
     }
 
     /// C on the SAME ROW as the newest A (no newline between A and C) → true.
@@ -1485,7 +1567,11 @@ mod tests {
             b"\x1b]133;A\x07>>>\x1b]133;B\x07cmd\r\n\x1b]133;C\x07out",
         );
         let result = block_command_line(&s, 0);
-        assert_eq!(result, Some("cmd".to_string()), "prefix '>>>' must be excluded");
+        assert_eq!(
+            result,
+            Some("cmd".to_string()),
+            "prefix '>>>' must be excluded"
+        );
     }
 
     /// Soft-wrapped long command in a narrow screen → joined WITHOUT \\n.
@@ -1505,7 +1591,10 @@ mod tests {
         let result = block_command_line(&s, 0);
         assert!(result.is_some(), "should extract wrapped command");
         let text = result.unwrap();
-        assert!(!text.contains('\n'), "soft-wrapped command must not contain newline: {text:?}");
+        assert!(
+            !text.contains('\n'),
+            "soft-wrapped command must not contain newline: {text:?}"
+        );
         assert!(text.contains("abcdefgh"), "first segment present");
         assert!(text.contains("ijklmnop"), "second segment present");
     }
@@ -1523,19 +1612,18 @@ mod tests {
             b"\x1b]133;A\x07$ \x1b]133;B\x07line1\r\nline2\r\n\x1b]133;C\x07out",
         );
         let result = block_command_line(&s, 0);
-        assert_eq!(result, Some("line1\nline2".to_string()),
-            "hard rows must be joined with newline");
+        assert_eq!(
+            result,
+            Some("line1\nline2".to_string()),
+            "hard rows must be joined with newline"
+        );
     }
 
     /// No B row → None.
     #[test]
     fn bcl_no_b_row_is_none() {
         // A and C but no B: shell did not emit 133;B.
-        let s = screen_from(
-            4,
-            20,
-            b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07out",
-        );
+        let s = screen_from(4, 20, b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07out");
         assert_eq!(block_command_line(&s, 0), None, "no B → None");
     }
 
@@ -1543,11 +1631,7 @@ mod tests {
     #[test]
     fn bcl_no_c_row_is_none() {
         // A and B but no C.
-        let s = screen_from(
-            4,
-            20,
-            b"\x1b]133;A\x07$ \x1b]133;B\x07cmd",
-        );
+        let s = screen_from(4, 20, b"\x1b]133;A\x07$ \x1b]133;B\x07cmd");
         assert_eq!(block_command_line(&s, 0), None, "no C → None");
     }
 
@@ -1612,8 +1696,11 @@ mod tests {
             b"\x1b]133;A\x07\xe4\xb8\xad \x1b]133;B\x07hello\r\n\x1b]133;C\x07out",
         );
         let result = block_command_line(&s, 0);
-        assert_eq!(result, Some("hello".to_string()),
-            "wide grapheme in prompt must not corrupt col slicing");
+        assert_eq!(
+            result,
+            Some("hello".to_string()),
+            "wide grapheme in prompt must not corrupt col slicing"
+        );
     }
 
     // ── closing_exit tests ───────────────────────────────────────────────────
@@ -1770,8 +1857,14 @@ mod tests {
         assert!(!row_at(&s, 0).unwrap().mark.is_folded());
 
         fold_all_completed(&mut s);
-        assert!(row_at(&s, 0).unwrap().mark.is_folded(), "completed block folded");
-        assert!(!row_at(&s, 3).unwrap().mark.is_folded(), "active block left open");
+        assert!(
+            row_at(&s, 0).unwrap().mark.is_folded(),
+            "completed block folded"
+        );
+        assert!(
+            !row_at(&s, 3).unwrap().mark.is_folded(),
+            "active block left open"
+        );
 
         unfold_all(&mut s);
         assert!(!row_at(&s, 0).unwrap().mark.is_folded());
@@ -1836,7 +1929,11 @@ mod tests {
         // Offset that lands the $two prompt (unified 3) at the top: from_unified(3)
         // = 1, max(2) - 1 = 1.
         assert_eq!(scroll_offset_for_top(&s, rows, 3), 1);
-        assert_eq!(scroll_line_at(&s, rows, 1, 0), 3, "the prompt is at the top");
+        assert_eq!(
+            scroll_line_at(&s, rows, 1, 0),
+            3,
+            "the prompt is at the top"
+        );
         // A target within the bottom `rows` visible lines snaps to live (0).
         assert_eq!(scroll_offset_for_top(&s, rows, 7), 0);
     }
@@ -1882,11 +1979,23 @@ mod tests {
     #[test]
     fn format_duration_boundaries() {
         // Kills: 260:11 < → <= (ms=1000: without boundary test, "1000ms" vs "1.0s")
-        assert_eq!(format_duration(1_000), "1.0s", "1000ms crosses the ms→s boundary");
+        assert_eq!(
+            format_duration(1_000),
+            "1.0s",
+            "1000ms crosses the ms→s boundary"
+        );
         // Kills: 262:18 < → <= (ms=9950: "10.0s" via tenths vs "10s" via whole-secs)
-        assert_eq!(format_duration(9_950), "10s", "9950ms crosses the tenths→whole boundary");
+        assert_eq!(
+            format_duration(9_950),
+            "10s",
+            "9950ms crosses the tenths→whole boundary"
+        );
         // Kills: 269:17 < → <= (secs=60: "60s" vs "1m00s")
-        assert_eq!(format_duration(60_000), "1m00s", "60s crosses the secs→minutes boundary");
+        assert_eq!(
+            format_duration(60_000),
+            "1m00s",
+            "60s crosses the secs→minutes boundary"
+        );
     }
 
     #[test]
@@ -1907,7 +2016,10 @@ mod tests {
         assert!(result.is_some(), "command must be extracted");
         let text = result.unwrap();
         // The soft-wrap between row 1 and row 2 must NOT become a '\n'.
-        assert!(!text.contains('\n'), "soft-wrapped rows must not have newline: {text:?}");
+        assert!(
+            !text.contains('\n'),
+            "soft-wrapped rows must not have newline: {text:?}"
+        );
         assert!(text.starts_with("abcdefghij"), "first segment present");
     }
 
@@ -1919,7 +2031,10 @@ mod tests {
         //   mutation: active.rows.get_mut(3 + 3) = active.rows.get_mut(6) → None
         let mut s = across_boundary(); // sb_len=3, active has 3 rows (lines 3,4,5)
         let row = row_at_mut(&mut s, 3);
-        assert!(row.is_some(), "line 3 (active[0]) must be reachable via row_at_mut with sb_len=3");
+        assert!(
+            row.is_some(),
+            "line 3 (active[0]) must be reachable via row_at_mut with sb_len=3"
+        );
     }
 
     #[test]
@@ -1930,7 +2045,10 @@ mod tests {
         let mut s = two_blocks();
         set_block_folded(&mut s, 0, true);
         // Block 0: prompt row=0, output rows=1..=2 (start=1, end=2, folded).
-        assert!(is_folded_command_line(&s, 0), "prompt row is a folded command line");
+        assert!(
+            is_folded_command_line(&s, 0),
+            "prompt row is a folded command line"
+        );
         // Row 1 IS the output_start row: original says line(1) < start(1) → false.
         // Mutation says 1 <= 1 → true (wrong).
         assert!(

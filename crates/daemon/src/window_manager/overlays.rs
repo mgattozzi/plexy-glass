@@ -1,12 +1,13 @@
-use super::{COMMAND_HISTORY_CAP, WindowManager};
-use plexy_glass_mux::overlay;
 use std::mem;
+
 use plexy_glass_mux::{
-    BufferAction, BufferEntry, BufferOutcome, BufferPickerState, HistoryEntry, HistoryOutcome,
-    HistoryState, HistoryTarget, HintOutcome, HintPick, HintState, KeyEvent, NodeKey, Overlay,
+    BufferAction, BufferEntry, BufferOutcome, BufferPickerState, HintOutcome, HintPick, HintState,
+    HistoryEntry, HistoryOutcome, HistoryState, HistoryTarget, KeyEvent, NodeKey, Overlay,
     OverlayAction, PickerEntry, RenameTarget, TreeAction, TreeKind, TreeNode, TreeOutcome,
-    TreeState, handle_buffers, handle_hint, handle_history, handle_tree, session_label,
+    TreeState, handle_buffers, handle_hint, handle_history, handle_tree, overlay, session_label,
 };
+
+use super::{COMMAND_HISTORY_CAP, WindowManager};
 
 /// How the caller should follow up after feeding a key to the active overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +58,10 @@ impl WindowManager {
     /// Open a rename prompt seeded with the active window's current name.
     pub fn open_rename_window(&mut self) {
         let buf = self.active_window().name.clone();
-        self.set_overlay(Overlay::Rename { target: RenameTarget::Window, buf });
+        self.set_overlay(Overlay::Rename {
+            target: RenameTarget::Window,
+            buf,
+        });
     }
 
     /// Open a rename prompt for the active pane, capturing its id so a later
@@ -69,7 +73,10 @@ impl WindowManager {
             .pane(pid)
             .and_then(super::super::pane::Pane::name)
             .unwrap_or_default();
-        self.set_overlay(Overlay::Rename { target: RenameTarget::Pane, buf });
+        self.set_overlay(Overlay::Rename {
+            target: RenameTarget::Pane,
+            buf,
+        });
         self.rename_pane_target = Some(pid);
     }
 
@@ -115,7 +122,10 @@ impl WindowManager {
 
     /// Open the choose-buffer overlay over a snapshot of the paste buffers.
     pub fn open_buffer_picker(&mut self, entries: Vec<BufferEntry>) {
-        self.set_overlay(Overlay::BufferPicker(BufferPickerState { entries, selected: 0 }));
+        self.set_overlay(Overlay::BufferPicker(BufferPickerState {
+            entries,
+            selected: 0,
+        }));
     }
 
     /// Open the history palette over a pre-built entry snapshot (assembled by the
@@ -155,9 +165,10 @@ impl WindowManager {
             .into_iter()
             .map(|k| match k {
                 NodeKey::Session(s) if s == old => NodeKey::Session(new.to_string()),
-                NodeKey::Window { session, window } if session == old => {
-                    NodeKey::Window { session: new.to_string(), window }
-                }
+                NodeKey::Window { session, window } if session == old => NodeKey::Window {
+                    session: new.to_string(),
+                    window,
+                },
                 k => k,
             })
             .collect();

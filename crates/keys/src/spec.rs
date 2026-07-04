@@ -43,7 +43,9 @@ pub fn parse_chord(s: &str) -> Result<ChordSpec, KeyParseError> {
     let mut mods = Modifiers::empty();
     let parts: Vec<&str> = s.split('+').collect();
     // invariant: split on a non-empty string always yields at least one element
-    let (key_part, mod_parts) = parts.split_last().expect("split always yields >= 1 element");
+    let (key_part, mod_parts) = parts
+        .split_last()
+        .expect("split always yields >= 1 element");
     for m in mod_parts {
         match Modifiers::alias_meta_as_alt(m.trim()) {
             Some(flag) => mods |= flag,
@@ -206,9 +208,11 @@ pub fn parse_command(s: &str) -> Result<Command, KeyParseError> {
         "next_prompt" => Command::NextPrompt,
         "copy_output" => Command::CopyOutput,
         "layout" => {
-            let arg_str = arg.filter(|a| !a.is_empty()).ok_or_else(|| {
-                KeyParseError::MissingArg { command: name.to_string() }
-            })?;
+            let arg_str =
+                arg.filter(|a| !a.is_empty())
+                    .ok_or_else(|| KeyParseError::MissingArg {
+                        command: name.to_string(),
+                    })?;
             let preset = plexy_glass_mux::LayoutPreset::parse(arg_str).ok_or_else(|| {
                 KeyParseError::BadArg {
                     command: name.to_string(),
@@ -234,8 +238,9 @@ pub fn parse_command(s: &str) -> Result<Command, KeyParseError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plexy_glass_mux::{Direction, Key, Modifiers};
+
+    use super::*;
 
     #[test]
     fn parses_bare_letter() {
@@ -263,8 +268,14 @@ mod tests {
     #[test]
     fn parses_literal_plus_key() {
         // `+` is the modifier separator; binding it as a key must still work.
-        assert_eq!(parse_chord("+").unwrap(), (Modifiers::empty(), Key::Char('+')));
-        assert_eq!(parse_chord("Ctrl++").unwrap(), (Modifiers::CTRL, Key::Char('+')));
+        assert_eq!(
+            parse_chord("+").unwrap(),
+            (Modifiers::empty(), Key::Char('+'))
+        );
+        assert_eq!(
+            parse_chord("Ctrl++").unwrap(),
+            (Modifiers::CTRL, Key::Char('+'))
+        );
     }
 
     #[test]
@@ -320,24 +331,42 @@ mod tests {
 
     #[test]
     fn parses_enter_block_mode() {
-        assert_eq!(parse_command("enter_block_mode").unwrap(), Command::EnterBlockMode);
+        assert_eq!(
+            parse_command("enter_block_mode").unwrap(),
+            Command::EnterBlockMode
+        );
     }
 
     #[test]
     fn parses_resize_pane_commands() {
-        assert_eq!(parse_command("resize_pane_right").unwrap(), Command::ResizePane(Direction::Right));
-        assert_eq!(parse_command("resize_pane_up").unwrap(), Command::ResizePane(Direction::Up));
+        assert_eq!(
+            parse_command("resize_pane_right").unwrap(),
+            Command::ResizePane(Direction::Right)
+        );
+        assert_eq!(
+            parse_command("resize_pane_up").unwrap(),
+            Command::ResizePane(Direction::Up)
+        );
     }
 
     #[test]
     fn parses_last_window_pane_commands() {
-        assert_eq!(parse_command("select_last_window").unwrap(), Command::SelectLastWindow);
-        assert_eq!(parse_command("select_last_pane").unwrap(), Command::SelectLastPane);
+        assert_eq!(
+            parse_command("select_last_window").unwrap(),
+            Command::SelectLastWindow
+        );
+        assert_eq!(
+            parse_command("select_last_pane").unwrap(),
+            Command::SelectLastPane
+        );
     }
 
     #[test]
     fn parses_overlay_commands() {
-        assert_eq!(parse_command("rename_window").unwrap(), Command::RenameWindow);
+        assert_eq!(
+            parse_command("rename_window").unwrap(),
+            Command::RenameWindow
+        );
         assert_eq!(parse_command("rename_pane").unwrap(), Command::RenamePane);
         assert_eq!(parse_command("show_help").unwrap(), Command::ShowHelp);
     }
@@ -345,9 +374,18 @@ mod tests {
     #[test]
     fn parses_overlay_chords() {
         // The default bindings use comma / period / question chords.
-        assert_eq!(parse_chord(",").unwrap(), (Modifiers::empty(), Key::Char(',')));
-        assert_eq!(parse_chord(".").unwrap(), (Modifiers::empty(), Key::Char('.')));
-        assert_eq!(parse_chord("?").unwrap(), (Modifiers::empty(), Key::Char('?')));
+        assert_eq!(
+            parse_chord(",").unwrap(),
+            (Modifiers::empty(), Key::Char(','))
+        );
+        assert_eq!(
+            parse_chord(".").unwrap(),
+            (Modifiers::empty(), Key::Char('.'))
+        );
+        assert_eq!(
+            parse_chord("?").unwrap(),
+            (Modifiers::empty(), Key::Char('?'))
+        );
     }
 
     #[test]
@@ -394,11 +432,18 @@ mod tests {
         let c = parse_command("popup:git log --oneline").unwrap();
         assert_eq!(
             c,
-            Command::OpenPopup { command: Some("git log --oneline".into()) }
+            Command::OpenPopup {
+                command: Some("git log --oneline".into())
+            }
         );
         // splitn(2, ':') keeps later colons intact.
         let c = parse_command("popup:rg foo:bar").unwrap();
-        assert_eq!(c, Command::OpenPopup { command: Some("rg foo:bar".into()) });
+        assert_eq!(
+            c,
+            Command::OpenPopup {
+                command: Some("rg foo:bar".into())
+            }
+        );
     }
 
     #[test]

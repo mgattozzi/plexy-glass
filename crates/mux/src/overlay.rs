@@ -4,12 +4,12 @@
 //! mode), and the compositor renders the overlay. This module only decides how
 //! one key event mutates an overlay and what the caller should do next.
 
-use crate::command_prompt::{self, Completion};
-use crate::{Direction, Key, KeyEvent, Modifiers};
 use crate::buffer::BufferPickerState;
+use crate::command_prompt::{self, Completion};
 use crate::hint::HintState;
 use crate::history::HistoryState;
 use crate::tree::TreeState;
+use crate::{Direction, Key, KeyEvent, Modifiers};
 
 /// What a rename overlay targets. The concrete window/pane is resolved by the
 /// daemon at open time, not stored here.
@@ -119,12 +119,17 @@ pub fn handle(event: &KeyEvent, overlay: &mut Overlay) -> OverlayAction {
         Overlay::Rename { buf, .. } => handle_rename(event, buf),
         Overlay::Help { scroll } => handle_help(event, scroll),
         Overlay::Welcome => handle_welcome(event),
-        Overlay::Command { buf, history, hist_idx, completions } => {
-            handle_command_prompt(event, buf, history, hist_idx, completions)
-        }
-        Overlay::SessionPicker { entries, filter, selected } => {
-            handle_session_picker(event, entries, filter, selected)
-        }
+        Overlay::Command {
+            buf,
+            history,
+            hist_idx,
+            completions,
+        } => handle_command_prompt(event, buf, history, hist_idx, completions),
+        Overlay::SessionPicker {
+            entries,
+            filter,
+            selected,
+        } => handle_session_picker(event, entries, filter, selected),
         // Tree / buffer-picker / history / hint overlays are handled by the
         // daemon via their own pure handlers (actions need the registry); these
         // arms only keep the match exhaustive and are never reached.
@@ -168,9 +173,7 @@ fn handle_help(event: &KeyEvent, scroll: &mut u16) -> OverlayAction {
         (m, Key::Char('j') | Key::Arrow(Direction::Down)) if m.is_empty() => {
             scroll.saturating_add(1)
         }
-        (m, Key::Char('k') | Key::Arrow(Direction::Up)) if m.is_empty() => {
-            scroll.saturating_sub(1)
-        }
+        (m, Key::Char('k') | Key::Arrow(Direction::Up)) if m.is_empty() => scroll.saturating_sub(1),
         (m, Key::PageDown) if m.is_empty() => scroll.saturating_add(PAGE_STEP),
         (m, Key::PageUp) if m.is_empty() => scroll.saturating_sub(PAGE_STEP),
         (m, Key::Char('d')) if m == Modifiers::CTRL => scroll.saturating_add(PAGE_STEP),
@@ -234,7 +237,9 @@ fn handle_command_prompt(
             }
         }
         (m, Key::Tab) if m.is_empty() => complete_in_place(buf, completions),
-        (m, Key::Arrow(Direction::Up)) if m.is_empty() => history_recall(buf, history, hist_idx, true),
+        (m, Key::Arrow(Direction::Up)) if m.is_empty() => {
+            history_recall(buf, history, hist_idx, true)
+        }
         (m, Key::Arrow(Direction::Down)) if m.is_empty() => {
             history_recall(buf, history, hist_idx, false)
         }
@@ -346,9 +351,13 @@ fn handle_session_picker(
                 None => OverlayAction::None,
             }
         }
-        (m, Key::Arrow(Direction::Up)) if m.is_empty() => move_picker(selected, filtered_len, false),
+        (m, Key::Arrow(Direction::Up)) if m.is_empty() => {
+            move_picker(selected, filtered_len, false)
+        }
         (m, Key::Char('p')) if m == Modifiers::CTRL => move_picker(selected, filtered_len, false),
-        (m, Key::Arrow(Direction::Down)) if m.is_empty() => move_picker(selected, filtered_len, true),
+        (m, Key::Arrow(Direction::Down)) if m.is_empty() => {
+            move_picker(selected, filtered_len, true)
+        }
         (m, Key::Char('n')) if m == Modifiers::CTRL => move_picker(selected, filtered_len, true),
         (m, Key::Home) if m.is_empty() => set_picker(selected, 0),
         (m, Key::End) if m.is_empty() => set_picker(selected, filtered_len.saturating_sub(1)),
@@ -433,7 +442,9 @@ mod tests {
     }
 
     fn buf_of(o: &Overlay) -> &str {
-        let Overlay::Command { buf, .. } = o else { panic!("expected command overlay") };
+        let Overlay::Command { buf, .. } = o else {
+            panic!("expected command overlay")
+        };
         buf
     }
 
@@ -532,7 +543,11 @@ mod tests {
             handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
         }
         handle(&ev(Modifiers::empty(), Key::Tab), &mut o);
-        assert_eq!(buf_of(&o), " zoom ", "leading whitespace is preserved on completion");
+        assert_eq!(
+            buf_of(&o),
+            " zoom ",
+            "leading whitespace is preserved on completion"
+        );
     }
 
     #[test]
@@ -573,7 +588,11 @@ mod tests {
     }
 
     fn entry(name: &str) -> PickerEntry {
-        PickerEntry { name: name.into(), label: name.into(), is_current: false }
+        PickerEntry {
+            name: name.into(),
+            label: name.into(),
+            is_current: false,
+        }
     }
 
     #[test]
@@ -612,7 +631,10 @@ mod tests {
     }
 
     fn picker_state(o: &Overlay) -> (&str, usize) {
-        let Overlay::SessionPicker { filter, selected, .. } = o else {
+        let Overlay::SessionPicker {
+            filter, selected, ..
+        } = o
+        else {
             panic!("expected session picker")
         };
         (filter, *selected)
@@ -735,32 +757,54 @@ mod tests {
     }
 
     fn rename() -> Overlay {
-        Overlay::Rename { target: RenameTarget::Window, buf: String::new() }
+        Overlay::Rename {
+            target: RenameTarget::Window,
+            buf: String::new(),
+        }
     }
 
     #[test]
     fn rename_appends_printable_chars() {
         let mut o = rename();
-        assert_eq!(handle(&ev(Modifiers::empty(), Key::Char('h')), &mut o), OverlayAction::Redraw);
+        assert_eq!(
+            handle(&ev(Modifiers::empty(), Key::Char('h')), &mut o),
+            OverlayAction::Redraw
+        );
         handle(&ev(Modifiers::SHIFT, Key::Char('I')), &mut o);
-        let Overlay::Rename { buf, .. } = &o else { panic!("expected rename") };
+        let Overlay::Rename { buf, .. } = &o else {
+            panic!("expected rename")
+        };
         assert_eq!(buf, "hI");
     }
 
     #[test]
     fn rename_backspace_pops_and_is_noop_when_empty() {
-        let mut o = Overlay::Rename { target: RenameTarget::Pane, buf: "ab".into() };
-        assert_eq!(handle(&ev(Modifiers::empty(), Key::Backspace), &mut o), OverlayAction::Redraw);
+        let mut o = Overlay::Rename {
+            target: RenameTarget::Pane,
+            buf: "ab".into(),
+        };
+        assert_eq!(
+            handle(&ev(Modifiers::empty(), Key::Backspace), &mut o),
+            OverlayAction::Redraw
+        );
         handle(&ev(Modifiers::empty(), Key::Backspace), &mut o);
-        let Overlay::Rename { buf, .. } = &o else { panic!() };
+        let Overlay::Rename { buf, .. } = &o else {
+            panic!()
+        };
         assert!(buf.is_empty());
         // Backspace on empty: no change.
-        assert_eq!(handle(&ev(Modifiers::empty(), Key::Backspace), &mut o), OverlayAction::None);
+        assert_eq!(
+            handle(&ev(Modifiers::empty(), Key::Backspace), &mut o),
+            OverlayAction::None
+        );
     }
 
     #[test]
     fn rename_enter_commits_trimmed() {
-        let mut o = Overlay::Rename { target: RenameTarget::Window, buf: "  build  ".into() };
+        let mut o = Overlay::Rename {
+            target: RenameTarget::Window,
+            buf: "  build  ".into(),
+        };
         assert_eq!(
             handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
             OverlayAction::Commit("build".into())
@@ -771,17 +815,30 @@ mod tests {
     fn rename_escape_cancels_but_q_is_a_character() {
         let mut o = rename();
         // 'q' must be typed, not treated as dismiss.
-        assert_eq!(handle(&ev(Modifiers::empty(), Key::Char('q')), &mut o), OverlayAction::Redraw);
-        let Overlay::Rename { buf, .. } = &o else { panic!() };
+        assert_eq!(
+            handle(&ev(Modifiers::empty(), Key::Char('q')), &mut o),
+            OverlayAction::Redraw
+        );
+        let Overlay::Rename { buf, .. } = &o else {
+            panic!()
+        };
         assert_eq!(buf, "q");
-        assert_eq!(handle(&ev(Modifiers::empty(), Key::Escape), &mut o), OverlayAction::Cancel);
+        assert_eq!(
+            handle(&ev(Modifiers::empty(), Key::Escape), &mut o),
+            OverlayAction::Cancel
+        );
     }
 
     #[test]
     fn rename_ignores_control_combos() {
         let mut o = rename();
-        assert_eq!(handle(&ev(Modifiers::CTRL, Key::Char('c')), &mut o), OverlayAction::None);
-        let Overlay::Rename { buf, .. } = &o else { panic!() };
+        assert_eq!(
+            handle(&ev(Modifiers::CTRL, Key::Char('c')), &mut o),
+            OverlayAction::None
+        );
+        let Overlay::Rename { buf, .. } = &o else {
+            panic!()
+        };
         assert!(buf.is_empty());
     }
 
@@ -789,9 +846,17 @@ mod tests {
     fn help_scrolls_and_saturates_at_top() {
         let mut o = Overlay::Help { scroll: 0 };
         // At the top, scrolling up is a no-op.
-        assert_eq!(handle(&ev(Modifiers::empty(), Key::Char('k')), &mut o), OverlayAction::None);
-        assert_eq!(handle(&ev(Modifiers::empty(), Key::Char('j')), &mut o), OverlayAction::Redraw);
-        let Overlay::Help { scroll } = &o else { panic!() };
+        assert_eq!(
+            handle(&ev(Modifiers::empty(), Key::Char('k')), &mut o),
+            OverlayAction::None
+        );
+        assert_eq!(
+            handle(&ev(Modifiers::empty(), Key::Char('j')), &mut o),
+            OverlayAction::Redraw
+        );
+        let Overlay::Help { scroll } = &o else {
+            panic!()
+        };
         assert_eq!(*scroll, 1);
     }
 
@@ -799,13 +864,19 @@ mod tests {
     fn help_page_and_jump_keys() {
         let mut o = Overlay::Help { scroll: 0 };
         handle(&ev(Modifiers::empty(), Key::PageDown), &mut o);
-        let Overlay::Help { scroll } = &o else { panic!() };
+        let Overlay::Help { scroll } = &o else {
+            panic!()
+        };
         assert_eq!(*scroll, PAGE_STEP);
         handle(&ev(Modifiers::SHIFT, Key::Char('G')), &mut o);
-        let Overlay::Help { scroll } = &o else { panic!() };
+        let Overlay::Help { scroll } = &o else {
+            panic!()
+        };
         assert_eq!(*scroll, u16::MAX);
         handle(&ev(Modifiers::empty(), Key::Char('g')), &mut o);
-        let Overlay::Help { scroll } = &o else { panic!() };
+        let Overlay::Help { scroll } = &o else {
+            panic!()
+        };
         assert_eq!(*scroll, 0);
     }
 
@@ -813,7 +884,10 @@ mod tests {
     fn help_dismiss_keys() {
         for key in [Key::Escape, Key::Char('q'), Key::Enter] {
             let mut o = Overlay::Help { scroll: 3 };
-            assert_eq!(handle(&ev(Modifiers::empty(), key), &mut o), OverlayAction::Cancel);
+            assert_eq!(
+                handle(&ev(Modifiers::empty(), key), &mut o),
+                OverlayAction::Cancel
+            );
         }
     }
 }

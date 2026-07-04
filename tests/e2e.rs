@@ -9,18 +9,18 @@
 //! $HOME so the daemon writes its socket, lockfile, and logs in isolation
 //! and never collides between tests.
 
-use assert_cmd::cargo::CommandCargoExt;
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::fs::{self, Permissions};
 use std::io::Write;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::slice::Iter;
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use assert_cmd::cargo::CommandCargoExt;
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 /// The isolated environment for one e2e test: the env vars handed to every
 /// spawned `plexy-glass` process. On drop it tells this test's daemon to shut
@@ -78,7 +78,10 @@ fn isolate_dirs(tmp: &tempfile::TempDir) -> TestEnv {
     TestEnv {
         vars: vec![
             ("XDG_RUNTIME_DIR".into(), xdg.to_string_lossy().into_owned()),
-            ("XDG_STATE_HOME".into(), state.to_string_lossy().into_owned()),
+            (
+                "XDG_STATE_HOME".into(),
+                state.to_string_lossy().into_owned(),
+            ),
             ("HOME".into(), home.to_string_lossy().into_owned()),
             ("TMPDIR".into(), tmp.path().to_string_lossy().into_owned()),
             // Keep the child shell deterministic.
@@ -93,7 +96,10 @@ fn isolate_dirs(tmp: &tempfile::TempDir) -> TestEnv {
             ("PLEXY_FORCE_KITTY".into(), "1".into()),
             // XDG_CONFIG_HOME is used by the directories crate on Linux; on macOS
             // the crate uses $HOME/Library/Application Support instead.
-            ("XDG_CONFIG_HOME".into(), xdg_config.to_string_lossy().into_owned()),
+            (
+                "XDG_CONFIG_HOME".into(),
+                xdg_config.to_string_lossy().into_owned(),
+            ),
             // Cap the tokio runtime of every spawned plexy-glass process. The
             // binary uses `#[tokio::main]` (multi-thread flavor), which defaults
             // to one worker per core (18 here), so each test's client + its
@@ -123,13 +129,11 @@ fn write_config(env: &TestEnv, body: &str) {
         fs::write(cfg_dir.join("config.kdl"), body).unwrap();
     }
     if let Some((_, home)) = env.iter().find(|(k, _)| k == "HOME") {
-        let cfg_dir =
-            PathBuf::from(home).join("Library/Application Support/plexy-glass");
+        let cfg_dir = PathBuf::from(home).join("Library/Application Support/plexy-glass");
         fs::create_dir_all(&cfg_dir).unwrap();
         fs::write(cfg_dir.join("config.kdl"), body).unwrap();
     }
 }
-
 
 /// A spawned `plexy-glass` client attached to a PTY, with ONE persistent reader
 /// thread accumulating all output into a shared, never-drained buffer.
@@ -173,7 +177,12 @@ impl TestSessionBuilder<'_> {
     }
 
     const fn size(mut self, rows: u16, cols: u16) -> Self {
-        self.size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+        self.size = PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         self
     }
 
@@ -231,7 +240,13 @@ impl TestSessionBuilder<'_> {
                 }
             }
         });
-        TestSession { child: Some(child), master, writer, buf, _reader: reader_handle }
+        TestSession {
+            child: Some(child),
+            master,
+            writer,
+            buf,
+            _reader: reader_handle,
+        }
     }
 }
 
@@ -240,7 +255,12 @@ impl TestSession {
         TestSessionBuilder {
             env,
             args: vec!["attach".to_string()],
-            size: PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+            size: PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
             path_prepend: None,
         }
     }
@@ -328,12 +348,20 @@ impl TestSession {
         // Daemon attach + first render can lag under heavy parallel load; give a
         // generous floor. Polling returns the instant the marker appears, so a
         // large ceiling costs nothing when the machine isn't saturated.
-        self.wait_for(session_name.as_bytes(), timeout.max(Duration::from_secs(20)))
+        self.wait_for(
+            session_name.as_bytes(),
+            timeout.max(Duration::from_secs(20)),
+        )
     }
 
     fn resize(&self, rows: u16, cols: u16) {
         self.master
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .expect("resize");
     }
 
@@ -370,9 +398,7 @@ impl TestSession {
         let exited = rx.recv_timeout(timeout).is_ok();
         if !exited && let Some(pid) = pid {
             // SIGKILL by pid; the waiter thread then reaps via its `wait()`.
-            let _ = Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .status();
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
         }
         exited
     }
@@ -406,7 +432,10 @@ fn wait_for_file_exists(path: &Path, timeout: Duration) -> bool {
 fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        if fs::read_to_string(path).unwrap_or_default().contains(needle) {
+        if fs::read_to_string(path)
+            .unwrap_or_default()
+            .contains(needle)
+        {
             return true;
         }
         if Instant::now() >= deadline {
@@ -421,7 +450,10 @@ fn smoke_echo_hello_round_trips() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // No trailing `exit` because auto-close-on-pane-death would race the drain.
     sess.send_str("echo HEL-LO\n");
@@ -437,7 +469,10 @@ fn sigwinch_propagates_to_child() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // Resize the master pty; the client should receive SIGWINCH and propagate.
     sess.resize(50, 200);
@@ -455,10 +490,16 @@ fn mux_split_renders_two_panes() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     sess.send_str("echo LEFT\n");
-    assert!(sess.wait_for(b"LEFT", Duration::from_secs(5)), "LEFT never rendered");
+    assert!(
+        sess.wait_for(b"LEFT", Duration::from_secs(5)),
+        "LEFT never rendered"
+    );
     sess.send_prefix(b'v');
     // Wait for the vertical split separator (│) so the new right pane is active
     // before we echo into it.
@@ -472,7 +513,10 @@ fn mux_split_renders_two_panes() {
     );
     let txt = sess.snapshot_str();
     assert!(txt.contains("LEFT"), "expected LEFT in output. raw: {txt}");
-    assert!(txt.contains("RIGHT"), "expected RIGHT in output. raw: {txt}");
+    assert!(
+        txt.contains("RIGHT"),
+        "expected RIGHT in output. raw: {txt}"
+    );
 }
 
 #[test]
@@ -480,7 +524,10 @@ fn mux_resize_propagates_to_all_panes() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     sess.send_prefix(b'v'); // vertical split
     // Wait for the split to render before resizing so the resize reaches a
@@ -503,7 +550,10 @@ fn rename_window_via_overlay_updates_status_bar() {
     let mut sess = TestSession::spawn(&env);
     // `wait_ready` ensures the daemon is attached and routing the prefix key, so
     // it isn't lost to the shell (the old keystroke-leak flake under load).
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // Ctrl+a , opens the rename-window overlay; wait for its "rename window"
     // label before typing (safe now that the reader is persistent).
@@ -534,7 +584,10 @@ fn esc_cancels_overlay_and_paste_does_not_leak_on_legacy_client() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // --- Part 1: a lone ESC closes the choose-tree overlay. ---
     // Open the tree (Ctrl+a W); its " Tree " title / footer paints only while
@@ -592,7 +645,11 @@ fn esc_cancels_overlay_and_paste_does_not_leak_on_legacy_client() {
     // Ample time for an (incorrect) forward + shell echo, then assert absence.
     thread::sleep(Duration::from_millis(400));
     assert!(
-        !sess.wait_for_from(before_paste, b"LEAKED_PASTE_MARKER", Duration::from_millis(1)),
+        !sess.wait_for_from(
+            before_paste,
+            b"LEAKED_PASTE_MARKER",
+            Duration::from_millis(1)
+        ),
         "a paste leaked to the shell behind an open overlay. raw: {}",
         sess.snapshot_str()
     );
@@ -605,7 +662,10 @@ fn mux_kill_pane_collapses_layout() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     sess.send_prefix(b'v'); // split
     let _ = sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)); // gutter → split landed
@@ -630,12 +690,19 @@ fn osc8_hyperlink_click_invokes_opener() {
     let stub_dir = tmp.path().join("stubs");
     fs::create_dir_all(&stub_dir).unwrap();
     let stub_path = stub_dir.join("open");
-    fs::write(&stub_path, format!("#!/bin/sh\nprintf '%s' \"$1\" >> {}\n", log.display())).unwrap();
+    fs::write(
+        &stub_path,
+        format!("#!/bin/sh\nprintf '%s' \"$1\" >> {}\n", log.display()),
+    )
+    .unwrap();
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&stub_path, Permissions::from_mode(0o755)).unwrap();
 
     let mut sess = TestSession::builder(&env).path_prepend(&stub_dir).start();
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // Emit a cell with an OSC 8 hyperlink ('X'), then click on it at (1,1).
     sess.send_str("printf '\\x1b]8;;https://example.com\\x07X\\x1b]8;;\\x07\\n'\n");
@@ -669,10 +736,16 @@ fn selection_drag_copies_to_clipboard() {
     fs::set_permissions(&stub_path, Permissions::from_mode(0o755)).unwrap();
 
     let mut sess = TestSession::builder(&env).path_prepend(&stub_dir).start();
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     sess.send_str("echo SELECTME\n");
-    assert!(sess.wait_for(b"SELECTME", Duration::from_secs(3)), "SELECTME never rendered");
+    assert!(
+        sess.wait_for(b"SELECTME", Duration::from_secs(3)),
+        "SELECTME never rendered"
+    );
 
     // Press at row 2 col 1; motion to col 8 (button held); release. SGR coords
     // are 1-indexed on the wire.
@@ -697,13 +770,19 @@ fn mouse_wheel_scrolls_scrollback() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::builder(&env).size(10, 40).start();
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // Print 40 distinct lines so the first few scroll into scrollback.
     for i in 0..40 {
         sess.send_str(&format!("echo LINE{i:02}\n"));
     }
-    assert!(sess.wait_for(b"LINE39", Duration::from_secs(3)), "LINE39 never rendered");
+    assert!(
+        sess.wait_for(b"LINE39", Duration::from_secs(3)),
+        "LINE39 never rendered"
+    );
 
     // Wheel-up several lines; an early line should re-render in the viewport.
     // Mark the buffer first so we match the re-render, not the original print
@@ -720,10 +799,16 @@ fn osc7_cwd_inherited_on_split_renders_pwd() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // Inject OSC 7 reporting cwd=tmp, then split vertically, then run `pwd`.
-    sess.send_str(&format!("printf '\\x1b]7;file://localhost{}\\x07'\n", tmp.path().display()));
+    sess.send_str(&format!(
+        "printf '\\x1b]7;file://localhost{}\\x07'\n",
+        tmp.path().display()
+    ));
     // warmup: the daemon consuming the OSC 7 cwd update has no observable marker
     // (it's internal pane state, not echoed), so wait briefly before splitting
     // so the new pane inherits the reported cwd.
@@ -734,7 +819,10 @@ fn osc7_cwd_inherited_on_split_renders_pwd() {
 
     let needle = format!("{}", tmp.path().display());
     if !sess.wait_for(needle.as_bytes(), Duration::from_secs(8)) {
-        eprintln!("note: cwd inheritance test fail-soft (got: {})", sess.snapshot_str());
+        eprintln!(
+            "note: cwd inheritance test fail-soft (got: {})",
+            sess.snapshot_str()
+        );
     }
 }
 
@@ -746,9 +834,15 @@ fn detach_then_reattach_restores_session_content() {
     // First attach: write a marker, then Ctrl+a d to detach (session persists).
     {
         let mut s1 = TestSession::spawn(&env);
-        assert!(s1.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+        assert!(
+            s1.wait_ready("main", Duration::from_secs(5)),
+            "daemon never rendered"
+        );
         s1.send_str("echo MARKER_42\n");
-        assert!(s1.wait_for(b"MARKER_42", Duration::from_secs(3)), "marker never rendered in run 1");
+        assert!(
+            s1.wait_for(b"MARKER_42", Duration::from_secs(3)),
+            "marker never rendered in run 1"
+        );
         s1.send_prefix(b'd'); // detach
         drop(s1);
     }
@@ -767,8 +861,13 @@ fn new_and_list_show_named_session() {
     let env = isolate_dirs(&tmp);
 
     // Attach a named session in a PTY, then list it from a second process.
-    let mut sess = TestSession::builder(&env).args(&["attach", "-n", "foo"]).start();
-    assert!(sess.wait_ready("foo", Duration::from_secs(5)), "named session never rendered");
+    let mut sess = TestSession::builder(&env)
+        .args(&["attach", "-n", "foo"])
+        .start();
+    assert!(
+        sess.wait_ready("foo", Duration::from_secs(5)),
+        "named session never rendered"
+    );
 
     // `plexy-glass list` doesn't need a PTY.
     let list_out = Command::cargo_bin("plexy-glass")
@@ -797,8 +896,13 @@ fn kill_session_removes_it_from_list() {
     let env = isolate_dirs(&tmp);
 
     // Spawn a session named "doomed", then detach.
-    let mut sess = TestSession::builder(&env).args(&["attach", "-n", "doomed"]).start();
-    assert!(sess.wait_ready("doomed", Duration::from_secs(5)), "named session never rendered");
+    let mut sess = TestSession::builder(&env)
+        .args(&["attach", "-n", "doomed"])
+        .start();
+    assert!(
+        sess.wait_ready("doomed", Duration::from_secs(5)),
+        "named session never rendered"
+    );
     sess.send_prefix(b'd'); // detach
     drop(sess);
 
@@ -814,9 +918,7 @@ fn kill_session_removes_it_from_list() {
         .expect("kill");
     let kill_stdout = String::from_utf8_lossy(&kill_out.stdout);
     if !kill_stdout.contains("doomed") {
-        eprintln!(
-            "note: kill output didn't contain 'doomed' — fail-soft. stdout: {kill_stdout}"
-        );
+        eprintln!("note: kill output didn't contain 'doomed' — fail-soft. stdout: {kill_stdout}");
         return;
     }
 
@@ -850,10 +952,20 @@ fn kill_is_scoped_to_current_runtime_dir() {
     let env_b = isolate_dirs(&tmp_b);
 
     // Two independent daemons (distinct TMPDIR/XDG → distinct sockets+pidfiles).
-    let mut sess_a = TestSession::builder(&env_a).args(&["attach", "-n", "aaa"]).start();
-    assert!(sess_a.wait_ready("aaa", Duration::from_secs(6)), "session aaa never rendered");
-    let mut sess_b = TestSession::builder(&env_b).args(&["attach", "-n", "bbb"]).start();
-    assert!(sess_b.wait_ready("bbb", Duration::from_secs(6)), "session bbb never rendered");
+    let mut sess_a = TestSession::builder(&env_a)
+        .args(&["attach", "-n", "aaa"])
+        .start();
+    assert!(
+        sess_a.wait_ready("aaa", Duration::from_secs(6)),
+        "session aaa never rendered"
+    );
+    let mut sess_b = TestSession::builder(&env_b)
+        .args(&["attach", "-n", "bbb"])
+        .start();
+    assert!(
+        sess_b.wait_ready("bbb", Duration::from_secs(6)),
+        "session bbb never rendered"
+    );
     sess_a.send_prefix(b'd');
     sess_b.send_prefix(b'd');
     drop(sess_a);
@@ -891,7 +1003,10 @@ fn smart_attach_creates_main_when_zero_sessions() {
 
     // Plain attach (no -n) should smart-default to creating "main".
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(6)), "smart-default 'main' never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(6)),
+        "smart-default 'main' never rendered"
+    );
     sess.send_prefix(b'd'); // detach
     drop(sess);
 
@@ -904,9 +1019,7 @@ fn smart_attach_creates_main_when_zero_sessions() {
         .expect("list");
     let list_stdout = String::from_utf8_lossy(&list_out.stdout);
     if !list_stdout.contains("main") {
-        eprintln!(
-            "note: smart-default did not create 'main' — fail-soft (got: {list_stdout})"
-        );
+        eprintln!("note: smart-default did not create 'main' — fail-soft (got: {list_stdout})");
         return;
     }
     assert!(list_stdout.contains("main"));
@@ -937,7 +1050,10 @@ status {{
     // (The old version read the buffer *after* killing the client, when it had
     // already been drained, so it depended entirely on timing.)
     if !sess.wait_for(marker.as_bytes(), Duration::from_secs(5)) {
-        eprintln!("note: custom-config test fail-soft. raw: {}", sess.snapshot_str());
+        eprintln!(
+            "note: custom-config test fail-soft. raw: {}",
+            sess.snapshot_str()
+        );
     }
 }
 
@@ -950,7 +1066,10 @@ fn custom_prefix_retargets_bindings() {
     write_config(&env, "keymap { prefix \"Ctrl+b\" }\n");
 
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // Window count for a session from `list` output (the line's second
     // whitespace-separated column). Interactively created windows are now
@@ -1036,7 +1155,10 @@ session "main" {{
     // built at daemon boot. Its pane's command output should appear.
     let sess = TestSession::spawn(&env);
     if !sess.wait_for(marker.as_bytes(), Duration::from_secs(5)) {
-        eprintln!("note: declared-session test fail-soft. raw: {}", sess.snapshot_str());
+        eprintln!(
+            "note: declared-session test fail-soft. raw: {}",
+            sess.snapshot_str()
+        );
     }
 }
 
@@ -1069,8 +1191,14 @@ session "dev" {
     // The declared session was still built at boot, alongside "main".
     let (status, list_out, _) = run_cli(&env, &["list"]);
     assert!(status.success(), "list failed: {list_out}");
-    assert!(list_out.contains("dev"), "declared session missing from list: {list_out}");
-    assert!(list_out.contains("main"), "default session missing from list: {list_out}");
+    assert!(
+        list_out.contains("dev"),
+        "declared session missing from list: {list_out}"
+    );
+    assert!(
+        list_out.contains("main"),
+        "default session missing from list: {list_out}"
+    );
 }
 
 #[test]
@@ -1103,8 +1231,13 @@ session "v2" {
 "#,
     );
 
-    let mut sess = TestSession::builder(&env).args(&["attach", "-n", "v2"]).start();
-    assert!(sess.wait_ready("v2", Duration::from_secs(8)), "v2 never rendered");
+    let mut sess = TestSession::builder(&env)
+        .args(&["attach", "-n", "v2"])
+        .start();
+    assert!(
+        sess.wait_ready("v2", Duration::from_secs(8)),
+        "v2 never rendered"
+    );
 
     // Focused pane is window "work"'s active (left, ratio=2) pane. At host 24x80
     // the pane band is 21 rows x 78 cols; a vertical 2:1 split (usable 77) gives
@@ -1118,7 +1251,10 @@ session "v2" {
     // The declared env overlay reached the focused pane.
     sess.send_str("echo FOO=$FOO\n");
     if !sess.wait_for(b"FOO=barbaz", Duration::from_secs(6)) {
-        eprintln!("note: declared env not visible — fail-soft. raw: {}", sess.snapshot_str());
+        eprintln!(
+            "note: declared env not visible — fail-soft. raw: {}",
+            sess.snapshot_str()
+        );
     }
 }
 
@@ -1133,7 +1269,10 @@ fn reload_adds_a_new_declared_session_then_attachable() {
 
     // Boot with only the default; attach so a daemon is running.
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(6)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(6)),
+        "daemon never rendered"
+    );
 
     // Add a new declared session "fresh".
     write_config(
@@ -1155,7 +1294,11 @@ session "fresh" {
         .stdout(Stdio::piped())
         .output()
         .expect("reload");
-    assert!(out.status.success(), "reload failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "reload failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // "fresh" must now be live (built by the reload), so list shows it.
     let listed = {
@@ -1171,10 +1314,15 @@ session "fresh" {
             thread::sleep(Duration::from_millis(50));
         }
     };
-    assert!(listed, "reload never built the newly-declared session 'fresh'");
+    assert!(
+        listed,
+        "reload never built the newly-declared session 'fresh'"
+    );
 
     // And `attach -n fresh` lands on it.
-    let fresh = TestSession::builder(&env).args(&["attach", "-n", "fresh"]).start();
+    let fresh = TestSession::builder(&env)
+        .args(&["attach", "-n", "fresh"])
+        .start();
     assert!(
         fresh.wait_ready("fresh", Duration::from_secs(8)),
         "attach -n fresh did not render the reloaded session. raw: {}",
@@ -1188,14 +1336,20 @@ fn arrow_keys_pass_through_to_shell() {
     let env = isolate_dirs(&tmp);
 
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // Type a marker, then send Up arrow + Enter. If arrows pass through, the
     // shell recalls and re-runs the command, so MARK_1 appears AGAIN after the
     // Up+Enter. Mark the buffer first so we only match the recall, not the
     // first command's own echo/output.
     sess.send_str("echo MARK_1\n");
-    assert!(sess.wait_for(b"MARK_1", Duration::from_secs(5)), "MARK_1 never rendered");
+    assert!(
+        sess.wait_for(b"MARK_1", Duration::from_secs(5)),
+        "MARK_1 never rendered"
+    );
     let mark = sess.buffer_len();
     sess.send(b"\x1b[A\n"); // Up arrow + Enter
     if !sess.wait_for_from(mark, b"MARK_1", Duration::from_secs(5)) {
@@ -1212,14 +1366,20 @@ fn bracketed_paste_does_not_auto_execute_lines() {
     let env = isolate_dirs(&tmp);
 
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // Send a wrapped paste containing a multi-line block. The daemon forwards it
     // wrapped (if the shell has bracketed paste on) or strips the wrappers (if
     // not); either way PASTED_TAG should appear in the output.
     sess.send(b"\x1b[200~PASTED_TAG\necho line2\n\x1b[201~");
     if !sess.wait_for(b"PASTED_TAG", Duration::from_secs(5)) {
-        eprintln!("note: PASTED_TAG not visible — fail-soft. raw: {}", sess.snapshot_str());
+        eprintln!(
+            "note: PASTED_TAG not visible — fail-soft. raw: {}",
+            sess.snapshot_str()
+        );
     }
 }
 
@@ -1235,19 +1395,21 @@ fn copy_mode_navigates_and_yanks() {
     let stub_dir = tmp.path().join("stubs");
     fs::create_dir_all(&stub_dir).unwrap();
     let stub_path = stub_dir.join("pbcopy");
-    fs::write(
-        &stub_path,
-        format!("#!/bin/sh\ncat > {}\n", log.display()),
-    )
-    .unwrap();
+    fs::write(&stub_path, format!("#!/bin/sh\ncat > {}\n", log.display())).unwrap();
     fs::set_permissions(&stub_path, Permissions::from_mode(0o755)).unwrap();
 
     let mut sess = TestSession::builder(&env).path_prepend(&stub_dir).start();
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // Print a recognizable line, then wait for it.
     sess.send_str("echo COPY_MODE_TARGET\n");
-    assert!(sess.wait_for(b"COPY_MODE_TARGET", Duration::from_secs(15)), "target never rendered");
+    assert!(
+        sess.wait_for(b"COPY_MODE_TARGET", Duration::from_secs(15)),
+        "target never rendered"
+    );
 
     // Ctrl+a [ enters copy mode; g jumps to top; / search; v + l extension + y
     // yanks. The intermediate copy-mode steps have no observable PTY marker, so
@@ -1279,7 +1441,10 @@ fn reload_config_picks_up_custom_text_widget() {
 
     // First, attach with the default config.
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // Write a custom config that adds a recognizable text widget.
     let body = r#"
@@ -1303,7 +1468,10 @@ status {
     // The reloaded widget renders; capture it live (polled, so the reload's
     // re-render and the status tick are both tolerated).
     if !sess.wait_for(b"RELOADED_TAG", Duration::from_secs(5)) {
-        eprintln!("note: RELOADED_TAG not visible after reload — fail-soft. raw: {}", sess.snapshot_str());
+        eprintln!(
+            "note: RELOADED_TAG not visible after reload — fail-soft. raw: {}",
+            sess.snapshot_str()
+        );
         return;
     }
     sess.send_prefix(b'd'); // detach
@@ -1319,7 +1487,10 @@ fn mouse_click_traverses_wire_without_panic() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     sess.send_prefix(b'v'); // split vertically
     let _ = sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)); // split landed
@@ -1343,8 +1514,13 @@ fn kill_from_second_connection_ends_attached_session() {
     // Attach (run1) named "victim". The harness's persistent reader drains the
     // PTY (replacing the old manual drain thread), so the client never blocks on
     // stdout and can process the disconnect to exit.
-    let mut sess = TestSession::builder(&env).args(&["attach", "-n", "victim"]).start();
-    assert!(sess.wait_ready("victim", Duration::from_secs(5)), "victim never rendered");
+    let mut sess = TestSession::builder(&env)
+        .args(&["attach", "-n", "victim"])
+        .start();
+    assert!(
+        sess.wait_ready("victim", Duration::from_secs(5)),
+        "victim never rendered"
+    );
     sess.send_prefix(b'v'); // split → in-memory structural change
 
     // Kill from a SECOND connection while run1 is still attached.
@@ -1373,7 +1549,10 @@ fn mouse_drag_resize_traverses_wire() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // Split, then synthetic press → drag → release on the gutter.
     sess.send_prefix(b'v');
@@ -1395,7 +1574,10 @@ fn modkeys_sequence_does_not_underline_following_text() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // printf the XTMODKEYS set then a sentinel word, via the pane's shell.
     sess.send_str("printf '\\033[>4;2mZEBRA\\n'\n");
@@ -1434,7 +1616,10 @@ fn pane_queries_get_well_formed_replies() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     // Trigger XTVERSION; use a sentinel echo so we know the emulator processed
     // the query before we snapshot.
@@ -1477,7 +1662,10 @@ fn pane_xtgettcap_query_gets_capability_reply() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     let before_query = sess.buffer_len();
     // printf the DCS query (ESC P + q <hex> ESC backslash), then a sentinel.
@@ -1510,7 +1698,10 @@ fn pane_kitty_keyboard_query_gets_flags_reply() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
 
     sess.send_str(
         "printf '\\033[?u'; IFS= read -r -d u -t 2 reply; \
@@ -1538,7 +1729,10 @@ fn popup_opens_types_and_closes_with_chord() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
     // Open a popup from the command prompt: print a marker, then `cat` holds
     // the popup open.
     sess.send_prefix(b':');
@@ -1567,7 +1761,11 @@ fn popup_opens_types_and_closes_with_chord() {
             break;
         }
     }
-    assert!(ok, "layout shell never got keys after close: {}", sess.snapshot_str());
+    assert!(
+        ok,
+        "layout shell never got keys after close: {}",
+        sess.snapshot_str()
+    );
     assert!(
         !sess.snapshot_str().contains("MODAL_LEAK"),
         "popup was not modal: a key line leaked to the layout shell: {}",
@@ -1580,7 +1778,10 @@ fn popup_autocloses_when_command_exits() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
     sess.send_prefix(b':');
     sess.send_str("popup true\r");
     // `true` exits immediately, the popup auto-closes, and the layout shell
@@ -1605,7 +1806,10 @@ fn popup_does_not_survive_detach() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
     sess.send_prefix(b':');
     sess.send_str("popup printf 'POPUP_''LIVE '; cat\r");
     assert!(
@@ -1645,7 +1849,10 @@ fn popup_does_not_survive_detach() {
     assert!(deregistered, "daemon never deregistered the dropped client");
     // Reattach with a fresh client (fresh output buffer).
     let mut sess2 = TestSession::spawn(&env);
-    assert!(sess2.wait_ready("main", Duration::from_secs(5)), "reattach never rendered");
+    assert!(
+        sess2.wait_ready("main", Duration::from_secs(5)),
+        "reattach never rendered"
+    );
     // If the popup survived, keys route to `cat` and the probe never executes.
     sess2.send_str("echo 'NO_''POPUP'\n");
     assert!(
@@ -1671,10 +1878,16 @@ fn layout_tiled_keeps_all_panes_alive() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
     // Three panes: prefix+v (vertical split), then prefix+s (horizontal split).
     sess.send_prefix(b'v');
-    assert!(sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)), "no split separator");
+    assert!(
+        sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)),
+        "no split separator"
+    );
     sess.send_prefix(b's');
     // Apply tiled via the command prompt; the active pane's shell must still
     // respond afterwards. This is a liveness smoke test only, not a geometry test.
@@ -1689,7 +1902,11 @@ fn layout_tiled_keeps_all_panes_alive() {
             break;
         }
     }
-    assert!(ok, "active pane unresponsive after :layout tiled: {}", sess.snapshot_str());
+    assert!(
+        ok,
+        "active pane unresponsive after :layout tiled: {}",
+        sess.snapshot_str()
+    );
 }
 
 #[test]
@@ -1697,10 +1914,16 @@ fn next_layout_cycles_without_breaking_input() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
     // Two panes.
     sess.send_prefix(b'v');
-    assert!(sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)), "no split separator");
+    assert!(
+        sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)),
+        "no split separator"
+    );
     // Cycle through three presets with Ctrl+a Space.
     sess.send_prefix(b' ');
     sess.send_prefix(b' ');
@@ -1714,7 +1937,11 @@ fn next_layout_cycles_without_breaking_input() {
             break;
         }
     }
-    assert!(ok, "active pane unresponsive after next_layout cycling: {}", sess.snapshot_str());
+    assert!(
+        ok,
+        "active pane unresponsive after next_layout cycling: {}",
+        sess.snapshot_str()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1744,12 +1971,14 @@ fn cli_send_reaches_attached_session() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Quote-concatenation: 'CLI_''SENT' → CLI_SENT only when a shell *executes*
     // the line, never from PTY echo of the typed bytes.
-    let (status, _stdout, stderr) =
-        run_cli(&env, &["send", "--enter", "printf 'CLI_''SENT\\n'"]);
+    let (status, _stdout, stderr) = run_cli(&env, &["send", "--enter", "printf 'CLI_''SENT\\n'"]);
     assert!(
         status.success(),
         "send --enter failed (status={status:?}): {stderr}"
@@ -1769,11 +1998,13 @@ fn cli_capture_reads_pane() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Send a marker line first so it's on the screen.
-    let (status, _stdout, stderr) =
-        run_cli(&env, &["send", "--enter", "printf 'CAP_''MARKER\\n'"]);
+    let (status, _stdout, stderr) = run_cli(&env, &["send", "--enter", "printf 'CAP_''MARKER\\n'"]);
     assert!(status.success(), "send failed: {stderr}");
 
     // Wait for the marker to appear in the PTY (so the shell executed it).
@@ -1808,7 +2039,10 @@ fn cli_cmd_structural_and_errors() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Split a vertical pane (this one succeeds).
     let (status, _stdout, stderr) = run_cli(&env, &["cmd", "split v"]);
@@ -1863,7 +2097,10 @@ fn cli_buffer_set_save_load_paste_round_trips() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // `set-buffer` creates `buffer0` (confirmation message on stdout).
     let (status, stdout, stderr) = run_cli(&env, &["cmd", "set-buffer hello world"]);
@@ -1888,7 +2125,10 @@ fn cli_buffer_set_save_load_paste_round_trips() {
     let (status, stdout, stderr) =
         run_cli(&env, &["cmd", &format!("load-buffer {}", out.display())]);
     assert!(status.success(), "cmd load-buffer failed: {stderr}");
-    assert!(stdout.contains("(11 bytes)"), "unexpected load-buffer output: {stdout}");
+    assert!(
+        stdout.contains("(11 bytes)"),
+        "unexpected load-buffer output: {stdout}"
+    );
 
     // Start `cat` so the paste goes to cat's stdin and is echoed (probe loop
     // per the copy-mode e2e: cat echoes the plain token once it is up).
@@ -1902,7 +2142,11 @@ fn cli_buffer_set_save_load_paste_round_trips() {
             break;
         }
     }
-    assert!(cat_ready, "cat child never came up: {}", sess.snapshot_str());
+    assert!(
+        cat_ready,
+        "cat child never came up: {}",
+        sess.snapshot_str()
+    );
 
     // Paste `buffer1` (the loaded one) and `cat` echoes it into the pane.
     // Assert via `capture` (the grid as text): the frame diff skips blank
@@ -1940,7 +2184,10 @@ fn cross_window_swap_pane_exchanges_panes() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Window 1 (index 0, name "shell"): print a unique needle then keep alive.
     sess.send_str("printf 'SWAP_''W1\\n'; exec tail -f /dev/null\n");
@@ -2083,7 +2330,10 @@ fn capture_last_command_returns_block_output() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Emit two synthetic OSC 133 blocks in one printf. Marker names use
     // quote-concatenation so the echoed command text shows `OUT_'LN'_1` while
@@ -2122,7 +2372,11 @@ fn capture_last_command_returns_block_output() {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    assert!(marks_set, "OUT_LN_1 never appeared in plain capture (marks not set). pane: {}", sess.snapshot_str());
+    assert!(
+        marks_set,
+        "OUT_LN_1 never appeared in plain capture (marks not set). pane: {}",
+        sess.snapshot_str()
+    );
 
     // Now fetch via --last-command.
     let deadline2 = Instant::now() + Duration::from_secs(10);
@@ -2137,7 +2391,11 @@ fn capture_last_command_returns_block_output() {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    assert!(last_cmd_ok, "capture --last-command never succeeded. pane: {}", sess.snapshot_str());
+    assert!(
+        last_cmd_ok,
+        "capture --last-command never succeeded. pane: {}",
+        sess.snapshot_str()
+    );
     assert!(
         last_cmd_out.contains("OUT_LN_1"),
         "block output must contain OUT_LN_1. got: {last_cmd_out:?}"
@@ -2169,7 +2427,10 @@ fn block_mode_rerun_injects_command() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Plant: A, prompt "$ ", B, command "expr 40 + 2", C, output "PLANTED", D;0.
     let (send_status, _, send_err) = run_cli(
@@ -2204,7 +2465,10 @@ fn block_mode_paints_selection_bracket() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     let (send_status, _, send_err) = run_cli(
         &env,
@@ -2258,7 +2522,10 @@ fn block_mode_filter_shows_match_count() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
     plant_three_blocks(&env, &sess);
 
     sess.send_prefix(b'b');
@@ -2285,7 +2552,10 @@ fn block_mode_failed_jump_then_rerun() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
     plant_three_blocks(&env, &sess);
 
     sess.send_prefix(b'b');
@@ -2313,7 +2583,10 @@ fn kitty_image_renders_transmit_and_place() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Plant a tiny inline RGB image (2×2px, dims via s=/v=) with id 5.
     let (st, _, err) = run_cli(
@@ -2353,7 +2626,10 @@ fn block_mode_refuses_without_blocks() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
     sess.send_prefix(b'b');
     assert!(
         sess.wait_for(b"no command blocks in this pane", Duration::from_secs(10)),
@@ -2370,7 +2646,10 @@ fn history_empty_corpus_explains_shell_integration() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
     sess.send_prefix(b'/');
     assert!(
         sess.wait_for(b"no command blocks", Duration::from_secs(10)),
@@ -2394,7 +2673,10 @@ fn prev_prompt_and_next_prompt_scroll_viewport() {
     // 10-row terminal (8 usable rows after status + frame); printing more than
     // 8 lines after the first prompt pushes it into scrollback.
     let mut sess = TestSession::builder(&env).size(10, 60).start();
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Emit a single OSC 133 block with NO second A marker. This gives exactly
     // one PROMPT_START row ("BLKPROMPT"), so `prev-prompt` from the live
@@ -2409,7 +2691,9 @@ fn prev_prompt_and_next_prompt_scroll_viewport() {
     // emits `BLKPROMPT`. Since we assert on the rendered frame (not plain
     // capture), this avoids matching the typed echo.
     let mark_before = sess.buffer_len();
-    sess.send_str("printf '\\033]133;A\\007BLK'PROMPT'\\r\\n\\033]133;C\\007BLKOUT\\n\\033]133;D;0\\007'\n");
+    sess.send_str(
+        "printf '\\033]133;A\\007BLK'PROMPT'\\r\\n\\033]133;C\\007BLKOUT\\n\\033]133;D;0\\007'\n",
+    );
     // Wait for the block output to appear (marks are set by the time the
     // output is visible in the frame).
     assert!(
@@ -2486,7 +2770,11 @@ fn prev_prompt_and_next_prompt_scroll_viewport() {
             break;
         }
     }
-    assert!(live, "shell not live after next-prompt: {}", sess.snapshot_str());
+    assert!(
+        live,
+        "shell not live after next-prompt: {}",
+        sess.snapshot_str()
+    );
 }
 
 /// No-blocks error path: `capture --last-command` on a fresh session (no OSC
@@ -2497,7 +2785,10 @@ fn no_blocks_capture_last_command_exits_nonzero() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // No OSC 133 output, the pane has never seen any block markers.
     let (status, _stdout, stderr) = run_cli(&env, &["capture", "--last-command"]);
@@ -2526,7 +2817,10 @@ fn copy_mode_bracket_o_y_yanks_block_output() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Emit a completed OSC 133 block. Output text uses quote-concat so the
     // echoed command shows `YANK_'OUT'_A` while the printf emits `YANK_OUT_A`.
@@ -2553,7 +2847,11 @@ fn copy_mode_bracket_o_y_yanks_block_output() {
             break;
         }
     }
-    assert!(cat_ready, "cat child never came up: {}", sess.snapshot_str());
+    assert!(
+        cat_ready,
+        "cat child never came up: {}",
+        sess.snapshot_str()
+    );
 
     // Enter copy mode: prefix [ (0x01 then '[').
     sess.send_prefix(b'['); // enters copy mode
@@ -2635,7 +2933,10 @@ fn block_border_failed_block_paints_half_block_with_fail_color() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Emit a completed FAILED block: A → output → D;1 → A (next prompt).
     // Quote-concatenation: `BDR_'FAIL'_OUT` → BDR_FAIL_OUT appears only in
@@ -2655,7 +2956,11 @@ fn block_border_failed_block_paints_half_block_with_fail_color() {
     // The fail-color SGR (`\x1b[38;2;196;116;110m` for #c4746e) is emitted
     // adjacently on the same first-paint; search from mark_before.
     assert!(
-        sess.wait_for_from(mark_before, b"\x1b[38;2;196;116;110m", Duration::from_secs(10)),
+        sess.wait_for_from(
+            mark_before,
+            b"\x1b[38;2;196;116;110m",
+            Duration::from_secs(10)
+        ),
         "fail-color SGR (\\x1b[38;2;196;116;110m) never appeared after failed block. raw: {}",
         sess.snapshot_str()
     );
@@ -2667,7 +2972,10 @@ fn block_border_ok_block_paints_pipe_with_ok_color_no_half_block() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Emit a completed OK block: A → output → D;0 → A (next prompt).
     let mark_before = sess.buffer_len();
@@ -2676,7 +2984,11 @@ fn block_border_ok_block_paints_pipe_with_ok_color_no_half_block() {
     // Wait for the ok-color SGR (`\x1b[38;2;135;169;135m` for #87a987) in
     // the diff output from mark_before.
     assert!(
-        sess.wait_for_from(mark_before, b"\x1b[38;2;135;169;135m", Duration::from_secs(10)),
+        sess.wait_for_from(
+            mark_before,
+            b"\x1b[38;2;135;169;135m",
+            Duration::from_secs(10)
+        ),
         "ok-color SGR (\\x1b[38;2;135;169;135m) never appeared after ok block. raw: {}",
         sess.snapshot_str()
     );
@@ -2701,7 +3013,10 @@ fn block_border_alt_screen_reverts_and_restores() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Plant a failed block.
     let mark_before = sess.buffer_len();
@@ -2765,7 +3080,10 @@ fn block_border_disabled_by_config_no_half_block() {
     write_config(&env, "blocks {\n    enabled #false\n}\n");
 
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Emit a completed FAILED block.
     let mark_before = sess.buffer_len();
@@ -2810,7 +3128,10 @@ fn capital_letter_reaches_kitty_flags5_pane_as_text() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(5)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(5)),
+        "daemon never rendered"
+    );
     // Turn the pane into a helix-alike: push flags 5, then render received
     // bytes visibly. `exec` keeps cat as the direct child.
     sess.send_str("printf '\\033[>5u'; exec cat -v\n");
@@ -2861,8 +3182,14 @@ fn capital_letter_reaches_kitty_flags5_pane_as_text() {
 /// until the marker text is visible, which proves the emulator processed the
 /// mark (the precondition every successful `run` needs).
 fn seed_prompt_mark(env: &TestEnv, sess: &TestSession) {
-    let (status, _stdout, stderr) =
-        run_cli(env, &["send", "--enter", "printf '\\033]133;A\\007SEED'PROMPT'\\n'"]);
+    let (status, _stdout, stderr) = run_cli(
+        env,
+        &[
+            "send",
+            "--enter",
+            "printf '\\033]133;A\\007SEED'PROMPT'\\n'",
+        ],
+    );
     assert!(status.success(), "seed send failed: {stderr}");
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut seeded = false;
@@ -2874,7 +3201,11 @@ fn seed_prompt_mark(env: &TestEnv, sess: &TestSession) {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    assert!(seeded, "SEEDPROMPT never appeared in capture (mark not seeded). pane: {}", sess.snapshot_str());
+    assert!(
+        seeded,
+        "SEEDPROMPT never appeared in capture (mark not seeded). pane: {}",
+        sess.snapshot_str()
+    );
 }
 
 /// Happy path: `run` a command that emits C, real output, then D;0 + A, so
@@ -2884,7 +3215,10 @@ fn run_ok_prints_output_and_exits_zero() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
     seed_prompt_mark(&env, &sess);
 
     let (status, stdout, stderr) = run_cli(
@@ -2911,7 +3245,10 @@ fn run_failed_propagates_exit_code() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
     seed_prompt_mark(&env, &sess);
 
     let (status, stdout, stderr) = run_cli(
@@ -2940,7 +3277,10 @@ fn run_chained_back_to_back() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
     seed_prompt_mark(&env, &sess);
 
     let (status, stdout, stderr) = run_cli(
@@ -2950,8 +3290,14 @@ fn run_chained_back_to_back() {
             "printf '\\033]133;C\\007'; echo RUN_'ONE'_OUT; printf '\\033]133;D;0\\007\\033]133;A\\007'",
         ],
     );
-    assert!(status.success(), "first run failed (status={status:?}): {stderr:?}");
-    assert!(stdout.contains("RUN_ONE_OUT"), "first run output missing. got: {stdout:?}");
+    assert!(
+        status.success(),
+        "first run failed (status={status:?}): {stderr:?}"
+    );
+    assert!(
+        stdout.contains("RUN_ONE_OUT"),
+        "first run output missing. got: {stdout:?}"
+    );
 
     let (status, stdout, stderr) = run_cli(
         &env,
@@ -2965,7 +3311,10 @@ fn run_chained_back_to_back() {
         "second (chained) run failed (status={status:?}). stderr: {stderr:?} pane: {}",
         sess.snapshot_str()
     );
-    assert!(stdout.contains("RUN_TWO_OUT"), "second run output missing. got: {stdout:?}");
+    assert!(
+        stdout.contains("RUN_TWO_OUT"),
+        "second run output missing. got: {stdout:?}"
+    );
 }
 
 /// `run --timeout 1` with a command that never emits a D mark → exit 124 with
@@ -2975,7 +3324,10 @@ fn run_timeout_exits_124() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
     seed_prompt_mark(&env, &sess);
 
     // `true` emits no OSC 133 marks (no real shell integration in the pane),
@@ -3000,7 +3352,10 @@ fn run_no_blocks_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // No seeding, the pane has never seen a PROMPT_START mark.
     let (status, _stdout, stderr) = run_cli(&env, &["run", "echo hi"]);
@@ -3023,12 +3378,17 @@ fn run_busy_pane_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
     seed_prompt_mark(&env, &sess);
 
     // Emit a C mark after the seeded A (no D): the pane now looks mid-command.
-    let (status, _stdout, stderr) =
-        run_cli(&env, &["send", "--enter", "printf '\\033]133;C\\007MID'FLIGHT'\\n'"]);
+    let (status, _stdout, stderr) = run_cli(
+        &env,
+        &["send", "--enter", "printf '\\033]133;C\\007MID'FLIGHT'\\n'"],
+    );
     assert!(status.success(), "busy-seed send failed: {stderr}");
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut busy_set = false;
@@ -3040,7 +3400,11 @@ fn run_busy_pane_refused() {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    assert!(busy_set, "MIDFLIGHT never appeared (C mark not set). pane: {}", sess.snapshot_str());
+    assert!(
+        busy_set,
+        "MIDFLIGHT never appeared (C mark not set). pane: {}",
+        sess.snapshot_str()
+    );
 
     let (status, _stdout, stderr) = run_cli(&env, &["run", "echo hi"]);
     assert_eq!(
@@ -3066,7 +3430,10 @@ fn capture_last_command_json_returns_structured_object() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Full A / B / command / C / output / D;7 / A block. Quote-concatenation
     // keeps the echoed *typed* line distinct from the executed printf output.
@@ -3097,13 +3464,27 @@ fn capture_last_command_json_returns_structured_object() {
         thread::sleep(Duration::from_millis(100));
     }
     let v = parsed.unwrap_or_else(|| {
-        panic!("capture --last-command --json never returned exit 7. pane: {}", sess.snapshot_str())
+        panic!(
+            "capture --last-command --json never returned exit 7. pane: {}",
+            sess.snapshot_str()
+        )
     });
     let output = v["output"].as_str().expect("output must be a string");
-    assert!(output.contains("OUT_J3_LINE"), "JSON output missing the block text: {v}");
-    assert_eq!(v["exit_code"], 7, "JSON exit_code must be the D payload: {v}");
-    let cmd = v["command_line"].as_str().expect("command_line must be a string here");
-    assert!(cmd.contains("demo_cmd_j3"), "JSON command_line missing the typed text: {v}");
+    assert!(
+        output.contains("OUT_J3_LINE"),
+        "JSON output missing the block text: {v}"
+    );
+    assert_eq!(
+        v["exit_code"], 7,
+        "JSON exit_code must be the D payload: {v}"
+    );
+    let cmd = v["command_line"]
+        .as_str()
+        .expect("command_line must be a string here");
+    assert!(
+        cmd.contains("demo_cmd_j3"),
+        "JSON command_line missing the typed text: {v}"
+    );
 }
 
 /// `capture --json` without `--last-command` is a clap usage error (exit 2).
@@ -3132,11 +3513,13 @@ fn run_json_ok_and_failed() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
     seed_prompt_mark(&env, &sess);
 
-    let ok_cmd =
-        "printf '\\033]133;C\\007'; echo RUNJ_'OK'_OUT; printf '\\033]133;D;0\\007\\033]133;A\\007'";
+    let ok_cmd = "printf '\\033]133;C\\007'; echo RUNJ_'OK'_OUT; printf '\\033]133;D;0\\007\\033]133;A\\007'";
     let (status, stdout, stderr) = run_cli(&env, &["run", "--json", ok_cmd]);
     assert!(
         status.success(),
@@ -3146,7 +3529,10 @@ fn run_json_ok_and_failed() {
     let v: serde_json::Value =
         serde_json::from_str(&stdout).expect("run --json stdout must be one JSON object");
     assert!(
-        v["output"].as_str().expect("output is a string").contains("RUNJ_OK_OUT"),
+        v["output"]
+            .as_str()
+            .expect("output is a string")
+            .contains("RUNJ_OK_OUT"),
         "JSON output missing the needle: {v}"
     );
     assert_eq!(v["exit_code"], 0, "JSON exit_code must be 0: {v}");
@@ -3157,8 +3543,7 @@ fn run_json_ok_and_failed() {
         "JSON command_line must echo the sent text: {v}"
     );
 
-    let fail_cmd =
-        "printf '\\033]133;C\\007'; echo RUNJ_'FAIL'_OUT; printf '\\033]133;D;5\\007\\033]133;A\\007'";
+    let fail_cmd = "printf '\\033]133;C\\007'; echo RUNJ_'FAIL'_OUT; printf '\\033]133;D;5\\007\\033]133;A\\007'";
     let (status, stdout, stderr) = run_cli(&env, &["run", "--json", fail_cmd]);
     assert_eq!(
         status.code(),
@@ -3171,7 +3556,10 @@ fn run_json_ok_and_failed() {
     assert_eq!(v["exit_code"], 5, "JSON exit_code must be 5: {v}");
     assert_eq!(v["timed_out"], false, "JSON timed_out must be false: {v}");
     assert!(
-        v["output"].as_str().expect("output is a string").contains("RUNJ_FAIL_OUT"),
+        v["output"]
+            .as_str()
+            .expect("output is a string")
+            .contains("RUNJ_FAIL_OUT"),
         "JSON output missing the needle: {v}"
     );
 }
@@ -3183,7 +3571,10 @@ fn run_json_timeout_exits_124_with_timed_out_true() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
     seed_prompt_mark(&env, &sess);
 
     // `true` emits no OSC 133 marks, so the wait can only end via the timeout.
@@ -3197,8 +3588,16 @@ fn run_json_timeout_exits_124_with_timed_out_true() {
     let v: serde_json::Value =
         serde_json::from_str(&stdout).expect("timed-out run --json stdout must be one JSON object");
     assert_eq!(v["timed_out"], true, "JSON timed_out must be true: {v}");
-    assert_eq!(v["exit_code"], serde_json::Value::Null, "no exit code on timeout: {v}");
-    assert_eq!(v["command_line"].as_str(), Some("true"), "command_line must echo: {v}");
+    assert_eq!(
+        v["exit_code"],
+        serde_json::Value::Null,
+        "no exit code on timeout: {v}"
+    );
+    assert_eq!(
+        v["command_line"].as_str(),
+        Some("true"),
+        "command_line must echo: {v}"
+    );
     assert!(
         stderr.contains("timed out after 1s"),
         "the plain timeout note must stay on stderr: {stderr:?}"
@@ -3236,8 +3635,9 @@ fn choose_tree_filter_and_rename_session() {
     );
 
     // Session "beta", a second PTY client in the same daemon.
-    let beta_sess =
-        TestSession::builder(&env).args(&["attach", "-n", "beta"]).start();
+    let beta_sess = TestSession::builder(&env)
+        .args(&["attach", "-n", "beta"])
+        .start();
     assert!(
         beta_sess.wait_ready("beta", Duration::from_secs(20)),
         "beta session never rendered"
@@ -3343,7 +3743,11 @@ fn choose_tree_filter_and_rename_session() {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    assert!(list_ok, "list must show 'zeta' not 'beta'. raw: {}", main_sess.snapshot_str());
+    assert!(
+        list_ok,
+        "list must show 'zeta' not 'beta'. raw: {}",
+        main_sess.snapshot_str()
+    );
 
     drop(beta_sess);
 }
@@ -3357,7 +3761,10 @@ fn cli_pipe_pane_streams_then_stops() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Absolute path under the test's tempdir, clean, and it avoids the
     // daemon-cwd question.
@@ -3373,8 +3780,7 @@ fn cli_pipe_pane_streams_then_stops() {
     // contiguous needle); only the shell's EXECUTED `echo` output is the
     // contiguous `PIPE_NEEDLE`. Both the echo of the typed line and the
     // command's output flow to the pipe, but only the executed output matches.
-    let (status, _stdout, stderr) =
-        run_cli(&env, &["send", "--enter", "echo PIPE_'NEEDLE'"]);
+    let (status, _stdout, stderr) = run_cli(&env, &["send", "--enter", "echo PIPE_'NEEDLE'"]);
     assert!(status.success(), "send --enter failed: {stderr}");
 
     // Poll the tee'd file (bounded) until the executed-output needle lands.
@@ -3409,8 +3815,7 @@ fn cli_pipe_pane_streams_then_stops() {
     // Drive more pane output AFTER the stop. The PTY wait confirms the shell
     // actually executed the line and its output flowed through the pane, so if
     // the pipe were still attached, the file WOULD grow.
-    let (status, _stdout, stderr) =
-        run_cli(&env, &["send", "--enter", "echo AFTER_'STOP'"]);
+    let (status, _stdout, stderr) = run_cli(&env, &["send", "--enter", "echo AFTER_'STOP'"]);
     assert!(status.success(), "post-stop send failed: {stderr}");
     assert!(
         sess.wait_for(b"AFTER_STOP", Duration::from_secs(10)),
@@ -3422,7 +3827,8 @@ fn cli_pipe_pane_streams_then_stops() {
 
     let after_len = fs::metadata(&log).map_or(0, |m| m.len());
     assert_eq!(
-        after_len, settled_len,
+        after_len,
+        settled_len,
         "file grew after the pipe was stopped (pipe did not stop). \
          settled={settled_len}, after={after_len}, contents: {:?}",
         fs::read_to_string(&log).ok()
@@ -3444,7 +3850,10 @@ fn cli_monitor_command_alerts_background_completion() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Turn monitor-command ON for window 1 (the active window).
     let (status, _o, stderr) = run_cli(&env, &["cmd", "monitor-command"]);
@@ -3456,10 +3865,12 @@ fn cli_monitor_command_alerts_background_completion() {
     // can switch windows before it fires. The single-quoted printf format keeps
     // the ESC bytes literal in the typed line; the shell's printf interprets
     // the \033/\007 escapes.
-    let printf =
-        r"( sleep 1; printf '\033]133;C\007out\033]133;D;1\007\033]133;A\007' ) &";
+    let printf = r"( sleep 1; printf '\033]133;C\007out\033]133;D;1\007\033]133;A\007' ) &";
     let (status, _o, stderr) = run_cli(&env, &["send", "--enter", printf]);
-    assert!(status.success(), "send backgrounded printf failed: {stderr}");
+    assert!(
+        status.success(),
+        "send backgrounded printf failed: {stderr}"
+    );
 
     // Switch to a new window (Ctrl+a c) so window 1 is now in the background
     // when the completion fires ~1s later.
@@ -3496,7 +3907,10 @@ fn cli_monitor_silence_alerts_background_window() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // Turn monitor-silence on with a 1s threshold for window 1 (the active
     // window). The CLI `cmd` verb uses the prompt grammar: "monitor-silence 1".
@@ -3537,14 +3951,20 @@ fn cli_monitor_bell_alerts_background_window() {
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
-    assert!(sess.wait_ready("main", Duration::from_secs(20)), "daemon never rendered");
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
 
     // `monitor-bell` is ON by default; no toggle needed.
     // Schedule a delayed BEL in window 1's shell: after ~1s, emit a BEL byte.
     // Backgrounded so the shell returns immediately and we can switch windows.
     let printf = r"( sleep 1; printf '\a' ) &";
     let (status, _o, stderr) = run_cli(&env, &["send", "--enter", printf]);
-    assert!(status.success(), "send backgrounded printf failed: {stderr}");
+    assert!(
+        status.success(),
+        "send backgrounded printf failed: {stderr}"
+    );
 
     // Switch to a new window so window 1 is in the background when the BEL fires.
     sess.send_prefix(b'c');

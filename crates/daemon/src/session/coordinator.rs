@@ -1,15 +1,18 @@
 //! Render coordinator and related helpers extracted from `session.rs`.
 
-use super::Session;
-use crate::window_manager::{PendingNotification, Severity};
-use plexy_glass_mux::{VirtualScreen, compositor};
 use std::collections::HashMap;
 use std::panic;
 use std::process::Stdio;
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use plexy_glass_mux::{VirtualScreen, compositor};
 use tokio::process::Command;
 use tokio::sync::watch;
 use tokio::time;
+
+use super::Session;
+use crate::window_manager::{PendingNotification, Severity};
 
 /// Per-pane data captured under the window-manager lock, owned so the borrowed
 /// `PaneView`s handed to the compositor don't keep the lock held during
@@ -30,7 +33,9 @@ struct OwnedPane {
 /// the frame (the process panic hook records the location). See the
 /// terminal-trust-hardening spec, Phase 1.
 fn catch_compose(f: impl FnOnce() -> VirtualScreen) -> Option<VirtualScreen> {
-    if let Ok(frame) = panic::catch_unwind(panic::AssertUnwindSafe(f)) { Some(frame) } else {
+    if let Ok(frame) = panic::catch_unwind(panic::AssertUnwindSafe(f)) {
+        Some(frame)
+    } else {
         tracing::error!("compositor panicked; skipping frame");
         None
     }
@@ -40,8 +45,9 @@ pub(super) async fn render_coordinator(
     session: Arc<Session>,
     frame_tx: watch::Sender<Arc<VirtualScreen>>,
 ) {
-    use plexy_glass_mux::{PaneView, StatusLine};
     use std::time::Duration;
+
+    use plexy_glass_mux::{PaneView, StatusLine};
     const DEBOUNCE: Duration = Duration::from_millis(16);
 
     loop {
@@ -135,7 +141,9 @@ pub(super) async fn render_coordinator(
                     marked: marked_pane == Some(p.id),
                     drag_role: match pane_drag {
                         Some((src, _)) if src == p.id => plexy_glass_mux::PaneDragRole::Source,
-                        Some((_, Some(tgt))) if tgt == p.id => plexy_glass_mux::PaneDragRole::Target,
+                        Some((_, Some(tgt))) if tgt == p.id => {
+                            plexy_glass_mux::PaneDragRole::Target
+                        }
                         _ => plexy_glass_mux::PaneDragRole::None,
                     },
                 })
@@ -266,7 +274,11 @@ pub(super) async fn render_coordinator(
             hits.extend(zone_hits(&right, host_size.cols.saturating_sub(right_w)));
             m.set_status_hits(hits);
 
-            let status = StatusLine { left, middle: Vec::new(), right };
+            let status = StatusLine {
+                left,
+                middle: Vec::new(),
+                right,
+            };
             let selection = m.selection().cloned();
             // Transient status-line message (cleared lazily here when expired);
             // peek the severity before taking the text so it can be styled.
@@ -290,18 +302,23 @@ pub(super) async fn render_coordinator(
                 Some(plexy_glass_mux::Overlay::Help { scroll }) => {
                     let cfg = session.config_snapshot();
                     help_lines = build_help_lines(&cfg);
-                    Some(plexy_glass_mux::OverlayView::Help { lines: &help_lines, scroll: *scroll })
+                    Some(plexy_glass_mux::OverlayView::Help {
+                        lines: &help_lines,
+                        scroll: *scroll,
+                    })
                 }
                 Some(plexy_glass_mux::Overlay::Command { buf, .. }) => {
                     Some(plexy_glass_mux::OverlayView::Command { buf })
                 }
-                Some(plexy_glass_mux::Overlay::SessionPicker { entries, filter, selected }) => {
-                    Some(plexy_glass_mux::OverlayView::SessionPicker {
-                        entries,
-                        filter,
-                        selected: *selected,
-                    })
-                }
+                Some(plexy_glass_mux::Overlay::SessionPicker {
+                    entries,
+                    filter,
+                    selected,
+                }) => Some(plexy_glass_mux::OverlayView::SessionPicker {
+                    entries,
+                    filter,
+                    selected: *selected,
+                }),
                 Some(plexy_glass_mux::Overlay::Tree(state)) => {
                     Some(plexy_glass_mux::OverlayView::Tree { state })
                 }
@@ -321,14 +338,21 @@ pub(super) async fn render_coordinator(
                 Some(plexy_glass_mux::Overlay::Welcome) => {
                     let cfg = session.config_snapshot();
                     welcome_lines = build_welcome_lines(&cfg);
-                    Some(plexy_glass_mux::OverlayView::Welcome { lines: &welcome_lines })
+                    Some(plexy_glass_mux::OverlayView::Welcome {
+                        lines: &welcome_lines,
+                    })
                 }
                 None => None,
             };
 
-            let popup_view = popup_owned.as_ref().map(|(screen, title, rect)| {
-                plexy_glass_mux::PopupView { rect: *rect, screen, title }
-            });
+            let popup_view =
+                popup_owned
+                    .as_ref()
+                    .map(|(screen, title, rect)| plexy_glass_mux::PopupView {
+                        rect: *rect,
+                        screen,
+                        title,
+                    });
 
             // Build the block-border color pair from the session's current config
             // so that live-reload updates apply for free on the next compose call.
@@ -384,7 +408,12 @@ pub(super) async fn render_coordinator(
                 let title = format!("plexy-glass: {}", session.name());
                 for p in &monitor_drain.notifications {
                     let attended = attached > 0 && p.is_active_window && terminal_focused;
-                    if should_notify(nt.enabled, nt.min_duration_ms, p.event.duration_ms, attended) {
+                    if should_notify(
+                        nt.enabled,
+                        nt.min_duration_ms,
+                        p.event.duration_ms,
+                        attended,
+                    ) {
                         notify_desktop(title.clone(), notification_body(p));
                     }
                 }
@@ -422,7 +451,11 @@ fn notification_body(p: &PendingNotification) -> String {
     };
     match &p.event.command {
         Some(cmd) => format!("{glyph}{cmd}{exit} \u{b7} {dur}"),
-        None => format!("window {} ({}){exit} \u{b7} {dur}", p.window_index + 1, p.window_name),
+        None => format!(
+            "window {} ({}){exit} \u{b7} {dur}",
+            p.window_index + 1,
+            p.window_name
+        ),
     }
 }
 
@@ -489,7 +522,13 @@ fn notify_desktop(title: String, body: String) {
 fn substitute_prefix_token(keys: &str, prefix: &str) -> String {
     let parts: Vec<&str> = keys
         .split_whitespace()
-        .map(|tok| if tok.eq_ignore_ascii_case("prefix") { prefix } else { tok })
+        .map(|tok| {
+            if tok.eq_ignore_ascii_case("prefix") {
+                prefix
+            } else {
+                tok
+            }
+        })
         .collect();
     parts.join(" ")
 }
@@ -534,8 +573,14 @@ fn build_help_lines(config: &plexy_glass_config::Config) -> Vec<(String, String)
     // unresolved-token guard checks for it), so the first row keys on the
     // resolved prefix string itself, not the label "Prefix".
     let mut lines: Vec<(String, String)> = vec![
-        (prefix.clone(), "the prefix — press it, then a key below".to_string()),
-        (format!("{prefix} d"), "Detach — the session keeps running".to_string()),
+        (
+            prefix.clone(),
+            "the prefix — press it, then a key below".to_string(),
+        ),
+        (
+            format!("{prefix} d"),
+            "Detach — the session keeps running".to_string(),
+        ),
         ("Config".to_string(), config_dir_hint()),
         (String::new(), String::new()),
     ];
@@ -659,7 +704,11 @@ const DEFAULT_SELECT_RGB: (u8, u8, u8) = (0xdc, 0xa5, 0x61); // #dca561
 pub(super) fn hint_colors(cfg: &plexy_glass_config::Config) -> plexy_glass_mux::HintColors {
     let resolve = |name: &str, def: (u8, u8, u8)| {
         let rgb = plexy_glass_status::resolve_color(name, &cfg.palette).unwrap_or(
-            plexy_glass_status::Rgb { r: def.0, g: def.1, b: def.2 },
+            plexy_glass_status::Rgb {
+                r: def.0,
+                g: def.1,
+                b: def.2,
+            },
         );
         plexy_glass_emulator::Color::Rgb(rgb.r, rgb.g, rgb.b)
     };
@@ -676,8 +725,13 @@ pub(super) fn hint_colors(cfg: &plexy_glass_config::Config) -> plexy_glass_mux::
 /// resolves via `resolve_color`, falling back to the built-in palette default.
 pub(super) fn chrome_colors(cfg: &plexy_glass_config::Config) -> plexy_glass_mux::ChromeColors {
     let resolve = |name: &str, def: (u8, u8, u8)| {
-        let rgb = plexy_glass_status::resolve_color(name, &cfg.palette)
-            .unwrap_or(plexy_glass_status::Rgb { r: def.0, g: def.1, b: def.2 });
+        let rgb = plexy_glass_status::resolve_color(name, &cfg.palette).unwrap_or(
+            plexy_glass_status::Rgb {
+                r: def.0,
+                g: def.1,
+                b: def.2,
+            },
+        );
         plexy_glass_emulator::Color::Rgb(rgb.r, rgb.g, rgb.b)
     };
     plexy_glass_mux::ChromeColors {
@@ -705,15 +759,19 @@ pub(super) fn message_colors(
     use crate::window_manager::Severity;
     let resolve = |name: &str, def: (u8, u8, u8)| {
         let rgb = plexy_glass_status::resolve_color(name, &cfg.palette).unwrap_or(
-            plexy_glass_status::Rgb { r: def.0, g: def.1, b: def.2 },
+            plexy_glass_status::Rgb {
+                r: def.0,
+                g: def.1,
+                b: def.2,
+            },
         );
         plexy_glass_emulator::Color::Rgb(rgb.r, rgb.g, rgb.b)
     };
     let fg_def = match severity {
-        Severity::Info => (0x94, 0x9f, 0xb5),    // info
-        Severity::Success => DEFAULT_OK_RGB,     // ok
-        Severity::Warn => (0xc4, 0xb2, 0x8a),    // warn
-        Severity::Error => DEFAULT_ALERT_RGB,    // alert
+        Severity::Info => (0x94, 0x9f, 0xb5), // info
+        Severity::Success => DEFAULT_OK_RGB,  // ok
+        Severity::Warn => (0xc4, 0xb2, 0x8a), // warn
+        Severity::Error => DEFAULT_ALERT_RGB, // alert
     };
     let fg = resolve(severity.palette_key(), fg_def);
     let bg = resolve("bg_bar", (0x28, 0x27, 0x27)); // bg_bar
@@ -723,15 +781,14 @@ pub(super) fn message_colors(
 /// Resolve the block-mode selection-bracket color from config. Always returns a
 /// color (unlike [`block_border_colors`], which is `None` when blocks are
 /// disabled), since the bracket is independent of the block-status feature.
-pub(super) fn block_select_color(
-    cfg: &plexy_glass_config::Config,
-) -> plexy_glass_emulator::Color {
-    let rgb = plexy_glass_status::resolve_color(&cfg.blocks.select_color, &cfg.palette)
-        .unwrap_or(plexy_glass_status::Rgb {
+pub(super) fn block_select_color(cfg: &plexy_glass_config::Config) -> plexy_glass_emulator::Color {
+    let rgb = plexy_glass_status::resolve_color(&cfg.blocks.select_color, &cfg.palette).unwrap_or(
+        plexy_glass_status::Rgb {
             r: DEFAULT_SELECT_RGB.0,
             g: DEFAULT_SELECT_RGB.1,
             b: DEFAULT_SELECT_RGB.2,
-        });
+        },
+    );
     plexy_glass_emulator::Color::Rgb(rgb.r, rgb.g, rgb.b)
 }
 
@@ -750,18 +807,20 @@ pub(super) fn block_border_colors(
     let palette = &cfg.palette;
     // resolve_color failed (bad palette name or malformed hex) → fall back to
     // the hard-coded default so the feature keeps painting.
-    let ok_rgb = plexy_glass_status::resolve_color(&cfg.blocks.ok_color, palette)
-        .unwrap_or(plexy_glass_status::Rgb {
+    let ok_rgb = plexy_glass_status::resolve_color(&cfg.blocks.ok_color, palette).unwrap_or(
+        plexy_glass_status::Rgb {
             r: DEFAULT_OK_RGB.0,
             g: DEFAULT_OK_RGB.1,
             b: DEFAULT_OK_RGB.2,
-        });
-    let fail_rgb = plexy_glass_status::resolve_color(&cfg.blocks.fail_color, palette)
-        .unwrap_or(plexy_glass_status::Rgb {
+        },
+    );
+    let fail_rgb = plexy_glass_status::resolve_color(&cfg.blocks.fail_color, palette).unwrap_or(
+        plexy_glass_status::Rgb {
             r: DEFAULT_ALERT_RGB.0,
             g: DEFAULT_ALERT_RGB.1,
             b: DEFAULT_ALERT_RGB.2,
-        });
+        },
+    );
     Some(plexy_glass_mux::BlockBorderColors {
         ok: plexy_glass_emulator::Color::Rgb(ok_rgb.r, ok_rgb.g, ok_rgb.b),
         fail: plexy_glass_emulator::Color::Rgb(fail_rgb.r, fail_rgb.g, fail_rgb.b),
@@ -775,11 +834,15 @@ pub(super) fn block_border_colors(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plexy_glass_config::{KeymapBinding, built_in_default};
 
+    use super::*;
+
     fn binding(keys: &str, command: &str) -> KeymapBinding {
-        KeymapBinding { keys: keys.into(), command: command.into() }
+        KeymapBinding {
+            keys: keys.into(),
+            command: command.into(),
+        }
     }
 
     #[test]
@@ -791,30 +854,54 @@ mod tests {
     #[test]
     fn catch_compose_returns_none_on_panic() {
         let vs = catch_compose(|| panic!("compose blew up"));
-        assert!(vs.is_none(), "a compose panic must yield None, not propagate");
+        assert!(
+            vs.is_none(),
+            "a compose panic must yield None, not propagate"
+        );
     }
 
     #[test]
     fn should_notify_policy_matrix() {
         // enabled, min_ms, duration, attended
-        assert!(should_notify(true, 30_000, Some(30_000), false), "long + unattended → notify");
+        assert!(
+            should_notify(true, 30_000, Some(30_000), false),
+            "long + unattended → notify"
+        );
         assert!(should_notify(true, 30_000, Some(45_000), false));
-        assert!(!should_notify(true, 30_000, Some(29_999), false), "below threshold");
-        assert!(!should_notify(true, 30_000, Some(60_000), true), "attended → suppress");
+        assert!(
+            !should_notify(true, 30_000, Some(29_999), false),
+            "below threshold"
+        );
+        assert!(
+            !should_notify(true, 30_000, Some(60_000), true),
+            "attended → suppress"
+        );
         assert!(!should_notify(false, 0, Some(99_999), false), "disabled");
-        assert!(!should_notify(true, 30_000, None, false), "no duration → never");
-        assert!(should_notify(true, 0, Some(1), false), "min 0 notifies any unattended");
+        assert!(
+            !should_notify(true, 30_000, None, false),
+            "no duration → never"
+        );
+        assert!(
+            should_notify(true, 0, Some(1), false),
+            "min 0 notifies any unattended"
+        );
     }
 
     #[test]
     fn notification_argv_macos_uses_osascript_with_argv() {
-        let (prog, args) = notification_argv(true, "plexy-glass: web", "\u{2713} cargo build \u{b7} 2m03s");
+        let (prog, args) = notification_argv(
+            true,
+            "plexy-glass: web",
+            "\u{2713} cargo build \u{b7} 2m03s",
+        );
         assert_eq!(prog, "osascript");
         // Title/body are the trailing argv (body = item 1, title = item 2), never
         // interpolated into the script, that's the injection-safe contract.
         assert_eq!(args[args.len() - 2], "\u{2713} cargo build \u{b7} 2m03s");
         assert_eq!(args[args.len() - 1], "plexy-glass: web");
-        assert!(args.contains(&"display notification (item 1 of argv) with title (item 2 of argv)".to_string()));
+        assert!(args.contains(
+            &"display notification (item 1 of argv) with title (item 2 of argv)".to_string()
+        ));
     }
 
     #[test]
@@ -844,10 +931,16 @@ mod tests {
         assert!(body.contains('\u{2717}'), "fail glyph: {body:?}");
         // No command → window fallback.
         let p2 = PendingNotification {
-            event: CompletionEvent { command: None, ..p.event.clone() },
+            event: CompletionEvent {
+                command: None,
+                ..p.event.clone()
+            },
             ..p
         };
-        assert!(notification_body(&p2).contains("window 2 (api)"), "fallback to window");
+        assert!(
+            notification_body(&p2).contains("window 2 (api)"),
+            "fallback to window"
+        );
     }
 
     /// Test 1: default config, the output contains ("Ctrl+a c", "New window") and
@@ -859,7 +952,9 @@ mod tests {
 
         // Must contain the resolved form of the canonical "new window" binding.
         assert!(
-            lines.iter().any(|(k, v)| k == "Ctrl+a c" && v == "New window"),
+            lines
+                .iter()
+                .any(|(k, v)| k == "Ctrl+a c" && v == "New window"),
             "expected (\"Ctrl+a c\", \"New window\") in help lines; got:\n{lines:?}"
         );
 
@@ -882,13 +977,17 @@ mod tests {
         let mut cfg = built_in_default();
         cfg.keymap.prefix = "Ctrl+b".into();
         // Add user bindings: one prefix-relative and one absolute.
-        cfg.keymap.bindings.push(binding("prefix H", "resize_pane_left"));
+        cfg.keymap
+            .bindings
+            .push(binding("prefix H", "resize_pane_left"));
         cfg.keymap.bindings.push(binding("Ctrl+x q", "detach"));
 
         let lines = build_help_lines(&cfg);
 
         assert!(
-            lines.iter().any(|(k, v)| k == "Ctrl+b c" && v == "New window"),
+            lines
+                .iter()
+                .any(|(k, v)| k == "Ctrl+b c" && v == "New window"),
             "expected (\"Ctrl+b c\", \"New window\"); got:\n{lines:?}"
         );
         assert!(
@@ -932,26 +1031,63 @@ mod tests {
         // so a swapped key (active↔marked, source↔target, border/title/bg) is
         // caught here (the painting tests build colors from literals and can't).
         let c = chrome_colors(&built_in_default());
-        assert_eq!(c.rings.active, Rgb(0xb6, 0x92, 0x7b), "active ring = highlight");
+        assert_eq!(
+            c.rings.active,
+            Rgb(0xb6, 0x92, 0x7b),
+            "active ring = highlight"
+        );
         assert_eq!(c.rings.marked, Rgb(0xc4, 0xb2, 0x8a), "marked ring = warn");
-        assert_eq!(c.rings.drag_source, Rgb(0x94, 0x9f, 0xb5), "drag source = info");
-        assert_eq!(c.rings.drag_target, Rgb(0x87, 0xa9, 0x87), "drag target = ok");
-        assert_eq!(c.overlay_border, Rgb(0x73, 0x7c, 0x73), "overlay border = accent");
-        assert_eq!(c.overlay_title, Rgb(0xb6, 0x92, 0x7b), "overlay title = highlight");
-        assert_eq!(c.overlay_footer, Rgb(0xb6, 0x92, 0x7b), "overlay footer = muted");
+        assert_eq!(
+            c.rings.drag_source,
+            Rgb(0x94, 0x9f, 0xb5),
+            "drag source = info"
+        );
+        assert_eq!(
+            c.rings.drag_target,
+            Rgb(0x87, 0xa9, 0x87),
+            "drag target = ok"
+        );
+        assert_eq!(
+            c.overlay_border,
+            Rgb(0x73, 0x7c, 0x73),
+            "overlay border = accent"
+        );
+        assert_eq!(
+            c.overlay_title,
+            Rgb(0xb6, 0x92, 0x7b),
+            "overlay title = highlight"
+        );
+        assert_eq!(
+            c.overlay_footer,
+            Rgb(0xb6, 0x92, 0x7b),
+            "overlay footer = muted"
+        );
         assert_eq!(c.overlay_bg, Rgb(0x28, 0x27, 0x27), "overlay bg = bg_bar");
     }
 
     #[test]
     fn message_colors_map_severity_to_the_right_palette_key() {
-        use crate::window_manager::Severity;
         use plexy_glass_emulator::Color::Rgb;
+
+        use crate::window_manager::Severity;
         let cfg = built_in_default();
         let bg = Rgb(0x28, 0x27, 0x27); // bg_bar for every severity
-        assert_eq!(message_colors(&cfg, Severity::Info), (Rgb(0x94, 0x9f, 0xb5), bg));
-        assert_eq!(message_colors(&cfg, Severity::Success), (Rgb(0x87, 0xa9, 0x87), bg));
-        assert_eq!(message_colors(&cfg, Severity::Warn), (Rgb(0xc4, 0xb2, 0x8a), bg));
-        assert_eq!(message_colors(&cfg, Severity::Error), (Rgb(0xc4, 0x74, 0x6e), bg));
+        assert_eq!(
+            message_colors(&cfg, Severity::Info),
+            (Rgb(0x94, 0x9f, 0xb5), bg)
+        );
+        assert_eq!(
+            message_colors(&cfg, Severity::Success),
+            (Rgb(0x87, 0xa9, 0x87), bg)
+        );
+        assert_eq!(
+            message_colors(&cfg, Severity::Warn),
+            (Rgb(0xc4, 0xb2, 0x8a), bg)
+        );
+        assert_eq!(
+            message_colors(&cfg, Severity::Error),
+            (Rgb(0xc4, 0x74, 0x6e), bg)
+        );
     }
 
     #[test]
@@ -1034,7 +1170,9 @@ mod tests {
     fn block_border_colors_custom_palette_name_resolves() {
         let mut cfg = built_in_default();
         // Add a custom palette entry.
-        cfg.palette.entries.insert("my_green".to_string(), "#00ff00".to_string());
+        cfg.palette
+            .entries
+            .insert("my_green".to_string(), "#00ff00".to_string());
         cfg.blocks.ok_color = "my_green".to_string();
         let colors = block_border_colors(&cfg).expect("expected Some with custom palette name");
         assert_eq!(

@@ -9,6 +9,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::str;
 use std::sync::Arc;
+
 use base64::engine::general_purpose::STANDARD;
 
 /// Wire image format (Kitty `f=` key).
@@ -173,17 +174,17 @@ pub struct GraphicsCommand {
     /// `q` query. Defaults to transmit-and-display when absent (`a` omitted on a
     /// data-bearing command means transmit, but timg sends `a=T`).
     pub action: u8,
-    pub id: Option<u32>,         // i=
+    pub id: Option<u32>,           // i=
     pub placement_id: Option<u32>, // p=
-    pub format: Option<u32>,     // f=
-    pub width: Option<u32>,      // s=
-    pub height: Option<u32>,     // v=
-    pub rows: Option<u16>,       // r=
-    pub cols: Option<u16>,       // c=
-    pub more: bool,              // m=1 (more chunks coming)
+    pub format: Option<u32>,       // f=
+    pub width: Option<u32>,        // s=
+    pub height: Option<u32>,       // v=
+    pub rows: Option<u16>,         // r=
+    pub cols: Option<u16>,         // c=
+    pub more: bool,                // m=1 (more chunks coming)
     pub delete_target: Option<u8>, // d= (for a=d)
-    pub unicode: bool,           // U=1 (Unicode-placeholder / virtual placement)
-    pub payload: Vec<u8>,        // base64 chunk
+    pub unicode: bool,             // U=1 (Unicode-placeholder / virtual placement)
+    pub payload: Vec<u8>,          // base64 chunk
 }
 
 /// Parse the framed `ESC _ G<params>;<payload> ESC \` bytes into a command.
@@ -204,7 +205,9 @@ pub fn parse_command(framed: &[u8]) -> Option<GraphicsCommand> {
     };
     for kv in params.split(|&b| b == b',') {
         let mut it = kv.splitn(2, |&b| b == b'=');
-        let (Some(k), Some(v)) = (it.next(), it.next()) else { continue };
+        let (Some(k), Some(v)) = (it.next(), it.next()) else {
+            continue;
+        };
         let val = str::from_utf8(v).unwrap_or("");
         match k {
             b"a" => cmd.action = v.first().copied().unwrap_or(b't'),
@@ -238,7 +241,11 @@ pub fn sixel_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
                 // saturating: the payload is child-controlled, so a pathological
                 // run of digits must not overflow-panic.
                 b'0'..=b'9' => {
-                    cur = Some(cur.unwrap_or(0).saturating_mul(10).saturating_add(u32::from(b - b'0')));
+                    cur = Some(
+                        cur.unwrap_or(0)
+                            .saturating_mul(10)
+                            .saturating_add(u32::from(b - b'0')),
+                    );
                 }
                 b';' => {
                     if idx < 4 {
@@ -274,7 +281,9 @@ pub fn sixel_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
                 let mut n: u32 = 0;
                 i += 1;
                 while i < payload.len() && payload[i].is_ascii_digit() {
-                    n = n.saturating_mul(10).saturating_add(u32::from(payload[i] - b'0'));
+                    n = n
+                        .saturating_mul(10)
+                        .saturating_add(u32::from(payload[i] - b'0'));
                     i += 1;
                 }
                 if i < payload.len() && (0x3f..=0x7e).contains(&payload[i]) {
@@ -360,7 +369,11 @@ pub fn iterm_dimensions(args: &str, b64: &str) -> Option<(u32, u32)> {
     }
     // Decode a prefix of the base64 (enough for the file header) and read it.
     use base64::Engine as _;
-    let prefix: String = b64.chars().filter(|c| !c.is_whitespace()).take(16384).collect();
+    let prefix: String = b64
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .take(16384)
+        .collect();
     let bytes = STANDARD.decode(prefix.as_bytes()).ok()?;
     png_dimensions(&bytes).or_else(|| jpeg_dimensions(&bytes))
 }
@@ -460,7 +473,10 @@ mod tests {
 
     #[test]
     fn sixel_dims_from_raster_attributes() {
-        assert_eq!(sixel_dimensions(b"\"1;1;640;480#0;2;0;0;0~~~"), Some((640, 480)));
+        assert_eq!(
+            sixel_dimensions(b"\"1;1;640;480#0;2;0;0;0~~~"),
+            Some((640, 480))
+        );
     }
 
     #[test]
@@ -508,9 +524,15 @@ mod tests {
 
     #[test]
     fn iterm_dims_from_pixel_args() {
-        assert_eq!(iterm_dimensions("inline=1;width=20px;height=40px", "ignored"), Some((20, 40)));
+        assert_eq!(
+            iterm_dimensions("inline=1;width=20px;height=40px", "ignored"),
+            Some((20, 40))
+        );
         // Cell/percent sizing is not interpreted → falls through (no decodable data here).
-        assert_eq!(iterm_dimensions("inline=1;width=10;height=50%", "!!notb64!!"), None);
+        assert_eq!(
+            iterm_dimensions("inline=1;width=10;height=50%", "!!notb64!!"),
+            None
+        );
     }
 
     #[test]
@@ -528,7 +550,9 @@ mod tests {
     #[test]
     fn jpeg_dims_from_sof() {
         // SOI + SOF0: FFC0 len=0x0011 precision=8 height=0x0028(40) width=0x001E(30) …
-        let mut jpg = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x28, 0x00, 0x1E];
+        let mut jpg = vec![
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x28, 0x00, 0x1E,
+        ];
         jpg.extend_from_slice(&[0x03; 10]); // pad so i+9 < len during the scan
         assert_eq!(jpeg_dimensions(&jpg), Some((30, 40)));
         assert_eq!(jpeg_dimensions(b"not a jpeg"), None);
@@ -691,17 +715,30 @@ mod tests {
         let mb32: Arc<[u8]> = vec![0u8; 32 * 1024 * 1024].into();
         let mut store = ImageStore::default();
         let ev1 = store.insert(Image {
-            id: 1, format: ImageFormat::Png, pixel_w: 1, pixel_h: 1,
-            data_b64: mb32.clone(), iterm_args: None,
-            protocol: ImageProtocol::Kitty, generation: 1,
+            id: 1,
+            format: ImageFormat::Png,
+            pixel_w: 1,
+            pixel_h: 1,
+            data_b64: mb32.clone(),
+            iterm_args: None,
+            protocol: ImageProtocol::Kitty,
+            generation: 1,
         });
         let ev2 = store.insert(Image {
-            id: 2, format: ImageFormat::Png, pixel_w: 1, pixel_h: 1,
-            data_b64: mb32, iterm_args: None,
-            protocol: ImageProtocol::Kitty, generation: 1,
+            id: 2,
+            format: ImageFormat::Png,
+            pixel_w: 1,
+            pixel_h: 1,
+            data_b64: mb32,
+            iterm_args: None,
+            protocol: ImageProtocol::Kitty,
+            generation: 1,
         });
         assert!(ev1.is_empty(), "first insert: no eviction");
-        assert!(ev2.is_empty(), "total == cap exactly: no eviction with `>`; mutation `>=` evicts");
+        assert!(
+            ev2.is_empty(),
+            "total == cap exactly: no eviction with `>`; mutation `>=` evicts"
+        );
         assert_eq!(store.len(), 2);
         assert!(store.contains(1));
         assert!(store.contains(2));
@@ -715,11 +752,19 @@ mod tests {
         let mb65: Arc<[u8]> = vec![0u8; 65 * 1024 * 1024].into();
         let mut store = ImageStore::default();
         let evicted = store.insert(Image {
-            id: 1, format: ImageFormat::Png, pixel_w: 1, pixel_h: 1,
-            data_b64: mb65, iterm_args: None,
-            protocol: ImageProtocol::Kitty, generation: 1,
+            id: 1,
+            format: ImageFormat::Png,
+            pixel_w: 1,
+            pixel_h: 1,
+            data_b64: mb65,
+            iterm_args: None,
+            protocol: ImageProtocol::Kitty,
+            generation: 1,
         });
-        assert!(evicted.is_empty(), "sole image must survive even if it exceeds cap");
+        assert!(
+            evicted.is_empty(),
+            "sole image must survive even if it exceeds cap"
+        );
         assert_eq!(store.len(), 1);
         assert!(store.contains(1));
     }
@@ -815,7 +860,7 @@ mod tests {
         // so the fallback scan also finds no data and returns None.
         assert_eq!(sixel_dimensions(b"\"1;1;0;480\x00"), None); // width=0
         assert_eq!(sixel_dimensions(b"\"1;1;640;0\x00"), None); // height=0
-        assert_eq!(sixel_dimensions(b"\"1;1;0;0\x00"), None);   // both=0
+        assert_eq!(sixel_dimensions(b"\"1;1;0;0\x00"), None); // both=0
         // Both nonzero: the raster path succeeds directly (no fallback).
         assert_eq!(sixel_dimensions(b"\"1;1;1;1\x00"), Some((1, 1)));
     }
@@ -832,17 +877,17 @@ mod tests {
     #[test]
     fn sixel_new_band_increments_height() {
         // `-` starts a new 6-pixel band, so this verifies the bands counter is used.
-        assert_eq!(sixel_dimensions(b"~-~"), Some((1, 12)));  // 2 bands × 6 = 12
+        assert_eq!(sixel_dimensions(b"~-~"), Some((1, 12))); // 2 bands × 6 = 12
         assert_eq!(sixel_dimensions(b"~-~-~"), Some((1, 18))); // 3 bands
     }
 
     #[test]
     fn sixel_data_byte_range_boundary() {
         // kills: boundary mutations on the `0x3f..=0x7e` match arm (line 299).
-        assert_eq!(sixel_dimensions(b"?"), Some((1, 6)));    // 0x3f: inclusive lower bound
-        assert_eq!(sixel_dimensions(b"~"), Some((1, 6)));    // 0x7e: inclusive upper bound
-        assert_eq!(sixel_dimensions(b"\x3e"), None);          // 0x3e: just below → not data
-        assert_eq!(sixel_dimensions(b"\x7f"), None);          // 0x7f: just above → not data
+        assert_eq!(sixel_dimensions(b"?"), Some((1, 6))); // 0x3f: inclusive lower bound
+        assert_eq!(sixel_dimensions(b"~"), Some((1, 6))); // 0x7e: inclusive upper bound
+        assert_eq!(sixel_dimensions(b"\x3e"), None); // 0x3e: just below → not data
+        assert_eq!(sixel_dimensions(b"\x7f"), None); // 0x7f: just above → not data
     }
 
     #[test]
@@ -850,8 +895,8 @@ mod tests {
         // `!N` with no trailing data byte: tests the inner digit-loop boundary
         // (`while i < len`) and the outer `if i < len && range.contains` guard.
         // kills: `< vs <=` on line 274 (inner loop OOB) and line 278 (outer guard OOB).
-        assert_eq!(sixel_dimensions(b"!3"), None);    // repeat with no data byte
-        assert_eq!(sixel_dimensions(b"!99"), None);   // multi-digit, no data byte
+        assert_eq!(sixel_dimensions(b"!3"), None); // repeat with no data byte
+        assert_eq!(sixel_dimensions(b"!99"), None); // multi-digit, no data byte
         assert_eq!(sixel_dimensions(b"!3~"), Some((3, 6))); // normal repeat still works
     }
 
@@ -875,9 +920,19 @@ mod tests {
         assert_eq!(jpeg_dimensions(&[0xFF, 0xD8]), None);
         assert_eq!(jpeg_dimensions(&[0xFF, 0xD8, 0xFF]), None);
         // wrong first SOI byte
-        assert_eq!(jpeg_dimensions(&[0x00, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x28, 0x00, 0x1E, 0x00, 0x00, 0x00]), None);
+        assert_eq!(
+            jpeg_dimensions(&[
+                0x00, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x28, 0x00, 0x1E, 0x00, 0x00, 0x00
+            ]),
+            None
+        );
         // wrong second SOI byte
-        assert_eq!(jpeg_dimensions(&[0xFF, 0x00, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x28, 0x00, 0x1E, 0x00, 0x00, 0x00]), None);
+        assert_eq!(
+            jpeg_dimensions(&[
+                0xFF, 0x00, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x28, 0x00, 0x1E, 0x00, 0x00, 0x00
+            ]),
+            None
+        );
     }
 
     #[test]
@@ -891,7 +946,7 @@ mod tests {
             0xFF, 0xD1, // RST1 (standalone)
             0xFF, 0xC0, // SOF0
             0x00, 0x11, // segment length = 17
-            0x08,       // precision
+            0x08, // precision
             0x00, 0x64, // height = 100
             0x00, 0x50, // width = 80
         ];
@@ -931,10 +986,10 @@ mod tests {
         //        359:15 `*=` (no advance → infinite loop → timeout → caught)
         let mut jpg = vec![
             0xFF, 0xD8, // SOI
-            0x00,       // garbage (not 0xFF): i=2 → `i += 1` → i=3
+            0x00, // garbage (not 0xFF): i=2 → `i += 1` → i=3
             0xFF, 0xC0, // SOF0 at i=3
             0x00, 0x11, // segment length = 17
-            0x08,       // precision
+            0x08, // precision
             0x00, 0x64, // height = 100
             0x00, 0x50, // width = 80
         ];
@@ -953,7 +1008,7 @@ mod tests {
             0xFF, 0xFF, // fill byte: bytes[2]=0xFF, marker=0xFF → `i += 1`
             0xFF, 0xC0, // SOF0
             0x00, 0x11, // segment length = 17
-            0x08,       // precision
+            0x08, // precision
             0x00, 0x64, // height = 100
             0x00, 0x50, // width = 80
         ];
@@ -984,8 +1039,9 @@ mod tests {
             0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0xF0, 0x00, 0xA0,
         ];
         // bytes[29]=0x03, bytes[30]=0xBB (large → `i*3` mutation computes wrong length).
-        jpg.extend_from_slice(&[0x03u8, 0xBBu8, 0x11u8, 0x00u8, 0x02u8,
-                                 0x11u8, 0x01u8, 0x03u8, 0x11u8, 0x01u8]);
+        jpg.extend_from_slice(&[
+            0x03u8, 0xBBu8, 0x11u8, 0x00u8, 0x02u8, 0x11u8, 0x01u8, 0x03u8, 0x11u8, 0x01u8,
+        ]);
         assert_eq!(jpeg_dimensions(&jpg), Some((160, 240)));
     }
 

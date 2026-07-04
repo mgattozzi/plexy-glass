@@ -2,13 +2,16 @@
 //! `Config` model. Replaces the former serde/TOML loader; the `Config` shape and
 //! every downstream consumer are unchanged.
 
+use std::time::Duration;
+
+use kdl::{KdlDocument, KdlNode, KdlValue};
+
 use crate::{
     BlocksConfig, Config, ConfigError, DragModifier, GlyphTier, HintsConfig, KeymapBinding,
     KeymapConfig, MouseConfig, NotificationsConfig, Padding, PaletteConfig, PaneNode, PaneTemplate,
-    Position, SessionTemplate, SplitDirection, StatusConfig, StyleConfig, WidgetSpec, WindowTemplate,
+    Position, SessionTemplate, SplitDirection, StatusConfig, StyleConfig, WidgetSpec,
+    WindowTemplate,
 };
-use kdl::{KdlDocument, KdlNode, KdlValue};
-use std::time::Duration;
 
 /// Parse a KDL v2 document into a `Config`. Syntax errors and decode errors both
 /// surface as `ConfigError::Kdl` with a message; this never panics.
@@ -84,12 +87,20 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
             "session" => {
                 let template = decode_session(node, src)?;
                 if config.sessions.iter().any(|s| s.name == template.name) {
-                    return Err(decode_err(src, node, &format!("duplicate session `{}`", template.name)));
+                    return Err(decode_err(
+                        src,
+                        node,
+                        &format!("duplicate session `{}`", template.name),
+                    ));
                 }
                 config.sessions.push(template);
             }
             other => {
-                return Err(decode_err(src, node, &format!("unknown top-level node `{other}`")));
+                return Err(decode_err(
+                    src,
+                    node,
+                    &format!("unknown top-level node `{other}`"),
+                ));
             }
         }
     }
@@ -164,7 +175,12 @@ fn pos_arg(node: &KdlNode, idx: usize) -> Option<&KdlValue> {
         .map(kdl::KdlEntry::value)
 }
 
-fn string_arg<'a>(node: &'a KdlNode, idx: usize, src: &str, what: &str) -> Result<&'a str, ConfigError> {
+fn string_arg<'a>(
+    node: &'a KdlNode,
+    idx: usize,
+    src: &str,
+    what: &str,
+) -> Result<&'a str, ConfigError> {
     pos_arg(node, idx)
         .and_then(|v| v.as_string())
         .ok_or_else(|| decode_err(src, node, &format!("expected string {what}")))
@@ -173,7 +189,13 @@ fn string_arg<'a>(node: &'a KdlNode, idx: usize, src: &str, what: &str) -> Resul
 fn bool_arg(node: &KdlNode, idx: usize, src: &str, what: &str) -> Result<bool, ConfigError> {
     pos_arg(node, idx)
         .and_then(kdl::KdlValue::as_bool)
-        .ok_or_else(|| decode_err(src, node, &format!("expected boolean {what} (use #true / #false)")))
+        .ok_or_else(|| {
+            decode_err(
+                src,
+                node,
+                &format!("expected boolean {what} (use #true / #false)"),
+            )
+        })
 }
 
 /// Error if the node carries any property (named entry). Used by nodes that take
@@ -184,7 +206,11 @@ fn ensure_no_props(node: &KdlNode, src: &str) -> Result<(), ConfigError> {
             return Err(decode_err(
                 src,
                 node,
-                &format!("`{}` takes no properties (found `{}`)", node.name().value(), name.value()),
+                &format!(
+                    "`{}` takes no properties (found `{}`)",
+                    node.name().value(),
+                    name.value()
+                ),
             ));
         }
     }
@@ -220,14 +246,20 @@ fn decode_keymap(node: &KdlNode, src: &str) -> Result<KeymapConfig, ConfigError>
         for child in doc.nodes() {
             match child.name().value() {
                 "prefix" => km.prefix = string_arg(child, 0, src, "prefix")?.to_string(),
-                "inherit-defaults" => km.inherit_defaults = bool_arg(child, 0, src, "inherit-defaults")?,
+                "inherit-defaults" => {
+                    km.inherit_defaults = bool_arg(child, 0, src, "inherit-defaults")?;
+                }
                 "bind" => {
                     let keys = string_arg(child, 0, src, "bind keys")?.to_string();
                     let command = string_arg(child, 1, src, "bind command")?.to_string();
                     km.bindings.push(KeymapBinding { keys, command });
                 }
                 other => {
-                    return Err(decode_err(src, child, &format!("unknown keymap node `{other}`")));
+                    return Err(decode_err(
+                        src,
+                        child,
+                        &format!("unknown keymap node `{other}`"),
+                    ));
                 }
             }
         }
@@ -296,7 +328,9 @@ fn decode_blocks(node: &KdlNode, src: &str) -> Result<BlocksConfig, ConfigError>
             match child.name().value() {
                 "enabled" => blocks.enabled = bool_arg(child, 0, src, "enabled")?,
                 "ok-color" => blocks.ok_color = string_arg(child, 0, src, "ok-color")?.to_string(),
-                "fail-color" => blocks.fail_color = string_arg(child, 0, src, "fail-color")?.to_string(),
+                "fail-color" => {
+                    blocks.fail_color = string_arg(child, 0, src, "fail-color")?.to_string();
+                }
                 "select-color" => {
                     blocks.select_color = string_arg(child, 0, src, "select-color")?.to_string();
                 }
@@ -306,15 +340,22 @@ fn decode_blocks(node: &KdlNode, src: &str) -> Result<BlocksConfig, ConfigError>
                 "duration" => blocks.duration = bool_arg(child, 0, src, "duration")?,
                 "duration-threshold" => {
                     let s = string_arg(child, 0, src, "duration-threshold")?;
-                    blocks.duration_threshold_ms = parse_duration_threshold(s).ok_or_else(|| {
-                        decode_err(
-                            src,
-                            child,
-                            "invalid duration-threshold (use e.g. \"2s\", \"500ms\", or \"0\")",
-                        )
-                    })?;
+                    blocks.duration_threshold_ms =
+                        parse_duration_threshold(s).ok_or_else(|| {
+                            decode_err(
+                                src,
+                                child,
+                                "invalid duration-threshold (use e.g. \"2s\", \"500ms\", or \"0\")",
+                            )
+                        })?;
                 }
-                other => return Err(decode_err(src, child, &format!("unknown blocks node `{other}`"))),
+                other => {
+                    return Err(decode_err(
+                        src,
+                        child,
+                        &format!("unknown blocks node `{other}`"),
+                    ));
+                }
             }
         }
     }
@@ -368,7 +409,11 @@ fn decode_mouse(node: &KdlNode, src: &str) -> Result<MouseConfig, ConfigError> {
                     };
                 }
                 other => {
-                    return Err(decode_err(src, child, &format!("unknown mouse node `{other}`")));
+                    return Err(decode_err(
+                        src,
+                        child,
+                        &format!("unknown mouse node `{other}`"),
+                    ));
                 }
             }
         }
@@ -384,7 +429,13 @@ fn decode_glyph_tier(node: &KdlNode, src: &str) -> Result<GlyphTier, ConfigError
         .iter()
         .find(|e| e.name().is_none())
         .and_then(|e| e.value().as_string())
-        .ok_or_else(|| decode_err(src, node, "`glyphs` takes one string: unicode | nerd | ascii"))?;
+        .ok_or_else(|| {
+            decode_err(
+                src,
+                node,
+                "`glyphs` takes one string: unicode | nerd | ascii",
+            )
+        })?;
     match v {
         "unicode" => Ok(GlyphTier::Unicode),
         "nerd" => Ok(GlyphTier::Nerd),
@@ -422,13 +473,26 @@ fn decode_session(node: &KdlNode, src: &str) -> Result<SessionTemplate, ConfigEr
         }
     }
     if windows.is_empty() {
-        return Err(decode_err(src, node, &format!("session `{name}` has no windows")));
+        return Err(decode_err(
+            src,
+            node,
+            &format!("session `{name}` has no windows"),
+        ));
     }
     // At most one active window per session (deterministic config, not last-wins).
     if windows.iter().filter(|w| w.active).count() > 1 {
-        return Err(decode_err(src, node, &format!("session `{name}` has more than one active window")));
+        return Err(decode_err(
+            src,
+            node,
+            &format!("session `{name}` has more than one active window"),
+        ));
     }
-    Ok(SessionTemplate { name, cwd, env, windows })
+    Ok(SessionTemplate {
+        name,
+        cwd,
+        env,
+        windows,
+    })
 }
 
 fn decode_window(node: &KdlNode, src: &str) -> Result<WindowTemplate, ConfigError> {
@@ -440,33 +504,66 @@ fn decode_window(node: &KdlNode, src: &str) -> Result<WindowTemplate, ConfigErro
     // The window's layout is its single non-`env` child node.
     let layout_nodes: Vec<&KdlNode> = node
         .children()
-        .map(|d| d.nodes().iter().filter(|n| n.name().value() != "env").collect())
+        .map(|d| {
+            d.nodes()
+                .iter()
+                .filter(|n| n.name().value() != "env")
+                .collect()
+        })
         .unwrap_or_default();
     let layout = match layout_nodes.as_slice() {
         [single] => decode_layout_node(single, false, src)?,
         [] => {
-            return Err(decode_err(src, node, &format!("window `{name}` has no layout (expected one `pane` or `split`)")));
+            return Err(decode_err(
+                src,
+                node,
+                &format!("window `{name}` has no layout (expected one `pane` or `split`)"),
+            ));
         }
         _ => {
-            return Err(decode_err(src, node, &format!("window `{name}` must contain exactly one layout node; wrap multiple panes in a `split`")));
+            return Err(decode_err(
+                src,
+                node,
+                &format!(
+                    "window `{name}` must contain exactly one layout node; wrap multiple panes in a `split`"
+                ),
+            ));
         }
     };
     // At most one active pane per window (deterministic config, not last-wins).
     if count_active_leaves(&layout) > 1 {
-        return Err(decode_err(src, node, &format!("window `{name}` has more than one active pane")));
+        return Err(decode_err(
+            src,
+            node,
+            &format!("window `{name}` has more than one active pane"),
+        ));
     }
-    Ok(WindowTemplate { name, cwd, active, env, layout })
+    Ok(WindowTemplate {
+        name,
+        cwd,
+        active,
+        env,
+        layout,
+    })
 }
 
 /// Decode one layout node (`pane` or `split`). `allow_ratio` is true only when
 /// the node is a DIRECT child of a `split`: `ratio=` is read by the parent
 /// (`decode_split`) and so is permitted in the prop allowlist here; everywhere
 /// else a `ratio=` is rejected by the existing `ensure_only_props`.
-fn decode_layout_node(node: &KdlNode, allow_ratio: bool, src: &str) -> Result<PaneNode, ConfigError> {
+fn decode_layout_node(
+    node: &KdlNode,
+    allow_ratio: bool,
+    src: &str,
+) -> Result<PaneNode, ConfigError> {
     match node.name().value() {
         "pane" => Ok(PaneNode::Leaf(decode_pane(node, allow_ratio, src)?)),
         "split" => decode_split(node, allow_ratio, src),
-        other => Err(decode_err(src, node, &format!("expected `pane` or `split`, got `{other}`"))),
+        other => Err(decode_err(
+            src,
+            node,
+            &format!("expected `pane` or `split`, got `{other}`"),
+        )),
     }
 }
 
@@ -492,7 +589,11 @@ fn decode_split(node: &KdlNode, allow_ratio: bool, src: &str) -> Result<PaneNode
         "vertical" => SplitDirection::Vertical,
         "horizontal" => SplitDirection::Horizontal,
         other => {
-            return Err(decode_err(src, node, &format!("split direction must be `vertical` or `horizontal`, got `{other}`")));
+            return Err(decode_err(
+                src,
+                node,
+                &format!("split direction must be `vertical` or `horizontal`, got `{other}`"),
+            ));
         }
     };
     // A split itself may carry `ratio=` only when it is a direct child of an
@@ -509,9 +610,17 @@ fn decode_split(node: &KdlNode, allow_ratio: bool, src: &str) -> Result<PaneNode
         }
     }
     if children.len() < 2 {
-        return Err(decode_err(src, node, "`split` needs at least two child layout nodes"));
+        return Err(decode_err(
+            src,
+            node,
+            "`split` needs at least two child layout nodes",
+        ));
     }
-    Ok(PaneNode::Split { dir, children, weights })
+    Ok(PaneNode::Split {
+        dir,
+        children,
+        weights,
+    })
 }
 
 /// Read a split direct-child's `ratio=` weight: a `u32` >= 1, default 1.
@@ -524,10 +633,19 @@ fn split_child_ratio(node: &KdlNode, src: &str) -> Result<u32, ConfigError> {
             let i = v
                 .as_integer()
                 .ok_or_else(|| decode_err(src, node, "`ratio` must be a positive integer"))?;
-            let w = u32::try_from(i)
-                .map_err(|_| decode_err(src, node, "`ratio` out of range (expected a positive integer)"))?;
+            let w = u32::try_from(i).map_err(|_| {
+                decode_err(
+                    src,
+                    node,
+                    "`ratio` out of range (expected a positive integer)",
+                )
+            })?;
             if w < 1 {
-                return Err(decode_err(src, node, "`ratio` must be >= 1 (zero weights are not allowed)"));
+                return Err(decode_err(
+                    src,
+                    node,
+                    "`ratio` must be >= 1 (zero weights are not allowed)",
+                ));
             }
             Ok(w)
         }
@@ -549,9 +667,12 @@ fn decode_env_child(node: &KdlNode, src: &str) -> Result<Vec<(String, String)>, 
     // Reject more than one `env` block (session/window/pane all route here).
     // `find_child` only takes the first, so a second block would silently drop its
     // vars, and we'd rather fail loud, matching the decoder's strictness elsewhere.
-    let env_count = node
-        .children()
-        .map_or(0, |d| d.nodes().iter().filter(|n| n.name().value() == "env").count());
+    let env_count = node.children().map_or(0, |d| {
+        d.nodes()
+            .iter()
+            .filter(|n| n.name().value() == "env")
+            .count()
+    });
     if env_count > 1 {
         return Err(decode_err(src, node, "at most one `env` block is allowed"));
     }
@@ -616,8 +737,13 @@ fn bool_prop(node: &KdlNode, key: &str, src: &str) -> Result<Option<bool>, Confi
 }
 
 fn require_prop_str<'a>(node: &'a KdlNode, key: &str, src: &str) -> Result<&'a str, ConfigError> {
-    prop_str(node, key)
-        .ok_or_else(|| decode_err(src, node, &format!("`{}` requires string property `{key}`", node.name().value())))
+    prop_str(node, key).ok_or_else(|| {
+        decode_err(
+            src,
+            node,
+            &format!("`{}` requires string property `{key}`", node.name().value()),
+        )
+    })
 }
 
 fn prop_u8(node: &KdlNode, key: &str, src: &str) -> Result<Option<u8>, ConfigError> {
@@ -637,9 +763,13 @@ fn prop_u8(node: &KdlNode, key: &str, src: &str) -> Result<Option<u8>, ConfigErr
 fn prop_dur(node: &KdlNode, key: &str, src: &str) -> Result<Option<Duration>, ConfigError> {
     match prop_str(node, key) {
         None => Ok(None),
-        Some(s) => humantime::parse_duration(s)
-            .map(Some)
-            .map_err(|e| decode_err(src, node, &format!("invalid duration `{s}` for `{key}`: {e}"))),
+        Some(s) => humantime::parse_duration(s).map(Some).map_err(|e| {
+            decode_err(
+                src,
+                node,
+                &format!("invalid duration `{s}` for `{key}`: {e}"),
+            )
+        }),
     }
 }
 
@@ -650,7 +780,11 @@ fn prop_char(node: &KdlNode, key: &str, src: &str) -> Result<Option<char>, Confi
             let mut it = s.chars();
             match (it.next(), it.next()) {
                 (Some(c), None) => Ok(Some(c)),
-                _ => Err(decode_err(src, node, &format!("`{key}` must be exactly one character, got `{s}`"))),
+                _ => Err(decode_err(
+                    src,
+                    node,
+                    &format!("`{key}` must be exactly one character, got `{s}`"),
+                )),
             }
         }
     }
@@ -665,7 +799,11 @@ fn ensure_only_props(node: &KdlNode, allowed: &[&str], src: &str) -> Result<(), 
             return Err(decode_err(
                 src,
                 node,
-                &format!("unknown property `{}` on `{}`", name.value(), node.name().value()),
+                &format!(
+                    "unknown property `{}` on `{}`",
+                    name.value(),
+                    node.name().value()
+                ),
             ));
         }
     }
@@ -680,7 +818,11 @@ fn ensure_only_children(node: &KdlNode, allowed: &[&str], src: &str) -> Result<(
                 return Err(decode_err(
                     src,
                     child,
-                    &format!("unknown child node `{}` on `{}`", child.name().value(), node.name().value()),
+                    &format!(
+                        "unknown child node `{}` on `{}`",
+                        child.name().value(),
+                        node.name().value()
+                    ),
                 ));
             }
         }
@@ -690,7 +832,8 @@ fn ensure_only_children(node: &KdlNode, allowed: &[&str], src: &str) -> Result<(
 
 /// First child node with the given name, if any.
 fn find_child<'a>(node: &'a KdlNode, name: &str) -> Option<&'a KdlNode> {
-    node.children().and_then(|doc| doc.nodes().iter().find(|n| n.name().value() == name))
+    node.children()
+        .and_then(|doc| doc.nodes().iter().find(|n| n.name().value() == name))
 }
 
 // --- style ---
@@ -701,7 +844,10 @@ fn decode_style(node: &KdlNode, src: &str) -> Result<StyleConfig, ConfigError> {
         return Err(decode_err(
             src,
             node,
-            &format!("`{}` takes named style fields, not positional args", node.name().value()),
+            &format!(
+                "`{}` takes named style fields, not positional args",
+                node.name().value()
+            ),
         ));
     }
     // Property form.
@@ -714,8 +860,9 @@ fn decode_style(node: &KdlNode, src: &str) -> Result<StyleConfig, ConfigError> {
     if let Some(doc) = node.children() {
         for child in doc.nodes() {
             let key = child.name().value();
-            let val = pos_arg(child, 0)
-                .ok_or_else(|| decode_err(src, child, &format!("style field `{key}` needs a value")))?;
+            let val = pos_arg(child, 0).ok_or_else(|| {
+                decode_err(src, child, &format!("style field `{key}` needs a value"))
+            })?;
             set_style_field(&mut style, key, val, child, src)?;
         }
     }
@@ -745,7 +892,13 @@ fn set_style_field(
         "italic" => style.italic = as_flag(val)?,
         "underline" => style.underline = as_flag(val)?,
         "reverse" => style.reverse = as_flag(val)?,
-        other => return Err(decode_err(src, node, &format!("unknown style field `{other}`"))),
+        other => {
+            return Err(decode_err(
+                src,
+                node,
+                &format!("unknown style field `{other}`"),
+            ));
+        }
     }
     Ok(())
 }
@@ -755,7 +908,11 @@ fn set_style_field(
 fn require_style(node: &KdlNode, child_name: &str, src: &str) -> Result<StyleConfig, ConfigError> {
     match find_child(node, child_name) {
         Some(n) => decode_style(n, src),
-        None => Err(decode_err(src, node, &format!("`{}` requires a `{child_name}` node", node.name().value()))),
+        None => Err(decode_err(
+            src,
+            node,
+            &format!("`{}` requires a `{child_name}` node", node.name().value()),
+        )),
     }
 }
 
@@ -777,8 +934,13 @@ fn decode_padding(node: &KdlNode, src: &str) -> Result<Padding, ConfigError> {
 }
 
 fn padding_arg(node: &KdlNode, idx: usize, src: &str) -> Result<u8, ConfigError> {
-    let v = pos_arg(node, idx)
-        .ok_or_else(|| decode_err(src, node, "`padding` needs two integer args: <left> <right>"))?;
+    let v = pos_arg(node, idx).ok_or_else(|| {
+        decode_err(
+            src,
+            node,
+            "`padding` needs two integer args: <left> <right>",
+        )
+    })?;
     let i = v
         .as_integer()
         .ok_or_else(|| decode_err(src, node, "`padding` args must be integers"))?;
@@ -807,13 +969,20 @@ fn decode_status(node: &KdlNode, src: &str) -> Result<StatusConfig, ConfigError>
                 "position" => status.position = decode_position(child, src)?,
                 "refresh" => {
                     let s = string_arg(child, 0, src, "refresh duration")?;
-                    status.refresh = humantime::parse_duration(s)
-                        .map_err(|e| decode_err(src, child, &format!("invalid refresh duration `{s}`: {e}")))?;
+                    status.refresh = humantime::parse_duration(s).map_err(|e| {
+                        decode_err(src, child, &format!("invalid refresh duration `{s}`: {e}"))
+                    })?;
                 }
                 "left" => status.left = decode_zone(child, src)?,
                 "middle" => status.middle = decode_zone(child, src)?,
                 "right" => status.right = decode_zone(child, src)?,
-                other => return Err(decode_err(src, child, &format!("unknown status node `{other}`"))),
+                other => {
+                    return Err(decode_err(
+                        src,
+                        child,
+                        &format!("unknown status node `{other}`"),
+                    ));
+                }
             }
         }
     }
@@ -824,7 +993,11 @@ fn decode_position(node: &KdlNode, src: &str) -> Result<Position, ConfigError> {
     match string_arg(node, 0, src, "position")? {
         "bottom" => Ok(Position::Bottom),
         "top" => Ok(Position::Top),
-        other => Err(decode_err(src, node, &format!("position must be `top` or `bottom`, got `{other}`"))),
+        other => Err(decode_err(
+            src,
+            node,
+            &format!("position must be `top` or `bottom`, got `{other}`"),
+        )),
     }
 }
 
@@ -974,7 +1147,11 @@ fn decode_shell_args(node: &KdlNode, src: &str) -> Result<Vec<String>, ConfigErr
             let mut out = Vec::new();
             for e in args_node.entries() {
                 if e.name().is_some() {
-                    return Err(decode_err(src, args_node, "`args` takes positional string args only"));
+                    return Err(decode_err(
+                        src,
+                        args_node,
+                        "`args` takes positional string args only",
+                    ));
                 }
                 let s = e
                     .value()
@@ -997,9 +1174,21 @@ mod tests {
         // A present `palette` node overrides the entries it lists and keeps the
         // rest of the 11 built-in colors (config = overrides on defaults).
         let cfg = parse_config(r##"palette { accent "#ff0000" }"##).unwrap();
-        assert_eq!(cfg.palette.entries.get("accent").map(String::as_str), Some("#ff0000"), "override applied");
-        assert_eq!(cfg.palette.entries.get("bg").map(String::as_str), Some("#1D1C19"), "default bg retained");
-        assert_eq!(cfg.palette.entries.len(), 11, "merged with the built-in palette");
+        assert_eq!(
+            cfg.palette.entries.get("accent").map(String::as_str),
+            Some("#ff0000"),
+            "override applied"
+        );
+        assert_eq!(
+            cfg.palette.entries.get("bg").map(String::as_str),
+            Some("#1D1C19"),
+            "default bg retained"
+        );
+        assert_eq!(
+            cfg.palette.entries.len(),
+            11,
+            "merged with the built-in palette"
+        );
     }
 
     #[test]
@@ -1021,7 +1210,11 @@ mod tests {
         let cfg = parse_config(r#"status { position "top" }"#).unwrap();
         let d = built_in_default();
         assert_eq!(cfg.status.position, Position::Top);
-        assert_eq!(cfg.status.left.len(), d.status.left.len(), "omitted zones keep defaults");
+        assert_eq!(
+            cfg.status.left.len(),
+            d.status.left.len(),
+            "omitted zones keep defaults"
+        );
         assert_eq!(cfg.status.middle.len(), d.status.middle.len());
         assert_eq!(cfg.status.right.len(), d.status.right.len());
     }
@@ -1037,7 +1230,10 @@ mod tests {
         assert_eq!(cfg.keymap.bindings.len(), 2);
         assert_eq!(
             cfg.keymap.bindings[0],
-            KeymapBinding { keys: "Ctrl+a c".into(), command: "new_window".into() }
+            KeymapBinding {
+                keys: "Ctrl+a c".into(),
+                command: "new_window".into()
+            }
         );
     }
 
@@ -1201,7 +1397,13 @@ keymap {
         )
         .unwrap();
         match &cfg.status.left[0] {
-            WidgetSpec::Shell { command, args, interval, timeout, .. } => {
+            WidgetSpec::Shell {
+                command,
+                args,
+                interval,
+                timeout,
+                ..
+            } => {
                 assert_eq!(command, "echo");
                 assert_eq!(args, &vec!["hi".to_string(), "there".to_string()]);
                 assert_eq!(*interval, Some(Duration::from_secs(30)));
@@ -1214,12 +1416,15 @@ keymap {
     #[test]
     fn window_list_requires_both_styles() {
         // Missing inactive-style is a decode error (window-list requires both styles).
-        assert!(parse_config(r#"status { middle { window-list { active-style fg="fg" } } }"#).is_err());
+        assert!(
+            parse_config(r#"status { middle { window-list { active-style fg="fg" } } }"#).is_err()
+        );
     }
 
     #[test]
     fn attached_clients_min_count_defaults_to_two() {
-        let cfg = parse_config(r#"status { right { attached-clients { style fg="fg" } } }"#).unwrap();
+        let cfg =
+            parse_config(r#"status { right { attached-clients { style fg="fg" } } }"#).unwrap();
         match &cfg.status.right[0] {
             WidgetSpec::AttachedClients { min_count, .. } => assert_eq!(*min_count, 2),
             other => panic!("expected AttachedClients, got {other:?}"),
@@ -1228,8 +1433,13 @@ keymap {
 
     #[test]
     fn style_child_node_form_matches_property_form() {
-        let props = parse_config(r#"status { left { session { style fg="bg" bg="accent" bold=#true } } }"#).unwrap();
-        let children = parse_config(r#"status { left { session { style { fg "bg"; bg "accent"; bold #true } } } }"#).unwrap();
+        let props =
+            parse_config(r#"status { left { session { style fg="bg" bg="accent" bold=#true } } }"#)
+                .unwrap();
+        let children = parse_config(
+            r#"status { left { session { style { fg "bg"; bg "accent"; bold #true } } } }"#,
+        )
+        .unwrap();
         assert_eq!(props.status.left, children.status.left);
     }
 
@@ -1320,7 +1530,8 @@ keymap {
 
     #[test]
     fn decodes_single_pane_session() {
-        let cfg = parse_config(r#"session "dev" { window "main" { pane command="htop" } }"#).unwrap();
+        let cfg =
+            parse_config(r#"session "dev" { window "main" { pane command="htop" } }"#).unwrap();
         assert_eq!(cfg.sessions.len(), 1);
         let s = &cfg.sessions[0];
         assert_eq!(s.name, "dev");
@@ -1355,7 +1566,11 @@ keymap {
         )
         .unwrap();
         match &cfg.sessions[0].windows[0].layout {
-            PaneNode::Split { dir, children, weights } => {
+            PaneNode::Split {
+                dir,
+                children,
+                weights,
+            } => {
                 assert_eq!(*dir, SplitDirection::Vertical);
                 assert_eq!(children.len(), 3);
                 // default weights (no `ratio=`) are all 1, aligned to children.
@@ -1392,7 +1607,9 @@ keymap {
         )
         .unwrap();
         match &cfg.sessions[0].windows[0].layout {
-            PaneNode::Split { weights, children, .. } => {
+            PaneNode::Split {
+                weights, children, ..
+            } => {
                 assert_eq!(weights, &vec![2, 1, 3]);
                 assert_eq!(weights.len(), children.len());
             }
@@ -1409,8 +1626,14 @@ keymap {
         )
         .unwrap();
         match &cfg.sessions[0].windows[0].layout {
-            PaneNode::Split { weights, children, .. } => {
-                assert_eq!(weights, &vec![2, 1], "outer weights are 2:1 (nested split contributes its own ratio=1)");
+            PaneNode::Split {
+                weights, children, ..
+            } => {
+                assert_eq!(
+                    weights,
+                    &vec![2, 1],
+                    "outer weights are 2:1 (nested split contributes its own ratio=1)"
+                );
                 match &children[1] {
                     PaneNode::Split { weights, .. } => assert_eq!(weights, &vec![1, 1]),
                     other => panic!("expected nested Split, got {other:?}"),
@@ -1422,7 +1645,10 @@ keymap {
 
     #[test]
     fn ratio_zero_is_a_decode_error() {
-        assert!(parse_config(r#"session "s" { window "w" { split vertical { pane ratio=0; pane } } }"#).is_err());
+        assert!(
+            parse_config(r#"session "s" { window "w" { split vertical { pane ratio=0; pane } } }"#)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1431,7 +1657,10 @@ keymap {
         // by the standalone `decode_pane` allowlist (which omits `ratio`).
         assert!(parse_config(r#"session "s" { window "w" { pane ratio=2 } }"#).is_err());
         // A bare split (the window's top layout) with `ratio=` is likewise rejected.
-        assert!(parse_config(r#"session "s" { window "w" { split vertical ratio=2 { pane; pane } } }"#).is_err());
+        assert!(
+            parse_config(r#"session "s" { window "w" { split vertical ratio=2 { pane; pane } } }"#)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1488,7 +1717,10 @@ keymap {
         .unwrap();
         let s = &cfg.sessions[0];
         assert_eq!(s.env, vec![("RUST_LOG".to_string(), "debug".to_string())]);
-        assert_eq!(s.windows[0].env, vec![("TIER".to_string(), "win".to_string())]);
+        assert_eq!(
+            s.windows[0].env,
+            vec![("TIER".to_string(), "win".to_string())]
+        );
         match &s.windows[0].layout {
             PaneNode::Split { children, .. } => match &children[0] {
                 PaneNode::Leaf(p) => {
@@ -1502,10 +1734,9 @@ keymap {
 
     #[test]
     fn env_keeps_declared_order_and_multiple_keys() {
-        let cfg = parse_config(
-            r#"session "s" { window "w" { pane { env { A "1"; B "2"; C "3" } } } }"#,
-        )
-        .unwrap();
+        let cfg =
+            parse_config(r#"session "s" { window "w" { pane { env { A "1"; B "2"; C "3" } } } }"#)
+                .unwrap();
         match &cfg.sessions[0].windows[0].layout {
             PaneNode::Leaf(p) => assert_eq!(
                 p.env,
@@ -1521,7 +1752,9 @@ keymap {
 
     #[test]
     fn env_non_string_value_is_a_decode_error() {
-        assert!(parse_config(r#"session "s" { window "w" { pane { env { PORT 8080 } } } }"#).is_err());
+        assert!(
+            parse_config(r#"session "s" { window "w" { pane { env { PORT 8080 } } } }"#).is_err()
+        );
     }
 
     #[test]
@@ -1575,23 +1808,17 @@ keymap {
         // A second env block on session/window/pane silently dropped its vars;
         // it must now be rejected.
         assert!(
-            parse_config(
-                r#"session "s" { env { A "1" } env { B "2" } window "w" { pane } }"#
-            )
-            .is_err(),
+            parse_config(r#"session "s" { env { A "1" } env { B "2" } window "w" { pane } }"#)
+                .is_err(),
             "duplicate session env must error"
         );
         assert!(
-            parse_config(
-                r#"session "s" { window "w" { pane { env { A "1" } env { B "2" } } } }"#
-            )
-            .is_err(),
+            parse_config(r#"session "s" { window "w" { pane { env { A "1" } env { B "2" } } } }"#)
+                .is_err(),
             "duplicate pane env must error"
         );
         // A single env block still parses.
-        assert!(
-            parse_config(r#"session "s" { window "w" { pane { env { A "1" } } } }"#).is_ok()
-        );
+        assert!(parse_config(r#"session "s" { window "w" { pane { env { A "1" } } } }"#).is_ok());
     }
 
     #[test]
@@ -1607,17 +1834,30 @@ keymap {
         // split with one child
         assert!(parse_config(r#"session "s" { window "w" { split vertical { pane } } }"#).is_err());
         // bad split direction
-        assert!(parse_config(r#"session "s" { window "w" { split sideways { pane; pane } } }"#).is_err());
+        assert!(
+            parse_config(r#"session "s" { window "w" { split sideways { pane; pane } } }"#)
+                .is_err()
+        );
         // unknown pane property
         assert!(parse_config(r#"session "s" { window "w" { pane bogus="x" } }"#).is_err());
         // duplicate session name
-        assert!(parse_config(r#"session "s" { window "w" { pane } } session "s" { window "w" { pane } }"#).is_err());
+        assert!(
+            parse_config(
+                r#"session "s" { window "w" { pane } } session "s" { window "w" { pane } }"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn no_sessions_by_default() {
         assert!(parse_config("").unwrap().sessions.is_empty());
-        assert!(parse_config(r##"palette { bg "#000000" }"##).unwrap().sessions.is_empty());
+        assert!(
+            parse_config(r##"palette { bg "#000000" }"##)
+                .unwrap()
+                .sessions
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1704,11 +1944,21 @@ session "dev" cwd="~/projects/app" {
 
     #[test]
     fn docs_worked_example_parses() {
-        let cfg = parse_config(DOCS_WORKED_EXAMPLE).expect("docs/configuration.md example must parse");
+        let cfg =
+            parse_config(DOCS_WORKED_EXAMPLE).expect("docs/configuration.md example must parse");
         // Palette: overrides merged onto the built-in entries.
-        assert_eq!(cfg.palette.entries.get("accent").map(String::as_str), Some("#7aa2f7"));
-        assert_eq!(cfg.palette.entries.get("alert").map(String::as_str), Some("#f7768e"));
-        assert_eq!(cfg.palette.entries.get("bg").map(String::as_str), Some("#1D1C19"));
+        assert_eq!(
+            cfg.palette.entries.get("accent").map(String::as_str),
+            Some("#7aa2f7")
+        );
+        assert_eq!(
+            cfg.palette.entries.get("alert").map(String::as_str),
+            Some("#f7768e")
+        );
+        assert_eq!(
+            cfg.palette.entries.get("bg").map(String::as_str),
+            Some("#1D1C19")
+        );
         // Status: position, refresh, and the documented zone shapes.
         assert_eq!(cfg.status.position, Position::Top);
         assert_eq!(cfg.status.refresh, Duration::from_secs(2));
@@ -1716,7 +1966,13 @@ session "dev" cwd="~/projects/app" {
         assert_eq!(cfg.status.middle.len(), 1);
         assert_eq!(cfg.status.right.len(), 8);
         match &cfg.status.right[4] {
-            WidgetSpec::Shell { command, args, interval, timeout, .. } => {
+            WidgetSpec::Shell {
+                command,
+                args,
+                interval,
+                timeout,
+                ..
+            } => {
                 assert_eq!(command, "uname");
                 assert_eq!(args, &vec!["-sr".to_string()]);
                 assert_eq!(*interval, Some(Duration::from_mins(1)));
@@ -1729,7 +1985,10 @@ session "dev" cwd="~/projects/app" {
         assert_eq!(cfg.keymap.bindings.len(), 3);
         assert_eq!(
             cfg.keymap.bindings[0],
-            KeymapBinding { keys: "prefix g".into(), command: "popup:lazygit".into() }
+            KeymapBinding {
+                keys: "prefix g".into(),
+                command: "popup:lazygit".into()
+            }
         );
         // Session template: three windows, nested split in "run".
         assert_eq!(cfg.sessions.len(), 1);
@@ -1739,7 +1998,11 @@ session "dev" cwd="~/projects/app" {
         assert_eq!(s.windows.len(), 3);
         assert_eq!(s.windows[2].cwd.as_deref(), Some("~/projects/app/db"));
         match &s.windows[1].layout {
-            PaneNode::Split { dir: SplitDirection::Vertical, children, .. } => {
+            PaneNode::Split {
+                dir: SplitDirection::Vertical,
+                children,
+                ..
+            } => {
                 assert_eq!(children.len(), 2);
                 assert!(matches!(
                     &children[1],
@@ -1791,7 +2054,11 @@ session "dev" cwd="~/projects/app" {
         assert!(!s.windows[1].active);
         // window "run": a 2:1 vertical split; the second pane carries env.
         match &s.windows[1].layout {
-            PaneNode::Split { dir: SplitDirection::Vertical, children, weights } => {
+            PaneNode::Split {
+                dir: SplitDirection::Vertical,
+                children,
+                weights,
+            } => {
                 assert_eq!(weights, &vec![2, 1]);
                 assert_eq!(children.len(), 2);
                 match &children[1] {
@@ -1873,10 +2140,9 @@ session "dev" cwd="~/projects/app" {
 
     #[test]
     fn blocks_round_trip_custom_values() {
-        let cfg = parse_config(
-            r##"blocks { enabled #true; ok-color "#87a987"; fail-color "#c4746e" }"##,
-        )
-        .unwrap();
+        let cfg =
+            parse_config(r##"blocks { enabled #true; ok-color "#87a987"; fail-color "#c4746e" }"##)
+                .unwrap();
         assert!(cfg.blocks.enabled);
         assert_eq!(cfg.blocks.ok_color, "#87a987");
         assert_eq!(cfg.blocks.fail_color, "#c4746e");
@@ -1940,8 +2206,11 @@ session "dev" cwd="~/projects/app" {
 
     #[test]
     fn decodes_glyph_tier_and_auto_rename() {
-        let cfg = parse_config(r#"glyphs "nerd"
-auto-rename #false"#).expect("decode");
+        let cfg = parse_config(
+            r#"glyphs "nerd"
+auto-rename #false"#,
+        )
+        .expect("decode");
         assert_eq!(cfg.glyph_tier, crate::GlyphTier::Nerd);
         assert!(!cfg.auto_rename);
     }
@@ -1952,13 +2221,22 @@ auto-rename #false"#).expect("decode");
         assert_eq!(cfg.glyph_tier, crate::GlyphTier::Unicode);
         assert!(cfg.auto_rename);
         let err = parse_config(r#"glyphs "wingdings""#).unwrap_err();
-        assert!(err.to_string().contains("glyphs"), "msg names the node: {err}");
+        assert!(
+            err.to_string().contains("glyphs"),
+            "msg names the node: {err}"
+        );
     }
 
     #[test]
     fn welcome_defaults_true_and_can_be_disabled() {
-        assert!(parse_config("").expect("empty decodes").welcome, "default is on");
-        assert!(!parse_config("welcome #false").expect("decode").welcome, "welcome #false disables");
+        assert!(
+            parse_config("").expect("empty decodes").welcome,
+            "default is on"
+        );
+        assert!(
+            !parse_config("welcome #false").expect("decode").welcome,
+            "welcome #false disables"
+        );
         assert!(parse_config("welcome #true").expect("decode").welcome);
     }
 
@@ -2026,6 +2304,9 @@ hints {
         else {
             panic!("expected a Kdl error");
         };
-        assert!(msg.contains("line "), "expected a line:col location; got: {msg:?}");
+        assert!(
+            msg.contains("line "),
+            "expected a line:col location; got: {msg:?}"
+        );
     }
 }

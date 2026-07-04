@@ -41,7 +41,9 @@ impl KittyStack {
     /// `\e[<<n>u` pops `n` entries; popping an empty stack resets flags to 0.
     fn pop(&mut self, n: u16) {
         for _ in 0..n.max(1) {
-            if let Some(prev) = self.stack.pop() { self.current = prev } else {
+            if let Some(prev) = self.stack.pop() {
+                self.current = prev;
+            } else {
                 self.current = 0;
                 break;
             }
@@ -109,11 +111,19 @@ impl KeyboardState {
     }
 
     const fn active(&self, alt_screen: bool) -> &KittyStack {
-        if alt_screen { &self.kitty_alt } else { &self.kitty_main }
+        if alt_screen {
+            &self.kitty_alt
+        } else {
+            &self.kitty_main
+        }
     }
 
     const fn active_mut(&mut self, alt_screen: bool) -> &mut KittyStack {
-        if alt_screen { &mut self.kitty_alt } else { &mut self.kitty_main }
+        if alt_screen {
+            &mut self.kitty_alt
+        } else {
+            &mut self.kitty_main
+        }
     }
 }
 
@@ -167,7 +177,11 @@ mod tests {
         let mut k = KeyboardState::default();
         k.kitty_set(false, 0b0111, 1); // set bits 0,1,2
         k.kitty_set(false, 0b0010, 3); // clear bit 1
-        assert_eq!(k.kitty_flags(false), 0b0101, "mode=3 should clear listed bits");
+        assert_eq!(
+            k.kitty_flags(false),
+            0b0101,
+            "mode=3 should clear listed bits"
+        );
     }
 
     #[test]
@@ -231,7 +245,11 @@ mod tests {
         for _ in 0..KITTY_STACK_CAP {
             k.kitty_pop(false, 1);
         }
-        assert_eq!(k.kitty_flags(false), 0xAA, "sentinel must survive: no eviction at exactly cap");
+        assert_eq!(
+            k.kitty_flags(false),
+            0xAA,
+            "sentinel must survive: no eviction at exactly cap"
+        );
     }
 
     #[test]

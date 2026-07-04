@@ -75,8 +75,9 @@ fn lookup(name_or_hex: &str, palette: &PaletteConfig) -> Option<Rgb> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashMap;
+
+    use super::*;
 
     fn palette() -> PaletteConfig {
         let mut e = HashMap::new();
@@ -92,7 +93,14 @@ mod tests {
             ..Default::default()
         };
         let r = resolve_style(&s, &palette());
-        assert_eq!(r.fg, Some(Rgb { r: 0x7e, g: 0x9c, b: 0xd8 }));
+        assert_eq!(
+            r.fg,
+            Some(Rgb {
+                r: 0x7e,
+                g: 0x9c,
+                b: 0xd8
+            })
+        );
     }
 
     #[test]
@@ -102,7 +110,14 @@ mod tests {
             ..Default::default()
         };
         let r = resolve_style(&s, &PaletteConfig::default());
-        assert_eq!(r.fg, Some(Rgb { r: 0xab, g: 0xcd, b: 0xef }));
+        assert_eq!(
+            r.fg,
+            Some(Rgb {
+                r: 0xab,
+                g: 0xcd,
+                b: 0xef
+            })
+        );
     }
 
     #[test]
@@ -128,13 +143,27 @@ mod tests {
     #[test]
     fn resolve_color_hex_literal() {
         let result = resolve_color("#ff0000", &PaletteConfig::default());
-        assert_eq!(result, Some(Rgb { r: 0xff, g: 0x00, b: 0x00 }));
+        assert_eq!(
+            result,
+            Some(Rgb {
+                r: 0xff,
+                g: 0x00,
+                b: 0x00
+            })
+        );
     }
 
     #[test]
     fn resolve_color_palette_name() {
         let result = resolve_color("accent", &palette());
-        assert_eq!(result, Some(Rgb { r: 0x7e, g: 0x9c, b: 0xd8 }));
+        assert_eq!(
+            result,
+            Some(Rgb {
+                r: 0x7e,
+                g: 0x9c,
+                b: 0xd8
+            })
+        );
     }
 
     #[test]

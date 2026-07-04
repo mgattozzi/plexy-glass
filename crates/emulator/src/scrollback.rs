@@ -1,7 +1,8 @@
 //! Bounded scrollback buffer of completed rows.
 
-use crate::grid::Row;
 use std::collections::VecDeque;
+
+use crate::grid::Row;
 
 pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 
@@ -80,7 +81,11 @@ mod tests {
         s.push(a);
         s.push(b);
         s.push(c);
-        let texts: Vec<&str> = s.rows().iter().map(|r| r.cells[0].grapheme.as_str()).collect();
+        let texts: Vec<&str> = s
+            .rows()
+            .iter()
+            .map(|r| r.cells[0].grapheme.as_str())
+            .collect();
         assert_eq!(texts, vec!["B", "C"]);
     }
 

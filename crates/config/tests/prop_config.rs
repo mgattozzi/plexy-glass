@@ -4,8 +4,7 @@
 //! KDL-injection round-trip for a clean field (the decoder faithfully reflects
 //! authored config).
 
-use hegel::generators as gs;
-use hegel::TestCase;
+use hegel::{TestCase, generators as gs};
 use plexy_glass_config::parse_config;
 
 /// The decoder is total: arbitrary text (incl. malformed KDL, control bytes,
@@ -26,7 +25,11 @@ fn parse_config_never_panics(tc: TestCase) {
 #[hegel::test(test_cases = 500)]
 fn parse_config_plausible_kdl_never_panics(tc: TestCase) {
     let node = tc.draw(gs::text());
-    let val = tc.draw(gs::integers::<i64>().min_value(i64::MIN).max_value(i64::MAX));
+    let val = tc.draw(
+        gs::integers::<i64>()
+            .min_value(i64::MIN)
+            .max_value(i64::MAX),
+    );
     let b = tc.draw(gs::booleans());
     let src = format!("{node} {val} #{b}\nwelcome #{b}\n");
     tc.note(&format!("src = {src:?}"));
@@ -41,5 +44,8 @@ fn welcome_bool_injection_round_trips(tc: TestCase) {
     let want = tc.draw(gs::booleans());
     let src = format!("welcome #{want}\n");
     let cfg = parse_config(&src).expect("a lone welcome node must parse");
-    assert_eq!(cfg.welcome, want, "decoded welcome must equal the authored value");
+    assert_eq!(
+        cfg.welcome, want,
+        "decoded welcome must equal the authored value"
+    );
 }

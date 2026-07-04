@@ -1,9 +1,11 @@
+use std::env;
+
+use tokio::io::{AsyncRead, AsyncWrite};
+
 use crate::{
     ClientHello, Codec, CodecError, GraphicsCaps, NegotiatedKbd, PROTOCOL_VERSION, ProtocolError,
     ServerHello,
 };
-use std::env;
-use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Errors that can occur during the version handshake.
 #[derive(Debug, thiserror::Error)]
@@ -32,7 +34,9 @@ where
     let bytes = postcard::to_allocvec(&hello).map_err(|e| CodecError::Encode(e.to_string()))?;
     Codec::write_frame(writer, &bytes).await?;
 
-    let frame = Codec::read_frame(reader).await?.ok_or(HandshakeError::PeerClosed)?;
+    let frame = Codec::read_frame(reader)
+        .await?
+        .ok_or(HandshakeError::PeerClosed)?;
     let server: ServerHello = postcard::from_bytes(&frame).map_err(CodecError::from)?;
     // Symmetric with server_handshake's policy: a NEWER server gracefully
     // downgrades to serve us (it forces kbd=Legacy in its hello), so accept any
@@ -90,12 +94,17 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let frame = Codec::read_frame(reader).await?.ok_or(HandshakeError::PeerClosed)?;
+    let frame = Codec::read_frame(reader)
+        .await?
+        .ok_or(HandshakeError::PeerClosed)?;
     let mut client: ClientHello = postcard::from_bytes(&frame).map_err(CodecError::from)?;
 
     if client.version > PROTOCOL_VERSION {
         // Send our hello first so the peer can decode a structured error.
-        let our_hello = ServerHello { version: PROTOCOL_VERSION, daemon_pid };
+        let our_hello = ServerHello {
+            version: PROTOCOL_VERSION,
+            daemon_pid,
+        };
         let bytes =
             postcard::to_allocvec(&our_hello).map_err(|e| CodecError::Encode(e.to_string()))?;
         Codec::write_frame(writer, &bytes).await?;
@@ -121,7 +130,10 @@ where
         client.kbd = NegotiatedKbd::Legacy;
     }
 
-    let our_hello = ServerHello { version: PROTOCOL_VERSION, daemon_pid };
+    let our_hello = ServerHello {
+        version: PROTOCOL_VERSION,
+        daemon_pid,
+    };
     let bytes = postcard::to_allocvec(&our_hello).map_err(|e| CodecError::Encode(e.to_string()))?;
     Codec::write_frame(writer, &bytes).await?;
 
@@ -130,9 +142,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tokio::io;
     use tokio::io::duplex;
+
+    use super::*;
 
     #[tokio::test]
     async fn handshake_succeeds_when_versions_match() {
@@ -140,12 +153,8 @@ mod tests {
         let (mut cr, mut cw) = io::split(client_side);
         let (mut sr, mut sw) = io::split(server_side);
 
-        let server = tokio::spawn(async move {
-            server_handshake(&mut sr, &mut sw, 42).await
-        });
-        let client = tokio::spawn(async move {
-            client_handshake(&mut cr, &mut cw).await
-        });
+        let server = tokio::spawn(async move { server_handshake(&mut sr, &mut sw, 42).await });
+        let client = tokio::spawn(async move { client_handshake(&mut cr, &mut cw).await });
 
         let server = server.await.unwrap().unwrap();
         let client = client.await.unwrap().unwrap();
@@ -188,15 +197,22 @@ mod tests {
         // downgrade path). Drives only the client side.
         let (mut a, client_side) = duplex(1024);
         let (mut cr, mut cw) = io::split(client_side);
-        let newer = ServerHello { version: PROTOCOL_VERSION + 1, daemon_pid: 7 };
-        Codec::write_frame(&mut a, &postcard::to_allocvec(&newer).unwrap()).await.unwrap();
+        let newer = ServerHello {
+            version: PROTOCOL_VERSION + 1,
+            daemon_pid: 7,
+        };
+        Codec::write_frame(&mut a, &postcard::to_allocvec(&newer).unwrap())
+            .await
+            .unwrap();
         let hello = ClientHello {
             version: PROTOCOL_VERSION,
             term: "x".into(),
             kbd: NegotiatedKbd::Legacy,
             graphics: GraphicsCaps::default(),
         };
-        let got = client_handshake_with(&mut cr, &mut cw, hello).await.unwrap();
+        let got = client_handshake_with(&mut cr, &mut cw, hello)
+            .await
+            .unwrap();
         assert_eq!(got.version, PROTOCOL_VERSION + 1);
     }
 
@@ -205,15 +221,22 @@ mod tests {
         // An OLDER server cannot serve our newer protocol → VersionMismatch.
         let (mut a, client_side) = duplex(1024);
         let (mut cr, mut cw) = io::split(client_side);
-        let older = ServerHello { version: PROTOCOL_VERSION - 1, daemon_pid: 7 };
-        Codec::write_frame(&mut a, &postcard::to_allocvec(&older).unwrap()).await.unwrap();
+        let older = ServerHello {
+            version: PROTOCOL_VERSION - 1,
+            daemon_pid: 7,
+        };
+        Codec::write_frame(&mut a, &postcard::to_allocvec(&older).unwrap())
+            .await
+            .unwrap();
         let hello = ClientHello {
             version: PROTOCOL_VERSION,
             term: "x".into(),
             kbd: NegotiatedKbd::Legacy,
             graphics: GraphicsCaps::default(),
         };
-        let err = client_handshake_with(&mut cr, &mut cw, hello).await.unwrap_err();
+        let err = client_handshake_with(&mut cr, &mut cw, hello)
+            .await
+            .unwrap_err();
         match err {
             HandshakeError::VersionMismatch { ours, peer } => {
                 assert_eq!(ours, PROTOCOL_VERSION);
@@ -242,6 +265,10 @@ mod tests {
 
         let client = server_handshake(&mut sr, &mut sw, 1).await.unwrap();
         assert_eq!(client.version, PROTOCOL_VERSION - 1);
-        assert_eq!(client.kbd, NegotiatedKbd::Legacy, "old peer downgraded to legacy");
+        assert_eq!(
+            client.kbd,
+            NegotiatedKbd::Legacy,
+            "old peer downgraded to legacy"
+        );
     }
 }

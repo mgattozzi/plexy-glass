@@ -3,8 +3,9 @@
 //!
 //! See docs/superpowers/specs/2026-06-09-popup-panes-design.md.
 
-use crate::pane::Pane;
 use plexy_glass_protocol::PtySize;
+
+use crate::pane::Pane;
 
 pub struct Popup {
     /// The PTY-backed child.
@@ -103,6 +104,9 @@ mod tests {
         // A truncated escape at end of input passes through.
         assert_eq!(osc7_to_path("file:///tmp/x%2").as_deref(), Some("/tmp/x%2"));
         // No percent: unchanged.
-        assert_eq!(osc7_to_path("file:///tmp/plain").as_deref(), Some("/tmp/plain"));
+        assert_eq!(
+            osc7_to_path("file:///tmp/plain").as_deref(),
+            Some("/tmp/plain")
+        );
     }
 }

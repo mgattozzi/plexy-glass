@@ -1,11 +1,12 @@
-use crate::error::ClientError;
+use std::{io, str};
+
 use bytes::BytesMut;
 use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{ClientMsg, Codec, ColorScheme, ExitStatus, PtySize, ServerMsg};
-use std::io;
-use std::str;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
+
+use crate::error::ClientError;
 
 const STDIN_CHUNK: usize = 4096;
 
@@ -186,8 +187,7 @@ pub async fn send_client_msg<W>(writer: &mut W, msg: &ClientMsg) -> Result<(), C
 where
     W: AsyncWrite + Unpin,
 {
-    let bytes = postcard::to_allocvec(msg)
-        .map_err(|e| CodecError::Encode(e.to_string()))?;
+    let bytes = postcard::to_allocvec(msg).map_err(|e| CodecError::Encode(e.to_string()))?;
     Codec::write_frame(writer, &bytes).await?;
     Ok(())
 }
@@ -218,8 +218,8 @@ where
     let frame = Codec::read_frame(reader)
         .await?
         .ok_or_else(|| ClientError::Io(io::Error::other("daemon closed before Attached")))?;
-    let msg: ServerMsg = postcard::from_bytes(&frame)
-        .map_err(|e| CodecError::Decode(e.to_string()))?;
+    let msg: ServerMsg =
+        postcard::from_bytes(&frame).map_err(|e| CodecError::Decode(e.to_string()))?;
     match msg {
         ServerMsg::Attached { .. } => Ok(()),
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
@@ -231,13 +231,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::time::Duration;
+
     use bytes::Bytes;
     use plexy_glass_protocol::{ExitStatus, ServerMsg};
-    use std::time::Duration;
     use tokio::io::duplex;
-    use tokio::task;
-    use tokio::time;
+    use tokio::{task, time};
+
+    use super::*;
 
     #[tokio::test]
     async fn pump_writes_output_to_stdout_and_exits_on_exited() {
@@ -254,7 +255,9 @@ mod tests {
             let out = ServerMsg::Output(Bytes::from_static(b"abc"));
             let bytes = postcard::to_allocvec(&out).unwrap();
             Codec::write_frame(&mut server_w, &bytes).await.unwrap();
-            let done = ServerMsg::Exited { status: ExitStatus::Code(0) };
+            let done = ServerMsg::Exited {
+                status: ExitStatus::Code(0),
+            };
             let bytes = postcard::to_allocvec(&done).unwrap();
             Codec::write_frame(&mut server_w, &bytes).await.unwrap();
         });
@@ -265,11 +268,7 @@ mod tests {
         assert!(matches!(status, ExitStatus::Code(0)), "got: {status:?}");
 
         let mut out = Vec::new();
-        let _ = time::timeout(
-            Duration::from_millis(200),
-            stdout_r.read_to_end(&mut out),
-        )
-        .await;
+        let _ = time::timeout(Duration::from_millis(200), stdout_r.read_to_end(&mut out)).await;
         assert_eq!(&out, b"abc");
 
         server.await.unwrap();
@@ -318,7 +317,9 @@ mod tests {
             let out = ServerMsg::Output(Bytes::from(srv_payload));
             let bytes = postcard::to_allocvec(&out).unwrap();
             Codec::write_frame(&mut server_w, &bytes).await.unwrap();
-            let done = ServerMsg::Exited { status: ExitStatus::Code(0) };
+            let done = ServerMsg::Exited {
+                status: ExitStatus::Code(0),
+            };
             let bytes = postcard::to_allocvec(&done).unwrap();
             Codec::write_frame(&mut server_w, &bytes).await.unwrap();
         });
@@ -329,13 +330,10 @@ mod tests {
         assert!(matches!(status, ExitStatus::Code(0)), "got: {status:?}");
 
         let mut out = Vec::new();
-        time::timeout(
-            Duration::from_secs(5),
-            stdout_r.read_to_end(&mut out),
-        )
-        .await
-        .expect("stdout read timed out")
-        .expect("stdout read failed");
+        time::timeout(Duration::from_secs(5), stdout_r.read_to_end(&mut out))
+            .await
+            .expect("stdout read timed out")
+            .expect("stdout read failed");
         assert_eq!(
             out, payload,
             "daemon->client stream corrupted by mid-frame stdin"
@@ -353,10 +351,16 @@ mod tests {
         // Pins the current behavior (terminals emit these atomically).
         let mut first = b"abc\x1b[".to_vec();
         assert!(super::scan_outer_events(&mut first).is_empty());
-        assert_eq!(first, b"abc\x1b[", "incomplete trailing sequence passes through");
+        assert_eq!(
+            first, b"abc\x1b[",
+            "incomplete trailing sequence passes through"
+        );
         let mut second = b"Idef".to_vec();
         assert!(super::scan_outer_events(&mut second).is_empty());
-        assert_eq!(second, b"Idef", "the split head is not recognized as an event");
+        assert_eq!(
+            second, b"Idef",
+            "the split head is not recognized as an event"
+        );
     }
 
     #[test]

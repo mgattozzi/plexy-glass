@@ -1,14 +1,15 @@
-use super::*;
+use std::env;
+
 use plexy_glass_mux::{
     Command, HintAction, HintKind, HintState, HintTarget, KeyEvent, MouseButton, MouseEvent,
-    MouseKind, PickerEntry, TreeAction, TreeNode,
+    MouseKind, PickerEntry, TreeAction, TreeNode, blocks,
 };
-use crate::window_manager::OverlayKeyResult;
-use crate::{declared, test_env};
-use plexy_glass_mux::blocks;
-use std::env;
 use tokio::sync::broadcast;
 use tokio::time;
+
+use super::*;
+use crate::window_manager::OverlayKeyResult;
+use crate::{declared, test_env};
 
 fn spec() -> SpawnSpec {
     SpawnSpec {
@@ -52,7 +53,12 @@ async fn new_window_default_spec_is_shell_not_first_command() {
     let notify = Arc::new(Notify::new());
     let m = WindowManager::new(
         spec(), // program = `/bin/cat` (a non-shell first command)
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -68,7 +74,12 @@ async fn status_message_set_and_lazy_expire() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -81,7 +92,10 @@ async fn status_message_set_and_lazy_expire() {
     // Force expiry and confirm it clears in place on the next read.
     m.status_message.as_mut().unwrap().expires_at = Instant::now() - Duration::from_secs(1);
     assert_eq!(m.take_active_message(), None);
-    assert!(m.status_message.is_none(), "expired message cleared in place");
+    assert!(
+        m.status_message.is_none(),
+        "expired message cleared in place"
+    );
     // A newer message replaces the prior one.
     m.set_status_message("first".into(), Severity::Info);
     m.set_status_message("second".into(), Severity::Success);
@@ -249,9 +263,9 @@ async fn click_release_on_cursor_row_repositions_without_a_mark() {
             let step = (deadline - now).min(Duration::from_millis(150));
             match time::timeout(step, rx.recv()).await {
                 Ok(Ok(chunk)) => out.extend_from_slice(&chunk),
-                Ok(Err(_)) => break,          // channel closed or lagged
+                Ok(Err(_)) => break,                // channel closed or lagged
                 Err(_) if !out.is_empty() => break, // idle after data → done
-                Err(_) => {}                  // still idle, keep waiting to deadline
+                Err(_) => {}                        // still idle, keep waiting to deadline
             }
         }
         out
@@ -274,7 +288,12 @@ async fn click_release_on_cursor_row_repositions_without_a_mark() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(), // `/bin/cat` echoes input back as output
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -298,7 +317,11 @@ async fn click_release_on_cursor_row_repositions_without_a_mark() {
     let echoed = read_for(&mut rx, 2000).await;
     let lefts = echoed.iter().filter(|&&b| b == b'D').count();
     let rights = echoed.iter().filter(|&&b| b == b'C').count();
-    assert_eq!((lefts, rights), (3, 0), "expected 3 Left arrows, got {echoed:?}");
+    assert_eq!(
+        (lefts, rights),
+        (3, 0),
+        "expected 3 Left arrows, got {echoed:?}"
+    );
 
     // A DRAG (press, move to a different cell, release) must NOT reposition, it is
     // a selection. No arrows should be injected.
@@ -355,7 +378,12 @@ async fn double_click_on_a_two_char_word_still_copies() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -410,13 +438,31 @@ async fn double_click_on_a_two_char_word_still_copies() {
 async fn panes_inherit_real_host_cell_size_pixels() {
     let notify = Arc::new(Notify::new());
     // Host cell = 720/80 × 432/24 = 9×18 (distinct from the 10×20 fallback).
-    let host = PtySize { rows: 24, cols: 80, pixel_width: 720, pixel_height: 432 };
+    let host = PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 720,
+        pixel_height: 432,
+    };
     let mut m = WindowManager::new(spec(), host, notify, None, cfg()).unwrap();
     let pane = m.active_window().pane(PaneId(0)).cloned().unwrap();
-    assert_eq!(pane.with_screen(plexy_glass_emulator::Screen::cell_pixels), (9, 18), "construction must relay host cell size");
-    m.on_host_resize(PtySize { rows: 24, cols: 80, pixel_width: 800, pixel_height: 480 })
-        .unwrap();
-    assert_eq!(pane.with_screen(plexy_glass_emulator::Screen::cell_pixels), (10, 20), "host resize must update the cell size");
+    assert_eq!(
+        pane.with_screen(plexy_glass_emulator::Screen::cell_pixels),
+        (9, 18),
+        "construction must relay host cell size"
+    );
+    m.on_host_resize(PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 800,
+        pixel_height: 480,
+    })
+    .unwrap();
+    assert_eq!(
+        pane.with_screen(plexy_glass_emulator::Screen::cell_pixels),
+        (10, 20),
+        "host resize must update the cell size"
+    );
 }
 
 /// Copy-mode mouse must use pane-local coordinates (CopyMode::handle_mouse
@@ -430,7 +476,12 @@ async fn copy_mode_mouse_uses_pane_local_coords() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -440,8 +491,15 @@ async fn copy_mode_mouse_uses_pane_local_coords() {
     m.handle_command(Command::SplitV).unwrap();
     let active = m.active_window().active(); // right pane, offset from origin
     let pane = m.active_window().pane(active).cloned().unwrap();
-    let rect = m.active_window().layout().rect_of(active, m.viewport()).unwrap();
-    assert!(rect.col > 1, "right pane should be offset from the viewport origin");
+    let rect = m
+        .active_window()
+        .layout()
+        .rect_of(active, m.viewport())
+        .unwrap();
+    assert!(
+        rect.col > 1,
+        "right pane should be offset from the viewport origin"
+    );
     pane.enter_copy_mode(100, rect.rows, 0, 0);
 
     m.handle_mouse(MouseEvent {
@@ -455,7 +513,12 @@ async fn copy_mode_mouse_uses_pane_local_coords() {
     .unwrap();
 
     let col = pane.with_copy_mode(|cm| cm.cursor.1).unwrap();
-    assert_eq!(col, 5, "copy-mode cursor col must be pane-local (5), not viewport ({})", rect.col + 5);
+    assert_eq!(
+        col,
+        5,
+        "copy-mode cursor col must be pane-local (5), not viewport ({})",
+        rect.col + 5
+    );
 }
 
 #[tokio::test]
@@ -467,7 +530,12 @@ async fn forwarded_mouse_uses_pane_local_coords() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -482,8 +550,15 @@ async fn forwarded_mouse_uses_pane_local_coords() {
         s.modes.insert(Modes::MOUSE_BTN);
         s.modes.insert(Modes::MOUSE_SGR);
     });
-    let rect = m.active_window().layout().rect_of(active, m.viewport()).unwrap();
-    assert!(rect.col > 1, "right pane should be offset from the viewport origin");
+    let rect = m
+        .active_window()
+        .layout()
+        .rect_of(active, m.viewport())
+        .unwrap();
+    assert!(
+        rect.col > 1,
+        "right pane should be offset from the viewport origin"
+    );
 
     let mut rx = pane.subscribe_output();
     m.handle_mouse(MouseEvent {
@@ -503,8 +578,7 @@ async fn forwarded_mouse_uses_pane_local_coords() {
         if now >= deadline {
             break;
         }
-        match time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await
-        {
+        match time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await {
             Ok(Ok(c)) => out.extend_from_slice(&c),
             Ok(Err(_)) => break,
             Err(_) if !out.is_empty() => break,
@@ -514,7 +588,10 @@ async fn forwarded_mouse_uses_pane_local_coords() {
     // Pane-local (row 3, col 5) → SGR `ESC[<0;6;4M` (col+1;row+1). The raw
     // viewport coords (col ≈ rect.col+6) would not contain this.
     let s = String::from_utf8_lossy(&out);
-    assert!(s.contains(";6;4M"), "child must get pane-local SGR coords ;6;4M, got {s:?}");
+    assert!(
+        s.contains(";6;4M"),
+        "child must get pane-local SGR coords ;6;4M, got {s:?}"
+    );
     let _ = pane.send_input(Bytes::from_static(&[0x04])).await;
 }
 
@@ -547,7 +624,12 @@ async fn split_cwd_is_window_home_base_not_active_pane_cwd() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -571,7 +653,12 @@ async fn toggle_sync_panes_flips_the_flag() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -599,22 +686,37 @@ async fn session_picker_overlay_commits_switch_session() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
     )
     .unwrap();
     m.open_session_picker(vec![
-        PickerEntry { name: "main".into(), label: "main".into(), is_current: true },
-        PickerEntry { name: "work".into(), label: "work".into(), is_current: false },
+        PickerEntry {
+            name: "main".into(),
+            label: "main".into(),
+            is_current: true,
+        },
+        PickerEntry {
+            name: "work".into(),
+            label: "work".into(),
+            is_current: false,
+        },
     ]);
     assert!(matches!(
         m.overlay(),
         Some(plexy_glass_mux::Overlay::SessionPicker { .. })
     ));
     // Down to "work", then Enter → SwitchSession("work"); overlay closes.
-    m.handle_overlay_key(&okey(plexy_glass_mux::Key::Arrow(plexy_glass_mux::Direction::Down)));
+    m.handle_overlay_key(&okey(plexy_glass_mux::Key::Arrow(
+        plexy_glass_mux::Direction::Down,
+    )));
     let r = m.handle_overlay_key(&okey(plexy_glass_mux::Key::Enter));
     assert!(matches!(r, OverlayKeyResult::SwitchSession(ref n) if n == "work"));
     assert!(m.overlay().is_none(), "picker closes on commit");
@@ -625,7 +727,12 @@ async fn rename_window_overlay_commits_name() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -657,7 +764,12 @@ async fn rename_window_escape_cancels_without_change() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -668,7 +780,11 @@ async fn rename_window_escape_cancels_without_change() {
     type_str(&mut m, "zzz");
     m.handle_overlay_key(&okey(plexy_glass_mux::Key::Escape));
     assert!(m.overlay().is_none());
-    assert_eq!(m.active_window().name, orig, "cancel leaves the name unchanged");
+    assert_eq!(
+        m.active_window().name,
+        orig,
+        "cancel leaves the name unchanged"
+    );
 }
 
 #[tokio::test]
@@ -680,7 +796,10 @@ async fn rename_pane_overlay_sets_pane_name() {
     m.handle_overlay_key(&okey(plexy_glass_mux::Key::Enter));
     assert!(m.overlay().is_none());
     assert_eq!(
-        m.active_window().pane(active).and_then(super::super::pane::Pane::name).as_deref(),
+        m.active_window()
+            .pane(active)
+            .and_then(super::super::pane::Pane::name)
+            .as_deref(),
         Some("logs")
     );
 }
@@ -690,7 +809,12 @@ async fn empty_rename_commit_is_noop_but_closes() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -717,14 +841,22 @@ async fn show_help_opens_and_dismisses() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
     )
     .unwrap();
     m.handle_command(Command::ShowHelp).unwrap();
-    assert!(matches!(m.overlay(), Some(plexy_glass_mux::Overlay::Help { .. })));
+    assert!(matches!(
+        m.overlay(),
+        Some(plexy_glass_mux::Overlay::Help { .. })
+    ));
     m.handle_overlay_key(&okey(plexy_glass_mux::Key::Char('q')));
     assert!(m.overlay().is_none());
 }
@@ -733,7 +865,12 @@ async fn make_two_pane_manager() -> WindowManager {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -749,8 +886,10 @@ async fn select_layout_puts_active_pane_in_the_main_slot() {
     let mut m = make_two_pane_manager().await;
     m.handle_command(Command::SplitH).unwrap(); // 3 panes
     let active = m.active_window().active();
-    m.handle_command(Command::SelectLayout(plexy_glass_mux::LayoutPreset::MainVertical))
-        .unwrap();
+    m.handle_command(Command::SelectLayout(
+        plexy_glass_mux::LayoutPreset::MainVertical,
+    ))
+    .unwrap();
     let vp = m.viewport();
     let rects: Vec<(PaneId, plexy_glass_mux::Rect)> = m
         .active_window()
@@ -759,11 +898,7 @@ async fn select_layout_puts_active_pane_in_the_main_slot() {
         .into_iter()
         .map(|p| (p, m.active_window().layout().rect_of(p, vp).unwrap()))
         .collect();
-    let (widest, widest_rect) = rects
-        .iter()
-        .max_by_key(|(_, r)| r.cols)
-        .copied()
-        .unwrap();
+    let (widest, widest_rect) = rects.iter().max_by_key(|(_, r)| r.cols).copied().unwrap();
     assert_eq!(widest, active, "active pane takes the main slot: {rects:?}");
     assert!(
         widest_rect.cols > vp.cols / 2,
@@ -784,13 +919,22 @@ async fn next_layout_cycles_in_order_and_remembers() {
     use plexy_glass_mux::LayoutPreset;
     let mut m = make_two_pane_manager().await;
     m.handle_command(Command::NextLayout).unwrap();
-    assert_eq!(m.active_window().last_preset, Some(LayoutPreset::EvenHorizontal));
+    assert_eq!(
+        m.active_window().last_preset,
+        Some(LayoutPreset::EvenHorizontal)
+    );
     m.handle_command(Command::NextLayout).unwrap();
-    assert_eq!(m.active_window().last_preset, Some(LayoutPreset::EvenVertical));
+    assert_eq!(
+        m.active_window().last_preset,
+        Some(LayoutPreset::EvenVertical)
+    );
     // A manual split does NOT reset the cycle position.
     m.handle_command(Command::SplitV).unwrap();
     m.handle_command(Command::NextLayout).unwrap();
-    assert_eq!(m.active_window().last_preset, Some(LayoutPreset::MainHorizontal));
+    assert_eq!(
+        m.active_window().last_preset,
+        Some(LayoutPreset::MainHorizontal)
+    );
 }
 
 #[tokio::test]
@@ -808,7 +952,12 @@ async fn select_layout_single_pane_is_noop_but_remembers() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -817,7 +966,10 @@ async fn select_layout_single_pane_is_noop_but_remembers() {
     m.handle_command(Command::SelectLayout(plexy_glass_mux::LayoutPreset::Tiled))
         .unwrap();
     assert_eq!(m.active_window().layout().panes().len(), 1);
-    assert_eq!(m.active_window().last_preset, Some(plexy_glass_mux::LayoutPreset::Tiled));
+    assert_eq!(
+        m.active_window().last_preset,
+        Some(plexy_glass_mux::LayoutPreset::Tiled)
+    );
 }
 
 /// Push `n` blank rows into the active pane's scrollback, setting
@@ -852,7 +1004,12 @@ async fn prev_prompt_pins_target_to_viewport_top_and_clamps_at_oldest() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -875,7 +1032,12 @@ async fn next_prompt_walks_forward_then_snaps_to_live() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -901,7 +1063,12 @@ async fn next_prompt_snaps_to_live_when_the_prompt_is_in_the_grid() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -923,7 +1090,12 @@ async fn prev_prompt_lands_target_at_top_under_a_fold() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 6, cols: 20, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 6,
+            cols: 20,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -962,15 +1134,17 @@ async fn prev_prompt_lands_target_at_top_under_a_fold() {
     let top_line = |m: &WindowManager| {
         let p = m.active_window().active_pane().unwrap();
         let off = p.scroll_offset();
-        p.with_screen(|s| {
-            blocks::scroll_line_at(s, s.active.num_rows(), off, 0)
-        })
+        p.with_screen(|s| blocks::scroll_line_at(s, s.active.num_rows(), off, 0))
     };
     assert_eq!(top_line(&m), 3, "setup: block1 prompt at the top");
     // Prev-prompt jumps to block0's prompt (unified 0), which must land at the
     // top exactly despite the fold (unified 1,2) below it.
     m.handle_command(Command::PrevPrompt).unwrap();
-    assert_eq!(top_line(&m), 0, "prev-prompt lands the target at the top under a fold");
+    assert_eq!(
+        top_line(&m),
+        0,
+        "prev-prompt lands the target at the top under a fold"
+    );
 }
 
 #[tokio::test]
@@ -978,7 +1152,12 @@ async fn fold_via_block_mode_dispatch_persists_after_exit() {
     let notify = Arc::new(Notify::new());
     let m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -996,10 +1175,16 @@ async fn fold_via_block_mode_dispatch_persists_after_exit() {
     pane.enter_block_mode(plexy_glass_mux::BlockMode::new_for(&screen, 24).unwrap());
     // Apply the fold exactly as the connection dispatch does.
     pane.with_screen_mut(|s| blocks::toggle_block_fold(s, 0));
-    assert!(pane.with_screen(|s| s.active.rows[0].mark.is_folded()), "block folded");
+    assert!(
+        pane.with_screen(|s| s.active.rows[0].mark.is_folded()),
+        "block folded"
+    );
     // Leaving block mode must NOT clear the fold, that's the whole point.
     pane.exit_block_mode();
-    assert!(pane.with_screen(|s| s.active.rows[0].mark.is_folded()), "fold persists after exit");
+    assert!(
+        pane.with_screen(|s| s.active.rows[0].mark.is_folded()),
+        "fold persists after exit"
+    );
 }
 
 #[tokio::test]
@@ -1007,7 +1192,12 @@ async fn block_scroll_without_marks_prev_noops_and_next_goes_live() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -1016,11 +1206,18 @@ async fn block_scroll_without_marks_prev_noops_and_next_goes_live() {
     inject_scrollback_prompts(&m, 10, &[]); // scrollback, but no prompts
     m.handle_command(Command::PrevPrompt).unwrap();
     assert_eq!(active_scroll_offset(&m), 0, "prev with no marks is a no-op");
-    m.active_window().active_pane().unwrap().set_scroll_offset(5, 10);
+    m.active_window()
+        .active_pane()
+        .unwrap()
+        .set_scroll_offset(5, 10);
     m.handle_command(Command::PrevPrompt).unwrap();
     assert_eq!(active_scroll_offset(&m), 5, "prev keeps a manual scroll");
     m.handle_command(Command::NextPrompt).unwrap();
-    assert_eq!(active_scroll_offset(&m), 0, "next past the newest snaps live");
+    assert_eq!(
+        active_scroll_offset(&m),
+        0,
+        "next past the newest snaps live"
+    );
 }
 
 #[tokio::test]
@@ -1061,7 +1258,12 @@ async fn classify_click_count_increments_within_window() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -1086,7 +1288,12 @@ async fn classify_click_count_resets_on_target_change() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -1157,7 +1364,10 @@ async fn resize_drag_move_changes_the_split_border() {
     .await
     .unwrap();
     let after = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
-    assert!(after.cols > before.cols, "drag right widened pane 0: {before:?} -> {after:?}");
+    assert!(
+        after.cols > before.cols,
+        "drag right widened pane 0: {before:?} -> {after:?}"
+    );
 }
 
 // Regression: a pane running an app that enabled mouse reporting (less, hx,
@@ -1168,7 +1378,11 @@ async fn resize_drag_move_changes_the_split_border() {
 async fn left_click_focuses_non_active_pane_even_with_app_mouse_mode() {
     let mut m = make_two_pane_manager().await;
     let active = m.active_window().active();
-    let other = if active == PaneId(0) { PaneId(1) } else { PaneId(0) };
+    let other = if active == PaneId(0) {
+        PaneId(1)
+    } else {
+        PaneId(0)
+    };
     // Simulate less/hx: the non-active pane's app enabled mouse reporting.
     m.active_window()
         .pane(other)
@@ -1205,7 +1419,12 @@ async fn status_top_offset_shifts_border_hit_row() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -1249,12 +1468,20 @@ async fn status_top_offset_shifts_border_hit_row() {
 #[tokio::test]
 async fn on_host_resize_propagates_to_all_panes() {
     let mut m = make_two_pane_manager().await; // 24x80, vertical split
-    m.on_host_resize(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
-        .unwrap();
+    m.on_host_resize(PtySize {
+        rows: 40,
+        cols: 120,
+        pixel_width: 0,
+        pixel_height: 0,
+    })
+    .unwrap();
     let vp = m.viewport();
     // The layout region is inset by the pane frame: full width (120) minus
     // the two outer frame columns.
-    assert_eq!(vp.cols, 118, "viewport width did not update (120 - 2 frame cols)");
+    assert_eq!(
+        vp.cols, 118,
+        "viewport width did not update (120 - 2 frame cols)"
+    );
     let win = m.active_window();
     let panes = win.layout().panes();
     assert_eq!(panes.len(), 2);
@@ -1275,7 +1502,12 @@ async fn wheel_event_routes_to_active_pane_without_panic() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -1284,7 +1516,10 @@ async fn wheel_event_routes_to_active_pane_without_panic() {
     let pane = m.active_window().layout().panes()[0];
     let before = m.active_window().pane(pane).unwrap().scroll_offset();
     m.handle_mouse(MouseEvent {
-        kind: MouseKind::Wheel { delta: 3, horizontal: false },
+        kind: MouseKind::Wheel {
+            delta: 3,
+            horizontal: false,
+        },
         button: MouseButton::None,
         modifiers: plexy_glass_mux::MouseModifiers::default(),
         row: 2,
@@ -1303,7 +1538,12 @@ async fn status_bar_click_dispatches_select_window() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -1326,7 +1566,11 @@ async fn status_bar_click_dispatches_select_window() {
     })
     .await
     .unwrap();
-    assert_eq!(m.active_idx(), 0, "status-bar click did not select window 0");
+    assert_eq!(
+        m.active_idx(),
+        0,
+        "status-bar click did not select window 0"
+    );
 }
 
 // ---- SP1: pane zoom ----
@@ -1368,7 +1612,10 @@ async fn zoom_resizes_pane_to_full_then_restores() {
         .pane(active)
         .unwrap()
         .with_screen(|s| s.active.num_cols());
-    assert!(restored_cols < vp.cols, "unzoom should restore the split width");
+    assert!(
+        restored_cols < vp.cols,
+        "unzoom should restore the split width"
+    );
 }
 
 // ---- SP2: pane resize keybindings ----
@@ -1379,9 +1626,13 @@ async fn resize_pane_right_widens_active_pane() {
     let vp = m.viewport();
     let active = m.active_window().active();
     let before = m.active_window().layout().rect_of(active, vp).unwrap().cols;
-    m.handle_command(Command::ResizePane(plexy_glass_mux::Direction::Right)).unwrap();
+    m.handle_command(Command::ResizePane(plexy_glass_mux::Direction::Right))
+        .unwrap();
     let after = m.active_window().layout().rect_of(active, vp).unwrap().cols;
-    assert!(after >= before, "active pane should not shrink when growing right");
+    assert!(
+        after >= before,
+        "active pane should not shrink when growing right"
+    );
 }
 
 #[tokio::test]
@@ -1389,13 +1640,19 @@ async fn resize_single_pane_is_noop() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
     )
     .unwrap();
-    m.handle_command(Command::ResizePane(plexy_glass_mux::Direction::Left)).unwrap();
+    m.handle_command(Command::ResizePane(plexy_glass_mux::Direction::Left))
+        .unwrap();
     assert_eq!(m.active_window().layout().panes().len(), 1);
 }
 
@@ -1406,7 +1663,12 @@ async fn last_window_toggle_returns_to_previous() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -1426,7 +1688,12 @@ async fn last_window_noop_when_single() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -1444,7 +1711,11 @@ async fn last_pane_returns_to_previous() {
     let first = *panes.iter().find(|p| **p != second).unwrap();
     m.active_window_mut().focus(first);
     m.handle_command(Command::SelectLastPane).unwrap();
-    assert_eq!(m.active_window().active(), second, "last-pane returns to previous pane");
+    assert_eq!(
+        m.active_window().active(),
+        second,
+        "last-pane returns to previous pane"
+    );
 }
 
 // SP6: killing the active window must keep `last_active_window` valid.
@@ -1454,7 +1725,12 @@ async fn kill_window_keeps_last_active_index_valid() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -1471,7 +1747,11 @@ async fn kill_window_keeps_last_active_index_valid() {
     m.handle_command(Command::KillWindow).unwrap();
     assert_eq!(m.windows().len(), 2);
     m.handle_command(Command::SelectLastWindow).unwrap();
-    assert_eq!(m.windows()[m.active_idx()].id, w2_id, "toggle lands on the original W2");
+    assert_eq!(
+        m.windows()[m.active_idx()].id,
+        w2_id,
+        "toggle lands on the original W2"
+    );
 }
 
 // SP6: a window removed by pane-death (its last pane exited) must shift
@@ -1481,7 +1761,12 @@ async fn pane_death_window_removal_keeps_last_active_valid() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -1498,7 +1783,11 @@ async fn pane_death_window_removal_keeps_last_active_valid() {
     // last (was index 2, after the removed index 1) must follow W2 to
     // index 1 so the toggle still reaches it.
     m.handle_command(Command::SelectLastWindow).unwrap();
-    assert_eq!(m.windows()[m.active_idx()].id, w2_id, "toggle lands on the original W2");
+    assert_eq!(
+        m.windows()[m.active_idx()].id,
+        w2_id,
+        "toggle lands on the original W2"
+    );
 }
 
 #[tokio::test]
@@ -1539,7 +1828,12 @@ async fn command_pane_death_respawns_shell_in_place() {
     let _g = test_env::isolate();
     let mut m = WindowManager::new(
         command_spec(), // `PaneId(0)` runs a command → respawn-on-exit
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         Arc::new(Notify::new()),
         None,
         cfg(),
@@ -1547,17 +1841,31 @@ async fn command_pane_death_respawns_shell_in_place() {
     .unwrap();
     m.set_default_program("/bin/sh"); // fallback shell must not depend on `$SHELL`
     assert!(
-        m.active_window().active_pane().unwrap().respawn_shell_on_exit(),
+        m.active_window()
+            .active_pane()
+            .unwrap()
+            .respawn_shell_on_exit(),
         "the command pane is flagged to respawn a shell on exit",
     );
     let windows_before = m.windows().len();
 
     m.handle_pane_death(PaneId(0)).unwrap();
 
-    assert_eq!(m.windows().len(), windows_before, "window survives the command exit");
+    assert_eq!(
+        m.windows().len(),
+        windows_before,
+        "window survives the command exit"
+    );
     let new_active = m.active_window().active();
-    assert_ne!(new_active, PaneId(0), "the slot holds a fresh pane with a new id");
-    let new_pane = m.active_window().active_pane().expect("slot still occupied by a live pane");
+    assert_ne!(
+        new_active,
+        PaneId(0),
+        "the slot holds a fresh pane with a new id"
+    );
+    let new_pane = m
+        .active_window()
+        .active_pane()
+        .expect("slot still occupied by a live pane");
     assert!(
         !new_pane.respawn_shell_on_exit(),
         "the fallback shell has empty args → it closes normally when the user exits it",
@@ -1577,7 +1885,12 @@ async fn shell_pane_death_still_closes_window() {
     let _g = test_env::isolate();
     let mut m = WindowManager::new(
         spec(), // `/bin/cat`, empty args → interactive shell semantics
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         Arc::new(Notify::new()),
         None,
         cfg(),
@@ -1585,11 +1898,17 @@ async fn shell_pane_death_still_closes_window() {
     .unwrap();
     m.set_default_program("/bin/sh");
     assert!(
-        !m.active_window().active_pane().unwrap().respawn_shell_on_exit(),
+        !m.active_window()
+            .active_pane()
+            .unwrap()
+            .respawn_shell_on_exit(),
         "an empty-args pane is not flagged for respawn",
     );
     m.handle_pane_death(PaneId(0)).unwrap();
-    assert!(m.windows().is_empty(), "the sole shell window closes on exit");
+    assert!(
+        m.windows().is_empty(),
+        "the sole shell window closes on exit"
+    );
 }
 
 /// Respawn-once: the fallback shell has empty args, so when IT dies the window
@@ -1599,7 +1918,12 @@ async fn respawn_is_single_shot() {
     let _g = test_env::isolate();
     let mut m = WindowManager::new(
         command_spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         Arc::new(Notify::new()),
         None,
         cfg(),
@@ -1607,11 +1931,18 @@ async fn respawn_is_single_shot() {
     .unwrap();
     m.set_default_program("/bin/sh");
     m.handle_pane_death(PaneId(0)).unwrap(); // command exits → respawn shell
-    assert_eq!(m.windows().len(), 1, "still one window after the first (respawn) death");
+    assert_eq!(
+        m.windows().len(),
+        1,
+        "still one window after the first (respawn) death"
+    );
     let shell_id = m.active_window().active();
     // The user later exits the fallback shell.
     m.handle_pane_death(shell_id).unwrap();
-    assert!(m.windows().is_empty(), "the fallback shell's exit closes the window");
+    assert!(
+        m.windows().is_empty(),
+        "the fallback shell's exit closes the window"
+    );
 }
 
 /// A split that runs a command respawns a shell in ITS slot; the sibling pane
@@ -1621,7 +1952,12 @@ async fn command_split_pane_death_respawns_only_its_slot() {
     let _g = test_env::isolate();
     let mut m = WindowManager::new(
         spec(), // `PaneId(0)`: interactive shell
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         Arc::new(Notify::new()),
         None,
         cfg(),
@@ -1643,12 +1979,21 @@ async fn command_split_pane_death_respawns_only_its_slot() {
         )
         .unwrap();
     assert_eq!(new_id, PaneId(1));
-    assert!(m.active_window().pane(PaneId(1)).unwrap().respawn_shell_on_exit());
+    assert!(
+        m.active_window()
+            .pane(PaneId(1))
+            .unwrap()
+            .respawn_shell_on_exit()
+    );
 
     m.handle_pane_death(PaneId(1)).unwrap();
 
     let panes = m.active_window().layout().panes();
-    assert_eq!(panes.len(), 2, "both slots survive; the command slot got a fresh pane");
+    assert_eq!(
+        panes.len(),
+        2,
+        "both slots survive; the command slot got a fresh pane"
+    );
     assert!(panes.contains(&PaneId(0)), "sibling untouched");
     assert!(!panes.contains(&PaneId(1)), "old command pane id is gone");
     for pid in panes {
@@ -1663,7 +2008,12 @@ async fn command_session_survives_command_exit() {
     let _g = test_env::isolate();
     let mut m = WindowManager::new(
         command_spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         Arc::new(Notify::new()),
         None,
         cfg(),
@@ -1671,7 +2021,10 @@ async fn command_session_survives_command_exit() {
     .unwrap();
     m.set_default_program("/bin/sh");
     m.handle_pane_death(PaneId(0)).unwrap();
-    assert!(!m.is_empty(), "the session's last window survives the command exit");
+    assert!(
+        !m.is_empty(),
+        "the session's last window survives the command exit"
+    );
     m.active_window().active_pane().unwrap().kill_child();
 }
 
@@ -1683,7 +2036,12 @@ async fn respawn_repoints_marked_pane_to_new_shell() {
     let _g = test_env::isolate();
     let mut m = WindowManager::new(
         command_spec(), // `PaneId(0)`: command pane, active
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         Arc::new(Notify::new()),
         None,
         cfg(),
@@ -1697,7 +2055,11 @@ async fn respawn_repoints_marked_pane_to_new_shell() {
 
     let new_id = m.active_window().active();
     assert_ne!(new_id, PaneId(0));
-    assert_eq!(m.marked_pane(), Some(new_id), "mark follows the slot to the fresh shell");
+    assert_eq!(
+        m.marked_pane(),
+        Some(new_id),
+        "mark follows the slot to the fresh shell"
+    );
     m.active_window().active_pane().unwrap().kill_child();
 }
 
@@ -1733,7 +2095,12 @@ async fn cross_window_swap_into_monitored_window_does_not_replay_done() {
 fn mk_mgr() -> WindowManager {
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         Arc::new(Notify::new()),
         None,
         cfg(),
@@ -1757,17 +2124,28 @@ fn tnode(session: &str, window: Option<u32>, pane: Option<u32>, depth: u8) -> Tr
 }
 
 fn key(c: char) -> KeyEvent {
-    KeyEvent::new(plexy_glass_mux::Key::Char(c), plexy_glass_mux::Modifiers::empty())
+    KeyEvent::new(
+        plexy_glass_mux::Key::Char(c),
+        plexy_glass_mux::Modifiers::empty(),
+    )
 }
 
 #[tokio::test]
 async fn open_tree_then_enter_switches_and_closes() {
     let mut m = mk_mgr();
-    m.open_tree(vec![tnode("work", None, None, 0), tnode("work", Some(0), None, 1)]);
+    m.open_tree(vec![
+        tnode("work", None, None, 0),
+        tnode("work", Some(0), None, 1),
+    ]);
     assert!(matches!(m.overlay(), Some(Overlay::Tree(_))));
-    let r = m
-        .handle_overlay_key(&KeyEvent::new(plexy_glass_mux::Key::Enter, plexy_glass_mux::Modifiers::empty()));
-    assert!(matches!(r, OverlayKeyResult::Tree(TreeAction::Switch { .. })));
+    let r = m.handle_overlay_key(&KeyEvent::new(
+        plexy_glass_mux::Key::Enter,
+        plexy_glass_mux::Modifiers::empty(),
+    ));
+    assert!(matches!(
+        r,
+        OverlayKeyResult::Tree(TreeAction::Switch { .. })
+    ));
     assert!(m.overlay().is_none(), "switch closes the overlay");
 }
 
@@ -1781,11 +2159,17 @@ async fn tree_kill_keeps_overlay_open() {
     ]);
     m.handle_overlay_key(&key('j'));
     m.handle_overlay_key(&key('j')); // select the pane node
-    assert!(matches!(m.handle_overlay_key(&key('x')), OverlayKeyResult::Redraw));
+    assert!(matches!(
+        m.handle_overlay_key(&key('x')),
+        OverlayKeyResult::Redraw
+    ));
     let r = m.handle_overlay_key(&key('y'));
     assert!(matches!(
         r,
-        OverlayKeyResult::Tree(TreeAction::KillPane { pane: PaneId(5), .. })
+        OverlayKeyResult::Tree(TreeAction::KillPane {
+            pane: PaneId(5),
+            ..
+        })
     ));
     assert!(m.overlay().is_some(), "kill keeps the overlay open");
 }
@@ -1809,20 +2193,27 @@ async fn rename_tree_session_rewrites_subtree_and_rekeys_folds() {
 
     m.rename_tree_session("work", "dev");
 
-    let Some(Overlay::Tree(state)) = m.overlay() else { panic!("expected tree overlay") };
+    let Some(Overlay::Tree(state)) = m.overlay() else {
+        panic!("expected tree overlay")
+    };
     // Session row + its descendants now point at the new name.
     assert_eq!(state.nodes[0].name, "dev");
     assert_eq!(state.nodes[0].session, "dev");
     assert_eq!(state.nodes[1].session, "dev");
     assert_eq!(state.nodes[2].session, "dev");
-    assert!(state.nodes[0].label.contains("dev"), "label re-derived: {:?}", state.nodes[0].label);
+    assert!(
+        state.nodes[0].label.contains("dev"),
+        "label re-derived: {:?}",
+        state.nodes[0].label
+    );
     // The other session is untouched.
     assert_eq!(state.nodes[3].session, "other");
     // The collapsed window fold was re-keyed to the new session name.
     assert!(
-        state
-            .collapsed
-            .contains(&NodeKey::Window { session: "dev".into(), window: WindowId(0) }),
+        state.collapsed.contains(&NodeKey::Window {
+            session: "dev".into(),
+            window: WindowId(0)
+        }),
         "collapsed fold re-keyed: {:?}",
         state.collapsed
     );
@@ -1837,7 +2228,11 @@ async fn by_id_helpers_hit_and_miss() {
     // Real cross-window focus: from window 1, focus pane 0 (in window 0).
     assert!(m.focus_pane_by_id(PaneId(0)));
     assert_eq!(m.active_idx(), 0, "focus switched to pane 0's window");
-    assert_eq!(m.windows()[0].active(), PaneId(0), "pane 0 became its window's active pane");
+    assert_eq!(
+        m.windows()[0].active(),
+        PaneId(0),
+        "pane 0 became its window's active pane"
+    );
     assert!(!m.focus_pane_by_id(PaneId(999)));
 
     assert!(m.select_window_by_id(WindowId(1)));
@@ -1850,7 +2245,10 @@ async fn by_id_helpers_hit_and_miss() {
 
     // Rename a pane and read the stored name back.
     assert!(m.rename_pane_by_id(PaneId(0), "p".into()));
-    assert_eq!(m.windows()[0].pane(PaneId(0)).unwrap().name(), Some("p".to_string()));
+    assert_eq!(
+        m.windows()[0].pane(PaneId(0)).unwrap().name(),
+        Some("p".to_string())
+    );
     assert!(!m.rename_pane_by_id(PaneId(999), "p".into()));
 
     assert!(m.kill_window_panes(WindowId(1)));
@@ -1867,7 +2265,10 @@ async fn by_id_helpers_clear_zoom() {
     m.handle_command(Command::ZoomToggle).unwrap();
     assert!(m.windows()[0].is_zoomed());
     assert!(m.focus_pane_by_id(PaneId(0)));
-    assert!(!m.windows()[0].is_zoomed(), "focus_pane_by_id unzooms the target window");
+    assert!(
+        !m.windows()[0].is_zoomed(),
+        "focus_pane_by_id unzooms the target window"
+    );
 
     // `select_window_by_id` clears the leaving window's zoom before switching.
     m.handle_command(Command::NewWindow).unwrap(); // window 1 active
@@ -1875,7 +2276,10 @@ async fn by_id_helpers_clear_zoom() {
     m.handle_command(Command::ZoomToggle).unwrap();
     assert!(m.windows()[0].is_zoomed());
     m.select_window_by_id(WindowId(1));
-    assert!(!m.windows()[0].is_zoomed(), "select_window_by_id unzooms before switching");
+    assert!(
+        !m.windows()[0].is_zoomed(),
+        "select_window_by_id unzooms before switching"
+    );
 }
 
 // ----- break / join / swap -----
@@ -1888,7 +2292,11 @@ async fn mark_pane_toggles_and_death_clears() {
     m.handle_command(Command::MarkPane).unwrap();
     assert_eq!(m.marked_pane(), Some(PaneId(1)));
     m.handle_command(Command::MarkPane).unwrap();
-    assert_eq!(m.marked_pane(), None, "re-marking the active pane toggles off");
+    assert_eq!(
+        m.marked_pane(),
+        None,
+        "re-marking the active pane toggles off"
+    );
     m.handle_command(Command::MarkPane).unwrap();
     assert_eq!(m.marked_pane(), Some(PaneId(1)));
     m.handle_pane_death(PaneId(1)).unwrap();
@@ -1924,7 +2332,10 @@ async fn swap_pane_exchanges_with_neighbor() {
     m.handle_command(Command::SwapPane(false)).unwrap(); // swap with previous (pane 0)
     assert_eq!(m.active_window().active(), PaneId(1), "active id unchanged");
     let after = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
-    assert_ne!(before, after, "active pane's content moved to the other slot");
+    assert_ne!(
+        before, after,
+        "active pane's content moved to the other slot"
+    );
 }
 
 #[tokio::test]
@@ -1934,11 +2345,16 @@ async fn join_pane_moves_marked_and_removes_empty_source() {
     m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0
     m.handle_command(Command::MarkPane).unwrap(); // marked = pane 0
     m.handle_command(Command::SelectWindow(1)).unwrap(); // active W1
-    m.handle_command(Command::JoinPane(SplitDir::Vertical)).unwrap();
+    m.handle_command(Command::JoinPane(SplitDir::Vertical))
+        .unwrap();
     assert_eq!(m.windows().len(), 1, "emptied source window removed");
     let panes = m.active_window().layout().panes();
     assert!(panes.contains(&PaneId(0)) && panes.contains(&PaneId(1)));
-    assert_eq!(m.active_window().active(), PaneId(0), "joined pane is active");
+    assert_eq!(
+        m.active_window().active(),
+        PaneId(0),
+        "joined pane is active"
+    );
     assert_eq!(m.marked_pane(), None, "mark cleared after join");
 }
 
@@ -1953,10 +2369,19 @@ async fn join_pane_fixes_active_and_last_active_after_source_removal() {
     m.handle_command(Command::SelectWindow(2)).unwrap(); // active W2, last = W1
     let w2_id = m.windows()[m.active_idx()].id;
     let w1_id = m.windows()[1].id;
-    m.handle_command(Command::JoinPane(SplitDir::Vertical)).unwrap(); // W0 empties → removed
-    assert_eq!(m.windows()[m.active_idx()].id, w2_id, "active stays W2 across removal");
+    m.handle_command(Command::JoinPane(SplitDir::Vertical))
+        .unwrap(); // W0 empties → removed
+    assert_eq!(
+        m.windows()[m.active_idx()].id,
+        w2_id,
+        "active stays W2 across removal"
+    );
     m.handle_command(Command::SelectLastWindow).unwrap();
-    assert_eq!(m.windows()[m.active_idx()].id, w1_id, "last-active follows W1 across removal");
+    assert_eq!(
+        m.windows()[m.active_idx()].id,
+        w1_id,
+        "last-active follows W1 across removal"
+    );
 }
 
 #[tokio::test]
@@ -1964,16 +2389,30 @@ async fn join_pane_source_survives_when_multipane() {
     let mut m = mk_mgr(); // W0 idx0 pane0
     m.handle_command(Command::NewWindow).unwrap(); // W1 idx1 pane1, active
     m.handle_command(Command::SplitV).unwrap(); // W1 panes {1,2}, active 2
-    let half = m.windows()[1].pane(PaneId(1)).unwrap().with_screen(|s| s.active.num_cols());
+    let half = m.windows()[1]
+        .pane(PaneId(1))
+        .unwrap()
+        .with_screen(|s| s.active.num_cols());
     m.handle_command(Command::MarkPane).unwrap(); // marked = pane 2 (W1)
     m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0
-    m.handle_command(Command::JoinPane(SplitDir::Vertical)).unwrap();
+    m.handle_command(Command::JoinPane(SplitDir::Vertical))
+        .unwrap();
     assert_eq!(m.windows().len(), 2, "multi-pane source survives");
     let active_panes = m.active_window().layout().panes();
     assert!(active_panes.contains(&PaneId(0)) && active_panes.contains(&PaneId(2)));
-    assert_eq!(m.windows()[1].layout().panes(), vec![PaneId(1)], "source keeps its other pane");
-    let full = m.windows()[1].pane(PaneId(1)).unwrap().with_screen(|s| s.active.num_cols());
-    assert!(full > half, "surviving source pane was resized wider ({half} -> {full})");
+    assert_eq!(
+        m.windows()[1].layout().panes(),
+        vec![PaneId(1)],
+        "source keeps its other pane"
+    );
+    let full = m.windows()[1]
+        .pane(PaneId(1))
+        .unwrap()
+        .with_screen(|s| s.active.num_cols());
+    assert!(
+        full > half,
+        "surviving source pane was resized wider ({half} -> {full})"
+    );
     assert_eq!(m.marked_pane(), None);
 }
 
@@ -1984,21 +2423,36 @@ async fn swap_marked_pane_same_window_then_cross_window_swaps() {
     let vp = m.viewport();
     m.handle_command(Command::MarkPane).unwrap(); // marked = 1
     m.status_message = None; // clear the "marked pane" confirmation
-    m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Left)).unwrap(); // active 0
+    m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Left))
+        .unwrap(); // active 0
     let before = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
     m.handle_command(Command::SwapMarkedPane).unwrap();
     let after = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
     assert_ne!(before, after, "same-window swap exchanged slots");
-    assert_eq!(m.marked_pane(), Some(PaneId(1)), "mark preserved across swap");
+    assert_eq!(
+        m.marked_pane(),
+        Some(PaneId(1)),
+        "mark preserved across swap"
+    );
 
     // Cross-window: marked stays in W0; move active to a new window → the
     // panes exchange slots across windows (the old "use join" refusal is gone).
     m.handle_command(Command::NewWindow).unwrap(); // W1: pane 2, active
     m.handle_command(Command::SwapMarkedPane).unwrap();
     assert_eq!(m.take_active_message(), None);
-    assert!(m.windows()[1].pane(PaneId(1)).is_some(), "M moved into the active window");
-    assert!(m.windows()[0].pane(PaneId(2)).is_some(), "A moved into the other window");
-    assert_eq!(m.marked_pane(), Some(PaneId(1)), "mark preserved across the cross-window swap");
+    assert!(
+        m.windows()[1].pane(PaneId(1)).is_some(),
+        "M moved into the active window"
+    );
+    assert!(
+        m.windows()[0].pane(PaneId(2)).is_some(),
+        "A moved into the other window"
+    );
+    assert_eq!(
+        m.marked_pane(),
+        Some(PaneId(1)),
+        "mark preserved across the cross-window swap"
+    );
 }
 
 #[tokio::test]
@@ -2040,8 +2494,16 @@ async fn swap_marked_cross_window_focus_follows_slot() {
     m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0, pane 0
     m.handle_command(Command::SwapMarkedPane).unwrap();
     // W0's active slot now holds M; W1's active slot (was M) now holds A.
-    assert_eq!(m.windows()[0].active(), PaneId(1), "active window focuses M");
-    assert_eq!(m.windows()[1].active(), PaneId(0), "other window's focus follows the slot");
+    assert_eq!(
+        m.windows()[0].active(),
+        PaneId(1),
+        "active window focuses M"
+    );
+    assert_eq!(
+        m.windows()[1].active(),
+        PaneId(0),
+        "other window's focus follows the slot"
+    );
 }
 
 #[tokio::test]
@@ -2060,7 +2522,11 @@ async fn swap_marked_cross_window_zoom_follows_slot_in_other_window() {
         Some(PaneId(0)),
         "the zoomed SLOT keeps showing its occupant"
     );
-    assert_eq!(m.windows()[0].zoomed, None, "active window zoom stays cleared");
+    assert_eq!(
+        m.windows()[0].zoomed,
+        None,
+        "active window zoom stays cleared"
+    );
 }
 
 #[tokio::test]
@@ -2081,7 +2547,11 @@ async fn swap_marked_cross_window_then_close_falls_back_sanely() {
         "fallback focus {active:?} must be a live pane"
     );
     assert_eq!(active, PaneId(0));
-    assert_eq!(m.marked_pane(), None, "killing the marked pane clears the mark");
+    assert_eq!(
+        m.marked_pane(),
+        None,
+        "killing the marked pane clears the mark"
+    );
 }
 
 #[tokio::test]
@@ -2096,11 +2566,17 @@ async fn swap_marked_cross_window_resizes_both_windows() {
     // M (pane 2) now fills W0's full-viewport slot; A (pane 0) sits in W1's
     // half-width slot. Both PTYs must match their new rects immediately.
     let r2 = m.windows()[0].layout().rect_of(PaneId(2), vp).unwrap();
-    let c2 = m.windows()[0].pane(PaneId(2)).unwrap().with_screen(|s| s.active.num_cols());
+    let c2 = m.windows()[0]
+        .pane(PaneId(2))
+        .unwrap()
+        .with_screen(|s| s.active.num_cols());
     assert_eq!(c2, r2.cols, "M resized to the full-viewport slot");
     assert_eq!(c2, vp.cols);
     let r0 = m.windows()[1].layout().rect_of(PaneId(0), vp).unwrap();
-    let c0 = m.windows()[1].pane(PaneId(0)).unwrap().with_screen(|s| s.active.num_cols());
+    let c0 = m.windows()[1]
+        .pane(PaneId(0))
+        .unwrap()
+        .with_screen(|s| s.active.num_cols());
     assert_eq!(c0, r0.cols, "A resized to the half-width slot");
     assert!(c0 < vp.cols);
 }
@@ -2136,7 +2612,11 @@ async fn swap_marked_vanished_mark_is_cleared_silently() {
     let before = m.active_window().layout().panes();
     m.handle_command(Command::SwapMarkedPane).unwrap();
     assert_eq!(m.marked_pane(), None, "vanished mark cleared");
-    assert_eq!(m.active_window().layout().panes(), before, "no structural change");
+    assert_eq!(
+        m.active_window().layout().panes(),
+        before,
+        "no structural change"
+    );
     assert_eq!(m.take_active_message(), None, "cleared silently");
 }
 
@@ -2147,7 +2627,11 @@ async fn kill_pane_and_kill_window_clear_mark() {
     m.handle_command(Command::SplitV).unwrap(); // panes 0,1; active 1
     m.handle_command(Command::MarkPane).unwrap(); // marked = 1 (active)
     m.handle_command(Command::KillPane).unwrap();
-    assert_eq!(m.marked_pane(), None, "killing the marked pane clears the mark");
+    assert_eq!(
+        m.marked_pane(),
+        None,
+        "killing the marked pane clears the mark"
+    );
 
     // KillWindow clears a mark on any pane in the removed window.
     let mut m = mk_mgr();
@@ -2156,7 +2640,11 @@ async fn kill_pane_and_kill_window_clear_mark() {
     m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0
     m.handle_command(Command::MarkPane).unwrap(); // marks a W0 pane
     m.handle_command(Command::KillWindow).unwrap(); // removes W0
-    assert_eq!(m.marked_pane(), None, "killing the marked pane's window clears the mark");
+    assert_eq!(
+        m.marked_pane(),
+        None,
+        "killing the marked pane's window clears the mark"
+    );
 }
 
 #[tokio::test]
@@ -2170,12 +2658,17 @@ async fn structural_commands_clear_zoom() {
         assert!(!m.active_window().is_zoomed(), "{cmd:?} must clear zoom");
     }
     // Join/SwapMarked need a same-window marked pane.
-    for cmd in [Command::JoinPane(SplitDir::Vertical), Command::SwapMarkedPane] {
+    for cmd in [
+        Command::JoinPane(SplitDir::Vertical),
+        Command::SwapMarkedPane,
+    ] {
         let mut m = mk_mgr();
         m.handle_command(Command::SplitV).unwrap(); // panes 0,1; active 1
-        m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Left)).unwrap(); // active 0
+        m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Left))
+            .unwrap(); // active 0
         m.handle_command(Command::MarkPane).unwrap(); // marked 0
-        m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Right)).unwrap(); // active 1
+        m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Right))
+            .unwrap(); // active 1
         m.handle_command(Command::ZoomToggle).unwrap();
         assert!(m.active_window().is_zoomed());
         m.handle_command(cmd.clone()).unwrap();
@@ -2196,12 +2689,20 @@ async fn swap_pane_next_and_prev_are_directional() {
     let vp = m.viewport();
     let r1 = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
     m.handle_command(Command::SwapPane(false)).unwrap();
-    assert_eq!(m.active_window().layout().rect_of(PaneId(2), vp).unwrap(), r1, "prev swaps 2<->1");
+    assert_eq!(
+        m.active_window().layout().rect_of(PaneId(2), vp).unwrap(),
+        r1,
+        "prev swaps 2<->1"
+    );
     // next: active 2 wraps to pane 0.
     let mut m = setup();
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
     m.handle_command(Command::SwapPane(true)).unwrap();
-    assert_eq!(m.active_window().layout().rect_of(PaneId(2), vp).unwrap(), r0, "next wraps 2<->0");
+    assert_eq!(
+        m.active_window().layout().rect_of(PaneId(2), vp).unwrap(),
+        r0,
+        "next wraps 2<->0"
+    );
 }
 
 #[tokio::test]
@@ -2219,22 +2720,33 @@ async fn break_pane_names_window_from_pane_name() {
     assert!(m.rename_pane_by_id(PaneId(1), "editor".into()));
     m.handle_command(Command::BreakPane).unwrap();
     assert_eq!(m.windows().len(), 2);
-    assert_eq!(m.active_window().name, "editor", "new window named from the pane");
+    assert_eq!(
+        m.active_window().name,
+        "editor",
+        "new window named from the pane"
+    );
 }
 
 #[tokio::test]
 async fn join_pane_same_window_reorders() {
     let mut m = mk_mgr();
     m.handle_command(Command::SplitV).unwrap(); // panes 0,1; active 1
-    m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Left)).unwrap(); // active 0
+    m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Left))
+        .unwrap(); // active 0
     m.handle_command(Command::MarkPane).unwrap(); // marked 0
-    m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Right)).unwrap(); // active 1
-    m.handle_command(Command::JoinPane(SplitDir::Horizontal)).unwrap();
+    m.handle_command(Command::SelectPane(plexy_glass_mux::Direction::Right))
+        .unwrap(); // active 1
+    m.handle_command(Command::JoinPane(SplitDir::Horizontal))
+        .unwrap();
     assert_eq!(m.windows().len(), 1, "same-window join keeps one window");
     let panes = m.active_window().layout().panes();
     assert_eq!(panes.len(), 2);
     assert!(panes.contains(&PaneId(0)) && panes.contains(&PaneId(1)));
-    assert_eq!(m.active_window().active(), PaneId(0), "joined pane is active");
+    assert_eq!(
+        m.active_window().active(),
+        PaneId(0),
+        "joined pane is active"
+    );
     assert_eq!(m.marked_pane(), None);
 }
 
@@ -2244,9 +2756,17 @@ async fn join_pane_marked_equals_active_is_status_noop() {
     m.handle_command(Command::SplitV).unwrap(); // active 1
     m.handle_command(Command::MarkPane).unwrap(); // marked = active = 1
     let before = m.active_window().layout().panes().len();
-    m.handle_command(Command::JoinPane(SplitDir::Vertical)).unwrap();
-    assert_eq!(m.active_window().layout().panes().len(), before, "no structural change");
-    assert_eq!(m.take_active_message(), Some("marked pane is the active pane"));
+    m.handle_command(Command::JoinPane(SplitDir::Vertical))
+        .unwrap();
+    assert_eq!(
+        m.active_window().layout().panes().len(),
+        before,
+        "no structural change"
+    );
+    assert_eq!(
+        m.take_active_message(),
+        Some("marked pane is the active pane")
+    );
 }
 
 #[tokio::test]
@@ -2256,7 +2776,11 @@ async fn mark_survives_break_then_swap_is_cross_window() {
     m.handle_command(Command::MarkPane).unwrap(); // marked = 1 (active)
     m.status_message = None; // clear the "marked pane" confirmation
     m.handle_command(Command::BreakPane).unwrap(); // pane 1 → new window
-    assert_eq!(m.marked_pane(), Some(PaneId(1)), "mark survives a break (pane still lives)");
+    assert_eq!(
+        m.marked_pane(),
+        Some(PaneId(1)),
+        "mark survives a break (pane still lives)"
+    );
     m.handle_command(Command::SelectWindow(0)).unwrap(); // active W0 (pane 0)
     m.handle_command(Command::SwapMarkedPane).unwrap();
     // Cross-window swap: the broken-out pane comes back to W0's slot and
@@ -2271,8 +2795,14 @@ async fn mark_survives_break_then_swap_is_cross_window() {
 async fn buffer_picker_paste_closes_delete_stays_open() {
     let mut m = mk_mgr();
     m.open_buffer_picker(vec![
-        plexy_glass_mux::BufferEntry { name: "buffer1".into(), preview: "a".into() },
-        plexy_glass_mux::BufferEntry { name: "buffer0".into(), preview: "b".into() },
+        plexy_glass_mux::BufferEntry {
+            name: "buffer1".into(),
+            preview: "a".into(),
+        },
+        plexy_glass_mux::BufferEntry {
+            name: "buffer0".into(),
+            preview: "b".into(),
+        },
     ]);
     assert!(matches!(m.overlay(), Some(Overlay::BufferPicker(_))));
     // `d` deletes the selected buffer and keeps the overlay open.
@@ -2334,8 +2864,14 @@ async fn kill_window_flashes_named_window() {
     let auto_rename = m.config.auto_rename;
     let name = m.active_window().display_name(auto_rename);
     m.handle_command(Command::KillWindow).unwrap();
-    let msg = m.take_active_message().expect("kill-window flashes a message");
-    assert_eq!(msg, format!("killed window 2 ({name})"), "names the killed window");
+    let msg = m
+        .take_active_message()
+        .expect("kill-window flashes a message");
+    assert_eq!(
+        msg,
+        format!("killed window 2 ({name})"),
+        "names the killed window"
+    );
     assert_eq!(m.active_severity(), Severity::Success);
 }
 
@@ -2343,7 +2879,10 @@ async fn kill_window_flashes_named_window() {
 async fn welcome_overlay_opens_and_any_key_dismisses() {
     let mut m = mk_mgr();
     m.open_welcome();
-    assert!(matches!(m.overlay(), Some(plexy_glass_mux::Overlay::Welcome)));
+    assert!(matches!(
+        m.overlay(),
+        Some(plexy_glass_mux::Overlay::Welcome)
+    ));
     // Any key dismisses the modal (it's a "press any key to continue" banner).
     let r = m.handle_overlay_key(&key('x'));
     assert_eq!(r, OverlayKeyResult::Redraw);
@@ -2356,8 +2895,14 @@ async fn update_monitor_flags_clears_active_window_alerts() {
     m.active_window_mut().set_bell(); // a stale alert on the (current) window
     m.active_window_mut().set_activity();
     let _ = m.update_monitor_flags().alert_edge;
-    assert!(!m.active_window().bell_flag(), "current window's bell cleared");
-    assert!(!m.active_window().activity_flag(), "current window's activity cleared");
+    assert!(
+        !m.active_window().bell_flag(),
+        "current window's bell cleared"
+    );
+    assert!(
+        !m.active_window().activity_flag(),
+        "current window's activity cleared"
+    );
 }
 
 #[tokio::test]
@@ -2381,14 +2926,23 @@ async fn update_monitor_flags_sets_background_activity_then_clears_on_switch() {
         if m.windows()[1].activity_flag() {
             break;
         }
-        assert!(Instant::now() <= deadline, "background activity never flagged");
+        assert!(
+            Instant::now() <= deadline,
+            "background activity never flagged"
+        );
         time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(!m.active_window().activity_flag(), "the current window is never flagged");
+    assert!(
+        !m.active_window().activity_flag(),
+        "the current window is never flagged"
+    );
     // Switching to the flagged window clears it on the next update.
     m.handle_command(Command::SelectWindow(1)).unwrap();
     let _ = m.update_monitor_flags().alert_edge;
-    assert!(!m.windows()[1].activity_flag(), "flag cleared once the window is current");
+    assert!(
+        !m.windows()[1].activity_flag(),
+        "flag cleared once the window is current"
+    );
 }
 
 #[tokio::test]
@@ -2421,10 +2975,16 @@ async fn update_monitor_flags_sets_background_bell_from_a_real_bel() {
         if m.windows()[1].bell_flag() {
             break;
         }
-        assert!(Instant::now() <= deadline, "background bell never flagged window 1");
+        assert!(
+            Instant::now() <= deadline,
+            "background bell never flagged window 1"
+        );
         time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(!m.active_window().bell_flag(), "the current window is never bell-flagged");
+    assert!(
+        !m.active_window().bell_flag(),
+        "the current window is never bell-flagged"
+    );
 }
 
 /// Drive output into the background window's pane until `update_monitor_flags`
@@ -2481,10 +3041,16 @@ async fn activity_in_active_window_emits_no_message() {
     // Drain a few times; the active window never flags and never emits an edge
     // alert (`update_monitor_flags` returns false → no alert message set).
     for _ in 0..5 {
-        assert!(!m.update_monitor_flags().alert_edge, "active window emits no alert message");
+        assert!(
+            !m.update_monitor_flags().alert_edge,
+            "active window emits no alert message"
+        );
         time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(!m.active_window().activity_flag(), "active window is never flagged");
+    assert!(
+        !m.active_window().activity_flag(),
+        "active window is never flagged"
+    );
 }
 
 #[tokio::test]
@@ -2494,7 +3060,10 @@ async fn activity_does_not_re_message_while_sticky() {
     m.handle_command(Command::ToggleMonitorActivity).unwrap();
     m.handle_command(Command::SelectWindow(0)).unwrap();
     // First edge fires.
-    assert!(drive_until_alert(&mut m, 1).await.is_some(), "first edge messages");
+    assert!(
+        drive_until_alert(&mut m, 1).await.is_some(),
+        "first edge messages"
+    );
     // Subsequent drains, even with continued output, do NOT re-message while
     // the sticky flag stays true (the edge already happened).
     let pid = m.windows()[1].layout().panes()[0];
@@ -2505,7 +3074,10 @@ async fn activity_does_not_re_message_while_sticky() {
             .send_input(bytes::Bytes::from_static(b"y\n"))
             .await
             .unwrap();
-        assert!(!m.update_monitor_flags().alert_edge, "no re-message while the flag stays sticky");
+        assert!(
+            !m.update_monitor_flags().alert_edge,
+            "no re-message while the flag stays sticky"
+        );
         time::sleep(Duration::from_millis(20)).await;
     }
 }
@@ -2516,7 +3088,10 @@ async fn activity_re_messages_after_view_clears_and_re_edges() {
     m.new_window_with_spec(spec(), "api".into()).unwrap(); // window 1, active
     m.handle_command(Command::ToggleMonitorActivity).unwrap();
     m.handle_command(Command::SelectWindow(0)).unwrap();
-    assert!(drive_until_alert(&mut m, 1).await.is_some(), "first edge messages");
+    assert!(
+        drive_until_alert(&mut m, 1).await.is_some(),
+        "first edge messages"
+    );
     let _ = m.take_active_message();
     // View window 1 (clears its flag), then go back to window 0.
     m.handle_command(Command::SelectWindow(1)).unwrap();
@@ -2567,8 +3142,14 @@ async fn command_completion_nonzero_exit_flags_failed_and_messages() {
     let _ = m.update_monitor_flags().alert_edge; // baseline window 1 at 0
     // A command completes in the background window with a nonzero exit.
     set_block_counter(&m, 1, 1, Some(1));
-    assert!(m.update_monitor_flags().alert_edge, "completion edge fires a message");
-    assert_eq!(m.take_active_message(), Some("done in window 2 (api): exit 1"));
+    assert!(
+        m.update_monitor_flags().alert_edge,
+        "completion edge fires a message"
+    );
+    assert_eq!(
+        m.take_active_message(),
+        Some("done in window 2 (api): exit 1")
+    );
     assert_eq!(m.windows()[1].done_flag(), Some(false), "✗ flag (failed)");
 }
 
@@ -2581,7 +3162,10 @@ async fn command_completion_exit_zero_flags_ok_and_messages() {
     let _ = m.update_monitor_flags().alert_edge;
     set_block_counter(&m, 1, 1, Some(0));
     assert!(m.update_monitor_flags().alert_edge);
-    assert_eq!(m.take_active_message(), Some("done in window 2 (api): exit 0"));
+    assert_eq!(
+        m.take_active_message(),
+        Some("done in window 2 (api): exit 0")
+    );
     assert_eq!(m.windows()[1].done_flag(), Some(true), "✓ flag (ok)");
 }
 
@@ -2596,7 +3180,10 @@ async fn update_monitor_flags_collects_pending_notifications() {
     // A block completes in the BACKGROUND window (monitor-command never toggled).
     set_block_counter(&m, 1, 1, Some(0));
     let pid = m.windows()[1].layout().panes()[0];
-    m.windows()[1].pane(pid).unwrap().with_screen_mut(|s| s.last_block_duration = Some(45_000));
+    m.windows()[1]
+        .pane(pid)
+        .unwrap()
+        .with_screen_mut(|s| s.last_block_duration = Some(45_000));
     let drain = m.update_monitor_flags();
     let n = drain
         .notifications
@@ -2623,7 +3210,11 @@ async fn command_completion_codeless_d_flags_ok_with_no_exit_clause() {
         Some("done in window 2 (api)"),
         "codeless completion → no exit clause"
     );
-    assert_eq!(m.windows()[1].done_flag(), Some(true), "✓ flag (outcome unknown)");
+    assert_eq!(
+        m.windows()[1].done_flag(),
+        Some(true),
+        "✓ flag (outcome unknown)"
+    );
 }
 
 #[tokio::test]
@@ -2632,8 +3223,15 @@ async fn command_completion_in_active_window_neither_flags_nor_messages() {
     m.handle_command(Command::ToggleMonitorCommand).unwrap(); // monitor-command on for the active window
     let _ = m.update_monitor_flags().alert_edge; // baseline at 0
     set_block_counter(&m, 0, 1, Some(1)); // completion in the ACTIVE window
-    assert!(!m.update_monitor_flags().alert_edge, "active window emits no completion message");
-    assert_eq!(m.active_window().done_flag(), None, "active window never flagged");
+    assert!(
+        !m.update_monitor_flags().alert_edge,
+        "active window emits no completion message"
+    );
+    assert_eq!(
+        m.active_window().done_flag(),
+        None,
+        "active window never flagged"
+    );
 }
 
 #[tokio::test]
@@ -2652,7 +3250,10 @@ async fn command_completion_toggle_on_after_history_does_not_backlog() {
     let _ = m.take_active_message();
     m.handle_command(Command::SelectWindow(0)).unwrap();
     // No NEW completion since toggle-on → no alert (no history replay).
-    assert!(!m.update_monitor_flags().alert_edge, "toggle-on does not backlog completed history");
+    assert!(
+        !m.update_monitor_flags().alert_edge,
+        "toggle-on does not backlog completed history"
+    );
     assert_eq!(m.windows()[1].done_flag(), None);
 }
 
@@ -2675,12 +3276,22 @@ async fn command_completion_counter_decrease_re_baselines_silently() {
     // fresh completion after the reset fires from the new (0) baseline.
     m.handle_command(Command::SelectWindow(1)).unwrap();
     let _ = m.update_monitor_flags().alert_edge; // clears the now-active window's done flag
-    assert_eq!(m.windows()[1].done_flag(), None, "viewing cleared the done flag");
+    assert_eq!(
+        m.windows()[1].done_flag(),
+        None,
+        "viewing cleared the done flag"
+    );
     m.handle_command(Command::SelectWindow(0)).unwrap();
     let _ = m.update_monitor_flags().alert_edge; // re-baseline window 1 at 0 after the view
     set_block_counter(&m, 1, 1, Some(2));
-    assert!(m.update_monitor_flags().alert_edge, "post-reset completion alerts from the new baseline");
-    assert_eq!(m.take_active_message(), Some("done in window 2 (api): exit 2"));
+    assert!(
+        m.update_monitor_flags().alert_edge,
+        "post-reset completion alerts from the new baseline"
+    );
+    assert_eq!(
+        m.take_active_message(),
+        Some("done in window 2 (api): exit 2")
+    );
 }
 
 // ----- silence monitoring -----
@@ -2688,9 +3299,13 @@ async fn command_completion_counter_decrease_re_baselines_silently() {
 #[tokio::test]
 async fn monitor_silence_set_and_clear_messages() {
     let mut m = mk_mgr();
-    m.handle_command(Command::SetMonitorSilence(Some(30))).unwrap();
+    m.handle_command(Command::SetMonitorSilence(Some(30)))
+        .unwrap();
     assert_eq!(m.take_active_message(), Some("monitor-silence 30s"));
-    assert_eq!(m.active_window().monitor_silence(), Some(Duration::from_secs(30)));
+    assert_eq!(
+        m.active_window().monitor_silence(),
+        Some(Duration::from_secs(30))
+    );
     m.handle_command(Command::SetMonitorSilence(None)).unwrap();
     assert_eq!(m.take_active_message(), Some("monitor-silence off"));
     assert_eq!(m.active_window().monitor_silence(), None);
@@ -2700,7 +3315,8 @@ async fn monitor_silence_set_and_clear_messages() {
 async fn any_silence_monitored_reflects_arm_state() {
     let mut m = mk_mgr();
     assert!(!m.any_silence_monitored(), "no monitors by default");
-    m.handle_command(Command::SetMonitorSilence(Some(5))).unwrap();
+    m.handle_command(Command::SetMonitorSilence(Some(5)))
+        .unwrap();
     assert!(m.any_silence_monitored(), "armed after set");
     m.handle_command(Command::SetMonitorSilence(None)).unwrap();
     assert!(!m.any_silence_monitored(), "disarmed after clear");
@@ -2718,20 +3334,30 @@ async fn silence_edge_in_background_window_flags_and_messages() {
     // time has passed yet (tokio::time::Instant::now() has not advanced).
     assert!(!m.check_silence_alerts(), "no silence before the threshold");
     time::advance(Duration::from_millis(120)).await;
-    assert!(m.check_silence_alerts(), "silence edge fires past the threshold");
+    assert!(
+        m.check_silence_alerts(),
+        "silence edge fires past the threshold"
+    );
     assert_eq!(m.take_active_message(), Some("silence in window 2 (build)"));
     assert!(m.windows()[1].silence_flag(), "the ~ flag is set");
     // The episode latch prevents re-firing on the next tick while still silent.
-    assert!(!m.check_silence_alerts(), "no re-fire within the same silence episode");
+    assert!(
+        !m.check_silence_alerts(),
+        "no re-fire within the same silence episode"
+    );
 }
 
 #[tokio::test(start_paused = true)]
 async fn silence_active_window_never_fires() {
     let mut m = mk_mgr(); // window 0, active
-    m.active_window_mut().set_monitor_silence(Some(Duration::from_millis(50)));
+    m.active_window_mut()
+        .set_monitor_silence(Some(Duration::from_millis(50)));
     time::advance(Duration::from_millis(90)).await;
     // The active window is excluded (else an idle active window flickers 1 Hz).
-    assert!(!m.check_silence_alerts(), "active window never silence-fires");
+    assert!(
+        !m.check_silence_alerts(),
+        "active window never silence-fires"
+    );
     assert!(!m.active_window().silence_flag());
 }
 
@@ -2750,7 +3376,10 @@ async fn silence_output_resets_timer_and_latch() {
     assert!(!m.check_silence_alerts(), "output reset the timer");
     // A NEW silence episode after output resumes can fire again.
     time::advance(Duration::from_millis(120)).await;
-    assert!(m.check_silence_alerts(), "a new silence episode after output re-fires");
+    assert!(
+        m.check_silence_alerts(),
+        "a new silence episode after output re-fires"
+    );
     assert_eq!(m.take_active_message(), Some("silence in window 2 (build)"));
 }
 
@@ -2771,8 +3400,14 @@ async fn silence_viewing_clears_flag_but_not_latch() {
     // Go back to window 0; the window is STILL silent (no output happened), so
     // the latch must prevent a re-fire (no 1 Hz flag loop).
     m.handle_command(Command::SelectWindow(0)).unwrap();
-    assert!(!m.check_silence_alerts(), "no re-fire while still silent (latch held)");
-    assert!(!m.windows()[1].silence_flag(), "flag stays clear without a re-fire");
+    assert!(
+        !m.check_silence_alerts(),
+        "no re-fire while still silent (latch held)"
+    );
+    assert!(
+        !m.windows()[1].silence_flag(),
+        "flag stays clear without a re-fire"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -2797,7 +3432,12 @@ async fn open_popup_sets_state_with_derived_size() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -2805,7 +3445,8 @@ async fn open_popup_sets_state_with_derived_size() {
     .unwrap();
     m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
     assert!(!m.has_popup());
-    m.handle_command(Command::OpenPopup { command: None }).unwrap();
+    m.handle_command(Command::OpenPopup { command: None })
+        .unwrap();
     assert!(m.has_popup());
     let rect = plexy_glass_mux::popup_rect(m.viewport());
     let (rows, cols) = m
@@ -2822,17 +3463,30 @@ async fn open_popup_is_last_wins_and_close_clears() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
     )
     .unwrap();
     m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
-    m.handle_command(Command::OpenPopup { command: Some("sleep 600".into()) }).unwrap();
+    m.handle_command(Command::OpenPopup {
+        command: Some("sleep 600".into()),
+    })
+    .unwrap();
     assert_eq!(m.popup().unwrap().title, "sleep 600");
-    m.handle_command(Command::OpenPopup { command: None }).unwrap();
-    assert_eq!(m.popup().unwrap().title, "popup", "second open replaces the first");
+    m.handle_command(Command::OpenPopup { command: None })
+        .unwrap();
+    assert_eq!(
+        m.popup().unwrap().title,
+        "popup",
+        "second open replaces the first"
+    );
     m.handle_command(Command::ClosePopup).unwrap();
     assert!(!m.has_popup());
     // Idempotent.
@@ -2845,7 +3499,12 @@ async fn input_target_pane_prefers_popup() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -2858,7 +3517,8 @@ async fn input_target_pane_prefers_popup() {
         Some(layout_pane),
         "no popup: input targets the active layout pane"
     );
-    m.handle_command(Command::OpenPopup { command: None }).unwrap();
+    m.handle_command(Command::OpenPopup { command: None })
+        .unwrap();
     let popup_id = m.popup().unwrap().pane.id();
     assert_eq!(
         m.input_target_pane().map(super::super::pane::Pane::id),
@@ -2884,14 +3544,20 @@ async fn paste_gate_reads_the_popup_pane_mode_not_the_layout_pane() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
     )
     .unwrap();
     m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
-    m.handle_command(Command::OpenPopup { command: None }).unwrap();
+    m.handle_command(Command::OpenPopup { command: None })
+        .unwrap();
     // The popup app turns bracketed paste ON; the layout pane has it OFF.
     m.popup().unwrap().pane.with_screen_mut(|s| {
         s.modes.insert(plexy_glass_emulator::Modes::BRACKETED_PASTE);
@@ -2914,7 +3580,12 @@ async fn popup_cwd_prefers_live_osc7_then_home_base() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -2928,7 +3599,11 @@ async fn popup_cwd_prefers_live_osc7_then_home_base() {
         pane.with_screen_mut(|s| s.cwd = Some("file:///live/here".to_string()));
     }
     assert_eq!(m.popup_cwd().as_deref(), Some("/live/here"));
-    assert_eq!(m.split_cwd().as_deref(), Some("/home/base"), "splits unaffected");
+    assert_eq!(
+        m.split_cwd().as_deref(),
+        Some("/home/base"),
+        "splits unaffected"
+    );
 }
 
 #[tokio::test]
@@ -2936,14 +3611,20 @@ async fn popup_pane_death_closes_popup_only() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
     )
     .unwrap();
     m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
-    m.handle_command(Command::OpenPopup { command: None }).unwrap();
+    m.handle_command(Command::OpenPopup { command: None })
+        .unwrap();
     let popup_id = m.popup().unwrap().pane.id();
     m.handle_pane_death(popup_id).unwrap();
     assert!(!m.has_popup());
@@ -2955,14 +3636,20 @@ async fn last_window_death_also_closes_popup() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
     )
     .unwrap();
     m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
-    m.handle_command(Command::OpenPopup { command: None }).unwrap();
+    m.handle_command(Command::OpenPopup { command: None })
+        .unwrap();
     // The only layout pane dies → session is ending; popup must not orphan.
     m.handle_pane_death(PaneId(0)).unwrap();
     assert!(m.is_empty());
@@ -2974,14 +3661,20 @@ async fn kill_window_emptying_session_also_closes_popup() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
     )
     .unwrap();
     m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
-    m.handle_command(Command::OpenPopup { command: None }).unwrap();
+    m.handle_command(Command::OpenPopup { command: None })
+        .unwrap();
     m.handle_command(Command::KillWindow).unwrap();
     assert!(m.is_empty());
     assert!(!m.has_popup());
@@ -2992,16 +3685,27 @@ async fn host_resize_resizes_popup_pane() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
     )
     .unwrap();
     m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
-    m.handle_command(Command::OpenPopup { command: None }).unwrap();
-    m.on_host_resize(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
+    m.handle_command(Command::OpenPopup { command: None })
         .unwrap();
+    m.on_host_resize(PtySize {
+        rows: 40,
+        cols: 120,
+        pixel_width: 0,
+        pixel_height: 0,
+    })
+    .unwrap();
     let rect = plexy_glass_mux::popup_rect(m.viewport());
     let (rows, cols) = m
         .popup()
@@ -3015,8 +3719,13 @@ async fn host_resize_resizes_popup_pane() {
 async fn popup_swallows_clicks_outside_and_keeps_focus() {
     let mut m = make_two_pane_manager().await;
     let focused_before = m.active_window().active();
-    let other = if focused_before == PaneId(0) { PaneId(1) } else { PaneId(0) };
-    m.handle_command(Command::OpenPopup { command: None }).unwrap();
+    let other = if focused_before == PaneId(0) {
+        PaneId(1)
+    } else {
+        PaneId(0)
+    };
+    m.handle_command(Command::OpenPopup { command: None })
+        .unwrap();
     // Click squarely inside the OTHER layout pane (outside the popup box).
     // Geometry check: viewport is (1,1,21,78), so the popup box spans rows
     // 3..=18, cols 9..=70. SplitV focuses the new right pane, so `other` is
@@ -3038,16 +3747,24 @@ async fn popup_swallows_clicks_outside_and_keeps_focus() {
     })
     .await
     .unwrap();
-    assert_eq!(m.active_window().active(), focused_before, "popup is modal: no focus change");
+    assert_eq!(
+        m.active_window().active(),
+        focused_before,
+        "popup is modal: no focus change"
+    );
     assert!(m.has_popup(), "popup still open");
-    assert!(m.resize_drag.is_none(), "no border drag starts under a popup");
+    assert!(
+        m.resize_drag.is_none(),
+        "no border drag starts under a popup"
+    );
 }
 
 #[tokio::test]
 async fn popup_swallows_interior_click_when_child_has_no_mouse_mode() {
     let mut m = make_two_pane_manager().await;
     let focused_before = m.active_window().active();
-    m.handle_command(Command::OpenPopup { command: None }).unwrap();
+    m.handle_command(Command::OpenPopup { command: None })
+        .unwrap();
     // Box center is genuinely interior: for a (1,1,21,78) viewport the box
     // is rows 3..=18 / cols 9..=70, so (11, 40) sits inside the border. It
     // also happens to sit on the SplitV gutter, and without Rule 0 this press
@@ -3063,9 +3780,19 @@ async fn popup_swallows_interior_click_when_child_has_no_mouse_mode() {
     .await
     .unwrap();
     assert!(m.has_popup());
-    assert!(m.selection().is_none(), "no layout selection starts under a popup");
-    assert!(m.resize_drag.is_none(), "no border drag starts under a popup");
-    assert_eq!(m.active_window().active(), focused_before, "no focus change under a popup");
+    assert!(
+        m.selection().is_none(),
+        "no layout selection starts under a popup"
+    );
+    assert!(
+        m.resize_drag.is_none(),
+        "no border drag starts under a popup"
+    );
+    assert_eq!(
+        m.active_window().active(),
+        focused_before,
+        "no focus change under a popup"
+    );
 }
 
 #[tokio::test]
@@ -3084,8 +3811,12 @@ async fn open_popup_clears_in_flight_resize_drag() {
     .unwrap();
     assert!(m.resize_drag.is_some(), "premise: drag started");
     // ...then a popup opens (e.g. via a keybinding) mid-drag.
-    m.handle_command(Command::OpenPopup { command: None }).unwrap();
-    assert!(m.resize_drag.is_none(), "popup open must drop the frozen drag");
+    m.handle_command(Command::OpenPopup { command: None })
+        .unwrap();
+    assert!(
+        m.resize_drag.is_none(),
+        "popup open must drop the frozen drag"
+    );
     assert!(m.selection().is_none());
 }
 
@@ -3115,7 +3846,11 @@ fn shift_left_press(row: u16, col: u16) -> MouseEvent {
     MouseEvent {
         kind: MouseKind::Press,
         button: MouseButton::Left,
-        modifiers: plexy_glass_mux::MouseModifiers { shift: true, alt: false, ctrl: false },
+        modifiers: plexy_glass_mux::MouseModifiers {
+            shift: true,
+            alt: false,
+            ctrl: false,
+        },
         row,
         col,
     }
@@ -3131,7 +3866,12 @@ async fn prompt_click_while_scrolled_jumps_to_viewport_top() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3149,7 +3889,11 @@ async fn prompt_click_while_scrolled_jumps_to_viewport_top() {
     m.handle_mouse(plain_left_press(2, 5)).await.unwrap();
 
     // Expected new offset: sb - abs_line = 10 - 3 = 7.
-    assert_eq!(pane.scroll_offset(), 7, "prompt row should be at viewport top (offset 7)");
+    assert_eq!(
+        pane.scroll_offset(),
+        7,
+        "prompt row should be at viewport top (offset 7)"
+    );
 }
 
 // J4-T2: same setup, press on a non-prompt row → behavior unchanged (selection
@@ -3161,7 +3905,12 @@ async fn non_prompt_click_while_scrolled_leaves_offset_unchanged() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3176,8 +3925,15 @@ async fn non_prompt_click_while_scrolled_leaves_offset_unchanged() {
     m.handle_mouse(plain_left_press(1, 5)).await.unwrap();
 
     // Offset must be unchanged; a selection started instead.
-    assert_eq!(pane.scroll_offset(), 8, "offset unchanged on non-prompt click");
-    assert!(m.selection().is_some(), "selection started on non-prompt click");
+    assert_eq!(
+        pane.scroll_offset(),
+        8,
+        "offset unchanged on non-prompt click"
+    );
+    assert!(
+        m.selection().is_some(),
+        "selection started on non-prompt click"
+    );
 }
 
 // J4-T3: offset 0 (live view) + prompt row under cursor → untouched (no
@@ -3188,7 +3944,12 @@ async fn prompt_click_at_live_view_does_not_change_offset() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3217,7 +3978,12 @@ async fn shift_click_on_scrolled_prompt_row_extends_selection_not_jumps() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3239,7 +4005,10 @@ async fn shift_click_on_scrolled_prompt_row_extends_selection_not_jumps() {
 
     // Shift+click fires the extend branch BEFORE the prompt-jump rung.
     assert_eq!(pane.scroll_offset(), 8, "shift+click: offset unchanged");
-    assert!(m.selection().is_some(), "shift+click: selection still active");
+    assert!(
+        m.selection().is_some(),
+        "shift+click: selection still active"
+    );
 }
 
 // J4-T5: prompt line in the GRID portion of a scrolled view → offset saturates
@@ -3254,7 +4023,12 @@ async fn prompt_click_on_grid_portion_snaps_to_live() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3275,7 +4049,11 @@ async fn prompt_click_on_grid_portion_snaps_to_live() {
     m.handle_mouse(plain_left_press(3, 5)).await.unwrap();
 
     // sb.saturating_sub(5) = 0 → snaps to live.
-    assert_eq!(pane.scroll_offset(), 0, "grid-portion prompt click saturates to live");
+    assert_eq!(
+        pane.scroll_offset(),
+        0,
+        "grid-portion prompt click saturates to live"
+    );
 }
 
 // J4-T6: pane with app mouse mode on → passthrough unaffected (event forwarded
@@ -3285,7 +4063,12 @@ async fn app_mouse_mode_passthrough_unaffected_by_prompt_jump() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3303,7 +4086,11 @@ async fn app_mouse_mode_passthrough_unaffected_by_prompt_jump() {
     m.handle_mouse(plain_left_press(2, 5)).await.unwrap();
 
     // Rule 5 forwarded the event, so J4's rung never ran and the offset is unchanged.
-    assert_eq!(pane.scroll_offset(), 8, "app mouse mode: passthrough, no offset change");
+    assert_eq!(
+        pane.scroll_offset(),
+        8,
+        "app mouse mode: passthrough, no offset change"
+    );
 }
 
 // J4-T7: double-click on the now-relocated content is just another click
@@ -3314,7 +4101,12 @@ async fn double_click_after_prompt_jump_does_not_panic() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3343,15 +4135,22 @@ async fn hint_overlay_pick_returns_copy() {
     let notify = Arc::new(Notify::new());
     let mut wm = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
     )
     .unwrap();
-    let targets = vec![
-        HintTarget { start: (0, 0), text: "alpha".into(), kind: HintKind::Sha },
-    ];
+    let targets = vec![HintTarget {
+        start: (0, 0),
+        text: "alpha".into(),
+        kind: HintKind::Sha,
+    }];
     // Single target + single-char alphabet → label "a".
     let state = HintState::new(targets, "asdf");
     wm.open_hints(state);
@@ -3374,7 +4173,12 @@ async fn move_window_forward_keeps_active_following_window() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3399,7 +4203,12 @@ async fn move_window_backward_and_to_end() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3430,7 +4239,12 @@ async fn move_window_keeps_unrelated_active_window() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3452,7 +4266,12 @@ async fn move_window_noops() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3473,7 +4292,12 @@ async fn move_window_by_id_resolves_source() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3498,7 +4322,12 @@ async fn three_tab_manager() -> WindowManager {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3529,7 +4358,11 @@ fn mev(kind: MouseKind, row: u16, col: u16, alt: bool) -> MouseEvent {
     MouseEvent {
         kind,
         button: MouseButton::Left,
-        modifiers: plexy_glass_mux::MouseModifiers { shift: false, alt, ctrl: false },
+        modifiers: plexy_glass_mux::MouseModifiers {
+            shift: false,
+            alt,
+            ctrl: false,
+        },
         row,
         col,
     }
@@ -3541,11 +4374,15 @@ async fn alt_drag_reorders_window_to_drop_slot() {
     let ids: Vec<_> = m.windows().iter().map(|w| w.id).collect();
 
     // Alt-press tab 0 → drag begins; highlight points at index 0.
-    m.handle_mouse(mev(MouseKind::Press, 23, 2, true)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Press, 23, 2, true))
+        .await
+        .unwrap();
     assert_eq!(m.dragging_window_idx(), Some(0), "drag started on tab 0");
 
     // Release over tab 2 → move W0 to slot 2.
-    m.handle_mouse(mev(MouseKind::Release, 23, 12, false)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Release, 23, 12, false))
+        .await
+        .unwrap();
     assert_eq!(m.dragging_window_idx(), None, "drag cleared on release");
     assert_eq!(
         m.windows().iter().map(|w| w.id).collect::<Vec<_>>(),
@@ -3556,8 +4393,14 @@ async fn alt_drag_reorders_window_to_drop_slot() {
 #[tokio::test]
 async fn plain_press_still_selects_no_drag() {
     let mut m = three_tab_manager().await;
-    m.handle_mouse(mev(MouseKind::Press, 23, 2, false)).await.unwrap();
-    assert_eq!(m.dragging_window_idx(), None, "no drag without the modifier");
+    m.handle_mouse(mev(MouseKind::Press, 23, 2, false))
+        .await
+        .unwrap();
+    assert_eq!(
+        m.dragging_window_idx(),
+        None,
+        "no drag without the modifier"
+    );
     assert_eq!(m.active_idx(), 0, "plain click selected tab 0");
 }
 
@@ -3565,8 +4408,12 @@ async fn plain_press_still_selects_no_drag() {
 async fn alt_drag_release_on_same_tab_is_noop() {
     let mut m = three_tab_manager().await;
     let ids: Vec<_> = m.windows().iter().map(|w| w.id).collect();
-    m.handle_mouse(mev(MouseKind::Press, 23, 2, true)).await.unwrap();
-    m.handle_mouse(mev(MouseKind::Release, 23, 3, false)).await.unwrap(); // same tab 0
+    m.handle_mouse(mev(MouseKind::Press, 23, 2, true))
+        .await
+        .unwrap();
+    m.handle_mouse(mev(MouseKind::Release, 23, 3, false))
+        .await
+        .unwrap(); // same tab 0
     assert_eq!(m.windows().iter().map(|w| w.id).collect::<Vec<_>>(), ids);
     assert_eq!(m.dragging_window_idx(), None);
 }
@@ -3575,11 +4422,21 @@ async fn alt_drag_release_on_same_tab_is_noop() {
 async fn alt_drag_release_off_status_row_aborts() {
     let mut m = three_tab_manager().await;
     let ids: Vec<_> = m.windows().iter().map(|w| w.id).collect();
-    m.handle_mouse(mev(MouseKind::Press, 23, 2, true)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Press, 23, 2, true))
+        .await
+        .unwrap();
     // Move stays in drag; release on a pane row (5) aborts with no reorder.
-    m.handle_mouse(mev(MouseKind::Move, 10, 8, false)).await.unwrap();
-    assert_eq!(m.dragging_window_idx(), Some(0), "still dragging after a move");
-    m.handle_mouse(mev(MouseKind::Release, 5, 8, false)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Move, 10, 8, false))
+        .await
+        .unwrap();
+    assert_eq!(
+        m.dragging_window_idx(),
+        Some(0),
+        "still dragging after a move"
+    );
+    m.handle_mouse(mev(MouseKind::Release, 5, 8, false))
+        .await
+        .unwrap();
     assert_eq!(m.windows().iter().map(|w| w.id).collect::<Vec<_>>(), ids);
     assert_eq!(m.dragging_window_idx(), None);
 }
@@ -3588,8 +4445,12 @@ async fn alt_drag_release_off_status_row_aborts() {
 async fn alt_drag_release_right_of_tabs_moves_to_end() {
     let mut m = three_tab_manager().await;
     let ids: Vec<_> = m.windows().iter().map(|w| w.id).collect();
-    m.handle_mouse(mev(MouseKind::Press, 23, 7, true)).await.unwrap(); // grab tab 1
-    m.handle_mouse(mev(MouseKind::Release, 23, 40, false)).await.unwrap(); // past all tabs
+    m.handle_mouse(mev(MouseKind::Press, 23, 7, true))
+        .await
+        .unwrap(); // grab tab 1
+    m.handle_mouse(mev(MouseKind::Release, 23, 40, false))
+        .await
+        .unwrap(); // past all tabs
     assert_eq!(
         m.windows().iter().map(|w| w.id).collect::<Vec<_>>(),
         vec![ids[0], ids[2], ids[1]]
@@ -3602,11 +4463,20 @@ async fn alt_drag_release_right_of_tabs_moves_to_end() {
 async fn open_popup_clears_in_flight_tab_drag() {
     let mut m = three_tab_manager().await;
     // Alt-press tab 0 → drag begins.
-    m.handle_mouse(mev(MouseKind::Press, 23, 2, true)).await.unwrap();
-    assert!(m.dragging_window_idx().is_some(), "premise: tab drag started");
+    m.handle_mouse(mev(MouseKind::Press, 23, 2, true))
+        .await
+        .unwrap();
+    assert!(
+        m.dragging_window_idx().is_some(),
+        "premise: tab drag started"
+    );
     // A popup opens mid-drag (e.g. via a keybinding from another client).
-    m.handle_command(Command::OpenPopup { command: None }).unwrap();
-    assert!(m.dragging_window_idx().is_none(), "popup open must clear the frozen tab drag");
+    m.handle_command(Command::OpenPopup { command: None })
+        .unwrap();
+    assert!(
+        m.dragging_window_idx().is_none(),
+        "popup open must clear the frozen tab drag"
+    );
 }
 
 // I2: a popup opened mid alt-drag must clear the in-flight pane_drag so the
@@ -3618,11 +4488,17 @@ async fn open_popup_clears_in_flight_pane_drag() {
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
     let (cr, cc) = (r0.row + r0.rows / 2, r0.col + r0.cols / 2);
     // Alt-press inside pane 0 → pane drag begins.
-    m.handle_mouse(mev(MouseKind::Press, cr, cc, true)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Press, cr, cc, true))
+        .await
+        .unwrap();
     assert!(m.pane_drag_roles().is_some(), "premise: pane drag started");
     // A popup opens mid-drag (e.g. via a keybinding from another client).
-    m.handle_command(Command::OpenPopup { command: None }).unwrap();
-    assert!(m.pane_drag_roles().is_none(), "popup open must clear the frozen pane drag");
+    m.handle_command(Command::OpenPopup { command: None })
+        .unwrap();
+    assert!(
+        m.pane_drag_roles().is_none(),
+        "popup open must clear the frozen pane drag"
+    );
 }
 
 // M1: `last_active_window` re-follows its window by id after `move_window`.
@@ -3631,7 +4507,12 @@ async fn move_window_keeps_last_active_valid_by_id() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3667,20 +4548,36 @@ async fn alt_drag_swaps_panes_and_focuses_source() {
     let (c1r, c1c) = (r1.row + r1.rows / 2, r1.col + r1.cols / 2);
 
     // Alt-press in pane 0 → drag begins, source = pane 0.
-    m.handle_mouse(mev(MouseKind::Press, c0r, c0c, true)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Press, c0r, c0c, true))
+        .await
+        .unwrap();
     assert_eq!(m.pane_drag_roles(), Some((PaneId(0), None)));
 
     // Move into pane 1 → target updates.
-    m.handle_mouse(mev(MouseKind::Move, c1r, c1c, false)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Move, c1r, c1c, false))
+        .await
+        .unwrap();
     assert_eq!(m.pane_drag_roles(), Some((PaneId(0), Some(PaneId(1)))));
 
     // Release in pane 1 → swap + focus source + clear.
-    m.handle_mouse(mev(MouseKind::Release, c1r, c1c, false)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Release, c1r, c1c, false))
+        .await
+        .unwrap();
     assert_eq!(m.pane_drag_roles(), None, "drag cleared on release");
     // Slots swapped occupants: pane 0's old position now holds pane 1, and vice versa.
-    assert_eq!(m.active_window().layout().pane_at_coord(vp, c0r, c0c), Some(PaneId(1)));
-    assert_eq!(m.active_window().layout().pane_at_coord(vp, c1r, c1c), Some(PaneId(0)));
-    assert_eq!(m.active_window().active(), PaneId(0), "focus follows dragged pane");
+    assert_eq!(
+        m.active_window().layout().pane_at_coord(vp, c0r, c0c),
+        Some(PaneId(1))
+    );
+    assert_eq!(
+        m.active_window().layout().pane_at_coord(vp, c1r, c1c),
+        Some(PaneId(0))
+    );
+    assert_eq!(
+        m.active_window().active(),
+        PaneId(0),
+        "focus follows dragged pane"
+    );
 }
 
 #[tokio::test]
@@ -3688,9 +4585,15 @@ async fn plain_press_in_pane_does_not_start_drag() {
     let mut m = make_two_pane_manager().await; // active = 1
     let vp = m.viewport();
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
-    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, false)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, false))
+        .await
+        .unwrap();
     assert_eq!(m.pane_drag_roles(), None, "no drag without the modifier");
-    assert_eq!(m.active_window().active(), PaneId(0), "plain click focused pane 0");
+    assert_eq!(
+        m.active_window().active(),
+        PaneId(0),
+        "plain click focused pane 0"
+    );
 }
 
 #[tokio::test]
@@ -3700,9 +4603,17 @@ async fn alt_drag_release_on_same_pane_is_noop() {
     let r1 = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
     let (cr, cc) = (r1.row + r1.rows / 2, r1.col + r1.cols / 2);
     let before = m.active_window().layout().dfs_leaves();
-    m.handle_mouse(mev(MouseKind::Press, cr, cc, true)).await.unwrap();
-    m.handle_mouse(mev(MouseKind::Release, cr, cc, false)).await.unwrap();
-    assert_eq!(m.active_window().layout().dfs_leaves(), before, "no swap on same pane");
+    m.handle_mouse(mev(MouseKind::Press, cr, cc, true))
+        .await
+        .unwrap();
+    m.handle_mouse(mev(MouseKind::Release, cr, cc, false))
+        .await
+        .unwrap();
+    assert_eq!(
+        m.active_window().layout().dfs_leaves(),
+        before,
+        "no swap on same pane"
+    );
     assert_eq!(m.pane_drag_roles(), None);
 }
 
@@ -3712,10 +4623,18 @@ async fn alt_drag_release_off_content_aborts() {
     let vp = m.viewport();
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
     let before = m.active_window().layout().dfs_leaves();
-    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, true)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, true))
+        .await
+        .unwrap();
     // Release far off the grid → pane_at_coord None → abort.
-    m.handle_mouse(mev(MouseKind::Release, 250, 250, false)).await.unwrap();
-    assert_eq!(m.active_window().layout().dfs_leaves(), before, "no swap off content");
+    m.handle_mouse(mev(MouseKind::Release, 250, 250, false))
+        .await
+        .unwrap();
+    assert_eq!(
+        m.active_window().layout().dfs_leaves(),
+        before,
+        "no swap off content"
+    );
     assert_eq!(m.pane_drag_roles(), None);
 }
 
@@ -3731,8 +4650,14 @@ async fn alt_drag_preempts_child_mouse_mode() {
     assert!(m.pane_has_any_mouse_mode(PaneId(1)));
     let vp = m.viewport();
     let r1 = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
-    m.handle_mouse(mev(MouseKind::Press, r1.row + 1, r1.col + 1, true)).await.unwrap();
-    assert_eq!(m.pane_drag_roles().map(|(s, _)| s), Some(PaneId(1)), "alt-press pre-empts child");
+    m.handle_mouse(mev(MouseKind::Press, r1.row + 1, r1.col + 1, true))
+        .await
+        .unwrap();
+    assert_eq!(
+        m.pane_drag_roles().map(|(s, _)| s),
+        Some(PaneId(1)),
+        "alt-press pre-empts child"
+    );
 }
 
 // M2: `move_window` clamp-collapses-to-noop (to=99 clamps to 2 == from) returns
@@ -3742,7 +4667,12 @@ async fn move_window_clamp_to_noop() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3787,7 +4717,12 @@ async fn overlay_swallows_mouse_events() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3800,8 +4735,13 @@ async fn overlay_swallows_mouse_events() {
     }]);
     m.handle_command(Command::ShowHelp).unwrap();
     assert!(m.overlay().is_some(), "premise: overlay open");
-    m.handle_mouse(mev(MouseKind::Press, 23, 2, false)).await.unwrap();
-    assert!(!m.detach_requested, "overlay must swallow the status-bar Detach click");
+    m.handle_mouse(mev(MouseKind::Press, 23, 2, false))
+        .await
+        .unwrap();
+    assert!(
+        !m.detach_requested,
+        "overlay must swallow the status-bar Detach click"
+    );
 }
 
 // #4: reset_mouse_gestures clears every in-flight gesture (here a pane drag and
@@ -3811,7 +4751,9 @@ async fn reset_mouse_gestures_clears_in_flight_drag() {
     let mut m = make_two_pane_manager().await;
     let vp = m.viewport();
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
-    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, true)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, true))
+        .await
+        .unwrap();
     assert!(m.pane_drag_roles().is_some(), "premise: pane drag started");
     m.reset_mouse_gestures();
     assert!(m.pane_drag_roles().is_none(), "reset clears the pane drag");
@@ -3829,12 +4771,17 @@ async fn open_overlay_clears_in_flight_pane_drag() {
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
     let (cr, cc) = (r0.row + r0.rows / 2, r0.col + r0.cols / 2);
     // Alt-press inside pane 0 → pane drag begins.
-    m.handle_mouse(mev(MouseKind::Press, cr, cc, true)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Press, cr, cc, true))
+        .await
+        .unwrap();
     assert!(m.pane_drag_roles().is_some(), "premise: pane drag started");
     // A help overlay opens mid-drag (e.g. via its keybinding).
     m.handle_command(Command::ShowHelp).unwrap();
     assert!(m.overlay().is_some(), "premise: overlay open");
-    assert!(m.pane_drag_roles().is_none(), "overlay open must clear the frozen pane drag");
+    assert!(
+        m.pane_drag_roles().is_none(),
+        "overlay open must clear the frozen pane drag"
+    );
 }
 
 // #4: a pane-swap drag whose Release lands on the status-bar row aborts cleanly,
@@ -3847,12 +4794,24 @@ async fn pane_drag_release_on_status_row_aborts() {
     let vp = m.viewport();
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
     let before = m.active_window().layout().dfs_leaves();
-    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, true)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, true))
+        .await
+        .unwrap();
     assert!(m.pane_drag_roles().is_some(), "premise: pane drag started");
     // Release over the status-bar row → abort, no swap, drag cleared.
-    m.handle_mouse(mev(MouseKind::Release, 23, 5, false)).await.unwrap();
-    assert_eq!(m.pane_drag_roles(), None, "drag cleared on status-row release");
-    assert_eq!(m.active_window().layout().dfs_leaves(), before, "no swap on abort");
+    m.handle_mouse(mev(MouseKind::Release, 23, 5, false))
+        .await
+        .unwrap();
+    assert_eq!(
+        m.pane_drag_roles(),
+        None,
+        "drag cleared on status-row release"
+    );
+    assert_eq!(
+        m.active_window().layout().dfs_leaves(),
+        before,
+        "no swap on abort"
+    );
 }
 
 // #17: a drag over a click-only child (?1000, no ?1002/?1003) must NOT forward
@@ -3865,7 +4824,12 @@ async fn motion_not_forwarded_to_click_only_child() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(), // `/bin/cat` echoes what it receives
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3879,9 +4843,15 @@ async fn motion_not_forwarded_to_click_only_child() {
     });
     let mut rx = pane.subscribe_output();
     // Press (forwarded), Move (must be dropped), Release (forwarded).
-    m.handle_mouse(mev(MouseKind::Press, 4, 6, false)).await.unwrap();
-    m.handle_mouse(mev(MouseKind::Move, 4, 9, false)).await.unwrap();
-    m.handle_mouse(mev(MouseKind::Release, 4, 9, false)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Press, 4, 6, false))
+        .await
+        .unwrap();
+    m.handle_mouse(mev(MouseKind::Move, 4, 9, false))
+        .await
+        .unwrap();
+    m.handle_mouse(mev(MouseKind::Release, 4, 9, false))
+        .await
+        .unwrap();
 
     let mut out = Vec::new();
     let deadline = Instant::now() + Duration::from_millis(1200);
@@ -3890,8 +4860,7 @@ async fn motion_not_forwarded_to_click_only_child() {
         if now >= deadline {
             break;
         }
-        match time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await
-        {
+        match time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await {
             Ok(Ok(c)) => out.extend_from_slice(&c),
             Ok(Err(_)) => break,
             Err(_) if !out.is_empty() => break,
@@ -3903,7 +4872,10 @@ async fn motion_not_forwarded_to_click_only_child() {
     // `ESC[<32;9;4M`. Match the numeric tails (cat may render the ESC[< prefix
     // in caret notation, as the sibling forwarded-mouse test does). The motion
     // report must be absent; the press must be present.
-    assert!(!s.contains("32;9;4"), "motion must not reach a click-only child, got {s:?}");
+    assert!(
+        !s.contains("32;9;4"),
+        "motion must not reach a click-only child, got {s:?}"
+    );
     assert!(s.contains("0;6;4M"), "press should be forwarded, got {s:?}");
     let _ = pane.send_input(Bytes::from_static(&[0x04])).await;
 }
@@ -3917,7 +4889,12 @@ async fn motion_forwarded_to_motion_tracking_child() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3929,8 +4906,12 @@ async fn motion_forwarded_to_motion_tracking_child() {
         s.modes.insert(Modes::MOUSE_SGR);
     });
     let mut rx = pane.subscribe_output();
-    m.handle_mouse(mev(MouseKind::Press, 4, 6, false)).await.unwrap();
-    m.handle_mouse(mev(MouseKind::Move, 4, 9, false)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Press, 4, 6, false))
+        .await
+        .unwrap();
+    m.handle_mouse(mev(MouseKind::Move, 4, 9, false))
+        .await
+        .unwrap();
     let mut out = Vec::new();
     let deadline = Instant::now() + Duration::from_millis(1200);
     loop {
@@ -3938,8 +4919,7 @@ async fn motion_forwarded_to_motion_tracking_child() {
         if now >= deadline {
             break;
         }
-        match time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await
-        {
+        match time::timeout((deadline - now).min(Duration::from_millis(150)), rx.recv()).await {
             Ok(Ok(c)) => out.extend_from_slice(&c),
             Ok(Err(_)) => break,
             Err(_) if !out.is_empty() => break,
@@ -3947,7 +4927,10 @@ async fn motion_forwarded_to_motion_tracking_child() {
         }
     }
     let s = String::from_utf8_lossy(&out);
-    assert!(s.contains("32;9;4"), "motion must reach a ?1002 child, got {s:?}");
+    assert!(
+        s.contains("32;9;4"),
+        "motion must reach a ?1002 child, got {s:?}"
+    );
     let _ = pane.send_input(Bytes::from_static(&[0x04])).await;
 }
 
@@ -3958,7 +4941,12 @@ async fn osc8_click_without_opener_reports_error() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
-        PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
         notify,
         None,
         cfg(),
@@ -3976,8 +4964,13 @@ async fn osc8_click_without_opener_reports_error() {
     // SAFETY: nextest runs each test in its own process.
     unsafe { env::set_var("PATH", dir.path()) };
     // Physical (1,1) → pane-local (0,0) (viewport frame inset, no status bar).
-    m.handle_mouse(mev(MouseKind::Press, 1, 1, false)).await.unwrap();
+    m.handle_mouse(mev(MouseKind::Press, 1, 1, false))
+        .await
+        .unwrap();
     unsafe { env::set_var("PATH", old) };
     assert_eq!(m.active_severity(), Severity::Error);
-    assert_eq!(m.take_active_message(), Some("couldn't open (no system opener)"));
+    assert_eq!(
+        m.take_active_message(),
+        Some("couldn't open (no system opener)")
+    );
 }

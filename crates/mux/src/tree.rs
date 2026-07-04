@@ -49,9 +49,10 @@ impl TreeNode {
     pub fn key(&self) -> Option<NodeKey> {
         match self.kind() {
             TreeKind::Session => Some(NodeKey::Session(self.session.clone())),
-            TreeKind::Window => self
-                .window
-                .map(|window| NodeKey::Window { session: self.session.clone(), window }),
+            TreeKind::Window => self.window.map(|window| NodeKey::Window {
+                session: self.session.clone(),
+                window,
+            }),
             TreeKind::Pane => None,
         }
     }
@@ -70,7 +71,9 @@ pub enum TreeMode {
     #[default]
     Navigate,
     ConfirmKill,
-    Rename { buf: String },
+    Rename {
+        buf: String,
+    },
     /// Incremental filter entry; the live pattern is [`TreeState::filter`].
     Filter,
 }
@@ -91,7 +94,10 @@ pub struct TreeState {
 impl TreeState {
     /// A fresh fully-expanded, unfiltered tree over `nodes`.
     pub fn new(nodes: Vec<TreeNode>) -> Self {
-        Self { nodes, ..Self::default() }
+        Self {
+            nodes,
+            ..Self::default()
+        }
     }
 
     /// Indices of the currently visible rows, in order. A row is visible iff
@@ -138,16 +144,37 @@ impl TreeState {
 /// What the caller (daemon connection layer) must perform after a tree key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeAction {
-    Switch { session: String, window: Option<WindowId>, pane: Option<PaneId> },
+    Switch {
+        session: String,
+        window: Option<WindowId>,
+        pane: Option<PaneId>,
+    },
     KillSession(String),
-    KillWindow { session: String, window: WindowId },
-    KillPane { session: String, pane: PaneId },
-    RenameWindow { session: String, window: WindowId, name: String },
-    RenamePane { session: String, pane: PaneId, name: String },
+    KillWindow {
+        session: String,
+        window: WindowId,
+    },
+    KillPane {
+        session: String,
+        pane: PaneId,
+    },
+    RenameWindow {
+        session: String,
+        window: WindowId,
+        name: String,
+    },
+    RenamePane {
+        session: String,
+        pane: PaneId,
+        name: String,
+    },
     /// Rename a session. Unlike the window/pane renames the tree is NOT
     /// optimistically mutated: the daemon commits on success only (see
     /// [`handle_rename`]'s session arm).
-    RenameSession { old: String, new: String },
+    RenameSession {
+        old: String,
+        new: String,
+    },
 }
 
 /// tree.rs-local follow-up. The daemon adapts this into `OverlayAction`/
@@ -267,7 +294,9 @@ fn handle_navigate(event: &KeyEvent, state: &mut TreeState) -> TreeOutcome {
             // All kinds, sessions included; the edit buffer is primed with the
             // bare current name (same as window/pane rename).
             let n = &state.nodes[state.selected];
-            state.mode = TreeMode::Rename { buf: n.name.clone() };
+            state.mode = TreeMode::Rename {
+                buf: n.name.clone(),
+            };
             TreeOutcome::Redraw
         }
         _ => TreeOutcome::None,
@@ -293,7 +322,10 @@ fn collapse_selected(state: &mut TreeState) -> TreeOutcome {
             let session = n.session.clone();
             // invariant: a Pane node always carries its parent WindowId.
             let window = n.window.expect("pane node has WindowId");
-            state.collapsed.insert(NodeKey::Window { session: session.clone(), window });
+            state.collapsed.insert(NodeKey::Window {
+                session: session.clone(),
+                window,
+            });
             // Land on the window row: the nearest preceding row of that window.
             let parent = (0..state.selected).rev().find(|&i| {
                 let p = &state.nodes[i];
@@ -490,7 +522,12 @@ fn clamp_sel(state: &mut TreeState) {
     if vis.contains(&state.selected) {
         return;
     }
-    match vis.iter().rev().find(|&&i| i <= state.selected).or_else(|| vis.first()) {
+    match vis
+        .iter()
+        .rev()
+        .find(|&&i| i <= state.selected)
+        .or_else(|| vis.first())
+    {
         Some(&i) => state.selected = i,
         None => state.selected = 0,
     }
@@ -565,12 +602,21 @@ mod tests {
     #[test]
     fn collapse_session_hides_descendants_and_expand_restores() {
         let mut s = sample();
-        assert_eq!(handle_tree(&ev(Modifiers::empty(), Key::Char('h')), &mut s), TreeOutcome::Redraw);
+        assert_eq!(
+            handle_tree(&ev(Modifiers::empty(), Key::Char('h')), &mut s),
+            TreeOutcome::Redraw
+        );
         assert_eq!(s.visible_indices(), vec![0, 4, 5, 6]);
         assert!(s.collapsed.contains(&NodeKey::Session("A".into())));
         // Already collapsed → no-op.
-        assert_eq!(handle_tree(&ev(Modifiers::empty(), Key::Char('h')), &mut s), TreeOutcome::None);
-        assert_eq!(handle_tree(&ev(Modifiers::empty(), Key::Char('l')), &mut s), TreeOutcome::Redraw);
+        assert_eq!(
+            handle_tree(&ev(Modifiers::empty(), Key::Char('h')), &mut s),
+            TreeOutcome::None
+        );
+        assert_eq!(
+            handle_tree(&ev(Modifiers::empty(), Key::Char('l')), &mut s),
+            TreeOutcome::Redraw
+        );
         assert_eq!(s.visible_indices(), vec![0, 1, 2, 3, 4, 5, 6]);
         assert!(s.collapsed.is_empty());
     }
@@ -584,10 +630,16 @@ mod tests {
             TreeOutcome::Redraw
         );
         assert_eq!(s.visible_indices(), vec![0, 1, 4, 5, 6]);
-        assert!(s.collapsed.contains(&NodeKey::Window { session: "A".into(), window: WindowId(0) }));
+        assert!(s.collapsed.contains(&NodeKey::Window {
+            session: "A".into(),
+            window: WindowId(0)
+        }));
         // Expand via Right.
         assert_eq!(
-            handle_tree(&ev(Modifiers::empty(), Key::Arrow(Direction::Right)), &mut s),
+            handle_tree(
+                &ev(Modifiers::empty(), Key::Arrow(Direction::Right)),
+                &mut s
+            ),
             TreeOutcome::Redraw
         );
         assert_eq!(s.visible_indices().len(), 7);
@@ -597,7 +649,10 @@ mod tests {
     fn pane_h_folds_its_window_and_moves_selection_to_it() {
         let mut s = sample();
         s.selected = 2; // pane under A's window
-        assert_eq!(handle_tree(&ev(Modifiers::empty(), Key::Char('h')), &mut s), TreeOutcome::Redraw);
+        assert_eq!(
+            handle_tree(&ev(Modifiers::empty(), Key::Char('h')), &mut s),
+            TreeOutcome::Redraw
+        );
         assert_eq!(s.selected, 1, "selection moved to the folded window row");
         assert_eq!(s.visible_indices(), vec![0, 1, 4, 5, 6]);
     }
@@ -606,7 +661,10 @@ mod tests {
     fn expand_on_pane_is_noop() {
         let mut s = sample();
         s.selected = 2;
-        assert_eq!(handle_tree(&ev(Modifiers::empty(), Key::Char('l')), &mut s), TreeOutcome::None);
+        assert_eq!(
+            handle_tree(&ev(Modifiers::empty(), Key::Char('l')), &mut s),
+            TreeOutcome::None
+        );
     }
 
     #[test]
@@ -724,7 +782,10 @@ mod tests {
         let out = handle_tree(&ev(Modifiers::empty(), Key::Char('y')), &mut s);
         assert_eq!(
             out,
-            TreeOutcome::Act(TreeAction::KillWindow { session: "B".into(), window: WindowId(0) })
+            TreeOutcome::Act(TreeAction::KillWindow {
+                session: "B".into(),
+                window: WindowId(0)
+            })
         );
     }
 
@@ -759,16 +820,29 @@ mod tests {
     fn session_r_enters_rename_primed_and_emits_action_without_mutation() {
         let mut s = sample();
         let before = s.nodes.clone();
-        assert_eq!(handle_tree(&ev(Modifiers::empty(), Key::Char('r')), &mut s), TreeOutcome::Redraw);
-        assert_eq!(s.mode, TreeMode::Rename { buf: "A".into() }, "primed with the session name");
+        assert_eq!(
+            handle_tree(&ev(Modifiers::empty(), Key::Char('r')), &mut s),
+            TreeOutcome::Redraw
+        );
+        assert_eq!(
+            s.mode,
+            TreeMode::Rename { buf: "A".into() },
+            "primed with the session name"
+        );
         handle_tree(&ev(Modifiers::empty(), Key::Backspace), &mut s);
         type_str(&mut s, "Z");
         let out = handle_tree(&ev(Modifiers::empty(), Key::Enter), &mut s);
         assert_eq!(
             out,
-            TreeOutcome::Act(TreeAction::RenameSession { old: "A".into(), new: "Z".into() })
+            TreeOutcome::Act(TreeAction::RenameSession {
+                old: "A".into(),
+                new: "Z".into()
+            })
         );
-        assert_eq!(s.nodes, before, "tree NOT optimistically mutated for a session rename");
+        assert_eq!(
+            s.nodes, before,
+            "tree NOT optimistically mutated for a session rename"
+        );
         assert_eq!(s.mode, TreeMode::Navigate);
     }
 
@@ -778,10 +852,16 @@ mod tests {
         // Empty input: same as window/pane rename, a no-op edit.
         handle_tree(&ev(Modifiers::empty(), Key::Char('r')), &mut s);
         handle_tree(&ev(Modifiers::empty(), Key::Backspace), &mut s);
-        assert_eq!(handle_tree(&ev(Modifiers::empty(), Key::Enter), &mut s), TreeOutcome::Redraw);
+        assert_eq!(
+            handle_tree(&ev(Modifiers::empty(), Key::Enter), &mut s),
+            TreeOutcome::Redraw
+        );
         // Unchanged: no action (the registry would reject old == new).
         handle_tree(&ev(Modifiers::empty(), Key::Char('r')), &mut s);
-        assert_eq!(handle_tree(&ev(Modifiers::empty(), Key::Enter), &mut s), TreeOutcome::Redraw);
+        assert_eq!(
+            handle_tree(&ev(Modifiers::empty(), Key::Enter), &mut s),
+            TreeOutcome::Redraw
+        );
         assert_eq!(s.mode, TreeMode::Navigate);
     }
 
@@ -821,7 +901,11 @@ mod tests {
         let mut s = sample();
         assert_eq!(
             handle_tree(&ev(Modifiers::empty(), Key::Enter), &mut s),
-            TreeOutcome::Act(TreeAction::Switch { session: "A".into(), window: None, pane: None })
+            TreeOutcome::Act(TreeAction::Switch {
+                session: "A".into(),
+                window: None,
+                pane: None
+            })
         );
         s.selected = 1;
         assert_eq!(
@@ -854,7 +938,10 @@ mod tests {
         let out = handle_tree(&ev(Modifiers::empty(), Key::Char('y')), &mut s);
         assert_eq!(
             out,
-            TreeOutcome::Act(TreeAction::KillWindow { session: "A".into(), window: WindowId(0) })
+            TreeOutcome::Act(TreeAction::KillWindow {
+                session: "A".into(),
+                window: WindowId(0)
+            })
         );
         assert_eq!(s.nodes.len(), 4);
         assert_eq!(s.mode, TreeMode::Navigate);
@@ -949,7 +1036,10 @@ mod tests {
             Key::Char('x'),
             Key::Char('r'),
         ] {
-            assert_eq!(handle_tree(&ev(Modifiers::empty(), key), &mut s), TreeOutcome::None);
+            assert_eq!(
+                handle_tree(&ev(Modifiers::empty(), key), &mut s),
+                TreeOutcome::None
+            );
         }
     }
 

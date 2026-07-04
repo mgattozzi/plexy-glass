@@ -2,8 +2,7 @@
 //! consistent inverses. Every cell inside a pane's content rect must hit-test
 //! back to that pane, which is the invariant underneath all mouse routing.
 
-use hegel::TestCase;
-use hegel::generators as gs;
+use hegel::{TestCase, generators as gs};
 use plexy_glass_mux::{LayoutTree, PaneId, Rect, SplitDir, SplitPosition};
 
 /// Build a random split layout by applying up to a handful of splits to random
@@ -25,7 +24,9 @@ fn random_layout(tc: &TestCase) -> LayoutTree {
         } else {
             SplitDir::Horizontal
         };
-        if t.split(target, dir, PaneId(next), SplitPosition::After).is_ok() {
+        if t.split(target, dir, PaneId(next), SplitPosition::After)
+            .is_ok()
+        {
             next += 1;
         }
     }
@@ -38,7 +39,9 @@ fn every_corner_of_a_pane_rect_hit_tests_to_it(tc: TestCase) {
     // A generous viewport so panes keep real content rects after the gutters.
     let vp = Rect::new(0, 0, 60, 100);
     for pane in t.panes() {
-        let Some(rect) = t.rect_of(pane, vp) else { continue };
+        let Some(rect) = t.rect_of(pane, vp) else {
+            continue;
+        };
         if rect.rows == 0 || rect.cols == 0 {
             continue;
         }
@@ -91,19 +94,36 @@ fn replace_leaf_preserves_slot_set_and_rects(tc: TestCase) {
         .collect();
 
     let replaced = t.replace_leaf(old, new);
-    assert!(replaced, "replacing an existing leaf {old:?} must report success");
+    assert!(
+        replaced,
+        "replacing an existing leaf {old:?} must report success"
+    );
 
     let panes_after = t.panes();
-    tc.note(&format!("before={panes_before:?} old={old:?} after={panes_after:?}"));
+    tc.note(&format!(
+        "before={panes_before:?} old={old:?} after={panes_after:?}"
+    ));
     // Arity preserved: same count, old gone, new present.
-    assert_eq!(panes_after.len(), panes_before.len(), "pane count must not change");
+    assert_eq!(
+        panes_after.len(),
+        panes_before.len(),
+        "pane count must not change"
+    );
     assert!(!panes_after.contains(&old), "old id must be gone");
     assert!(panes_after.contains(&new), "new id must occupy the slot");
     // The new occupant inherits the exact slot rect.
-    assert_eq!(t.rect_of(new, vp), old_rect, "new pane inherits the old slot's rect");
+    assert_eq!(
+        t.rect_of(new, vp),
+        old_rect,
+        "new pane inherits the old slot's rect"
+    );
     // Every other pane's rect is untouched.
     for (p, rect) in others_before {
-        assert_eq!(t.rect_of(p, vp), rect, "sibling {p:?} rect must be unchanged");
+        assert_eq!(
+            t.rect_of(p, vp),
+            rect,
+            "sibling {p:?} rect must be unchanged"
+        );
     }
 }
 

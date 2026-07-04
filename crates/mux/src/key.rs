@@ -1,7 +1,8 @@
 //! Typed keyboard events used by the keymap and input router.
 
-use crate::Direction;
 use bitflags::bitflags;
+
+use crate::Direction;
 
 bitflags! {
     /// Keyboard modifiers, aligned to the wire convention so that
@@ -26,9 +27,9 @@ impl Modifiers {
     pub fn alias_meta_as_alt(s: &str) -> Option<Self> {
         match s {
             "Shift" | "shift" | "SHIFT" => Some(Self::SHIFT),
-            "Ctrl"  | "ctrl"  | "CTRL"  | "Control" | "control" => Some(Self::CTRL),
-            "Alt"   | "alt"   | "ALT"   | "Meta"    | "meta" | "META" => Some(Self::ALT),
-            "Super" | "super" | "SUPER" | "Cmd"     | "cmd"  | "CMD"  => Some(Self::SUPER),
+            "Ctrl" | "ctrl" | "CTRL" | "Control" | "control" => Some(Self::CTRL),
+            "Alt" | "alt" | "ALT" | "Meta" | "meta" | "META" => Some(Self::ALT),
+            "Super" | "super" | "SUPER" | "Cmd" | "cmd" | "CMD" => Some(Self::SUPER),
             "Hyper" | "hyper" | "HYPER" => Some(Self::HYPER),
             _ => None,
         }
@@ -40,7 +41,7 @@ pub enum Key {
     /// Any printable scalar (or non-printable control char if it arrives raw).
     Char(char),
     Arrow(Direction),
-    Function(u8),    // 1..=12
+    Function(u8), // 1..=12
     Home,
     End,
     PageUp,

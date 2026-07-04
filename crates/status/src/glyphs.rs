@@ -25,7 +25,10 @@ pub fn powerline_zone(
     fn pad_group(g: Vec<Segment>) -> Vec<Segment> {
         let space = |bg| Segment {
             text: " ".into(),
-            style: ResolvedStyle { bg, ..Default::default() },
+            style: ResolvedStyle {
+                bg,
+                ..Default::default()
+            },
             click_action: None,
         };
         let lead = g.first().and_then(|s| s.style.bg);
@@ -54,7 +57,11 @@ pub fn powerline_zone(
     fn arrow(text: &str, fg: Option<crate::Rgb>, bg: Option<crate::Rgb>) -> Segment {
         Segment {
             text: text.into(),
-            style: ResolvedStyle { fg, bg, ..Default::default() },
+            style: ResolvedStyle {
+                fg,
+                bg,
+                ..Default::default()
+            },
             click_action: None,
         }
     }
@@ -189,7 +196,10 @@ mod tests {
     fn seg(text: &str, bg: Option<Rgb>) -> Segment {
         Segment {
             text: text.into(),
-            style: ResolvedStyle { bg, ..Default::default() },
+            style: ResolvedStyle {
+                bg,
+                ..Default::default()
+            },
             click_action: None,
         }
     }
@@ -225,7 +235,10 @@ mod tests {
         assert!(out.iter().any(|s| s.text == "b"));
         // Two right-arrows in order: the inter-group transition (fg=a bg=b) and
         // the trailing cap into the bar bg (fg=b bg=None).
-        let seps: Vec<_> = out.iter().filter(|s| s.text == GlyphSet::NERD.sep_right).collect();
+        let seps: Vec<_> = out
+            .iter()
+            .filter(|s| s.text == GlyphSet::NERD.sep_right)
+            .collect();
         assert_eq!(seps.len(), 2);
         assert_eq!(seps[0].style.fg, Some(a));
         assert_eq!(seps[0].style.bg, Some(b));
@@ -243,7 +256,10 @@ mod tests {
         assert!(out.iter().any(|s| s.text == "b"));
         // Two left-arrows in order: the leading cap from the bar bg (fg=a
         // bg=None) and the inter-group transition (fg=cur b, bg=prev a).
-        let seps: Vec<_> = out.iter().filter(|s| s.text == GlyphSet::NERD.sep_left).collect();
+        let seps: Vec<_> = out
+            .iter()
+            .filter(|s| s.text == GlyphSet::NERD.sep_left)
+            .collect();
         assert_eq!(seps.len(), 2);
         assert_eq!(seps[0].style.fg, Some(a));
         assert_eq!(seps[0].style.bg, None);
@@ -259,7 +275,10 @@ mod tests {
         // Leading cell is a space carrying the group bg; "x" is flanked by spaces.
         assert_eq!(out[0].text, " ");
         assert_eq!(out[0].style.bg, Some(a));
-        let xi = out.iter().position(|s| s.text == "x").expect("content present");
+        let xi = out
+            .iter()
+            .position(|s| s.text == "x")
+            .expect("content present");
         assert_eq!(out[xi - 1].text, " ");
         assert_eq!(out[xi + 1].text, " ");
     }

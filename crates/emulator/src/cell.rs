@@ -1,10 +1,9 @@
 //! A single grid cell: one grapheme cluster plus its colors and attributes.
 
-use crate::{
-    attrs::{Attrs, UnderlineStyle},
-    color::Color,
-};
 use smol_str::SmolStr;
+
+use crate::attrs::{Attrs, UnderlineStyle};
+use crate::color::Color;
 
 /// One screen cell.
 ///

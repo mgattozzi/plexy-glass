@@ -1,15 +1,16 @@
-use crate::error::ClientError;
-use nix::libc;
-use std::env;
 use std::fs::OpenOptions;
-use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use std::{env, io};
+
+use nix::libc;
 use tokio::net::UnixStream;
 use tokio::time;
 use tracing::{debug, info};
+
+use crate::error::ClientError;
 
 /// Connect to the daemon socket without spawning one if absent.
 ///
@@ -19,7 +20,10 @@ use tracing::{debug, info};
 pub async fn connect_only(socket: &Path) -> Result<UnixStream, ClientError> {
     UnixStream::connect(socket)
         .await
-        .map_err(|source| ClientError::Connect { path: socket.to_path_buf(), source })
+        .map_err(|source| ClientError::Connect {
+            path: socket.to_path_buf(),
+            source,
+        })
 }
 
 /// Connect to the daemon socket, spawning a new daemon if one is not running.
@@ -27,11 +31,19 @@ pub async fn connect_only(socket: &Path) -> Result<UnixStream, ClientError> {
 pub async fn connect_or_spawn(socket: &Path) -> Result<UnixStream, ClientError> {
     match UnixStream::connect(socket).await {
         Ok(s) => return Ok(s),
-        Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
             debug!(error = %e, path = %socket.display(), "daemon not reachable, spawning");
         }
         Err(e) => {
-            return Err(ClientError::Connect { path: socket.to_path_buf(), source: e });
+            return Err(ClientError::Connect {
+                path: socket.to_path_buf(),
+                source: e,
+            });
         }
     }
 
@@ -46,7 +58,10 @@ pub async fn connect_or_spawn(socket: &Path) -> Result<UnixStream, ClientError> 
                 return Ok(s);
             }
             Err(e) if Instant::now() >= deadline => {
-                return Err(ClientError::Connect { path: socket.to_path_buf(), source: e });
+                return Err(ClientError::Connect {
+                    path: socket.to_path_buf(),
+                    source: e,
+                });
             }
             Err(_) => {
                 time::sleep(delay).await;
@@ -67,7 +82,8 @@ fn spawn_daemon() -> Result<(), ClientError> {
                 .append(true)
                 .open(&p.log_file)
                 .ok()
-        }).map_or_else(Stdio::null, Stdio::from);
+        })
+        .map_or_else(Stdio::null, Stdio::from);
     cmd.arg("daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -96,9 +112,10 @@ pub fn default_socket_path() -> Result<PathBuf, ClientError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
+
+    use super::*;
 
     #[tokio::test]
     async fn connects_when_a_listener_is_already_running() {

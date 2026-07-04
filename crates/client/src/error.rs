@@ -1,6 +1,7 @@
-use plexy_glass_protocol::errors::{CodecError, ProtocolError};
 use std::io;
 use std::path::PathBuf;
+
+use plexy_glass_protocol::errors::{CodecError, ProtocolError};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
