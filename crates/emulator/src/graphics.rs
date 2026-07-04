@@ -79,6 +79,9 @@ pub struct Image {
     /// bump, not a deep copy; `ImageStore::push_frame` uses `Arc::make_mut`
     /// to append, which only deep-copies if an old snapshot is still alive.
     pub frames: Arc<Vec<Frame>>,
+    /// The most recently received `a=a` animation-control state. `None`
+    /// until the first `a=a` for this image arrives.
+    pub anim_control: Option<AnimControl>,
 }
 
 impl Image {
@@ -125,6 +128,23 @@ pub struct Frame {
     pub gap_ms: i32,
     pub format: ImageFormat,
     pub data_b64: Arc<[u8]>,
+}
+
+/// The most recently received `a=a` (animation control) state for an image.
+/// This is terminal *state*, not a data stream — unlike frames, only the
+/// latest one matters, and it's replayed to a client after the frame log
+/// (or re-replayed if it changed since the client last saw one).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct AnimControl {
+    /// `s=`: 1 = stop, 2 = loading (wait for more frames at the end instead
+    /// of looping), 3 = loop normally back to frame 1. `None` if `s=` was
+    /// absent or `0` (ignored, same as unspecified).
+    pub state: Option<u8>,
+    /// `v=`: loop count. `0` is ignored (same as unspecified, stored as
+    /// `None`), `1` = infinite, `n>1` = loop `n-1` additional times.
+    pub loop_count: Option<u32>,
+    /// `c=`: jump to this frame now (current-frame selector).
+    pub current_frame: Option<u32>,
 }
 
 /// An on-screen placement of an image, anchored to an absolute unified line.
@@ -237,11 +257,10 @@ impl ImageStore {
         self.map.get(&id)
     }
 
-    /// Mutable access for updating in-place state (currently: unused by this
-    /// task, reserved for `a=a` control state in a follow-up). Frame appends
-    /// go through `push_frame` instead, which keeps the byte budget accurate;
-    /// this method does NOT track byte changes, so don't use it to touch
-    /// `data_b64` or `frames` directly.
+    /// Mutable access for updating in-place state (used to set `anim_control`
+    /// from `a=a`). Frame appends go through `push_frame` instead, which keeps
+    /// the byte budget accurate; this method does NOT track byte changes, so
+    /// don't use it to touch `data_b64` or `frames` directly.
     pub fn get_mut(&mut self, id: u32) -> Option<&mut Image> {
         self.map.get_mut(&id)
     }
@@ -616,6 +635,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_command_animation_control_keys() {
+        let cmd = parse_command(b"\x1b_Ga=a,i=6,s=3,v=0,c=2\x1b\\").unwrap();
+        assert_eq!(cmd.action, b'a');
+        assert_eq!(cmd.id, Some(6));
+        assert_eq!(cmd.width, Some(3)); // s=: reused as animation state for a=a
+        assert_eq!(cmd.height, Some(0)); // v=: reused as loop count for a=a
+        assert_eq!(cmd.cols, Some(2)); // c=: reused as current-frame selector for a=a
+    }
+
+    #[test]
     fn png_dims_from_header() {
         let mut png = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         png.extend_from_slice(&13u32.to_be_bytes());
@@ -725,6 +754,7 @@ mod tests {
             protocol: ImageProtocol::Kitty,
             generation: 1,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         }
     }
 
@@ -739,6 +769,7 @@ mod tests {
             iterm_args: None,
             generation: 1,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         }
     }
 
@@ -884,6 +915,7 @@ mod tests {
             protocol: ImageProtocol::Kitty,
             generation: 1,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         });
         store.insert(Image {
             id: 2,
@@ -895,6 +927,7 @@ mod tests {
             protocol: ImageProtocol::Kitty,
             generation: 1,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         });
         // re-insert id=1 → moves it to the back of the LRU; id=2 is now oldest
         store.insert(Image {
@@ -907,6 +940,7 @@ mod tests {
             protocol: ImageProtocol::Kitty,
             generation: 2,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         });
         // insert id=3 → total ≈ 75 MiB > 64 MiB; id=2 (oldest) must be evicted
         let evicted = store.insert(Image {
@@ -919,6 +953,7 @@ mod tests {
             protocol: ImageProtocol::Kitty,
             generation: 1,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         });
         assert_eq!(evicted, vec![2], "id=2 is oldest after re-insert of id=1");
         assert!(store.contains(1));
@@ -943,6 +978,7 @@ mod tests {
             protocol: ImageProtocol::Kitty,
             generation: 1,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         });
         let ev2 = store.insert(Image {
             id: 2,
@@ -954,6 +990,7 @@ mod tests {
             protocol: ImageProtocol::Kitty,
             generation: 1,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         });
         assert!(ev1.is_empty(), "first insert: no eviction");
         assert!(
@@ -982,6 +1019,7 @@ mod tests {
             protocol: ImageProtocol::Kitty,
             generation: 1,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         });
         assert!(
             evicted.is_empty(),
@@ -1007,6 +1045,7 @@ mod tests {
             protocol: ImageProtocol::Kitty,
             generation: 1,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         });
         let evicted = store.insert(Image {
             id: 2,
@@ -1018,6 +1057,7 @@ mod tests {
             protocol: ImageProtocol::Kitty,
             generation: 1,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         });
         // After the eviction loop: id=1 gone, id=2 remains (40 MiB < 64 MiB cap).
         assert_eq!(evicted, vec![1]);
@@ -1312,6 +1352,7 @@ mod tests {
             protocol: ImageProtocol::Kitty,
             generation: 1,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         });
         assert!(ev1.is_empty());
         let ev2 = store.insert(Image {
@@ -1324,6 +1365,7 @@ mod tests {
             protocol: ImageProtocol::Kitty,
             generation: 2,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         });
         assert_eq!(ev2, vec![1], "oldest image evicted over budget");
         assert!(!store.contains(1));

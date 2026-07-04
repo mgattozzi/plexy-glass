@@ -14,7 +14,8 @@ use crate::cell::Cell;
 use crate::color::Color;
 use crate::cursor::{Cursor, CursorShape};
 use crate::graphics::{
-    self, Frame, Image, ImageFormat, ImageProtocol, ImageStore, Placement, VirtualPlacement,
+    self, AnimControl, Frame, Image, ImageFormat, ImageProtocol, ImageStore, Placement,
+    VirtualPlacement,
 };
 use crate::grid::{Grid, Row, RowMark, WrapOrigin};
 use crate::hyperlinks::HyperlinkTable;
@@ -321,6 +322,7 @@ impl Screen {
             iterm_args: None,
             generation: self.image_gen,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         };
         let evicted = self.images.insert(image);
         if !evicted.is_empty() {
@@ -366,6 +368,22 @@ impl Screen {
             }
             b't' | b'T' => self.accumulate_transmission(cmd),
             b'f' => self.accumulate_frame(cmd),
+            b'a' => {
+                if let Some(id) = cmd.id
+                    && let Some(img) = self.images.get_mut(id)
+                {
+                    let state = cmd
+                        .width
+                        .and_then(|v| u8::try_from(v).ok())
+                        .filter(|&s| s != 0);
+                    let loop_count = cmd.height.filter(|&v| v != 0);
+                    img.anim_control = Some(AnimControl {
+                        state,
+                        loop_count,
+                        current_frame: cmd.cols.map(u32::from),
+                    });
+                }
+            }
             _ => {} // query (q) and unknown: ignored in Phase 2
         }
     }
@@ -434,6 +452,7 @@ impl Screen {
             iterm_args: None,
             generation: self.image_gen,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         };
         let evicted = self.images.insert(image);
         if !evicted.is_empty() {
@@ -1902,6 +1921,7 @@ impl Screen {
             iterm_args: Some(Arc::from(args)),
             generation: self.image_gen,
             frames: Arc::new(Vec::new()),
+            anim_control: None,
         };
         let evicted = self.images.insert(image);
         if !evicted.is_empty() {
@@ -2404,6 +2424,31 @@ mod tests {
         assert_eq!(frames[1].frame_number, Some(2));
         assert_eq!(frames[0].data_b64.as_ref(), b"RkdI");
         assert_eq!(frames[1].data_b64.as_ref(), b"SklK");
+    }
+
+    #[test]
+    fn a_a_stores_the_latest_control_state() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,i=8,f=24,s=1,v=1;QUJD\x1b\\");
+        e.advance(b"\x1b_Ga=a,i=8,s=3,v=0,c=2\x1b\\");
+        e.advance(b"\n");
+        let s = e.screen();
+        let ctrl = s.images.get(8).unwrap().anim_control.as_ref().unwrap();
+        assert_eq!(ctrl.state, Some(3));
+        assert_eq!(ctrl.loop_count, None); // v=0 means ignored/unspecified
+        assert_eq!(ctrl.current_frame, Some(2));
+    }
+
+    #[test]
+    fn a_a_replaces_the_prior_control_state() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,i=8,f=24,s=1,v=1;QUJD\x1b\\");
+        e.advance(b"\x1b_Ga=a,i=8,s=3\x1b\\");
+        e.advance(b"\x1b_Ga=a,i=8,s=1\x1b\\"); // stop, supersedes the prior "loop" state
+        e.advance(b"\n");
+        let s = e.screen();
+        let ctrl = s.images.get(8).unwrap().anim_control.as_ref().unwrap();
+        assert_eq!(ctrl.state, Some(1));
     }
 
     #[test]
