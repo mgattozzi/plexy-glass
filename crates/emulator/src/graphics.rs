@@ -89,6 +89,10 @@ pub struct Placement {
     /// Cell footprint.
     pub rows: u16,
     pub cols: u16,
+    /// Kitty `z=` placement key (default 0). Negative draws under text;
+    /// same-z overlaps break ties by lower image id winning (handled at
+    /// render time, not stored here).
+    pub z: i32,
     /// Monotonic id (per Screen), stable across clones, for renderer dedupe.
     pub seq: u64,
 }
@@ -184,7 +188,13 @@ pub struct GraphicsCommand {
     pub more: bool,                // m=1 (more chunks coming)
     pub delete_target: Option<u8>, // d= (for a=d)
     pub unicode: bool,             // U=1 (Unicode-placeholder / virtual placement)
-    pub payload: Vec<u8>,          // base64 chunk
+    /// `z=`: signed. Meaning depends on the action it's paired with — for
+    /// `a=p`/`a=T` it's the placement z-index (negative draws under text);
+    /// for `a=f` (Task 2) the same key means the inter-frame gap in ms
+    /// (negative = gapless). One field, two call-site interpretations, same
+    /// as `rows`/`cols` already are for `r=`/`c=` across different actions.
+    pub z: Option<i32>,
+    pub payload: Vec<u8>, // base64 chunk
 }
 
 /// Parse the framed `ESC _ G<params>;<payload> ESC \` bytes into a command.
@@ -218,6 +228,7 @@ pub fn parse_command(framed: &[u8]) -> Option<GraphicsCommand> {
             b"v" => cmd.height = val.parse().ok(),
             b"r" => cmd.rows = val.parse().ok(),
             b"c" => cmd.cols = val.parse().ok(),
+            b"z" => cmd.z = val.parse().ok(),
             b"m" => cmd.more = val == "1",
             b"d" => cmd.delete_target = v.first().copied(),
             b"U" => cmd.unicode = val == "1",
@@ -458,6 +469,18 @@ mod tests {
     #[test]
     fn non_graphics_apc_is_none() {
         assert!(parse_command(b"\x1b_qfoo\x1b\\").is_none());
+    }
+
+    #[test]
+    fn parse_command_z_index_key() {
+        let cmd = parse_command(b"\x1b_Ga=p,i=5,z=-3\x1b\\").unwrap();
+        assert_eq!(cmd.z, Some(-3));
+    }
+
+    #[test]
+    fn parse_command_z_index_absent_by_default() {
+        let cmd = parse_command(b"\x1b_Ga=p,i=5\x1b\\").unwrap();
+        assert_eq!(cmd.z, None);
     }
 
     #[test]

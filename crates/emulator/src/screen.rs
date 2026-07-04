@@ -41,6 +41,7 @@ struct PendingTx {
     /// `U=1`: on finalize, record a virtual placement instead of an anchored one.
     unicode: bool,
     placement_id: Option<u32>,
+    z: i32,
 }
 
 /// Terminal color queries from inner apps (OSC 10/11/12 with `?` parameter).
@@ -306,7 +307,7 @@ impl Screen {
             self.virtual_placements
                 .retain(|p| !evicted.contains(&p.image_id));
         }
-        self.add_placement(id, ImageProtocol::Sixel, w, h, None, None);
+        self.add_placement(id, ImageProtocol::Sixel, w, h, None, None, 0);
     }
 
     pub(crate) fn handle_graphics(&mut self, framed: &[u8]) {
@@ -338,7 +339,7 @@ impl Screen {
                         self.add_virtual_placement(id, cmd.placement_id, cmd.rows, cmd.cols);
                     } else {
                         let (w, h, proto) = (img.pixel_w, img.pixel_h, img.protocol);
-                        self.add_placement(id, proto, w, h, cmd.rows, cmd.cols);
+                        self.add_placement(id, proto, w, h, cmd.rows, cmd.cols, cmd.z.unwrap_or(0));
                     }
                 }
             }
@@ -380,6 +381,7 @@ impl Screen {
                 place_cols: cmd.cols,
                 unicode: cmd.unicode,
                 placement_id: cmd.placement_id,
+                z: cmd.z.unwrap_or(0),
             });
         }
         if !cmd.more {
@@ -430,6 +432,7 @@ impl Screen {
                     h,
                     tx.place_rows,
                     tx.place_cols,
+                    tx.z,
                 );
             }
         }
@@ -467,6 +470,10 @@ impl Screen {
 
     /// Add a placement at the cursor and advance the cursor by its row footprint
     /// (so subsequent output lands below the image, the spike's overlap fix).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each param is a distinct Kitty placement key (i/proto/dims/r/c/z); a params struct would just rename them"
+    )]
     fn add_placement(
         &mut self,
         image_id: u32,
@@ -475,6 +482,7 @@ impl Screen {
         pixel_h: u32,
         r: Option<u16>,
         c: Option<u16>,
+        z: i32,
     ) {
         let (cell_w, cell_h) = self.cell_pixels();
         let rows =
@@ -498,6 +506,7 @@ impl Screen {
             col: self.cursor.col,
             rows,
             cols,
+            z,
             seq,
         });
         for _ in 0..rows {
@@ -1812,7 +1821,7 @@ impl Screen {
             self.virtual_placements
                 .retain(|p| !evicted.contains(&p.image_id));
         }
-        self.add_placement(id, ImageProtocol::Iterm2, w, h, None, None);
+        self.add_placement(id, ImageProtocol::Iterm2, w, h, None, None, 0);
     }
 
     fn handle_osc_color_query(&mut self, params: &[&[u8]], query: ColorQuery) {

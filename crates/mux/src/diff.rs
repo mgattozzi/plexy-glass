@@ -417,9 +417,15 @@ impl DiffRenderer {
             self.boxed.insert(p.key, rect_of(p));
         }
 
-        // ── Step 3: (re)emit data images last. ──
+        // ── Step 3: (re)emit data images last, lowest z first so a higher z
+        // paints on top — mirrors Kitty's own tie-break (same z → lower
+        // image id under, since Sixel/iTerm2 have no native compositor and we
+        // draw raw pixels ourselves in arrival order).
         let prev = self.previous.as_ref();
-        for p in current.placements.iter().filter(|p| is_data(p)) {
+        let mut data_placements: Vec<&VisiblePlacement> =
+            current.placements.iter().filter(|p| is_data(p)).collect();
+        data_placements.sort_by_key(|p| (p.z, p.image_id));
+        for p in data_placements {
             if p.data_b64.is_empty() {
                 continue;
             }
@@ -704,6 +710,9 @@ fn emit_place(out: &mut String, p: &VisiblePlacement) {
             ",x={},y={},w={},h={}",
             p.src_x, p.src_y, p.src_w, p.src_h
         );
+    }
+    if p.z != 0 {
+        let _ = write!(out, ",z={}", p.z);
     }
     let _ = write!(out, ",r={},c={},q=2\x1b\\", p.rows, p.cols);
 }
@@ -1217,6 +1226,7 @@ mod tests {
             host_col,
             rows: 2,
             cols: 3,
+            z: 0,
         }
     }
 
@@ -1293,6 +1303,25 @@ mod tests {
             s.contains("\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\"),
             "delete vanished placement: {s:?}"
         );
+    }
+
+    #[test]
+    fn kitty_placement_emits_nonzero_z() {
+        let mut d = kitty_renderer();
+        let mut p = vp(1, 7, 1, 2, 3);
+        p.z = 7;
+        let s = render_str(&mut d, &frame_with(vec![p]));
+        assert!(
+            s.contains(",z=7"),
+            "expected z=7 in the emitted a=p command, got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn kitty_placement_omits_z_when_zero() {
+        let mut d = kitty_renderer();
+        let s = render_str(&mut d, &frame_with(vec![vp(1, 7, 1, 2, 3)])); // z defaults to 0
+        assert!(!s.contains(",z="), "z=0 should be omitted, got: {s:?}");
     }
 
     #[test]
@@ -1751,6 +1780,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sixel_placements_emit_lowest_z_first() {
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(sixel_caps());
+        let mut low = sixel_vp(1, 2, 3); // host row 2 -> "\x1b[3;4H"
+        low.z = -5;
+        let mut high = sixel_vp(2, 5, 3); // host row 5 -> "\x1b[6;4H"
+        high.z = 5;
+        // Push high before low, so ordering in the vec does NOT already match z order.
+        let s = render_str(&mut d, &frame_with(vec![high, low]));
+        let pos_low = s.find("\x1b[3;4H");
+        let pos_high = s.find("\x1b[6;4H");
+        assert!(
+            pos_low.is_some() && pos_high.is_some() && pos_low < pos_high,
+            "expected the z=-5 placement's data emitted before the z=5 placement's, got: {s:?}"
+        );
+    }
+
     // ── iTerm2 data placements ─────────────────────────────────────────────────
 
     fn iterm_vp(key: u64, host_row: u16, host_col: u16) -> VisiblePlacement {
@@ -1928,6 +1975,7 @@ mod tests {
             host_col: 0,
             rows,
             cols,
+            z: 0,
         }
     }
 

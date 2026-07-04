@@ -794,6 +794,7 @@ pub fn compose(
                     host_col,
                     rows: vis_rows,
                     cols: vis_cols,
+                    z: p.z,
                 });
             }
         }

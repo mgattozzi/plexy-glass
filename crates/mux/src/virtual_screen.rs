@@ -44,6 +44,12 @@ pub struct VisiblePlacement {
     /// Displayed cell box (already clipped to the visible region).
     pub rows: u16,
     pub cols: u16,
+    /// Kitty `z=` placement key, carried from `Placement::z`. For Kitty
+    /// clients this passes straight through to the emitted `a=p` command
+    /// (the real terminal does the stacking); for Sixel/iTerm2 clients
+    /// (drawn as raw pixels by us) the renderer sorts by this before
+    /// emitting, matching Kitty's own tie-break semantics.
+    pub z: i32,
 }
 
 /// A Unicode-placeholder (virtual) placement resolved for the per-client
