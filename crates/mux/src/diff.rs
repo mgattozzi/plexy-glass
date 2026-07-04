@@ -940,6 +940,7 @@ fn apply_sgr_delta(out: &mut String, prev: &CellAttrs, cell: &Cell) {
 mod tests {
     use std::sync::Arc;
 
+    use hegel::{TestCase, generators as gs};
     use smol_str::SmolStr;
 
     use super::*;
@@ -1597,6 +1598,76 @@ mod tests {
             s.contains("a=a") && s.contains(",s=3"),
             "control reset means it's re-sent even though value is unchanged: {s:?}"
         );
+    }
+
+    // ── property: per-client replay ordering/idempotence ────────────────────
+
+    /// A Kitty placement carrying `n` synthetic animation frames, each tagged
+    /// `FR{i}Z`. The trailing `Z` matters: it rules out `FR1Z` false-matching
+    /// inside `FR10Z`/`FR11Z`/…, so a property test can search for one frame's
+    /// marker in the wire output without ambiguity.
+    fn vp_with_frames(image_id: u32, n: usize) -> VisiblePlacement {
+        let frames = (0..n)
+            .map(|i| sample_frame_visible(format!("FR{i}Z").as_bytes()))
+            .collect::<Vec<_>>();
+        VisiblePlacement {
+            frames: Arc::new(frames),
+            anim_control: (n > 0).then_some(AnimControl {
+                state: Some(3),
+                loop_count: Some(1),
+                current_frame: None,
+            }),
+            ..vp(1, image_id, 1, 0, 0)
+        }
+    }
+
+    /// As an image's frame log grows one tick at a time, a client that
+    /// renders every tick must see each frame exactly once, in arrival order
+    /// — the invariant the per-client `frames_sent` bookkeeping (Task 4) is
+    /// supposed to guarantee. At tick `n` the log holds frames `0..n`; the
+    /// client was caught up to `n-1` after the previous tick, so this
+    /// render must carry frame `n-1`'s marker (the new one) and must carry
+    /// NONE of the earlier frames' markers (no repeat). Checking that at
+    /// every tick, over a randomly sized log, would catch a skip (the "new"
+    /// marker missing), a repeat/stall (an "old" marker reappearing, because
+    /// `frames_sent` never advanced), or a reorder (the "new" marker missing
+    /// while some other frame appears instead) — not just a restated total
+    /// count. The direct `frames_sent` assertion catches an off-by-one in
+    /// the bookkeeping itself even in the (contrived) case where it doesn't
+    /// happen to change what bytes got emitted this particular tick.
+    #[hegel::test(test_cases = 100)]
+    fn prop_client_never_repeats_a_frame_and_sees_them_in_order(tc: TestCase) {
+        let final_count = tc.draw(gs::integers::<usize>().min_value(0).max_value(50));
+        tc.note(&format!("final_count={final_count}"));
+        let image_id: u32 = 42;
+        let mut d = kitty_renderer();
+        for n in 0..=final_count {
+            let s = render_str(&mut d, &frame_with(vec![vp_with_frames(image_id, n)]));
+            if n == 0 {
+                assert!(
+                    !s.contains("FR"),
+                    "no frames exist yet, nothing should replay: {s:?}"
+                );
+            } else {
+                let newest = format!("FR{}Z", n - 1);
+                assert!(
+                    s.contains(&newest),
+                    "tick {n}: the newest frame must replay this tick: {s:?}"
+                );
+                for old in 0..n - 1 {
+                    let stale = format!("FR{old}Z");
+                    assert!(
+                        !s.contains(&stale),
+                        "tick {n}: frame {old} was already sent, must not repeat: {s:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                d.frames_sent.get(&image_id).copied(),
+                Some(n),
+                "frames_sent must land on exactly {n} after a render that saw {n} frames: {s:?}"
+            );
+        }
     }
 
     #[test]
