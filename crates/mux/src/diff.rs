@@ -420,7 +420,7 @@ impl DiffRenderer {
         // ── Step 3: (re)emit data images last, lowest z first so a higher z
         // paints on top — mirrors Kitty's own tie-break (same z → lower
         // image id under, since Sixel/iTerm2 have no native compositor and we
-        // draw raw pixels ourselves in arrival order).
+        // must explicitly order paint sequences).
         let prev = self.previous.as_ref();
         let mut data_placements: Vec<&VisiblePlacement> =
             current.placements.iter().filter(|p| is_data(p)).collect();

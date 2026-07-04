@@ -90,7 +90,7 @@ pub struct Placement {
     pub rows: u16,
     pub cols: u16,
     /// Kitty `z=` placement key (default 0). Negative draws under text;
-    /// same-z overlaps break ties by lower image id winning (handled at
+    /// same-z overlaps break ties by lower image id drawn under (handled at
     /// render time, not stored here).
     pub z: i32,
     /// Monotonic id (per Screen), stable across clones, for renderer dedupe.
