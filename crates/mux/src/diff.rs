@@ -1621,52 +1621,67 @@ mod tests {
         }
     }
 
-    /// As an image's frame log grows one tick at a time, a client that
-    /// renders every tick must see each frame exactly once, in arrival order
-    /// — the invariant the per-client `frames_sent` bookkeeping (Task 4) is
-    /// supposed to guarantee. At tick `n` the log holds frames `0..n`; the
-    /// client was caught up to `n-1` after the previous tick, so this
-    /// render must carry frame `n-1`'s marker (the new one) and must carry
-    /// NONE of the earlier frames' markers (no repeat). Checking that at
-    /// every tick, over a randomly sized log, would catch a skip (the "new"
-    /// marker missing), a repeat/stall (an "old" marker reappearing, because
-    /// `frames_sent` never advanced), or a reorder (the "new" marker missing
-    /// while some other frame appears instead) — not just a restated total
-    /// count. The direct `frames_sent` assertion catches an off-by-one in
-    /// the bookkeeping itself even in the (contrived) case where it doesn't
-    /// happen to change what bytes got emitted this particular tick.
+    /// As an image's frame log grows by a *randomized* amount each tick
+    /// (0, 1, or several at once), a client that renders every tick must see
+    /// each frame exactly once, in arrival order, and a multi-frame batch
+    /// must replay in the same relative order it was appended — the
+    /// invariant the per-client `frames_sent` bookkeeping (Task 4) and the
+    /// `p.frames[sent..]` replay loop in `render_kitty_placements` are
+    /// supposed to guarantee. Randomizing the batch size (rather than always
+    /// growing the log by exactly one frame per tick) matters: a
+    /// fixed-growth-of-one loop makes every batch length 1, and a batch of
+    /// length 1 is identical whether replayed forwards or reversed, so a
+    /// reordering bug (e.g. `.rev()` sneaking into that loop) would pass
+    /// undetected. With batches of 2+, this test checks the newly appended
+    /// frames' markers appear in the wire output at strictly increasing
+    /// byte offsets, in addition to the skip/repeat/stall checks (no new
+    /// marker missing, no stale marker reappearing, `frames_sent` landing
+    /// exactly on the new total).
     #[hegel::test(test_cases = 100)]
     fn prop_client_never_repeats_a_frame_and_sees_them_in_order(tc: TestCase) {
-        let final_count = tc.draw(gs::integers::<usize>().min_value(0).max_value(50));
-        tc.note(&format!("final_count={final_count}"));
+        let batch_sizes =
+            tc.draw(gs::vecs(gs::integers::<usize>().min_value(0).max_value(5)).max_size(20));
+        tc.note(&format!("batch_sizes={batch_sizes:?}"));
         let image_id: u32 = 42;
         let mut d = kitty_renderer();
-        for n in 0..=final_count {
-            let s = render_str(&mut d, &frame_with(vec![vp_with_frames(image_id, n)]));
-            if n == 0 {
+        let mut total = 0usize;
+        for growth in batch_sizes {
+            let new_total = total + growth;
+            let s = render_str(&mut d, &frame_with(vec![vp_with_frames(image_id, new_total)]));
+            if growth == 0 {
                 assert!(
-                    !s.contains("FR"),
-                    "no frames exist yet, nothing should replay: {s:?}"
+                    (0..new_total).all(|i| !s.contains(&format!("FR{i}Z"))),
+                    "no new frames since last tick, nothing should replay: {s:?}"
                 );
             } else {
-                let newest = format!("FR{}Z", n - 1);
+                // The newly appended frames (indices `total..new_total`) must
+                // replay this tick, in the order they were appended.
+                let positions: Vec<usize> = (total..new_total)
+                    .map(|i| {
+                        let marker = format!("FR{i}Z");
+                        s.find(&marker).unwrap_or_else(|| {
+                            panic!("batch of {growth}: frame {i} must replay: {s:?}")
+                        })
+                    })
+                    .collect();
                 assert!(
-                    s.contains(&newest),
-                    "tick {n}: the newest frame must replay this tick: {s:?}"
+                    positions.windows(2).all(|w| w[0] < w[1]),
+                    "batch of {growth} new frames must replay in arrival order: {s:?}"
                 );
-                for old in 0..n - 1 {
+                for old in 0..total {
                     let stale = format!("FR{old}Z");
                     assert!(
                         !s.contains(&stale),
-                        "tick {n}: frame {old} was already sent, must not repeat: {s:?}"
+                        "frame {old} was already sent, must not repeat: {s:?}"
                     );
                 }
             }
             assert_eq!(
                 d.frames_sent.get(&image_id).copied(),
-                Some(n),
-                "frames_sent must land on exactly {n} after a render that saw {n} frames: {s:?}"
+                Some(new_total),
+                "frames_sent must land on exactly {new_total}: {s:?}"
             );
+            total = new_total;
         }
     }
 
