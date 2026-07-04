@@ -10,9 +10,9 @@ All three common terminal graphics protocols are supported: **Kitty graphics**,
 **Sixel**, and **iTerm2** (`OSC 1337`). Images are clipped to their visible
 region, follow copy/block-mode scrolling, and fall back to a labelled
 placeholder box on a client whose terminal can't render that image's protocol.
-Kitty additionally supports Unicode-placeholder (virtual) placements. Only
-native Kitty animation remains unimplemented (see
-`docs/superpowers/specs/2026-06-22-inline-graphics-design.md`).
+Kitty additionally supports Unicode-placeholder (virtual) placements, native
+animation playback, and `z=` stacking order (the latter also honored for
+Sixel/iTerm2, see below).
 
 ## Trying it
 
@@ -78,11 +78,30 @@ size.
   placeholder mode (`a=p,U=1` + `U+10EEEE` cells) are supported: the image is
   transmitted once and the virtual placement emitted once per client, and the
   placeholder cells scroll/reflow with the text natively.
-- **Animation.** Tools that animate by re-transmitting each frame under the
-  same image id (e.g. `timg`, `chafa` on a GIF) play back correctly, since a
-  changed image is re-transmitted to each client automatically. The *native*
-  Kitty animation protocol (`a=f` frames / `a=a` control) is not yet
-  implemented.
+- **Animation, native (Kitty).** The emulator captures every `a=f` frame
+  command and the latest `a=a` control state verbatim (frame data, canvas
+  source, gap timing, and the stop/loading/loop state plus loop count and
+  current-frame jump), without compositing any pixels itself. The per-client
+  renderer replays the frame log and control state to each Kitty client (the
+  whole log to a newly-attached client, only the new frames plus a changed
+  control state to one already attached) and then **stops re-transmitting** —
+  from there the client's own terminal plays the animation (looping,
+  stopping, jumping to a frame) exactly as it would for a directly-connected
+  program.
+- **Animation, re-transmit workaround (Sixel/iTerm2).** These protocols have
+  no native animation model, so tools that animate by re-transmitting each
+  frame under the same image id (e.g. `timg`, `chafa` on a GIF) keep working
+  the same way they always have: a changed image is re-transmitted to each
+  client automatically. This path is unchanged and is Sixel/iTerm2-only now
+  that Kitty has real native playback.
+- **`z=` ordering.** Kitty clients get a placement's `z` passed straight
+  through on the wire (omitted when `0`, the default, since that's already
+  Kitty's default stacking order); ties and negative-vs-text stacking are
+  left to the client's own terminal. Sixel and iTerm2 have no placement
+  protocol of their own to carry a stacking order, so before drawing,
+  overlapping placements on those clients are sorted by `(z, image_id)` so
+  lower `z` (and, within the same `z`, lower image id) draws first and higher
+  draws on top.
 
 ## Limitations
 
@@ -92,8 +111,10 @@ size.
 - Sixel and iTerm2 images aren't source-cropped under partial occlusion (they're
   emitted at their visible top-left and the terminal clips at the screen edge);
   precise crop is Kitty-only.
-- Native Kitty animation (`a=f`/`a=a`), explicit `z`-ordering, relative
-  placements, and a popup rendering its *own* inline images are future work.
+- Sixel and iTerm2 have no native animation of their own; they rely on the
+  re-transmit-under-the-same-id workaround, same as before.
+- Relative placements and a popup rendering its *own* inline images are still
+  future work.
 - Two panes that both use Unicode-placeholder mode with the same raw image id
   can collide on one client (the placeholder cells carry the raw id).
 - A pane resize drops its **classic** placements (the program re-emits on
