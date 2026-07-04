@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use plexy_glass_emulator::{Cell, ImageFormat, ImageProtocol};
+use plexy_glass_emulator::{AnimControl, Cell, Frame, ImageFormat, ImageProtocol};
 
 /// An image placement resolved to host (terminal) coordinates, ready for the
 /// per-client renderer to transmit (once) and place. Built by the compositor
@@ -50,6 +50,12 @@ pub struct VisiblePlacement {
     /// (drawn as raw pixels by us) the renderer sorts by this before
     /// emitting, matching Kitty's own tie-break semantics.
     pub z: i32,
+    /// Every `a=f` frame received for this image so far, in arrival order.
+    /// `Arc`-shared with the source `Image` — cloning a `VisiblePlacement`
+    /// every compositor pass is a refcount bump, not a deep copy.
+    pub frames: Arc<Vec<Frame>>,
+    /// The latest `a=a` control state for this image, if any has been sent.
+    pub anim_control: Option<AnimControl>,
 }
 
 /// A Unicode-placeholder (virtual) placement resolved for the per-client

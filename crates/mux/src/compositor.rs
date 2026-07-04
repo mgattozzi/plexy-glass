@@ -795,6 +795,8 @@ pub fn compose(
                     rows: vis_rows,
                     cols: vis_cols,
                     z: p.z,
+                    frames: img.frames.clone(),
+                    anim_control: img.anim_control.clone(),
                 });
             }
         }

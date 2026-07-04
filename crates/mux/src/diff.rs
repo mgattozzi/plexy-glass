@@ -5,7 +5,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
-use plexy_glass_emulator::{Attrs, Cell, Color, UnderlineStyle};
+use plexy_glass_emulator::{AnimControl, Attrs, Cell, Color, Frame, UnderlineStyle};
 
 use crate::virtual_screen::{VirtualScreen, VisiblePlacement};
 
@@ -71,6 +71,15 @@ pub struct DiffRenderer {
     /// Set by `invalidate`: the next render first deletes ALL terminal images
     /// (session switch / re-point) before re-transmitting + re-placing.
     reset_images: bool,
+    /// Host image id → how many entries of that image's frame log this
+    /// client has already received, for incremental animation replay. A
+    /// brand-new client (absent from this map) gets the base transmit plus
+    /// every buffered frame in one shot; an already-attached client only
+    /// gets the tail past its recorded count.
+    frames_sent: HashMap<u32, usize>,
+    /// Host image id → the last `a=a` control state sent to this client, so
+    /// it's only re-sent when it changes (or on first sight of the image).
+    last_anim_sent: HashMap<u32, AnimControl>,
 }
 
 impl DiffRenderer {
@@ -85,6 +94,8 @@ impl DiffRenderer {
             virtual_placed: HashMap::new(),
             placed_data: HashMap::new(),
             reset_images: false,
+            frames_sent: HashMap::new(),
+            last_anim_sent: HashMap::new(),
         }
     }
 
@@ -273,9 +284,29 @@ impl DiffRenderer {
             if p.data_b64.is_empty() {
                 continue;
             }
-            if self.transmitted.get(&p.image_id) != Some(&p.generation) {
+            let is_new_generation = self.transmitted.get(&p.image_id) != Some(&p.generation);
+            if is_new_generation {
                 emit_transmit(out, p);
                 self.transmitted.insert(p.image_id, p.generation);
+                // A fresh generation means the base image content changed
+                // (a=t reset it, which also clears the source's frame log —
+                // see Task 2 Step 12), so any previously replayed frame log
+                // no longer applies to this client's view of the content.
+                self.frames_sent.insert(p.image_id, 0);
+                self.last_anim_sent.remove(&p.image_id);
+            }
+            let sent = self.frames_sent.get(&p.image_id).copied().unwrap_or(0);
+            if p.frames.len() > sent {
+                for f in &p.frames[sent..] {
+                    emit_frame(out, p.image_id, f);
+                }
+                self.frames_sent.insert(p.image_id, p.frames.len());
+            }
+            if let Some(ctrl) = &p.anim_control
+                && self.last_anim_sent.get(&p.image_id) != Some(ctrl)
+            {
+                emit_anim_control(out, p.image_id, ctrl);
+                self.last_anim_sent.insert(p.image_id, ctrl.clone());
             }
             let rect = PlacedRect {
                 host_row: p.host_row,
@@ -720,6 +751,73 @@ fn emit_place(out: &mut String, p: &VisiblePlacement) {
 /// Delete a single placement (lowercase `d=i` keeps the image data for re-place).
 fn emit_delete(out: &mut String, image_id: u32, placement_id: u32) {
     let _ = write!(out, "\x1b_Ga=d,d=i,i={image_id},p={placement_id},q=2\x1b\\");
+}
+
+/// Replay one stored `a=f` command verbatim (chunked like `emit_transmit_bytes`).
+fn emit_frame(out: &mut String, image_id: u32, f: &Frame) {
+    if f.data_b64.is_empty() {
+        return;
+    }
+    const CHUNK: usize = 4096;
+    let n = f.data_b64.len();
+    let mut i = 0;
+    let mut first = true;
+    while i < n {
+        let end = (i + CHUNK).min(n);
+        let more = u8::from(end < n);
+        if first {
+            let _ = write!(out, "\x1b_Gi={image_id},a=f,f={}", f.format.kitty_f());
+            if let Some(r) = f.frame_number {
+                let _ = write!(out, ",r={r}");
+            }
+            if let Some(c) = f.canvas_source {
+                let _ = write!(out, ",c={c}");
+            }
+            if f.x != 0 {
+                let _ = write!(out, ",x={}", f.x);
+            }
+            if f.y != 0 {
+                let _ = write!(out, ",y={}", f.y);
+            }
+            if f.width != 0 {
+                let _ = write!(out, ",s={}", f.width);
+            }
+            if f.height != 0 {
+                let _ = write!(out, ",v={}", f.height);
+            }
+            if f.overwrite {
+                let _ = write!(out, ",X=1");
+            }
+            if f.bg_color != 0 {
+                let _ = write!(out, ",Y={}", f.bg_color);
+            }
+            if f.gap_ms != 0 {
+                let _ = write!(out, ",z={}", f.gap_ms);
+            }
+            let _ = write!(out, ",q=2,m={more};");
+            first = false;
+        } else {
+            let _ = write!(out, "\x1b_Ga=f,i={image_id},m={more};");
+        }
+        out.push_str(&String::from_utf8_lossy(&f.data_b64[i..end]));
+        out.push_str("\x1b\\");
+        i = end;
+    }
+}
+
+/// Replay the latest `a=a` control command for an image.
+fn emit_anim_control(out: &mut String, image_id: u32, ctrl: &AnimControl) {
+    let _ = write!(out, "\x1b_Gi={image_id},a=a");
+    if let Some(s) = ctrl.state {
+        let _ = write!(out, ",s={s}");
+    }
+    if let Some(v) = ctrl.loop_count {
+        let _ = write!(out, ",v={v}");
+    }
+    if let Some(c) = ctrl.current_frame {
+        let _ = write!(out, ",c={c}");
+    }
+    out.push_str(",q=2\x1b\\");
 }
 
 impl Default for DiffRenderer {
@@ -1227,6 +1325,8 @@ mod tests {
             rows: 2,
             cols: 3,
             z: 0,
+            frames: Arc::new(Vec::new()),
+            anim_control: None,
         }
     }
 
@@ -1365,6 +1465,137 @@ mod tests {
         assert!(
             s.contains("a=t"),
             "changed content re-transmits id 7: {s:?}"
+        );
+    }
+
+    // ── animation frame/control replay ─────────────────────────────────────────
+
+    fn sample_frame_visible(data: &[u8]) -> Frame {
+        Frame {
+            frame_number: None,
+            canvas_source: None,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            overwrite: false,
+            bg_color: 0,
+            gap_ms: 0,
+            format: plexy_glass_emulator::ImageFormat::Rgba,
+            data_b64: Arc::from(data),
+        }
+    }
+
+    #[test]
+    fn new_client_gets_base_transmit_all_frames_and_latest_control() {
+        let mut d = kitty_renderer();
+        let mut p = vp(1, 7, 1, 2, 3);
+        p.frames = Arc::new(vec![sample_frame_visible(b"f1"), sample_frame_visible(b"f2")]);
+        p.anim_control = Some(AnimControl {
+            state: Some(3),
+            loop_count: Some(1),
+            current_frame: None,
+        });
+        let s = render_str(&mut d, &frame_with(vec![p]));
+        assert!(s.contains("a=t"), "expected the base transmit, got: {s}");
+        let f1_pos = s.find("f1").expect("f1 must be replayed");
+        let f2_pos = s.find("f2").expect("f2 must be replayed");
+        assert!(f1_pos < f2_pos, "frames must replay in arrival order: {s:?}");
+        assert!(
+            s.contains("a=a"),
+            "expected the animation control command, got: {s}"
+        );
+        assert!(s.contains(",s=3"), "expected control state s=3: {s:?}");
+    }
+
+    #[test]
+    fn already_attached_client_only_gets_new_frames() {
+        let mut d = kitty_renderer();
+        let mut p = vp(1, 7, 1, 2, 3);
+        p.frames = Arc::new(vec![sample_frame_visible(b"f1")]);
+        render_str(&mut d, &frame_with(vec![p.clone()])); // client is now caught up to 1 frame
+
+        p.frames = Arc::new(vec![sample_frame_visible(b"f1"), sample_frame_visible(b"f2")]);
+        let s = render_str(&mut d, &frame_with(vec![p]));
+        assert!(!s.contains("f1"), "f1 was already sent, must not repeat: {s:?}");
+        assert!(s.contains("f2"), "f2 is new, must be sent: {s:?}");
+    }
+
+    #[test]
+    fn unchanged_anim_control_not_resent() {
+        let mut d = kitty_renderer();
+        let mut p = vp(1, 7, 1, 2, 3);
+        p.anim_control = Some(AnimControl {
+            state: Some(3),
+            loop_count: None,
+            current_frame: None,
+        });
+        render_str(&mut d, &frame_with(vec![p.clone()]));
+        let s = render_str(&mut d, &frame_with(vec![p]));
+        assert!(
+            !s.contains("a=a"),
+            "unchanged control must not be re-sent: {s:?}"
+        );
+    }
+
+    #[test]
+    fn changed_anim_control_is_resent() {
+        let mut d = kitty_renderer();
+        let mut p = vp(1, 7, 1, 2, 3);
+        p.anim_control = Some(AnimControl {
+            state: Some(3),
+            loop_count: None,
+            current_frame: None,
+        });
+        render_str(&mut d, &frame_with(vec![p.clone()]));
+        p.anim_control = Some(AnimControl {
+            state: Some(1),
+            loop_count: None,
+            current_frame: None,
+        });
+        let s = render_str(&mut d, &frame_with(vec![p]));
+        assert!(
+            s.contains("a=a") && s.contains(",s=1"),
+            "changed control must be re-sent: {s:?}"
+        );
+    }
+
+    #[test]
+    fn new_generation_resets_frame_and_control_replay_bookkeeping() {
+        // A fresh base-image generation means the source's frame log/control
+        // were also reset (Tasks 2-3), so a client's replay bookkeeping for
+        // that image must reset too: the next frame with the SAME frame data
+        // (now representing a fresh log on the new generation) must replay in
+        // full, not be treated as "already sent".
+        let mut d = kitty_renderer();
+        let mut p = vp(1, 7, 1, 2, 3);
+        p.frames = Arc::new(vec![sample_frame_visible(b"f1")]);
+        p.anim_control = Some(AnimControl {
+            state: Some(3),
+            loop_count: None,
+            current_frame: None,
+        });
+        render_str(&mut d, &frame_with(vec![p.clone()]));
+
+        // Base image content changes (new generation) and the frame log/
+        // control reset on the source, then a new frame arrives on top.
+        p.generation = 2;
+        p.data_b64 = Arc::from(&b"WFla"[..]);
+        p.frames = Arc::new(vec![sample_frame_visible(b"f1")]);
+        p.anim_control = Some(AnimControl {
+            state: Some(3),
+            loop_count: None,
+            current_frame: None,
+        });
+        let s = render_str(&mut d, &frame_with(vec![p]));
+        assert!(s.contains("a=t"), "new generation re-transmits: {s:?}");
+        assert!(
+            s.contains("f1"),
+            "frame log reset means f1 replays again on the new generation: {s:?}"
+        );
+        assert!(
+            s.contains("a=a") && s.contains(",s=3"),
+            "control reset means it's re-sent even though value is unchanged: {s:?}"
         );
     }
 
@@ -1976,6 +2207,8 @@ mod tests {
             rows,
             cols,
             z: 0,
+            frames: Arc::new(Vec::new()),
+            anim_control: None,
         }
     }
 
