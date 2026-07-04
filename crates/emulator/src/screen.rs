@@ -2443,12 +2443,30 @@ mod tests {
     fn a_a_replaces_the_prior_control_state() {
         let mut e = crate::Emulator::new(24, 80);
         e.advance(b"\x1b_Ga=T,i=8,f=24,s=1,v=1;QUJD\x1b\\");
-        e.advance(b"\x1b_Ga=a,i=8,s=3\x1b\\");
-        e.advance(b"\x1b_Ga=a,i=8,s=1\x1b\\"); // stop, supersedes the prior "loop" state
+        e.advance(b"\x1b_Ga=a,i=8,s=3,v=5,c=3\x1b\\");
+        // stop, with no v=/c= at all: a buggy merge-not-replace implementation
+        // would keep loop_count=5/current_frame=3 from the previous command.
+        e.advance(b"\x1b_Ga=a,i=8,s=1\x1b\\");
         e.advance(b"\n");
         let s = e.screen();
         let ctrl = s.images.get(8).unwrap().anim_control.as_ref().unwrap();
         assert_eq!(ctrl.state, Some(1));
+        assert_eq!(ctrl.loop_count, None, "second a=a omitted v= — must not retain the prior v=5");
+        assert_eq!(
+            ctrl.current_frame, None,
+            "second a=a omitted c= — must not retain the prior c=3"
+        );
+    }
+
+    #[test]
+    fn a_a_s0_normalizes_state_to_none() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,i=8,f=24,s=1,v=1;QUJD\x1b\\");
+        e.advance(b"\x1b_Ga=a,i=8,s=0\x1b\\");
+        e.advance(b"\n");
+        let s = e.screen();
+        let ctrl = s.images.get(8).unwrap().anim_control.as_ref().unwrap();
+        assert_eq!(ctrl.state, None, "s=0 means ignored/unspecified, same as v=0");
     }
 
     #[test]
