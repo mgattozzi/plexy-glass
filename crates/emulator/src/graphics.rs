@@ -73,6 +73,58 @@ pub struct Image {
     /// renderer keyed on `(id, generation)` re-transmits when the pixels change
     /// instead of showing the stale first image.
     pub generation: u64,
+    /// Ordered log of every `a=f` command received for this image, replayed
+    /// verbatim to clients (see `Frame`'s doc comment). `Arc`-wrapped so a
+    /// compositor snapshot clone (every render pass) is a cheap refcount
+    /// bump, not a deep copy; `ImageStore::push_frame` uses `Arc::make_mut`
+    /// to append, which only deep-copies if an old snapshot is still alive.
+    pub frames: Arc<Vec<Frame>>,
+}
+
+impl Image {
+    /// Bytes counted toward `ImageStore`'s budget: the base transmit plus
+    /// every stored animation frame.
+    pub fn total_bytes(&self) -> usize {
+        self.data_b64.len()
+            + self
+                .frames
+                .iter()
+                .map(|f| f.data_b64.len())
+                .sum::<usize>()
+    }
+}
+
+/// One `a=f` animation-frame command, stored verbatim — no compositing is
+/// done by us. Kitty's own terminal composites frames client-side (alpha
+/// blend or overwrite, onto whichever frame `canvas_source` names), and that
+/// process is deterministic given the command stream in order, so replaying
+/// these in original arrival order to any client reproduces exactly what the
+/// originating child's terminal would have shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    /// `r=`: which frame number this command is. `None` means "append the
+    /// next number" (Kitty auto-assigns root+1, root+2, ... in arrival
+    /// order); `Some(n)` where `n` already exists means "edit frame `n` in
+    /// place, using its own prior content as the canvas" rather than append.
+    /// Stored exactly as received (present or absent) so replay reproduces
+    /// the same auto-numbering the original stream would have triggered.
+    pub frame_number: Option<u32>,
+    /// `c=`: which frame to use as the canvas background (`1` = the root/base
+    /// image). `None` if unspecified.
+    pub canvas_source: Option<u32>,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    /// `X=1` vs default alpha blend.
+    pub overwrite: bool,
+    /// `Y=`, default 0 (transparent black).
+    pub bg_color: u32,
+    /// `z=` gap in ms: positive = delay before the next frame, negative =
+    /// gapless, 0 = unspecified (same as absent).
+    pub gap_ms: i32,
+    pub format: ImageFormat,
+    pub data_b64: Arc<[u8]>,
 }
 
 /// An on-screen placement of an image, anchored to an absolute unified line.
@@ -126,6 +178,10 @@ pub struct ImageStore {
 
 impl ImageStore {
     const CAP_BYTES: usize = 64 * 1024 * 1024;
+    // ponytail: fixed cap, revisit if a real animation exceeds it — real
+    // GIF/APNG re-encoders send tens to low hundreds of frames, not
+    // thousands.
+    const CAP_FRAMES_PER_IMAGE: usize = 512;
 
     /// Insert (or replace) an image, evicting oldest entries while over the
     /// byte budget. Returns the ids evicted, so the caller can drop placements
@@ -133,17 +189,41 @@ impl ImageStore {
     pub fn insert(&mut self, img: Image) -> Vec<u32> {
         let id = img.id;
         if let Some(old) = self.map.remove(&id) {
-            self.bytes = self.bytes.saturating_sub(old.data_b64.len());
+            self.bytes = self.bytes.saturating_sub(old.total_bytes());
             self.order.retain(|&i| i != id);
         }
-        self.bytes += img.data_b64.len();
+        self.bytes += img.total_bytes();
         self.map.insert(id, img);
         self.order.push_back(id);
+        self.evict_over_budget()
+    }
+
+    /// Append an animation frame (`a=f`) to an already-transmitted image.
+    /// Evicts the oldest stored frame past `CAP_FRAMES_PER_IMAGE`, then
+    /// evicts whole images oldest-first if still over the byte budget.
+    /// Returns evicted whole-image ids (mirrors `insert`); no-ops (frame
+    /// dropped, empty Vec returned) if `id` isn't currently stored — a
+    /// pathological `a=f` for an id that was never transmitted or was
+    /// already evicted can't leak state.
+    pub fn push_frame(&mut self, id: u32, frame: Frame) -> Vec<u32> {
+        let Some(img) = self.map.get_mut(&id) else {
+            return Vec::new();
+        };
+        self.bytes += frame.data_b64.len();
+        Arc::make_mut(&mut img.frames).push(frame);
+        if img.frames.len() > Self::CAP_FRAMES_PER_IMAGE {
+            let dropped = Arc::make_mut(&mut img.frames).remove(0);
+            self.bytes = self.bytes.saturating_sub(dropped.data_b64.len());
+        }
+        self.evict_over_budget()
+    }
+
+    fn evict_over_budget(&mut self) -> Vec<u32> {
         let mut evicted = Vec::new();
         while self.bytes > Self::CAP_BYTES && self.order.len() > 1 {
             if let Some(victim) = self.order.pop_front() {
                 if let Some(img) = self.map.remove(&victim) {
-                    self.bytes = self.bytes.saturating_sub(img.data_b64.len());
+                    self.bytes = self.bytes.saturating_sub(img.total_bytes());
                     evicted.push(victim);
                 }
             } else {
@@ -155,6 +235,15 @@ impl ImageStore {
 
     pub fn get(&self, id: u32) -> Option<&Image> {
         self.map.get(&id)
+    }
+
+    /// Mutable access for updating in-place state (currently: unused by this
+    /// task, reserved for `a=a` control state in a follow-up). Frame appends
+    /// go through `push_frame` instead, which keeps the byte budget accurate;
+    /// this method does NOT track byte changes, so don't use it to touch
+    /// `data_b64` or `frames` directly.
+    pub fn get_mut(&mut self, id: u32) -> Option<&mut Image> {
+        self.map.get_mut(&id)
     }
 
     pub fn contains(&self, id: u32) -> bool {
@@ -194,6 +283,16 @@ pub struct GraphicsCommand {
     /// (negative = gapless). One field, two call-site interpretations, same
     /// as `rows`/`cols` already are for `r=`/`c=` across different actions.
     pub z: Option<i32>,
+    /// `x=` (`a=f` only): frame rect left, in pixels, within the canvas.
+    pub frame_x: Option<u32>,
+    /// `y=` (`a=f` only): frame rect top, in pixels, within the canvas.
+    pub frame_y: Option<u32>,
+    /// `X=1` (`a=f` only): overwrite the target rect. Absent/any other value
+    /// means the default, alpha-blend the frame's pixels onto the canvas.
+    pub compose_overwrite: bool,
+    /// `Y=` (`a=f` only): solid background RGBA (32-bit). Default (absent)
+    /// is transparent black (`0`).
+    pub bg_color: Option<u32>,
     pub payload: Vec<u8>, // base64 chunk
 }
 
@@ -232,6 +331,10 @@ pub fn parse_command(framed: &[u8]) -> Option<GraphicsCommand> {
             b"m" => cmd.more = val == "1",
             b"d" => cmd.delete_target = v.first().copied(),
             b"U" => cmd.unicode = val == "1",
+            b"x" => cmd.frame_x = val.parse().ok(),
+            b"y" => cmd.frame_y = val.parse().ok(),
+            b"X" => cmd.compose_overwrite = val == "1",
+            b"Y" => cmd.bg_color = val.parse().ok(),
             _ => {}
         }
     }
@@ -484,6 +587,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_command_frame_transmit_keys() {
+        let cmd = parse_command(
+            b"\x1b_Ga=f,i=9,r=2,c=1,x=10,y=5,s=20,v=30,X=1,Y=4278190335,z=-1,f=32\x1b\\",
+        )
+        .unwrap();
+        assert_eq!(cmd.action, b'f');
+        assert_eq!(cmd.id, Some(9));
+        assert_eq!(cmd.rows, Some(2)); // r=: reused as frame number for a=f
+        assert_eq!(cmd.cols, Some(1)); // c=: reused as canvas-source frame for a=f
+        assert_eq!(cmd.frame_x, Some(10));
+        assert_eq!(cmd.frame_y, Some(5));
+        assert_eq!(cmd.width, Some(20)); // s=: frame rect width
+        assert_eq!(cmd.height, Some(30)); // v=: frame rect height
+        assert!(cmd.compose_overwrite);
+        assert_eq!(cmd.bg_color, Some(4_278_190_335));
+        assert_eq!(cmd.z, Some(-1)); // reused: gap_ms for a=f
+        assert_eq!(cmd.format, Some(32));
+    }
+
+    #[test]
+    fn parse_command_frame_defaults() {
+        let cmd = parse_command(b"\x1b_Ga=f,i=9\x1b\\").unwrap();
+        assert!(!cmd.compose_overwrite);
+        assert_eq!(cmd.bg_color, None);
+        assert_eq!(cmd.frame_x, None);
+        assert_eq!(cmd.frame_y, None);
+    }
+
+    #[test]
     fn png_dims_from_header() {
         let mut png = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         png.extend_from_slice(&13u32.to_be_bytes());
@@ -592,7 +724,67 @@ mod tests {
             iterm_args: None,
             protocol: ImageProtocol::Kitty,
             generation: 1,
+            frames: Arc::new(Vec::new()),
         }
+    }
+
+    fn sample_image(id: u32, data: &[u8]) -> Image {
+        Image {
+            id,
+            protocol: ImageProtocol::Kitty,
+            format: ImageFormat::Rgba,
+            pixel_w: 1,
+            pixel_h: 1,
+            data_b64: Arc::from(data),
+            iterm_args: None,
+            generation: 1,
+            frames: Arc::new(Vec::new()),
+        }
+    }
+
+    fn sample_frame(data: &[u8]) -> Frame {
+        Frame {
+            frame_number: None,
+            canvas_source: None,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            overwrite: false,
+            bg_color: 0,
+            gap_ms: 0,
+            format: ImageFormat::Rgba,
+            data_b64: Arc::from(data),
+        }
+    }
+
+    #[test]
+    fn push_frame_no_op_for_unknown_id() {
+        let mut store = ImageStore::default();
+        let evicted = store.push_frame(999, sample_frame(b"data"));
+        assert!(evicted.is_empty());
+    }
+
+    #[test]
+    fn push_frame_appends_and_counts_bytes() {
+        let mut store = ImageStore::default();
+        store.insert(sample_image(1, b"base"));
+        store.push_frame(1, sample_frame(b"frame-one"));
+        assert_eq!(store.get(1).unwrap().frames.len(), 1);
+        assert_eq!(store.get(1).unwrap().frames[0].data_b64.as_ref(), b"frame-one");
+    }
+
+    #[test]
+    fn push_frame_evicts_oldest_frame_past_cap() {
+        let mut store = ImageStore::default();
+        store.insert(sample_image(1, b"base"));
+        for i in 0..(ImageStore::CAP_FRAMES_PER_IMAGE + 5) {
+            store.push_frame(1, sample_frame(format!("f{i}").as_bytes()));
+        }
+        let frames = &store.get(1).unwrap().frames;
+        assert_eq!(frames.len(), ImageStore::CAP_FRAMES_PER_IMAGE);
+        // The oldest 5 frames (f0..f4) were evicted; the log now starts at f5.
+        assert_eq!(frames[0].data_b64.as_ref(), b"f5");
     }
 
     // --- ImageFormat::from_kitty_f ---
@@ -691,6 +883,7 @@ mod tests {
             iterm_args: None,
             protocol: ImageProtocol::Kitty,
             generation: 1,
+            frames: Arc::new(Vec::new()),
         });
         store.insert(Image {
             id: 2,
@@ -701,6 +894,7 @@ mod tests {
             iterm_args: None,
             protocol: ImageProtocol::Kitty,
             generation: 1,
+            frames: Arc::new(Vec::new()),
         });
         // re-insert id=1 → moves it to the back of the LRU; id=2 is now oldest
         store.insert(Image {
@@ -712,6 +906,7 @@ mod tests {
             iterm_args: None,
             protocol: ImageProtocol::Kitty,
             generation: 2,
+            frames: Arc::new(Vec::new()),
         });
         // insert id=3 → total ≈ 75 MiB > 64 MiB; id=2 (oldest) must be evicted
         let evicted = store.insert(Image {
@@ -723,6 +918,7 @@ mod tests {
             iterm_args: None,
             protocol: ImageProtocol::Kitty,
             generation: 1,
+            frames: Arc::new(Vec::new()),
         });
         assert_eq!(evicted, vec![2], "id=2 is oldest after re-insert of id=1");
         assert!(store.contains(1));
@@ -746,6 +942,7 @@ mod tests {
             iterm_args: None,
             protocol: ImageProtocol::Kitty,
             generation: 1,
+            frames: Arc::new(Vec::new()),
         });
         let ev2 = store.insert(Image {
             id: 2,
@@ -756,6 +953,7 @@ mod tests {
             iterm_args: None,
             protocol: ImageProtocol::Kitty,
             generation: 1,
+            frames: Arc::new(Vec::new()),
         });
         assert!(ev1.is_empty(), "first insert: no eviction");
         assert!(
@@ -783,6 +981,7 @@ mod tests {
             iterm_args: None,
             protocol: ImageProtocol::Kitty,
             generation: 1,
+            frames: Arc::new(Vec::new()),
         });
         assert!(
             evicted.is_empty(),
@@ -807,6 +1006,7 @@ mod tests {
             iterm_args: None,
             protocol: ImageProtocol::Kitty,
             generation: 1,
+            frames: Arc::new(Vec::new()),
         });
         let evicted = store.insert(Image {
             id: 2,
@@ -817,6 +1017,7 @@ mod tests {
             iterm_args: None,
             protocol: ImageProtocol::Kitty,
             generation: 1,
+            frames: Arc::new(Vec::new()),
         });
         // After the eviction loop: id=1 gone, id=2 remains (40 MiB < 64 MiB cap).
         assert_eq!(evicted, vec![1]);
@@ -1110,6 +1311,7 @@ mod tests {
             iterm_args: None,
             protocol: ImageProtocol::Kitty,
             generation: 1,
+            frames: Arc::new(Vec::new()),
         });
         assert!(ev1.is_empty());
         let ev2 = store.insert(Image {
@@ -1121,6 +1323,7 @@ mod tests {
             iterm_args: None,
             protocol: ImageProtocol::Kitty,
             generation: 2,
+            frames: Arc::new(Vec::new()),
         });
         assert_eq!(ev2, vec![1], "oldest image evicted over budget");
         assert!(!store.contains(1));

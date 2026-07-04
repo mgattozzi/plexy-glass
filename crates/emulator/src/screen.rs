@@ -14,7 +14,7 @@ use crate::cell::Cell;
 use crate::color::Color;
 use crate::cursor::{Cursor, CursorShape};
 use crate::graphics::{
-    self, Image, ImageFormat, ImageProtocol, ImageStore, Placement, VirtualPlacement,
+    self, Frame, Image, ImageFormat, ImageProtocol, ImageStore, Placement, VirtualPlacement,
 };
 use crate::grid::{Grid, Row, RowMark, WrapOrigin};
 use crate::hyperlinks::HyperlinkTable;
@@ -42,6 +42,23 @@ struct PendingTx {
     unicode: bool,
     placement_id: Option<u32>,
     z: i32,
+}
+
+/// Accumulates a chunked `a=f` transmission, mirroring `PendingTx`.
+#[derive(Clone, Debug)]
+struct PendingFrame {
+    image_id: u32,
+    frame_number: Option<u32>,
+    canvas_source: Option<u32>,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    overwrite: bool,
+    bg_color: u32,
+    gap_ms: i32,
+    format: ImageFormat,
+    data_b64: Vec<u8>,
 }
 
 /// Terminal color queries from inner apps (OSC 10/11/12 with `?` parameter).
@@ -189,6 +206,8 @@ pub struct Screen {
     pub virtual_placements: Vec<VirtualPlacement>,
     /// In-progress chunked transmission (`None` between images).
     pending_tx: Option<PendingTx>,
+    /// In-progress chunked animation-frame transmission (`None` between frames).
+    pending_frame: Option<PendingFrame>,
     graphics_seq: u64,
     placement_id_seq: u32,
     image_id_seq: u32,
@@ -242,6 +261,7 @@ impl Screen {
             placements: Vec::new(),
             virtual_placements: Vec::new(),
             pending_tx: None,
+            pending_frame: None,
             graphics_seq: 0,
             placement_id_seq: 0,
             image_id_seq: 0x8000_0000, // synthesized ids; high to avoid child collisions
@@ -300,6 +320,7 @@ impl Screen {
             data_b64: Arc::from(inner.as_slice()),
             iterm_args: None,
             generation: self.image_gen,
+            frames: Arc::new(Vec::new()),
         };
         let evicted = self.images.insert(image);
         if !evicted.is_empty() {
@@ -344,6 +365,7 @@ impl Screen {
                 }
             }
             b't' | b'T' => self.accumulate_transmission(cmd),
+            b'f' => self.accumulate_frame(cmd),
             _ => {} // query (q) and unknown: ignored in Phase 2
         }
     }
@@ -411,6 +433,7 @@ impl Screen {
             data_b64: Arc::from(tx.data_b64.as_slice()),
             iterm_args: None,
             generation: self.image_gen,
+            frames: Arc::new(Vec::new()),
         };
         let evicted = self.images.insert(image);
         if !evicted.is_empty() {
@@ -436,6 +459,70 @@ impl Screen {
                 );
             }
         }
+    }
+
+    fn accumulate_frame(&mut self, cmd: graphics::GraphicsCommand) {
+        let is_continuation = self.pending_frame.is_some()
+            && cmd.id.is_none()
+            && cmd.rows.is_none()
+            && cmd.cols.is_none()
+            && cmd.frame_x.is_none()
+            && cmd.frame_y.is_none()
+            && cmd.width.is_none()
+            && cmd.height.is_none();
+        if is_continuation {
+            if let Some(pf) = self.pending_frame.as_mut() {
+                pf.data_b64.extend_from_slice(&cmd.payload);
+            }
+        } else {
+            let Some(image_id) = cmd.id else {
+                // a=f with no i= can't target an image; drop it (mirrors
+                // accumulate_transmission's synthesized-id path not applying
+                // here since a frame MUST reference an existing image).
+                return;
+            };
+            let format = cmd
+                .format
+                .and_then(ImageFormat::from_kitty_f)
+                .unwrap_or(ImageFormat::Png);
+            self.pending_frame = Some(PendingFrame {
+                image_id,
+                frame_number: cmd.rows.map(u32::from),
+                canvas_source: cmd.cols.map(u32::from),
+                x: cmd.frame_x.unwrap_or(0),
+                y: cmd.frame_y.unwrap_or(0),
+                width: cmd.width.unwrap_or(0),
+                height: cmd.height.unwrap_or(0),
+                overwrite: cmd.compose_overwrite,
+                bg_color: cmd.bg_color.unwrap_or(0),
+                gap_ms: cmd.z.unwrap_or(0),
+                format,
+                data_b64: cmd.payload,
+            });
+        }
+        if !cmd.more {
+            self.finalize_frame();
+        }
+    }
+
+    fn finalize_frame(&mut self) {
+        let Some(pf) = self.pending_frame.take() else {
+            return;
+        };
+        let frame = Frame {
+            frame_number: pf.frame_number,
+            canvas_source: pf.canvas_source,
+            x: pf.x,
+            y: pf.y,
+            width: pf.width,
+            height: pf.height,
+            overwrite: pf.overwrite,
+            bg_color: pf.bg_color,
+            gap_ms: pf.gap_ms,
+            format: pf.format,
+            data_b64: Arc::from(pf.data_b64.as_slice()),
+        };
+        self.images.push_frame(pf.image_id, frame);
     }
 
     /// Record a Unicode-placeholder (virtual) placement. The app positions the
@@ -1814,6 +1901,7 @@ impl Screen {
             data_b64: Arc::from(b64.as_bytes()),
             iterm_args: Some(Arc::from(args)),
             generation: self.image_gen,
+            frames: Arc::new(Vec::new()),
         };
         let evicted = self.images.insert(image);
         if !evicted.is_empty() {
@@ -2266,6 +2354,56 @@ mod tests {
         assert!(s.images.contains(9), "image stored");
         assert!(s.virtual_placements.is_empty(), "a=t,U=1 does not place");
         assert!(s.placements.is_empty());
+    }
+
+    #[test]
+    fn fresh_transmit_on_same_id_clears_prior_frames() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,i=7,f=24,s=1,v=1;QUJD\x1b\\"); // base image
+        e.advance(b"\x1b_Ga=f,i=7,f=24,s=1,v=1;QUJD\x1b\\"); // one frame
+        e.advance(b"\n");
+        let s = e.screen();
+        assert_eq!(s.images.get(7).unwrap().frames.len(), 1);
+        e.advance(b"\x1b_Ga=T,i=7,f=24,s=1,v=1;RkdI\x1b\\"); // fresh transmit, same id
+        e.advance(b"\n");
+        let s = e.screen();
+        assert_eq!(
+            s.images.get(7).unwrap().frames.len(),
+            0,
+            "a fresh a=t must clear the prior animation's frame log"
+        );
+    }
+
+    #[test]
+    fn a_f_append_without_r_grows_the_frame_log() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,i=3,f=24,s=1,v=1;QUJD\x1b\\");
+        e.advance(b"\x1b_Ga=f,i=3,f=24,s=1,v=1;RkdI\x1b\\");
+        e.advance(b"\x1b_Ga=f,i=3,f=24,s=1,v=1;SklK\x1b\\");
+        e.advance(b"\n");
+        let s = e.screen();
+        let frames = &s.images.get(3).unwrap().frames;
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].frame_number, None);
+        assert_eq!(frames[1].frame_number, None);
+    }
+
+    #[test]
+    fn a_f_with_r_is_stored_as_an_edit_entry_not_a_mutation() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,i=4,f=24,s=1,v=1;QUJD\x1b\\");
+        e.advance(b"\x1b_Ga=f,i=4,r=2,f=24,s=1,v=1;RkdI\x1b\\"); // first send of frame 2
+        e.advance(b"\x1b_Ga=f,i=4,r=2,f=24,s=1,v=1;SklK\x1b\\"); // edit frame 2 in place
+        e.advance(b"\n");
+        let s = e.screen();
+        let frames = &s.images.get(4).unwrap().frames;
+        // Both commands are stored as separate log entries (verbatim replay
+        // principle — see the Frame doc comment), not merged into one.
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].frame_number, Some(2));
+        assert_eq!(frames[1].frame_number, Some(2));
+        assert_eq!(frames[0].data_b64.as_ref(), b"RkdI");
+        assert_eq!(frames[1].data_b64.as_ref(), b"SklK");
     }
 
     #[test]
