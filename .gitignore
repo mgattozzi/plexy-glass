@@ -11,6 +11,13 @@
 # committed separately as regression seeds).
 **/corpus/
 
+# ...except graphics_advance's corpus, which is hand-authored realistic +
+# adversarial protocol byte sequences (Kitty/Sixel/iTerm2 framing a blind
+# fuzzer is very unlikely to discover on its own) meant to be committed as a
+# permanent seed corpus, not regenerated noise.
+!crates/emulator/tests/__fuzz__/graphics_advance/corpus/
+!crates/emulator/tests/__fuzz__/graphics_advance/corpus/*
+
 # insta pending snapshots (review with `cargo insta review`; accepted goldens
 # are committed under crates/*/src/snapshots/).
 *.snap.new
