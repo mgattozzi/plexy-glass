@@ -2,6 +2,7 @@
 //! frame bookkeeping: round-trip/bounds invariants, not implementation
 //! restatement. See CLAUDE.md's property-testing conventions.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use hegel::{TestCase, generators as gs};
@@ -47,6 +48,22 @@ fn sample_frame(n: u8) -> Frame {
     }
 }
 
+fn sized_frame(size: usize) -> Frame {
+    Frame {
+        frame_number: None,
+        canvas_source: None,
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        overwrite: false,
+        bg_color: 0,
+        gap_ms: 0,
+        format: ImageFormat::Rgba,
+        data_b64: Arc::from(vec![0u8; size]),
+    }
+}
+
 /// Any well-formed `a=f` frame with random key values parses without
 /// panicking and every key that was set is recoverable from the parsed
 /// command (round-trip, not a restatement of the parser's own logic — this
@@ -77,8 +94,13 @@ fn prop_frame_command_round_trips_its_keys(tc: TestCase) {
     assert_eq!(cmd.compose_overwrite, overwrite);
 }
 
-/// `push_frame` never grows an image's frame log past the documented cap,
-/// no matter how many frames arrive.
+/// `push_frame` never grows an image's frame log past the documented cap, no
+/// matter how many frames arrive, AND eviction drops the OLDEST frames first
+/// (not some other subset) — each pushed frame's content is tagged with its
+/// push index, so once `n` exceeds the cap the surviving frames must be
+/// exactly pushes `[n - cap, n)` in that order. Mirrors the hand-written
+/// `push_frame_evicts_oldest_frame_past_cap` unit test in graphics.rs, but for
+/// any `n` hegel draws rather than one fixed value.
 #[hegel::test(test_cases = 50)]
 fn prop_push_frame_never_exceeds_cap(tc: TestCase) {
     let n = tc.draw(gs::integers::<usize>().min_value(0).max_value(1000));
@@ -88,53 +110,74 @@ fn prop_push_frame_never_exceeds_cap(tc: TestCase) {
         store.push_frame(1, sample_frame((i % 256) as u8));
     }
     tc.note(&format!("pushed {n} frames"));
-    let len = store
+    let frames = &store
         .get(1)
         .expect("image 1 must still be present (byte budget is far above what this test pushes)")
-        .frames
-        .len();
+        .frames;
+    let len = frames.len();
     assert!(
         len <= CAP_FRAMES_PER_IMAGE,
         "frame log grew past the documented cap: {len}"
     );
     assert_eq!(len, n.min(CAP_FRAMES_PER_IMAGE));
+
+    // Oldest-eviction identity: the surviving frames must be the LAST `len`
+    // pushes, in original order — not an arbitrary subset.
+    let first_survivor = n - len; // push index of the oldest surviving frame
+    for (j, frame) in frames.iter().enumerate() {
+        let expected_push_index = first_survivor + j;
+        assert_eq!(
+            frame.data_b64.as_ref(),
+            &[(expected_push_index % 256) as u8],
+            "frame at position {j} should be push #{expected_push_index}, oldest-first eviction violated"
+        );
+    }
 }
 
-/// Frame bytes always count toward the store's total (a cheap proxy for "the
-/// byte-budget accounting stays consistent" — this doesn't re-derive the
-/// eviction threshold, just confirms bytes are neither double-counted nor
-/// dropped as frames arrive and the image is re-read).
+/// Once enough frames are pushed to force the per-image frame-cap eviction
+/// (`CAP_FRAMES_PER_IMAGE`), `Image::total_bytes()` must reflect ONLY the
+/// surviving frames, not the evicted ones. This tracks its own independent
+/// sliding-window model of which frames should still be alive (oldest
+/// evicted first, past the cap — the exact arithmetic `push_frame` performs:
+/// `self.bytes += new frame; if over cap, self.bytes -= evicted frame`) and
+/// checks it against `total_bytes()` after every push. Unlike the old
+/// version of this test, which re-derived the same `data_b64.len() +
+/// frames.iter().map(len).sum()` formula `total_bytes()` itself computes
+/// (`f(x) == f(x)`, and never pushed past the cap), this one independently
+/// models the CAP-EVICTION subtraction — the one place bytes could actually
+/// drift from what's stored — so a bug in `push_frame`'s eviction bookkeeping
+/// (e.g. subtracting the wrong frame's size, or forgetting to subtract at
+/// all) would show up as a mismatch here.
 #[hegel::test(test_cases = 50)]
-fn prop_frame_bytes_are_reflected_in_total_bytes(tc: TestCase) {
-    let sizes = tc.draw(gs::vecs(gs::integers::<u8>().min_value(1).max_value(200)).max_size(20));
+fn prop_frame_bytes_reflect_eviction(tc: TestCase) {
+    let n = tc.draw(gs::integers::<usize>().min_value(0).max_value(600));
     let mut store = ImageStore::default();
     store.insert(sample_image(1));
-    let mut expected: usize = store
+    let base_len = store
         .get(1)
         .expect("image 1 must be present right after insert")
         .total_bytes();
-    for &sz in &sizes {
-        let data = vec![0u8; sz as usize];
-        let frame = Frame {
-            frame_number: None,
-            canvas_source: None,
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-            overwrite: false,
-            bg_color: 0,
-            gap_ms: 0,
-            format: ImageFormat::Rgba,
-            data_b64: Arc::from(data),
-        };
-        store.push_frame(1, frame);
-        expected += sz as usize;
+
+    // Independent sliding-window model of "which frames are still alive":
+    // same cap, same oldest-first eviction rule as `push_frame`, tracked here
+    // from scratch rather than read back from `Image::frames`.
+    let mut window: VecDeque<usize> = VecDeque::new();
+    for i in 0..n {
+        let sz = (i % 200) + 1; // vary frame size so this isn't just a frame count
+        store.push_frame(1, sized_frame(sz));
+        window.push_back(sz);
+        if window.len() > CAP_FRAMES_PER_IMAGE {
+            window.pop_front();
+        }
+        let expected = base_len + window.iter().sum::<usize>();
+        let total = store
+            .get(1)
+            .expect("image 1 must still be present (byte budget is far above what this test pushes)")
+            .total_bytes();
+        assert_eq!(
+            total, expected,
+            "byte accounting drifted after push #{i} of {n} (window len {})",
+            window.len()
+        );
     }
-    tc.note(&format!("sizes={sizes:?}"));
-    let total = store
-        .get(1)
-        .expect("image 1 must still be present (byte budget is far above what this test pushes)")
-        .total_bytes();
-    assert_eq!(total, expected);
 }
