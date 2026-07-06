@@ -167,6 +167,8 @@ struct TestSessionBuilder<'e> {
     args: Vec<String>,
     size: PtySize,
     path_prepend: Option<String>,
+    env_overrides: Vec<(String, String)>,
+    env_removes: Vec<String>,
 }
 
 impl TestSessionBuilder<'_> {
@@ -189,6 +191,22 @@ impl TestSessionBuilder<'_> {
     /// Prepend `dir` to `PATH` (for stub `open`/`pbcopy` binaries).
     fn path_prepend(mut self, dir: &Path) -> Self {
         self.path_prepend = Some(format!("{}:/usr/bin:/bin", dir.display()));
+        self
+    }
+
+    /// Set a per-session env var, applied after (and so overriding) the shared
+    /// `TestEnv`. Use for per-client capability forcing, e.g.
+    /// `.env("PLEXY_FORCE_SIXEL", "1")`.
+    fn env(mut self, key: &str, val: &str) -> Self {
+        self.env_overrides.push((key.to_string(), val.to_string()));
+        self
+    }
+
+    /// Unset an inherited env var for this session only. The client treats any
+    /// *present* value (even `""`) as "forced", so a no-graphics client must
+    /// have `PLEXY_FORCE_KITTY` genuinely absent, not empty.
+    fn env_remove(mut self, key: &str) -> Self {
+        self.env_removes.push(key.to_string());
         self
     }
 
@@ -215,6 +233,12 @@ impl TestSessionBuilder<'_> {
         }
         for (k, v) in self.env {
             builder.env(k, v);
+        }
+        for (k, v) in &self.env_overrides {
+            builder.env(k, v);
+        }
+        for k in &self.env_removes {
+            builder.env_remove(k);
         }
         if let Some(path) = &self.path_prepend {
             builder.env("PATH", path);
@@ -262,6 +286,8 @@ impl TestSession {
                 pixel_height: 0,
             },
             path_prepend: None,
+            env_overrides: Vec::new(),
+            env_removes: Vec::new(),
         }
     }
 
@@ -2615,6 +2641,52 @@ fn kitty_image_renders_transmit_and_place() {
     assert!(
         sess.wait_for(b"\x1b_Ga=p,i=", Duration::from_secs(10)),
         "no place-by-id emitted. raw: {:?}",
+        sess.snapshot_str()
+    );
+}
+
+/// A Sixel-only client: the daemon captures the child's Sixel DCS image, and
+/// re-emits the Sixel data at the placed cell (Sixel is re-emitted as data,
+/// not transmit-once-by-id like Kitty).
+#[test]
+fn sixel_image_renders_data_at_cell() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::builder(&env)
+        .env_remove("PLEXY_FORCE_KITTY")
+        .env("PLEXY_FORCE_SIXEL", "1")
+        .start();
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+
+    // sh runs printf, so the pane's child OUTPUTs the Sixel; the daemon's
+    // emulator captures it (the client never sees the raw child bytes). The
+    // marker after it tells us the image line was processed.
+    let (st, _, err) = run_cli(
+        &env,
+        &[
+            "send",
+            "--enter",
+            "printf 'SIX_''OK\\n\\033Pq\"1;1;10;20#0;2;0;0;0~~~\\033\\\\\\n'",
+        ],
+    );
+    assert!(st.success(), "send failed: {err}");
+    assert!(
+        sess.wait_for(b"SIX_OK", Duration::from_secs(15)),
+        "image-bearing line never rendered. pane: {}",
+        sess.snapshot_str()
+    );
+    // The renderer re-emits the Sixel data (DCS `\x1bP` … `\x1b\\`) at the host
+    // cell. Match the DCS intro + the raster-attribute prefix the child sent.
+    // Note: vte's DCS param parsing pushes an explicit `0` for the omitted P1
+    // (the same normalization it applies to a bare `\x1b[m`), so the captured
+    // bare `\x1bPq` round-trips as `\x1bP0q` here -- semantically identical (0
+    // is the standard default for an omitted parameter), not a re-emit bug.
+    assert!(
+        sess.wait_for(b"\x1bP0q\"1;1", Duration::from_secs(10)),
+        "no Sixel data re-emitted to the Sixel client. raw: {:?}",
         sess.snapshot_str()
     );
 }

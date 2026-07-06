@@ -71,6 +71,14 @@ pub async fn run(
     } else {
         negotiate::classify_graphics(&probe_reply)
     };
+    // `PLEXY_FORCE_SIXEL` forces Sixel caps on, the Sixel sibling of
+    // `PLEXY_FORCE_KITTY`/`PLEXY_FORCE_ITERM2`. OR'd in (not an override) so a
+    // test can force Sixel-only by unsetting `PLEXY_FORCE_KITTY` and setting
+    // this: the else-branch `classify_graphics` yields all-false under the
+    // harness PTY (which answers no probe), then this sets `sixel = true`.
+    if env::var_os("PLEXY_FORCE_SIXEL").is_some() {
+        graphics.sixel = true;
+    }
     // iTerm2 isn't probeable via escapes, so detect it from the environment (or a
     // `PLEXY_FORCE_ITERM2` test hook) and OR it into the negotiated caps.
     if env::var_os("PLEXY_FORCE_ITERM2").is_some()
