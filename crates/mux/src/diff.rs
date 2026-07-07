@@ -1546,6 +1546,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn transmit_cap_at_exactly_256_does_not_reset() {
+        // Boundary companion to `transmit_cap_exceeded_schedules_reset_next_frame`:
+        // distinguishes `>` from a `>= TRANSMIT_CAP` mutant. At exactly 256
+        // distinct transmissions the real guard (`> 256`) is false, so an
+        // unchanged second frame must stay silent; a `>=` mutant would wrongly
+        // schedule a reset here.
+        let mut d = kitty_renderer();
+        let placements: Vec<VisiblePlacement> = (1..=256u32)
+            .map(|id| vp(u64::from(id), id, 1, 2, 3))
+            .collect();
+        render_str(&mut d, &frame_with(placements.clone()));
+        let s = render_str(&mut d, &frame_with(placements));
+        assert!(
+            !s.contains("\x1b_G"),
+            "exactly at TRANSMIT_CAP, unchanged frame must stay silent: {s:?}"
+        );
+    }
+
     // ── animation frame/control replay ─────────────────────────────────────────
 
     fn sample_frame_visible(seq: u64, data: &[u8]) -> Frame {
