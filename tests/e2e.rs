@@ -2691,6 +2691,44 @@ fn sixel_image_renders_data_at_cell() {
     );
 }
 
+/// An iTerm2-only client: the daemon captures the child's OSC 1337 inline
+/// image and re-emits it at the placed cell.
+#[test]
+fn iterm2_image_renders_data_at_cell() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::builder(&env)
+        .env_remove("PLEXY_FORCE_KITTY")
+        .env("PLEXY_FORCE_ITERM2", "1")
+        .start();
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+
+    let (st, _, err) = run_cli(
+        &env,
+        &[
+            "send",
+            "--enter",
+            "printf 'ITM_''OK\\n\\033]1337;File=inline=1;width=2px;height=2px:QUJD\\007\\n'",
+        ],
+    );
+    assert!(st.success(), "send failed: {err}");
+    assert!(
+        sess.wait_for(b"ITM_OK", Duration::from_secs(15)),
+        "image-bearing line never rendered. pane: {}",
+        sess.snapshot_str()
+    );
+    // The renderer re-emits the iTerm2 data (`OSC 1337 File=…:data BEL`) at the
+    // host cell.
+    assert!(
+        sess.wait_for(b"\x1b]1337;File=", Duration::from_secs(10)),
+        "no iTerm2 data re-emitted to the iTerm2 client. raw: {:?}",
+        sess.snapshot_str()
+    );
+}
+
 /// `prefix b` on a pane with no OSC 133 blocks (plain /bin/sh, no shell
 /// integration) refuses to open block mode and shows the no-blocks status hint.
 #[test]
