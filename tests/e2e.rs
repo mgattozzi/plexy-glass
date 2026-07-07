@@ -2645,6 +2645,42 @@ fn kitty_image_renders_transmit_and_place() {
     );
 }
 
+/// A Kitty placement with an explicit z-index: the daemon carries the `z=`
+/// key through to the emitted `a=p` place command (Kitty does its own
+/// stacking; we just pass it through).
+#[test]
+fn kitty_placement_carries_z_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+
+    // Transmit + display an image with z=-3 (draw under text). id 5, 2×2px.
+    let (st, _, err) = run_cli(
+        &env,
+        &[
+            "send",
+            "--enter",
+            "printf 'ZID_''OK\\n\\033_Gi=5,a=T,f=24,s=2,v=2,z=-3,q=2;QUJDQUJDQUJDQUJD\\033\\\\\\n'",
+        ],
+    );
+    assert!(st.success(), "send failed: {err}");
+    assert!(
+        sess.wait_for(b"ZID_OK", Duration::from_secs(15)),
+        "image-bearing line never rendered. pane: {}",
+        sess.snapshot_str()
+    );
+    // The place command carries z=-3 through to the client.
+    assert!(
+        sess.wait_for(b",z=-3", Duration::from_secs(10)),
+        "z-index not carried through to a=p. raw: {:?}",
+        sess.snapshot_str()
+    );
+}
+
 /// A Sixel-only client: the daemon captures the child's Sixel DCS image, and
 /// re-emits the Sixel data at the placed cell (Sixel is re-emitted as data,
 /// not transmit-once-by-id like Kitty).
