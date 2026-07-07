@@ -2296,6 +2296,7 @@ const fn rgb_to_color(rgb: plexy_glass_status::Rgb) -> plexy_glass_emulator::Col
 mod tests {
     use std::iter;
 
+    use hegel::{TestCase, generators as gs};
     use plexy_glass_emulator::{Emulator, RowMark};
 
     use super::*;
@@ -5256,6 +5257,98 @@ mod tests {
         assert_eq!(crop_axis(80, 4, 1, 2), (20, 40));
     }
 
+    /// `crop_axis` never returns a sub-rect exceeding the full pixel extent, and
+    /// the uncropped case round-trips to the whole extent. Draws off/vis within
+    /// [0, cells] (the caller's contract — leading-hidden and visible cells are
+    /// both bounded by the display cell count).
+    #[hegel::test(test_cases = 300)]
+    fn prop_crop_axis_stays_in_bounds(tc: TestCase) {
+        let pixels = tc.draw(gs::integers::<u32>().min_value(0).max_value(100_000));
+        let cells = tc.draw(gs::integers::<u16>().min_value(1).max_value(500));
+        let off = tc.draw(gs::integers::<u16>().min_value(0).max_value(cells));
+        let vis = tc.draw(gs::integers::<u16>().min_value(0).max_value(cells));
+        let (start, extent) = crop_axis(pixels, cells, off, vis);
+        tc.note(&format!(
+            "pixels={pixels} cells={cells} off={off} vis={vis} -> ({start},{extent})"
+        ));
+        // The sub-rect is within [0, pixels].
+        assert!(start <= pixels, "start {start} exceeds pixels {pixels}");
+        assert!(
+            start.saturating_add(extent) <= pixels,
+            "start+extent {start}+{extent} exceeds pixels {pixels}"
+        );
+        // Uncropped (no leading hidden cells, all cells visible) is the exact whole
+        // extent — the code's fast path, asserted as a round-trip.
+        if off == 0 && u64::from(vis) >= u64::from(cells) {
+            assert_eq!(
+                (start, extent),
+                (0, pixels),
+                "uncropped must be the full extent"
+            );
+        }
+        // A zero-width visible span yields zero extent (nothing to show).
+        if vis == 0 {
+            assert_eq!(extent, 0, "no visible cells must crop to zero pixels");
+        }
+    }
+
+    /// `host_image_id` folds (pane_id, raw_id) → a nonzero wire id. Over a
+    /// realistic bounded range it must be injective: a collision would make two
+    /// panes' images share a wire id and clobber each other. Also never zero.
+    #[test]
+    fn host_image_id_injective_over_realistic_range() {
+        use std::collections::HashMap;
+        let mut seen: HashMap<u32, (u32, u32)> = HashMap::new();
+        // 32 panes × 4096 raw ids = 131072 pairs — well past any real session.
+        for pane in 0u32..32 {
+            for raw in 0u32..4096 {
+                let host = host_image_id(pane, raw);
+                assert_ne!(host, 0, "host id must never be 0 (pane={pane}, raw={raw})");
+                if let Some(prev) = seen.insert(host, (pane, raw)) {
+                    panic!("host id collision: {prev:?} and ({pane}, {raw}) both fold to {host}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn effective_scroll_for_uses_full_scrollback_length_in_copy_mode() {
+        // Kills the `+ → *` mutation at `total_lines = scrollback.len() +
+        // active.num_rows()` (documented as a real, previously-unexercised gap
+        // in the `// Equivalent note:` block above `effective_scroll_for`).
+        // scrollback=3 rows, active=2 rows: `+` gives 5, `*` gives 6, so the two
+        // must disagree on the final scroll offset if the operator is swapped.
+        let mut e = Emulator::new(2, 4);
+        e.advance(b"AAAA\r\nBBBB\r\nCCCC\r\nDDDD\r\nEEEE");
+        e.advance(b"\x1b[m"); // flush the trailing pending grapheme
+        let screen = e.screen().clone();
+        assert_eq!(screen.scrollback.len(), 3, "expected 3 scrollback rows");
+        assert_eq!(screen.active.num_rows(), 2);
+        let cm = crate::CopyMode {
+            cursor: (0, 0),
+            anchor: None,
+            search: crate::SearchState::default(),
+            viewport_top: 0,
+            pane_rows: 2,
+            total_lines: 5,
+        };
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 2, 4),
+            screen: &screen,
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: Some(&cm),
+            block_mode: None,
+            title: None,
+            marked: false,
+            drag_role: PaneDragRole::None,
+        };
+        // total_lines(5) - viewport_top(0) - rect.rows(2) = 3. A `+ → *` mutant
+        // would compute total_lines=6 and get 4 instead.
+        assert_eq!(effective_scroll_for(&view), 3);
+    }
+
     const TEST_COLOR: plexy_glass_emulator::Color =
         plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61);
 
@@ -7150,9 +7243,9 @@ mod tests {
     }
 
     // Equivalent note: `effective_scroll_for` line 965 `+ → *` (scrollback * active
-    // instead of +): real gap, no test exercises the copy/block-mode branch with
-    // a scrollback-containing screen, so the wrong total_lines value goes undetected.
-    // Gap left as-is (would require setting up a full PaneView with scrollback).
+    // instead of +): was a real gap (no test exercised the copy/block-mode branch
+    // with a scrollback-containing screen); now killed by
+    // `effective_scroll_for_uses_full_scrollback_length_in_copy_mode` above.
     //
     // Equivalent note: `crop_axis` line 942 `== → !=`: EQUIVALENT. When off != 0,
     // vis = cells - off < cells, so `vis >= cells` is false and the fast path still
