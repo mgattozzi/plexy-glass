@@ -28,7 +28,7 @@ pub struct GraphicsCaps {
 /// Includes the source crop and the displayed cell box, not just the host cell:
 /// scrolling a tall image through the top of a short pane keeps the host cell
 /// fixed while the crop walks, so a crop-only change must still re-place.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PlacedRect {
     host_row: u16,
     host_col: u16,
@@ -315,6 +315,12 @@ impl DiffRenderer {
             // `p.frames` past `CAP_FRAMES_PER_IMAGE` (finding #2).
             if let Some(last) = p.frames.last() {
                 let watermark = self.last_frame_seq.get(&p.image_id).copied().unwrap_or(0);
+                // Equivalent note: `> → >=` is equivalent. At the boundary
+                // (last.seq == watermark) a `>=` mutant enters the guard where
+                // the real code wouldn't, but the inner filter still finds zero
+                // frames with `seq > watermark`, so the loop emits nothing, and
+                // re-inserting the same `watermark` value is a no-op — no
+                // observable difference either way.
                 if last.seq > watermark {
                     for f in p.frames.iter().filter(|f| f.seq > watermark) {
                         emit_frame(out, p.image_id, f);
@@ -1500,6 +1506,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn invalidate_with_nothing_transmitted_emits_no_reset_delete() {
+        // Kills the two `delete !` survivors on the reset_images guard
+        // (`self.graphics.kitty && (!self.transmitted.is_empty() ||
+        // !self.placed.is_empty())`): the existing `invalidate_resets_images_
+        // then_retransmits` test only exercises the case where both maps are
+        // non-empty, so removing either `!` alone still leaves the `||` true
+        // (the other term already covers it) and the mutant survives. Here
+        // nothing was ever transmitted, so both maps are empty and the real
+        // guard is false; a `delete !` mutant flips one side to `.is_empty()`,
+        // making the guard true and spuriously emitting the reset-delete.
+        let mut d = kitty_renderer();
+        d.invalidate(); // reset before any Kitty placement was ever rendered
+        let s = render_str(&mut d, &frame_with(vec![]));
+        assert!(
+            !s.contains("\x1b_Ga=d,d=A,q=2\x1b\\"),
+            "nothing was ever transmitted; no reset-delete expected: {s:?}"
+        );
+    }
+
+    #[test]
+    fn transmit_cap_exceeded_schedules_reset_next_frame() {
+        // Real coverage gap called out in source at the TRANSMIT_CAP guard:
+        // "testing requires >256 distinct image transmissions in a single
+        // test fixture" — that's just 257 placements with distinct ids.
+        let mut d = kitty_renderer();
+        let placements: Vec<VisiblePlacement> = (1..=257u32)
+            .map(|id| vp(u64::from(id), id, 1, 2, 3))
+            .collect();
+        render_str(&mut d, &frame_with(placements.clone()));
+        // Frame is unchanged, so an ordinary render would emit nothing new for
+        // these placements — but crossing TRANSMIT_CAP schedules a full reset
+        // for the *next* render.
+        let s = render_str(&mut d, &frame_with(placements));
+        assert!(
+            s.contains("\x1b_Ga=d,d=A,q=2\x1b\\"),
+            "exceeding TRANSMIT_CAP must schedule a full reset: {s:?}"
+        );
+    }
+
     // ── animation frame/control replay ─────────────────────────────────────────
 
     fn sample_frame_visible(seq: u64, data: &[u8]) -> Frame {
@@ -1882,6 +1928,63 @@ mod tests {
         );
     }
 
+    // ── rects_overlap (box↔data repaint-overlap detection) ─────────────────────
+
+    fn rect(host_row: u16, host_col: u16, rows: u16, cols: u16) -> PlacedRect {
+        PlacedRect {
+            host_row,
+            host_col,
+            image_id: 0,
+            placement_id: 0,
+            src_x: 0,
+            src_y: 0,
+            src_w: 0,
+            src_h: 0,
+            rows,
+            cols,
+        }
+    }
+
+    #[test]
+    fn rects_overlap_edge_touching_is_not_overlap_but_shifted_is() {
+        // `rects_overlap` ANDs four half-open-interval checks (row-start,
+        // row-end, col-start, col-end); this exercises every `<` boundary and
+        // every `&&` in the chain, since render_overlay_placements relies on
+        // it to decide whether a stale repaint must force a data placement to
+        // re-emit (the box↔data transition's core geometry).
+        let a = rect(0, 0, 2, 2); // rows 0..2, cols 0..2
+
+        // Row-adjacent: b starts exactly where a's rows end (touching, not
+        // overlapping). Real code: false either direction.
+        let below = rect(2, 0, 2, 2); // rows 2..4, cols 0..2
+        assert!(
+            !rects_overlap(&a, &below),
+            "row-touching rects must not overlap: {a:?} vs {below:?}"
+        );
+        assert!(
+            !rects_overlap(&below, &a),
+            "overlap must be symmetric (row case): {below:?} vs {a:?}"
+        );
+
+        // Col-adjacent: b starts exactly where a's cols end.
+        let right = rect(0, 2, 2, 2); // rows 0..2, cols 2..4
+        assert!(
+            !rects_overlap(&a, &right),
+            "col-touching rects must not overlap: {a:?} vs {right:?}"
+        );
+        assert!(
+            !rects_overlap(&right, &a),
+            "overlap must be symmetric (col case): {right:?} vs {a:?}"
+        );
+
+        // Shifted by one cell in both axes: genuinely overlaps at (1,1).
+        let overlapping = rect(1, 1, 2, 2); // rows 1..3, cols 1..3
+        assert!(
+            rects_overlap(&a, &overlapping),
+            "one-cell-shifted rects must overlap: {a:?} vs {overlapping:?}"
+        );
+    }
+
     // ── placeholder box (non-graphics clients) ─────────────────────────────────
 
     fn boxed_vp(rows: u16, cols: u16) -> VisiblePlacement {
@@ -2086,6 +2189,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn virtual_transmit_cap_exceeded_reschedules_transmit_next_frame() {
+        // Mirrors the classic TRANSMIT_CAP gap for the virtual-placement path
+        // (`transmitted_virtual`, real coverage gap same as the classic one).
+        // Once exceeded, the reset-images guard checks only the CLASSIC maps
+        // (`self.transmitted`/`self.placed`), which stay empty in a
+        // virtual-only session, so no `a=d,d=A,q=2` bytes are emitted — but
+        // `transmitted_virtual`/`virtual_placed` ARE cleared, so the very
+        // next render re-transmits the unchanged placements (an ordinary
+        // unchanged frame emits nothing, per
+        // `virtual_placement_transmits_once_and_emits_unicode_place`).
+        let mut d = kitty_renderer();
+        let vps: Vec<VisibleVirtualPlacement> =
+            (1..=257u32).map(|id| vvp(u64::from(id), id)).collect();
+        render_str(&mut d, &frame_with_virtual(vps.clone()));
+        let s = render_str(&mut d, &frame_with_virtual(vps));
+        assert!(
+            s.contains("a=t"),
+            "exceeding virtual TRANSMIT_CAP must re-transmit next frame: {s:?}"
+        );
+    }
+
+    #[test]
+    fn virtual_transmit_cap_at_exactly_256_does_not_reset() {
+        // Boundary companion, same reasoning as the classic
+        // `transmit_cap_at_exactly_256_does_not_reset`: distinguishes `>`
+        // from a `>= TRANSMIT_CAP` mutant.
+        let mut d = kitty_renderer();
+        let vps: Vec<VisibleVirtualPlacement> =
+            (1..=256u32).map(|id| vvp(u64::from(id), id)).collect();
+        render_str(&mut d, &frame_with_virtual(vps.clone()));
+        let s = render_str(&mut d, &frame_with_virtual(vps));
+        assert!(
+            !s.contains("\x1b_G"),
+            "exactly at virtual TRANSMIT_CAP, unchanged frame must stay silent: {s:?}"
+        );
+    }
+
     // ── Sixel data placements ──────────────────────────────────────────────────
 
     fn sixel_vp(key: u64, host_row: u16, host_col: u16) -> VisiblePlacement {
@@ -2269,6 +2410,66 @@ mod tests {
             s.matches("\x1bP0q").count(),
             2,
             "both placements must re-emit so the higher-z one stays on top: {s:?}"
+        );
+    }
+
+    /// The overlay data-emit orders Sixel/iTerm2 placements by (z, image_id):
+    /// after rendering N placements, their data appears in non-decreasing
+    /// (z, image_id) order, each exactly once (a stable permutation — the sort
+    /// neither drops nor duplicates a placement). Each placement gets a distinct
+    /// host row so its emit order is recoverable from the cursor-position escape
+    /// (`\x1b[{row+1};4H`) that precedes its Sixel data, the same technique
+    /// `sixel_placements_emit_lowest_z_first` uses.
+    #[hegel::test(test_cases = 100)]
+    fn prop_overlay_z_sort_is_ordered_permutation(tc: TestCase) {
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(6));
+        // Each placement: distinct image_id (i+1), distinct host_row (2 + 3*i, so
+        // the position markers \x1b[3;4H, \x1b[6;4H, … never collide), random z in
+        // a small range so ties on z are common (exercising the image_id
+        // tie-break).
+        let mut specs: Vec<(i32, u32, u16)> = Vec::new(); // (z, image_id, host_row)
+        for i in 0..n {
+            let z = tc.draw(gs::integers::<i32>().min_value(-3).max_value(3));
+            let host_row = 2 + 3 * i as u16;
+            specs.push((z, i as u32 + 1, host_row));
+        }
+        tc.note(&format!("specs (z,id,row) = {specs:?}"));
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(sixel_caps());
+        let placements: Vec<VisiblePlacement> = specs
+            .iter()
+            .enumerate()
+            .map(|(i, &(z, id, host_row))| {
+                let mut p = sixel_vp(i as u64, host_row, 3); // key i, host_col 3 -> ";4H"
+                p.image_id = id;
+                p.z = z;
+                p
+            })
+            .collect();
+        let out = render_str(&mut d, &frame_with(placements));
+        // Recover the on-wire order via each placement's distinct position marker.
+        let mut emitted: Vec<(usize, (i32, u32))> = specs
+            .iter()
+            .map(|&(z, id, host_row)| {
+                let marker = format!("\x1b[{};4H", host_row + 1);
+                let pos = out.find(&marker).unwrap_or_else(|| {
+                    panic!("placement id {id} (row {host_row}) was not emitted: {out:?}")
+                });
+                (pos, (z, id))
+            })
+            .collect();
+        emitted.sort_by_key(|&(pos, _)| pos);
+        let wire_order: Vec<(i32, u32)> = emitted.iter().map(|&(_, k)| k).collect();
+        // A permutation of the input (same multiset) — nothing dropped/duplicated.
+        let mut got = wire_order.clone();
+        let mut want: Vec<(i32, u32)> = specs.iter().map(|&(z, id, _)| (z, id)).collect();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want, "emit order dropped or duplicated a placement");
+        // … and non-decreasing in (z, image_id).
+        assert!(
+            wire_order.windows(2).all(|w| w[0] <= w[1]),
+            "emit order not sorted by (z, image_id): {wire_order:?}"
         );
     }
 
