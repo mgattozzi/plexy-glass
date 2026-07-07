@@ -289,6 +289,15 @@ pub struct GraphicsCommand {
     pub rows: Option<u16>,         // r=
     pub cols: Option<u16>,         // c=
     pub more: bool,                // m=1 (more chunks coming)
+    /// Whether the wire carried an explicit `m=` key at all, regardless of its
+    /// value (`m=0` sets this too, even though it clears `more`). A real
+    /// continuation chunk always carries `m=`; a metadata-light *fresh*
+    /// single-shot command never does. `is_continuation` checks in
+    /// `screen.rs` key on this instead of inferring "continuation" from the
+    /// mere absence of other metadata, which used to conflate "no
+    /// i=/f=/s=/v=" with "this must be a continuation" (2026-07-06 inline-
+    /// graphics bug audit, findings #4/#5/#6).
+    pub saw_m: bool,
     pub delete_target: Option<u8>, // d= (for a=d)
     pub unicode: bool,             // U=1 (Unicode-placeholder / virtual placement)
     /// `z=`: signed. Meaning depends on the action it's paired with — for
@@ -342,7 +351,10 @@ pub fn parse_command(framed: &[u8]) -> Option<GraphicsCommand> {
             b"r" => cmd.rows = val.parse().ok(),
             b"c" => cmd.cols = val.parse().ok(),
             b"z" => cmd.z = val.parse().ok(),
-            b"m" => cmd.more = val == "1",
+            b"m" => {
+                cmd.saw_m = true;
+                cmd.more = val == "1";
+            }
             b"d" => cmd.delete_target = v.first().copied(),
             b"U" => cmd.unicode = val == "1",
             b"x" => cmd.frame_x = val.parse().ok(),
@@ -580,7 +592,14 @@ mod tests {
         let cmd = parse_command(b"\x1b_Gm=0;BBBB\x1b\\").unwrap();
         assert_eq!(cmd.action, b't', "no a= → default transmit");
         assert!(!cmd.more);
+        assert!(cmd.saw_m, "m=0 still sets saw_m even though more is false");
         assert_eq!(cmd.payload, b"BBBB");
+    }
+
+    #[test]
+    fn saw_m_false_when_key_absent() {
+        let cmd = parse_command(b"\x1b_Ga=T,i=1;AAAA\x1b\\").unwrap();
+        assert!(!cmd.saw_m, "no m= key on the wire → saw_m stays false");
     }
 
     #[test]

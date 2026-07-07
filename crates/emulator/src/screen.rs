@@ -340,6 +340,40 @@ impl Screen {
         let Some(cmd) = graphics::parse_command(framed) else {
             return;
         };
+        // A real continuation chunk never repeats `a=` (it's just `m=` plus
+        // payload), so `cmd.action` defaults to `t` regardless of whether
+        // it's actually continuing an `a=t`/`a=T` transmission or an `a=f`
+        // animation frame — dispatching on the defaulted action alone
+        // misroutes `a=f` continuations into the transmission reassembler
+        // (2026-07-06 bug audit finding #5). Route by whichever reassembly
+        // is actually in progress instead. Gated on `saw_m` (not just the
+        // bare shape) so a metadata-free non-continuation command that
+        // legitimately has no `m=` at all — e.g. `a=d` delete-all, which also
+        // carries no id/format/dims — never gets hijacked into an in-flight
+        // transmission's continuation path.
+        let bare_continuation_shape = cmd.saw_m
+            && cmd.id.is_none()
+            && cmd.format.is_none()
+            && cmd.width.is_none()
+            && cmd.height.is_none()
+            && cmd.rows.is_none()
+            && cmd.cols.is_none()
+            && cmd.frame_x.is_none()
+            && cmd.frame_y.is_none();
+        if bare_continuation_shape {
+            if self.pending_frame.is_some() && self.pending_tx.is_none() {
+                self.accumulate_frame(cmd);
+                return;
+            }
+            if self.pending_tx.is_some() && self.pending_frame.is_none() {
+                self.accumulate_transmission(cmd);
+                return;
+            }
+            // Neither is in progress: fall through to the normal dispatch
+            // below, where accumulate_transmission's own no-metadata guard
+            // drops it as malformed rather than fabricating a phantom image
+            // (finding #6) — it doesn't reference an image to continue.
+        }
         match cmd.action {
             b'd' => {
                 // Delete: by image id when given, else all placements.
@@ -389,17 +423,29 @@ impl Screen {
     }
 
     fn accumulate_transmission(&mut self, cmd: graphics::GraphicsCommand) {
-        let is_continuation = self.pending_tx.is_some()
-            && cmd.format.is_none()
+        let no_metadata = cmd.format.is_none()
             && cmd.id.is_none()
             && cmd.width.is_none()
             && cmd.height.is_none()
             && cmd.rows.is_none()
             && cmd.cols.is_none();
+        // `saw_m` (not just the absence of metadata) is what actually marks a
+        // continuation on the wire: a metadata-light *fresh* command (e.g.
+        // `a=T;<png>` relying entirely on Kitty defaults) carries no `m=` at
+        // all, so it must start a new transmission rather than get appended
+        // onto a stale/abandoned one (finding #4).
+        let is_continuation = self.pending_tx.is_some() && cmd.saw_m && no_metadata;
         if is_continuation {
             if let Some(tx) = self.pending_tx.as_mut() {
                 tx.data_b64.extend_from_slice(&cmd.payload);
             }
+        } else if cmd.saw_m && no_metadata && self.pending_tx.is_none() {
+            // A continuation-shaped chunk (only `m=`, no transmission-
+            // defining metadata) with no transmission in progress has
+            // nothing to continue — drop it instead of fabricating a
+            // phantom image (finding #6), mirroring accumulate_frame's own
+            // `cmd.id` guard for a frame chunk with no image to target.
+            return;
         } else {
             // Start a new transmission (drop any abandoned one).
             let id = cmd.id.unwrap_or_else(|| {
@@ -481,7 +527,10 @@ impl Screen {
     }
 
     fn accumulate_frame(&mut self, cmd: graphics::GraphicsCommand) {
+        // Mirrors accumulate_transmission's `saw_m` gate (finding #4/#5): a
+        // real continuation always carries `m=` on the wire.
         let is_continuation = self.pending_frame.is_some()
+            && cmd.saw_m
             && cmd.id.is_none()
             && cmd.rows.is_none()
             && cmd.cols.is_none()
@@ -2236,6 +2285,113 @@ mod tests {
         assert!(
             e.screen().placements.is_empty(),
             "no placement without finalize"
+        );
+    }
+
+    // --- 2026-07-06 inline-graphics bug audit: findings #4/#5/#6 ---
+    //
+    // All three share a root cause: `is_continuation` inferred "this is a
+    // continuation chunk" from the ABSENCE of metadata (i=/f=/s=/v=/etc)
+    // rather than the wire `m=` key, and the dispatch routed purely on the
+    // (defaulted) `a=` action. See `graphics::GraphicsCommand::saw_m`.
+
+    #[test]
+    fn fresh_metadata_light_transmit_after_abandoned_chunk_starts_new_image() {
+        // Finding #4: an abandoned `pending_tx` (a chunked transmission whose
+        // closing m=0 chunk never arrived) must not swallow the NEXT
+        // metadata-light fresh command into itself.
+        let mut e = crate::Emulator::new(24, 80);
+        // Same abandoned-tx precondition as `abandoned_chunked_transmission_stores_nothing`.
+        e.advance(b"\x1b_Ga=T,i=3,f=24,s=2,v=2,m=1;QQ\x1b\\");
+        assert!(
+            e.screen().images.is_empty(),
+            "not finalized yet (abandoned)"
+        );
+
+        // A brand-new single-shot command relying entirely on Kitty defaults
+        // (no i=/f=/s=/v=/m=) must start its OWN fresh transmission rather
+        // than get appended onto the stale abandoned one.
+        let mut png = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&30u32.to_be_bytes());
+        png.extend_from_slice(&40u32.to_be_bytes());
+        let b64 = STANDARD.encode(&png);
+        e.advance(format!("\x1b_Ga=T;{b64}\x1b\\").as_bytes());
+
+        let s = e.screen();
+        assert!(
+            !s.images.contains(3),
+            "the abandoned id=3 transmission must not be finalized/corrupted"
+        );
+        assert_eq!(s.images.len(), 1, "exactly one (new) image exists");
+        let new_id = 0x8000_0001; // first synthesized id (image_id_seq starts at 0x8000_0000)
+        let img = s
+            .images
+            .get(new_id)
+            .expect("fresh image under a synthesized id");
+        assert_eq!(img.format, ImageFormat::Png, "defaulted format");
+        assert_eq!(
+            (img.pixel_w, img.pixel_h),
+            (30, 40),
+            "dims decoded from the PNG header, not the stale RGBA dims"
+        );
+        assert_eq!(
+            img.data_b64.as_ref(),
+            b64.as_bytes(),
+            "data is the fresh PNG alone, not stale QQ concatenated with it"
+        );
+    }
+
+    #[test]
+    fn chunked_animation_frame_reassembles_across_apcs() {
+        // Finding #5: a chunked `a=f` continuation was routed to the a=t/a=T
+        // reassembler (accumulate_transmission) instead of accumulate_frame,
+        // because a bare continuation chunk never repeats `a=` and so
+        // defaults to action 't'. Reproduces the brief's exact repro.
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,i=7,f=24,s=1,v=1;QUJD\x1b\\"); // base image
+        e.advance(b"\x1b_Ga=f,i=7,f=24,s=1,v=1,m=1;QQ\x1b\\"); // first frame chunk (more=1)
+        e.advance(b"\x1b_Gm=0;Rg\x1b\\"); // final frame chunk, bare shape
+        e.advance(b"\n");
+
+        let s = e.screen();
+        let frames = &s.images.get(7).unwrap().frames;
+        assert_eq!(
+            frames.len(),
+            1,
+            "the chunked frame must reassemble, not drop"
+        );
+        assert_eq!(
+            frames[0].data_b64.as_ref(),
+            b"QQRg",
+            "reassembled from both chunks in order"
+        );
+        assert_eq!(
+            s.images.len(),
+            1,
+            "no spurious image was created from the misrouted continuation"
+        );
+    }
+
+    #[test]
+    fn stray_continuation_chunk_does_not_fabricate_or_evict_real_image() {
+        // Finding #6: a continuation-shaped chunk (only `m=`, no
+        // transmission-defining metadata) with no transmission in progress
+        // must be dropped, not fabricate a phantom image that could evict a
+        // real one under LRU pressure.
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b_Ga=T,i=9,f=24,s=10,v=20;QUJD\x1b\\"); // a real, already-displayed image
+        assert!(e.screen().images.contains(9));
+
+        e.advance(b"\x1b_Gm=0;QQ\x1b\\"); // stray continuation, nothing pending
+
+        let s = e.screen();
+        assert!(s.images.contains(9), "the real image must survive");
+        assert_eq!(s.images.len(), 1, "no phantom image was fabricated");
+        assert!(
+            s.placements.iter().all(|p| p.image_id == 9),
+            "no phantom placement either"
         );
     }
 
