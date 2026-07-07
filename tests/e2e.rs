@@ -2844,6 +2844,72 @@ fn iterm2_image_renders_data_at_cell() {
     );
 }
 
+/// Two clients on one session with different graphics caps: the Kitty client
+/// gets the real image transmit/place, the no-graphics client gets the
+/// labelled placeholder box for the same footprint.
+#[test]
+fn mixed_caps_clients_get_image_or_box() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    // Client A: default env → Kitty-capable. Auto-spawns the daemon, attaches
+    // to session "main".
+    let kitty = TestSession::spawn(&env);
+    assert!(
+        kitty.wait_ready("main", Duration::from_secs(20)),
+        "kitty client never rendered"
+    );
+    // Client B: same session "main", but no graphics at all.
+    let plain = TestSession::builder(&env)
+        .env_remove("PLEXY_FORCE_KITTY")
+        .start();
+    assert!(
+        plain.wait_ready("main", Duration::from_secs(20)),
+        "plain client never rendered"
+    );
+
+    // A 10×3-cell image (s=100,v=60 at the 10×20 default cell → 10×3 cells) so
+    // the placeholder box's inner width (cols-2 = 8) comfortably fits the
+    // `100x60` label (6 chars) instead of truncating it -- a 4×4 footprint
+    // (as in the original draft) only leaves an inner width of 2, which
+    // truncates the label down to `40` and makes the label assertion vacuous.
+    let (st, _, err) = run_cli(
+        &env,
+        &[
+            "send",
+            "--enter",
+            "printf 'MIX_''OK\\n\\033_Gi=7,a=T,f=24,s=100,v=60,q=2;QUJDQUJD\\033\\\\\\n'",
+        ],
+    );
+    assert!(st.success(), "send failed: {err}");
+    assert!(
+        kitty.wait_for(b"MIX_OK", Duration::from_secs(15)),
+        "image line never rendered on kitty client. pane: {}",
+        kitty.snapshot_str()
+    );
+    // Kitty client: real transmit + place.
+    assert!(
+        kitty.wait_for(b",a=t,f=24", Duration::from_secs(10)),
+        "kitty client got no transmit. raw: {:?}",
+        kitty.snapshot_str()
+    );
+    // No-graphics client: a placeholder box carrying the WxH label. The label
+    // is `{pixel_w}x{pixel_h}` = `100x60`; the input sends `s=100,v=60` (not
+    // contiguous), so `100x60` can only match the real placeholder box, never
+    // the shell's echo of the typed command.
+    assert!(
+        plain.wait_for(b"100x60", Duration::from_secs(10)),
+        "plain client got no placeholder box label. raw: {:?}",
+        plain.snapshot_str()
+    );
+    // And the no-graphics client must NOT get real image transmit bytes
+    // (`snapshot()` returns the raw `Vec<u8>` buffer).
+    assert!(
+        !plain.snapshot().windows(8).any(|w| w == b",a=t,f=2"),
+        "plain client wrongly got image transmit bytes. raw: {:?}",
+        plain.snapshot_str()
+    );
+}
+
 /// `prefix b` on a pane with no OSC 133 blocks (plain /bin/sh, no shell
 /// integration) refuses to open block mode and shows the no-blocks status hint.
 #[test]
