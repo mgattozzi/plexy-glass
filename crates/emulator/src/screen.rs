@@ -589,8 +589,19 @@ impl Screen {
             gap_ms: pf.gap_ms,
             format: pf.format,
             data_b64: Arc::from(pf.data_b64.as_slice()),
+            seq: 0, // assigned by push_frame
         };
-        self.images.push_frame(pf.image_id, frame);
+        // Mirror the sibling insert paths (handle_sixel, finalize_transmission,
+        // the iTerm2 path): push_frame can evict a whole image to stay under
+        // the byte budget, and a dangling placement for an evicted id would
+        // rebind to whatever image later reuses that id (2026-07-06 inline-
+        // graphics bug audit, finding #1).
+        let evicted = self.images.push_frame(pf.image_id, frame);
+        if !evicted.is_empty() {
+            self.placements.retain(|p| !evicted.contains(&p.image_id));
+            self.virtual_placements
+                .retain(|p| !evicted.contains(&p.image_id));
+        }
     }
 
     /// Record a Unicode-placeholder (virtual) placement. The app positions the
@@ -2547,6 +2558,70 @@ mod tests {
             s.images.get(7).unwrap().frames.len(),
             0,
             "a fresh a=t must clear the prior animation's frame log"
+        );
+    }
+
+    #[test]
+    fn byte_budget_eviction_prunes_dangling_placements_for_evicted_image() {
+        // Finding #1 (2026-07-06 inline-graphics bug audit): finalize_frame
+        // was the only image-insert path that ignored push_frame's returned
+        // evicted-ids Vec (unlike handle_sixel/finalize_transmission/the
+        // iTerm2 path, which all prune placements for evicted ids). Streaming
+        // a=f frames for image 2 past the 64 MiB byte budget evicts the
+        // older image 1 whole; its placement must not dangle, or a later
+        // re-transmit of id 1 would rebind the stale placement to new content.
+        let mut e = crate::Emulator::new(24, 80);
+
+        // Image 1 (small), placed at the cursor.
+        e.advance(b"\x1b_Ga=T,i=1,f=24,s=1,v=1;QUJD\x1b\\");
+        assert!(
+            e.screen().placements.iter().any(|p| p.image_id == 1),
+            "image 1 must be placed before eviction"
+        );
+
+        // Image 2 (small base transmit); its frame log grows past the byte
+        // budget below.
+        e.advance(b"\x1b_Ga=T,i=2,f=24,s=1,v=1;QUJD\x1b\\");
+
+        // Stream large a=f frames for image 2 until the 64 MiB ImageStore
+        // byte budget is blown. Each frame stays under the 16 MiB single-APC
+        // pre-scan cap (see parser.rs's APC_CAP) so it survives whole; five
+        // 14 MiB frames (70 MiB) comfortably crosses the 64 MiB budget on the
+        // fifth push.
+        let big = "A".repeat(14 * 1024 * 1024);
+        for _ in 0..5 {
+            let cmd = format!("\x1b_Ga=f,i=2,f=24,s=1,v=1;{big}\x1b\\");
+            e.advance(cmd.as_bytes());
+        }
+
+        let s = e.screen();
+        assert!(
+            s.images.get(1).is_none(),
+            "image 1 must have been evicted for the byte budget"
+        );
+        assert!(
+            s.images.get(2).is_some(),
+            "image 2 (the survivor) must still be stored"
+        );
+        assert!(
+            !s.placements.iter().any(|p| p.image_id == 1),
+            "the evicted image's placement must be pruned, not left dangling"
+        );
+
+        // Re-transmit id 1 with fresh content: since the id was freed, this
+        // must produce exactly one (brand-new) placement, not the stale one
+        // resurfacing alongside it.
+        e.advance(b"\x1b_Ga=T,i=1,f=24,s=1,v=1;RkdI\x1b\\");
+        let placed_for_1 = e
+            .screen()
+            .placements
+            .iter()
+            .filter(|p| p.image_id == 1)
+            .count();
+        assert_eq!(
+            placed_for_1, 1,
+            "re-transmitting the reused id must not resurrect the stale \
+             placement alongside the fresh one"
         );
     }
 

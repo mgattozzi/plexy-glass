@@ -71,12 +71,20 @@ pub struct DiffRenderer {
     /// Set by `invalidate`: the next render first deletes ALL terminal images
     /// (session switch / re-point) before re-transmitting + re-placing.
     reset_images: bool,
-    /// Host image id → how many entries of that image's frame log this
+    /// Host image id → the highest `Frame::seq` of that image's frame log this
     /// client has already received, for incremental animation replay. A
     /// brand-new client (absent from this map) gets the base transmit plus
-    /// every buffered frame in one shot; an already-attached client only
-    /// gets the tail past its recorded count.
-    frames_sent: HashMap<u32, usize>,
+    /// every buffered frame in one shot; an already-attached client only gets
+    /// the frames whose seq is past its recorded watermark. Tracking a seq
+    /// watermark rather than a received *count* matters because
+    /// `ImageStore::push_frame` caps the stored log at `CAP_FRAMES_PER_IMAGE`
+    /// and trims the front (`remove(0)`) past it — `frames.len()` then no
+    /// longer reflects how many frames have ever arrived, so comparing a count
+    /// against it can never advance again once the client catches up to the
+    /// cap. `seq` is assigned once per frame and is stable across that
+    /// trimming, so `seq > watermark` keeps working (2026-07-06 inline-
+    /// graphics bug audit, finding #2).
+    last_frame_seq: HashMap<u32, u64>,
     /// Host image id → the last `a=a` control state sent to this client, so
     /// it's only re-sent when it changes (or on first sight of the image).
     last_anim_sent: HashMap<u32, AnimControl>,
@@ -94,7 +102,7 @@ impl DiffRenderer {
             virtual_placed: HashMap::new(),
             placed_data: HashMap::new(),
             reset_images: false,
-            frames_sent: HashMap::new(),
+            last_frame_seq: HashMap::new(),
             last_anim_sent: HashMap::new(),
         }
     }
@@ -133,7 +141,7 @@ impl DiffRenderer {
             self.boxed.clear();
             self.virtual_placed.clear();
             self.placed_data.clear();
-            self.frames_sent.clear();
+            self.last_frame_seq.clear();
             self.last_anim_sent.clear();
             self.reset_images = false;
         }
@@ -163,7 +171,7 @@ impl DiffRenderer {
             self.boxed.clear();
             self.virtual_placed.clear();
             self.placed_data.clear();
-            self.frames_sent.clear();
+            self.last_frame_seq.clear();
             self.last_anim_sent.clear();
             // Clear + home, then walk every row, every cell.
             out.push_str("\x1b[2J\x1b[H");
@@ -296,15 +304,22 @@ impl DiffRenderer {
                 // (a=t reset it, which also clears the source's frame log —
                 // see Task 2 Step 12), so any previously replayed frame log
                 // no longer applies to this client's view of the content.
-                self.frames_sent.insert(p.image_id, 0);
+                self.last_frame_seq.insert(p.image_id, 0);
                 self.last_anim_sent.remove(&p.image_id);
             }
-            let sent = self.frames_sent.get(&p.image_id).copied().unwrap_or(0);
-            if p.frames.len() > sent {
-                for f in &p.frames[sent..] {
-                    emit_frame(out, p.image_id, f);
+            // Forward every frame whose seq is past this client's watermark,
+            // in log order (the log is always ascending by seq — see
+            // `ImageStore::push_frame`). Using `seq` instead of an index/count
+            // keeps this correct even after the store has trimmed the front of
+            // `p.frames` past `CAP_FRAMES_PER_IMAGE` (finding #2).
+            if let Some(last) = p.frames.last() {
+                let watermark = self.last_frame_seq.get(&p.image_id).copied().unwrap_or(0);
+                if last.seq > watermark {
+                    for f in p.frames.iter().filter(|f| f.seq > watermark) {
+                        emit_frame(out, p.image_id, f);
+                    }
+                    self.last_frame_seq.insert(p.image_id, last.seq);
                 }
-                self.frames_sent.insert(p.image_id, p.frames.len());
             }
             if let Some(ctrl) = &p.anim_control
                 && self.last_anim_sent.get(&p.image_id) != Some(ctrl)
@@ -945,6 +960,7 @@ mod tests {
     use std::sync::Arc;
 
     use hegel::{TestCase, generators as gs};
+    use plexy_glass_emulator::{Image, ImageFormat, ImageProtocol, ImageStore};
     use smol_str::SmolStr;
 
     use super::*;
@@ -1475,7 +1491,7 @@ mod tests {
 
     // ── animation frame/control replay ─────────────────────────────────────────
 
-    fn sample_frame_visible(data: &[u8]) -> Frame {
+    fn sample_frame_visible(seq: u64, data: &[u8]) -> Frame {
         Frame {
             frame_number: None,
             canvas_source: None,
@@ -1488,6 +1504,7 @@ mod tests {
             gap_ms: 0,
             format: plexy_glass_emulator::ImageFormat::Rgba,
             data_b64: Arc::from(data),
+            seq,
         }
     }
 
@@ -1496,8 +1513,8 @@ mod tests {
         let mut d = kitty_renderer();
         let mut p = vp(1, 7, 1, 2, 3);
         p.frames = Arc::new(vec![
-            sample_frame_visible(b"f1"),
-            sample_frame_visible(b"f2"),
+            sample_frame_visible(1, b"f1"),
+            sample_frame_visible(2, b"f2"),
         ]);
         p.anim_control = Some(AnimControl {
             state: Some(3),
@@ -1523,12 +1540,12 @@ mod tests {
     fn already_attached_client_only_gets_new_frames() {
         let mut d = kitty_renderer();
         let mut p = vp(1, 7, 1, 2, 3);
-        p.frames = Arc::new(vec![sample_frame_visible(b"f1")]);
+        p.frames = Arc::new(vec![sample_frame_visible(1, b"f1")]);
         render_str(&mut d, &frame_with(vec![p.clone()])); // client is now caught up to 1 frame
 
         p.frames = Arc::new(vec![
-            sample_frame_visible(b"f1"),
-            sample_frame_visible(b"f2"),
+            sample_frame_visible(1, b"f1"),
+            sample_frame_visible(2, b"f2"),
         ]);
         let s = render_str(&mut d, &frame_with(vec![p]));
         assert!(
@@ -1586,7 +1603,7 @@ mod tests {
         // full, not be treated as "already sent".
         let mut d = kitty_renderer();
         let mut p = vp(1, 7, 1, 2, 3);
-        p.frames = Arc::new(vec![sample_frame_visible(b"f1")]);
+        p.frames = Arc::new(vec![sample_frame_visible(1, b"f1")]);
         p.anim_control = Some(AnimControl {
             state: Some(3),
             loop_count: None,
@@ -1598,7 +1615,7 @@ mod tests {
         // control reset on the source, then a new frame arrives on top.
         p.generation = 2;
         p.data_b64 = Arc::from(&b"WFla"[..]);
-        p.frames = Arc::new(vec![sample_frame_visible(b"f1")]);
+        p.frames = Arc::new(vec![sample_frame_visible(1, b"f1")]);
         p.anim_control = Some(AnimControl {
             state: Some(3),
             loop_count: None,
@@ -1626,8 +1643,8 @@ mod tests {
         let mut p = vp(1, 7, 1, 2, 3);
         p.z = 7;
         p.frames = Arc::new(vec![
-            sample_frame_visible(b"FR0Z"),
-            sample_frame_visible(b"FR1Z"),
+            sample_frame_visible(1, b"FR0Z"),
+            sample_frame_visible(2, b"FR1Z"),
         ]);
         p.anim_control = Some(AnimControl {
             state: Some(3),
@@ -1653,7 +1670,7 @@ mod tests {
     /// marker in the wire output without ambiguity.
     fn vp_with_frames(image_id: u32, n: usize) -> VisiblePlacement {
         let frames = (0..n)
-            .map(|i| sample_frame_visible(format!("FR{i}Z").as_bytes()))
+            .map(|i| sample_frame_visible(i as u64 + 1, format!("FR{i}Z").as_bytes()))
             .collect::<Vec<_>>();
         VisiblePlacement {
             frames: Arc::new(frames),
@@ -1670,18 +1687,17 @@ mod tests {
     /// (0, 1, or several at once), a client that renders every tick must see
     /// each frame exactly once, in arrival order, and a multi-frame batch
     /// must replay in the same relative order it was appended — the
-    /// invariant the per-client `frames_sent` bookkeeping (Task 4) and the
-    /// `p.frames[sent..]` replay loop in `render_kitty_placements` are
-    /// supposed to guarantee. Randomizing the batch size (rather than always
-    /// growing the log by exactly one frame per tick) matters: a
-    /// fixed-growth-of-one loop makes every batch length 1, and a batch of
-    /// length 1 is identical whether replayed forwards or reversed, so a
-    /// reordering bug (e.g. `.rev()` sneaking into that loop) would pass
-    /// undetected. With batches of 2+, this test checks the newly appended
-    /// frames' markers appear in the wire output at strictly increasing
-    /// byte offsets, in addition to the skip/repeat/stall checks (no new
-    /// marker missing, no stale marker reappearing, `frames_sent` landing
-    /// exactly on the new total).
+    /// invariant the per-client `last_frame_seq` bookkeeping and the
+    /// seq-watermark replay loop in `render_kitty_placements` are supposed to
+    /// guarantee. Randomizing the batch size (rather than always growing the
+    /// log by exactly one frame per tick) matters: a fixed-growth-of-one loop
+    /// makes every batch length 1, and a batch of length 1 is identical
+    /// whether replayed forwards or reversed, so a reordering bug (e.g.
+    /// `.rev()` sneaking into that loop) would pass undetected. With batches
+    /// of 2+, this test checks the newly appended frames' markers appear in
+    /// the wire output at strictly increasing byte offsets, in addition to
+    /// the skip/repeat/stall checks (no new marker missing, no stale marker
+    /// reappearing, `last_frame_seq` landing exactly on the new total).
     #[hegel::test(test_cases = 100)]
     fn prop_client_never_repeats_a_frame_and_sees_them_in_order(tc: TestCase) {
         let batch_sizes =
@@ -1725,11 +1741,54 @@ mod tests {
                 }
             }
             assert_eq!(
-                d.frames_sent.get(&image_id).copied(),
-                Some(new_total),
-                "frames_sent must land on exactly {new_total}: {s:?}"
+                d.last_frame_seq.get(&image_id).copied(),
+                Some(new_total as u64),
+                "last_frame_seq must land on exactly {new_total}: {s:?}"
             );
             total = new_total;
+        }
+    }
+
+    #[test]
+    fn animation_replay_survives_frame_count_cap_eviction() {
+        // Finding #2 (2026-07-06 inline-graphics bug audit): the old
+        // `frames_sent` bookkeeping compared an absolute received-count
+        // against `p.frames.len()`. `ImageStore::push_frame` caps the stored
+        // log at CAP_FRAMES_PER_IMAGE (512), trimming the front with
+        // `remove(0)` past it, so `frames.len()` pins at 512 forever once an
+        // image's log has been trimmed. A client that had caught up to the
+        // cap could then never see `len() > sent` fire again, freezing
+        // playback even as fresh frames kept arriving. Drive a real
+        // `ImageStore` (not a hand-built Vec, so the front-eviction is
+        // genuine) past the cap and confirm the renderer keeps delivering.
+        let mut store = ImageStore::default();
+        store.insert(Image {
+            id: 7,
+            protocol: ImageProtocol::Kitty,
+            format: ImageFormat::Rgba,
+            pixel_w: 1,
+            pixel_h: 1,
+            data_b64: Arc::from(&b"QUJD"[..]),
+            iterm_args: None,
+            generation: 1,
+            frames: Arc::new(Vec::new()),
+            anim_control: None,
+        });
+
+        let mut d = kitty_renderer();
+        const PAST_CAP: usize = 600; // > ImageStore::CAP_FRAMES_PER_IMAGE (512)
+        for i in 0..PAST_CAP {
+            store.push_frame(7, sample_frame_visible(0, format!("FR{i}Z").as_bytes()));
+            let mut p = vp(1, 7, 1, 2, 3);
+            p.frames = store.get(7).unwrap().frames.clone();
+            let s = render_str(&mut d, &frame_with(vec![p]));
+            if i >= 512 {
+                assert!(
+                    s.contains(&format!("FR{i}Z")),
+                    "frame {i}, past the 512-frame cap, must still be delivered \
+                     (playback must not stall): {s:?}"
+                );
+            }
         }
     }
 

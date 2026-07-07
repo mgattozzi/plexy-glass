@@ -45,6 +45,7 @@ fn sample_frame(n: u8) -> Frame {
         gap_ms: 0,
         format: ImageFormat::Rgba,
         data_b64: Arc::from(vec![n]),
+        seq: 0, // overwritten by push_frame
     }
 }
 
@@ -61,6 +62,7 @@ fn sized_frame(size: usize) -> Frame {
         gap_ms: 0,
         format: ImageFormat::Rgba,
         data_b64: Arc::from(vec![0u8; size]),
+        seq: 0, // overwritten by push_frame
     }
 }
 
@@ -101,7 +103,12 @@ fn prop_frame_command_round_trips_its_keys(tc: TestCase) {
 /// push index, so once `n` exceeds the cap the surviving frames must be
 /// exactly pushes `[n - cap, n)` in that order. Mirrors the hand-written
 /// `push_frame_evicts_oldest_frame_past_cap` unit test in graphics.rs, but for
-/// any `n` hegel draws rather than one fixed value.
+/// any `n` hegel draws rather than one fixed value. Also checks `Frame::seq`
+/// (2026-07-06 inline-graphics bug audit, finding #2): it must equal
+/// `push index + 1` for every surviving frame, for any `n` — i.e. it stays
+/// the frame's original push order even though `remove(0)` eviction shifts
+/// its index down, which is exactly the property a per-client renderer needs
+/// to track replay progress across a trimmed log.
 #[hegel::test(test_cases = 50)]
 fn prop_push_frame_never_exceeds_cap(tc: TestCase) {
     let n = tc.draw(gs::integers::<usize>().min_value(0).max_value(1000));
@@ -131,6 +138,11 @@ fn prop_push_frame_never_exceeds_cap(tc: TestCase) {
             frame.data_b64.as_ref(),
             &[(expected_push_index % 256) as u8],
             "frame at position {j} should be push #{expected_push_index}, oldest-first eviction violated"
+        );
+        assert_eq!(
+            frame.seq,
+            (expected_push_index + 1) as u64,
+            "seq must track original push order (1-based), not the post-eviction index"
         );
     }
 }

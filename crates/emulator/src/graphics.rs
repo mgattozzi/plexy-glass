@@ -123,6 +123,15 @@ pub struct Frame {
     pub gap_ms: i32,
     pub format: ImageFormat,
     pub data_b64: Arc<[u8]>,
+    /// Monotonic per-image sequence number, assigned by `ImageStore::push_frame`
+    /// when the frame is appended (1, 2, 3, ...; 0 means "none sent yet" to a
+    /// renderer that hasn't seen this image). Unlike a frame's position in
+    /// `Image::frames`, this never changes once assigned, so it survives the
+    /// `CAP_FRAMES_PER_IMAGE` front-eviction (`remove(0)`) that shifts every
+    /// later frame's index down. A per-client renderer tracks "highest seq
+    /// sent" instead of "frames sent so far" so replay can't stall once the log
+    /// has been trimmed (2026-07-06 inline-graphics bug audit, finding #2).
+    pub seq: u64,
 }
 
 /// The most recently received `a=a` (animation control) state for an image.
@@ -220,10 +229,15 @@ impl ImageStore {
     /// dropped, empty Vec returned) if `id` isn't currently stored — a
     /// pathological `a=f` for an id that was never transmitted or was
     /// already evicted can't leak state.
-    pub fn push_frame(&mut self, id: u32, frame: Frame) -> Vec<u32> {
+    pub fn push_frame(&mut self, id: u32, mut frame: Frame) -> Vec<u32> {
         let Some(img) = self.map.get_mut(&id) else {
             return Vec::new();
         };
+        // Assign the next seq from the current tail, not a separate counter:
+        // the frame log is never fully emptied by the per-image cap eviction
+        // below (only a fresh `insert` resets it to `Vec::new()`), so the last
+        // entry's seq is always the running high-water mark.
+        frame.seq = img.frames.last().map_or(1, |f| f.seq + 1);
         self.bytes += frame.data_b64.len();
         Arc::make_mut(&mut img.frames).push(frame);
         if img.frames.len() > Self::CAP_FRAMES_PER_IMAGE {
@@ -800,6 +814,7 @@ mod tests {
             gap_ms: 0,
             format: ImageFormat::Rgba,
             data_b64: Arc::from(data),
+            seq: 0, // overwritten by push_frame
         }
     }
 
@@ -820,6 +835,11 @@ mod tests {
             store.get(1).unwrap().frames[0].data_b64.as_ref(),
             b"frame-one"
         );
+        assert_eq!(
+            store.get(1).unwrap().frames[0].seq,
+            1,
+            "first frame ever pushed for a fresh image gets seq 1"
+        );
     }
 
     #[test]
@@ -833,6 +853,18 @@ mod tests {
         assert_eq!(frames.len(), ImageStore::CAP_FRAMES_PER_IMAGE);
         // The oldest 5 frames (f0..f4) were evicted; the log now starts at f5.
         assert_eq!(frames[0].data_b64.as_ref(), b"f5");
+        // `seq` is assigned once per frame and never reused/rewritten by
+        // eviction (finding #2): f5 kept its original seq of 6 (1-based,
+        // f0..f4 were seq 1..5) even though it's now at index 0, and the log
+        // is still monotonic front-to-back across the eviction boundary.
+        assert_eq!(
+            frames[0].seq, 6,
+            "a surviving frame's seq must not shift when older frames are evicted"
+        );
+        assert!(
+            frames.windows(2).all(|w| w[0].seq < w[1].seq),
+            "seq must stay strictly increasing across the eviction boundary"
+        );
     }
 
     // --- ImageFormat::from_kitty_f ---
