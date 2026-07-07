@@ -2673,9 +2673,33 @@ fn kitty_placement_carries_z_index() {
         "image-bearing line never rendered. pane: {}",
         sess.snapshot_str()
     );
-    // The place command carries z=-3 through to the client.
+    // `,z=-3` appears verbatim in the typed printf source echoed back by the
+    // shell before execution, so matching it anywhere in the buffer would be
+    // satisfied by the echo rather than a real placement. `a=p` never appears
+    // in the input at all (it sends `a=T`) and the echo never contains a real
+    // ESC byte (it's literal `\033` text), so `\x1b_Ga=p` can only match the
+    // daemon's actual replay -- no buffer-position gate needed to rule out the
+    // echo for that half.
     assert!(
-        sess.wait_for(b",z=-3", Duration::from_secs(10)),
+        sess.wait_for(b"\x1b_Ga=p", Duration::from_secs(10)),
+        "no a=p place command emitted. raw: {:?}",
+        sess.snapshot_str()
+    );
+    // For z=-3 we do need a gate, since the echo really does contain that
+    // exact substring. Gating on a `buffer_len()` taken right after ZID_OK's
+    // `wait_for` returns doesn't work here: the daemon batches the whole
+    // post-echo render (ZID_OK's text plus the captured-and-replayed a=p) into
+    // one client write, so by the time `wait_for` observes ZID_OK the replay
+    // has typically already landed too, putting the mark *after* it. Instead,
+    // gate on the position of the real `a=p` match found above -- content-
+    // based, not time-based -- since z=-3 rides in that same escape sequence.
+    let buf = sess.snapshot();
+    let place_at = buf
+        .windows(6)
+        .position(|w| w == b"\x1b_Ga=p")
+        .expect("wait_for above just found this same pattern");
+    assert!(
+        sess.wait_for_from(place_at, b",z=-3", Duration::from_secs(10)),
         "z-index not carried through to a=p. raw: {:?}",
         sess.snapshot_str()
     );
@@ -2710,15 +2734,27 @@ fn kitty_animation_frames_replayed() {
         "animation line never rendered. pane: {}",
         sess.snapshot_str()
     );
-    // The daemon replays the frame command(s) …
+    // The old assertions (`a=f,i=`, `a=a`) both appear verbatim in the typed
+    // printf source (the shell echoes it back before executing it), so
+    // matching them anywhere in the cumulative buffer was satisfied by the
+    // echo, not the replay -- and `a=f,i=` in particular can never match the
+    // real replay at all: `emit_frame` writes id-first (`i=6,a=f,f=24`) for a
+    // single-chunk frame, so the wire bytes are `,a=f,f=`, never `a=f,i=`.
+    // The corrected id-first patterns below are echo-proof on their own (the
+    // echo's key order is always action-first: `a=f,i=` / `a=a,i=`), verified
+    // by checking they don't appear anywhere in the literal printf source --
+    // so no buffer-position gate is needed (and a `buffer_len()` mark taken
+    // right after the ANI_OK `wait_for` wouldn't help anyway: the daemon
+    // batches the whole post-echo render, marker text and replay alike, into
+    // one client write, so the mark usually lands after the replay too).
     assert!(
-        sess.wait_for(b"a=f,i=", Duration::from_secs(10)),
+        sess.wait_for(b",a=f,f=", Duration::from_secs(10)),
         "no a=f frame replayed to the client. raw: {:?}",
         sess.snapshot_str()
     );
     // … and the animation control.
     assert!(
-        sess.wait_for(b"a=a", Duration::from_secs(10)),
+        sess.wait_for(b",a=a,s=", Duration::from_secs(10)),
         "no a=a control replayed to the client. raw: {:?}",
         sess.snapshot_str()
     );
