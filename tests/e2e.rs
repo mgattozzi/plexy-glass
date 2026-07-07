@@ -2681,6 +2681,49 @@ fn kitty_placement_carries_z_index() {
     );
 }
 
+/// A Kitty client sees the daemon replay animation frame (`a=f`) and control
+/// (`a=a`) commands captured from the child — the capture→replay round-trip
+/// through a real daemon, not just the unit-level DiffRenderer.
+#[test]
+fn kitty_animation_frames_replayed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+
+    // Base image (id 6), then two frames, then loop control. One printf so the
+    // whole animation lands in one child write.
+    let (st, _, err) = run_cli(
+        &env,
+        &[
+            "send",
+            "--enter",
+            "printf 'ANI_''OK\\n\\033_Ga=T,i=6,f=24,s=2,v=2,q=2;QUJDQUJDQUJDQUJD\\033\\\\\\033_Ga=f,i=6,f=24,s=2,v=2;RkdIRkdIRkdIRkdI\\033\\\\\\033_Ga=f,i=6,f=24,s=2,v=2;SklKSklKSklKSklK\\033\\\\\\033_Ga=a,i=6,s=3,v=1\\033\\\\\\n'",
+        ],
+    );
+    assert!(st.success(), "send failed: {err}");
+    assert!(
+        sess.wait_for(b"ANI_OK", Duration::from_secs(15)),
+        "animation line never rendered. pane: {}",
+        sess.snapshot_str()
+    );
+    // The daemon replays the frame command(s) …
+    assert!(
+        sess.wait_for(b"a=f,i=", Duration::from_secs(10)),
+        "no a=f frame replayed to the client. raw: {:?}",
+        sess.snapshot_str()
+    );
+    // … and the animation control.
+    assert!(
+        sess.wait_for(b"a=a", Duration::from_secs(10)),
+        "no a=a control replayed to the client. raw: {:?}",
+        sess.snapshot_str()
+    );
+}
+
 /// A Sixel-only client: the daemon captures the child's Sixel DCS image, and
 /// re-emits the Sixel data at the placed cell (Sixel is re-emitted as data,
 /// not transmit-once-by-id like Kitty).
