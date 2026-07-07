@@ -404,9 +404,11 @@ confirmed or annotated by this pass, since chasing them wasn't in its brief.
 
 The **86% → 60%** headline number is real but needs a caveat: the file's
 raw mutant count grew from the 115 in the 2026-06-29 baseline to **868**,
-7.5x, while `compositor.rs`'s production code (excluding `mod tests`) only
-grew by about 60 lines over the same period — nowhere near enough to explain
-a 7.5x jump. Breaking the 313 survivors down by function: only ~75 sit in
+7.5x, while `compositor.rs`'s production code (excluding `mod tests`) grew
+by roughly 291 lines (~14.5%) since that baseline (of which only ~60 lines
+are this initiative's own additions since 2026-07-04; the rest came from
+unrelated feature work landed between the baseline and 07-04) — nowhere near
+enough to explain a 7.5x jump. Breaking the 313 survivors down by function: only ~75 sit in
 code this initiative's graphics scope touches at all (60 in `compose` itself
 — the top-level compositor entry point, already exercised indirectly by the
 snapshot suite but not by mutation-specific tests — plus `host_image_id`,
