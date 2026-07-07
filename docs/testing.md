@@ -40,6 +40,36 @@ that a process killed with SIGKILL flushes nothing.
 
 Captured: the client/daemon integration paths exercised by e2e show up in the report.
 
+### Graphics e2e tests
+
+`tests/e2e.rs` drives the inline-graphics pipeline through a real daemon +
+client + PTY round-trip, across all three protocols:
+
+- `kitty_image_renders_transmit_and_place`: the original Kitty transmit/place
+  wire round-trip.
+- `sixel_image_renders_data_at_cell`: a Sixel-only client (no Kitty caps) gets
+  the Sixel raster re-emitted at the host cell.
+- `iterm2_image_renders_data_at_cell`: an iTerm2-only client gets the
+  `OSC 1337;File=` payload re-emitted at the host cell.
+- `kitty_placement_carries_z_index`: a placement's `z=` key survives the
+  Kitty transmit/place round-trip.
+- `kitty_animation_frames_replayed`: `a=f` animation frames and the `a=a`
+  control are replayed to the client verbatim.
+- `mixed_caps_clients_get_image_or_box`: two clients attached to the same
+  session at once, one Kitty-capable and one with no graphics caps at all,
+  each get the representation their negotiated caps support (real data vs. a
+  placeholder box) from the same underlying placement.
+
+Three client env hooks force graphics capabilities on regardless of the real
+probe result, so the harness's PTY (which can't answer a graphics query) can
+still exercise the full image-render path (`crates/client/src/lib.rs`):
+`PLEXY_FORCE_KITTY`, `PLEXY_FORCE_ITERM2`, and `PLEXY_FORCE_SIXEL` (the Sixel
+sibling of the other two, OR'd into the negotiated `GraphicsCaps` the same
+way). `TestSessionBuilder::env`/`::env_remove` (`tests/e2e.rs`) set and unset
+these per session, which is how a test isolates a single protocol (e.g. unset
+`PLEXY_FORCE_KITTY`, set `PLEXY_FORCE_SIXEL`, for a genuinely Sixel-only
+client).
+
 ## Fuzzing (bolero)
 
 The byte-stream parsers are fuzzed with **bolero**. The targets are normal
@@ -281,7 +311,11 @@ every remaining missed mutant is documented in source with
 `// Equivalent note:`, mostly genuine equivalents plus a few acknowledged
 coverage gaps left for on-demand follow-up (still counted as missed, never
 hidden). No `#[mutants::skip]` is used anywhere, so the skipped count is 0 for
-every module.
+every module. `diff.rs` and `compositor.rs` were re-measured 2026-07-07 as part
+of the inline-graphics test-hardening initiative (see the notes below the
+table) — that later pass's survivors are **not** all individually annotated
+with `// Equivalent note:` the way the rest of this section's modules are; the
+notes below explain why and what's left untriaged.
 
 | Module | caught | missed | kill-rate |
 |---|---|---|---|
@@ -294,8 +328,8 @@ every module.
 | `hint.rs` | 72 | 22 | 77% |
 | `command_prompt.rs` | 52 | 6 | 90% |
 | `block_mode.rs` | 80 | 4 | 95% |
-| `diff.rs` | 109 | 33 | 77% |
-| `compositor.rs` | 99 | 16 | 86% |
+| `diff.rs` | 96 | 35 | 73% |
+| `compositor.rs` | 465 | 313 | 60% |
 | `blocks.rs` | 189 | 32 | 86% |
 
 Note that the `copy_mode.rs` and `block_mode.rs` numbers are post-fix:
@@ -322,11 +356,76 @@ true and fires the return anyway; empty matches: `.find()` on empty returns
 is guaranteed absent from matches by the `contains` guard, so `<=` finds the
 same element).
 
-`diff.rs` survivors are a mix: most are arithmetic-offset equivalents (viewport
-geometry clamped or overwritten), but a few are real coverage gaps (e.g. the
-Kitty image-reset / virtual-placement paths that no current test exercises).
-Those are labeled as gaps, not equivalents, and stay counted as missed. All
-survivors are documented in source with `// Equivalent note:`.
+`diff.rs` was re-measured 2026-07-07 as part of the inline-graphics
+test-hardening initiative
+(`docs/superpowers/specs/2026-07-06-graphics-test-hardening-design.md`), after
+a property test and six targeted unit tests
+(`prop_overlay_z_sort_is_ordered_permutation`,
+`invalidate_with_nothing_transmitted_emits_no_reset_delete`,
+`transmit_cap_exceeded_schedules_reset_next_frame`,
+`transmit_cap_at_exactly_256_does_not_reset`,
+`virtual_transmit_cap_exceeded_reschedules_transmit_next_frame`,
+`virtual_transmit_cap_at_exactly_256_does_not_reset`,
+`rects_overlap_edge_touching_is_not_overlap_but_shifted_is`) closed 13 real
+gaps in the reset-guard / `TRANSMIT_CAP` / `rects_overlap` survivors the prior
+pass had left undocumented-but-missed. The kill-rate is nonetheless **down**
+from the 77% baseline, and the reason is the calendar, not these tests: the
+native-animation + `z=`-ordering feature (2026-07-03/04, entirely *after*
+the 2026-06-29 baseline measurement) added `emit_frame`, `emit_place`'s `z`
+comparison, and more of `render_kitty_placements` — mutable surface the old
+109/33/142 baseline never measured because it didn't exist yet. This pass's
+178-mutant count reflects that code as it stands today; some of its survivors
+are pre-existing equivalents whose `// Equivalent note:` comments already
+cover them under stale self-cited line numbers (e.g. the loop-bound `< → <=`
+notes above `paint_cells_rect` and the two `render` loops), but most of the 35
+are genuinely untriaged: `paint_cells_rect`, `emit_placeholder_box`,
+`emit_transmit_bytes`, `emit_place`, and `emit_frame` each have real gaps this
+pass didn't chase (out of its named scope — box↔data transition and
+`TRANSMIT_CAP`/reset, per the Task 7 brief). The `paint_cells_rect` `< → ==`/
+`< → >` pair in particular looks like a genuine bug-in-waiting, since no
+current test inspects a full repaint's actual cell content, only that a `CUP`
+escape was emitted for the row. Full per-mutant triage is follow-up work, not
+a gap introduced by this pass.
+
+`compositor.rs` was re-measured the same day and the same way (full-file,
+`cargo mutants --timeout 20 -p plexy-glass-mux --file
+crates/mux/src/compositor.rs`, `cargo-mutants` 27.1.0), after this pass added
+`prop_crop_axis_stays_in_bounds`,
+`host_image_id_injective_over_realistic_range`, and
+`effective_scroll_for_uses_full_scrollback_length_in_copy_mode`. Those three
+tests do close their targeted gaps: `effective_scroll_for` now has **zero**
+missed mutants (the `+ → *` gap the old note called out is closed), and
+`crop_axis` has exactly **one** missed mutant left, the `== → !=` already
+labeled equivalent in source. `host_image_id`/`virtual_host_image_id` keep 8
+missed mutants swapping `&`/`|` for `^` in the bit-fold — plausibly equivalent
+(XOR agrees with AND/OR when the folded fields don't share bits, the same
+reasoning the file already uses elsewhere for disjoint-bit guards) but not
+confirmed or annotated by this pass, since chasing them wasn't in its brief.
+
+The **86% → 60%** headline number is real but needs a caveat: the file's
+raw mutant count grew from the 115 in the 2026-06-29 baseline to **868**,
+7.5x, while `compositor.rs`'s production code (excluding `mod tests`) only
+grew by about 60 lines over the same period — nowhere near enough to explain
+a 7.5x jump. Breaking the 313 survivors down by function: only ~75 sit in
+code this initiative's graphics scope touches at all (60 in `compose` itself
+— the top-level compositor entry point, already exercised indirectly by the
+snapshot suite but not by mutation-specific tests — plus `host_image_id`,
+`virtual_host_image_id`, `crop_axis`, `refold_placeholder_cell`, and
+`FoldCtx::line_at`); the remaining 238 sit in overlay-painting functions —
+`paint_history`, `paint_session_picker`, `paint_welcome`, `paint_popup`,
+`paint_buffers`, `paint_tree`, `paint_hint`, `paint_help_box`,
+`put_colored`/`put_char`/`put_str`, `draw_box` — that all shipped well before
+the 2026-06-29 baseline (choose-tree in May, popups and paste buffers in
+June, the welcome modal and hint mode in late June) and were never touched by
+this initiative. The likeliest explanation is that the mutation tool itself
+now generates a substantially larger and more granular mutant catalog per
+site than whatever version produced the original 115-mutant count, not that
+this code's test quality regressed — but that's inference, not a re-run of
+the old tool version to confirm it. Either way, the overlay-painting survivors
+are out of this initiative's graphics-focused scope (`diff.rs`/`compositor.rs`'s
+image-display code, per
+`docs/superpowers/specs/2026-07-06-graphics-test-hardening-design.md`) and are
+left for a dedicated pass rather than folded into this one.
 
 ### Lowest-covered modules (later-phase targets)
 
