@@ -388,8 +388,11 @@ impl DiffRenderer {
     ///   1. repaint every stale region (vanished/moved boxes AND data images),
     ///      collecting the repainted rects,
     ///   2. draw ALL current boxes (cheap, every frame),
-    ///   3. (re)emit data images, re-emitting when new, when the rect changed,
-    ///      when the footprint overlaps a region repainted in step 1, or when an
+    ///   3. (re)emit data images, lowest z first, re-emitting when new, when
+    ///      the rect changed, when the footprint overlaps a region repainted
+    ///      in step 1 (or by an earlier, lower-z placement re-emitted in this
+    ///      same step — so a higher placement isn't left stale under a fresh
+    ///      lower paint, which would invert the stack order), or when an
     ///      underlying cell changed this frame (so an in-place redraw like a
     ///      status line, prompt, or spinner can't leave a hole).
     ///
@@ -487,6 +490,11 @@ impl DiffRenderer {
                 let _ = write!(out, "\x1b7\x1b[{};{}H", p.host_row + 1, p.host_col + 1);
                 emit_data_image(out, p);
                 out.push_str("\x1b8");
+                // This rect just got fresh pixels painted over it, so any
+                // later (higher z / higher image-id) placement overlapping it
+                // must also re-emit this pass, or the paint we just did would
+                // cover it and invert the stack order.
+                repainted.push(rect);
             }
             self.placed_data.insert(p.key, rect);
         }
@@ -2219,6 +2227,44 @@ mod tests {
         assert!(
             pos_low.is_some() && pos_high.is_some() && pos_low < pos_high,
             "expected the z=-5 placement's data emitted before the z=5 placement's, got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn disturbed_lower_z_forces_overlapping_higher_z_to_reemit() {
+        // Regression for finding #7: step 3 emits data placements lowest-z
+        // first so a higher z paints on top. If only the lower one is
+        // disturbed and re-emitted, its fresh paint covers the still-cached
+        // higher one at their overlap, inverting the stack order for that
+        // frame. A disturbed placement must become a disturbance source for
+        // later (higher-z) overlapping placements in the same pass.
+        let mut d = DiffRenderer::new();
+        d.set_graphics_caps(sixel_caps());
+        let mut low = sixel_vp(1, 0, 0); // host cols 0-2
+        low.image_id = 7;
+        low.z = 0;
+        let mut high = sixel_vp(2, 0, 2); // host cols 2-4, overlaps low at col 2
+        high.image_id = 8;
+        high.z = 1;
+        render_str(&mut d, &frame_with(vec![low.clone(), high.clone()]));
+
+        // Disturb only `low`'s footprint: cell (0,0) is inside low's rect
+        // (cols 0-2) but outside high's rect (cols 2-4).
+        let mut f2 = frame_with(vec![low, high]);
+        f2.put(
+            0,
+            0,
+            Cell {
+                grapheme: SmolStr::new("X"),
+                ..Cell::default()
+            },
+        );
+        let s = render_str(&mut d, &f2);
+
+        assert_eq!(
+            s.matches("\x1bP0q").count(),
+            2,
+            "both placements must re-emit so the higher-z one stays on top: {s:?}"
         );
     }
 
