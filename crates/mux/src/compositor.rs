@@ -5297,7 +5297,6 @@ mod tests {
     /// panes' images share a wire id and clobber each other. Also never zero.
     #[test]
     fn host_image_id_injective_over_realistic_range() {
-        use std::collections::HashMap;
         let mut seen: HashMap<u32, (u32, u32)> = HashMap::new();
         // 32 panes × 4096 raw ids = 131072 pairs — well past any real session.
         for pane in 0u32..32 {
