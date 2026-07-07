@@ -50,9 +50,10 @@ pub struct DiffRenderer {
     /// re-transmit (Kitty `a=t` with the same `i=` replaces) instead of showing
     /// stale data.
     transmitted: HashMap<u32, u64>,
-    /// Same, but for virtual (Unicode-placeholder) placements, which transmit
-    /// under the app's RAW image id (no `host_image_id` fold). Kept separate so a
-    /// raw id can't collide with a folded classic host id in one map.
+    /// Same, but for virtual (Unicode-placeholder) placements, whose wire id the
+    /// compositor folds per pane via `virtual_host_image_id` (a 24-bit fold, to fit
+    /// the placeholder cell's fg encoding) rather than the classic `host_image_id`.
+    /// Kept separate so a virtual id can't collide with a classic host id in one map.
     transmitted_virtual: HashMap<u32, u64>,
     /// Placement key → what we last emitted, for the per-frame placement diff.
     placed: HashMap<u64, PlacedRect>,
@@ -501,9 +502,11 @@ impl DiffRenderer {
     }
 
     /// Unicode-placeholder (virtual) placements for a Kitty client: transmit the
-    /// image once (raw id + generation, in the dedicated `transmitted_virtual`
-    /// cache) and emit `a=p,U=1` once. The placeholder cells render via the
-    /// ordinary cell diff; deleting the virtual placement removes it.
+    /// image once (per-pane-folded wire id + generation, in the dedicated
+    /// `transmitted_virtual` cache) and emit `a=p,U=1` once. The `image_id` here is
+    /// already the folded wire id (the compositor rewrote the placeholder cells' fg
+    /// to match), so we place under it directly. The placeholder cells render via
+    /// the ordinary cell diff; deleting the virtual placement removes it.
     fn render_virtual_placements(&mut self, out: &mut String, current: &VirtualScreen) {
         if !self.graphics.kitty {
             return; // virtual placements are Kitty-only
@@ -2057,8 +2060,9 @@ mod tests {
     fn virtual_placement_transmits_once_and_emits_unicode_place() {
         let mut d = kitty_renderer();
         let s = render_str(&mut d, &frame_with_virtual(vec![vvp(1, 7)]));
-        // Transmitted under the RAW id (placeholder cells reference it), no fold.
-        assert!(s.contains("\x1b_Gi=7,a=t,f=100"), "transmit raw id: {s:?}");
+        // Transmitted under the wire id the compositor already folded into
+        // `image_id` (here 7 for the unit test); diff places under it verbatim.
+        assert!(s.contains("\x1b_Gi=7,a=t,f=100"), "transmit wire id: {s:?}");
         assert!(
             s.contains("\x1b_Ga=p,U=1,i=7,p=1,c=3,r=2,q=2\x1b\\"),
             "virtual place: {s:?}"

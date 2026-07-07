@@ -62,11 +62,14 @@ pub struct VisiblePlacement {
 /// renderer. The terminal composites the image onto the app's `U+10EEEE`
 /// placeholder cells (which flow through the ordinary cell diff), so this
 /// carries no host position, only the data to transmit once and the box to
-/// emit via `a=p,U=1`. The raw image id is kept (the placeholder cells
-/// reference it), so no per-pane id fold.
+/// emit via `a=p,U=1`.
 #[derive(Debug, Clone)]
 pub struct VisibleVirtualPlacement {
     pub key: u64,
+    /// Per-pane folded wire id (raw id folded via `virtual_host_image_id`), so
+    /// two panes drawing the same raw Kitty id don't collide in the client's
+    /// single terminal. The compositor rewrites the placeholder cells' fg to
+    /// this same id, keeping cells and the transmitted image in sync (finding #3).
     pub image_id: u32,
     pub placement_id: u32,
     pub generation: u64,

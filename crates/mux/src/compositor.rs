@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use plexy_glass_emulator::{Attrs, Screen, display_width};
+use plexy_glass_emulator::{Attrs, Cell, Color, Screen, display_width};
 
 use crate::blocks::{
     self, BlockLineStatus, FoldProjection, block_status_at, viewport_block_status,
@@ -314,6 +314,10 @@ pub fn compose(
             };
             let dim = !ctx.proj.is_identity() && blocks::is_folded_command_line(view.screen, line);
             let cells = row.cells.as_slice();
+            // Only panes actually drawing a virtual placement carry U+10EEEE
+            // placeholder cells whose fg-encoded id needs per-pane re-folding;
+            // skip the per-cell check for every other pane (finding #3).
+            let refold = !view.screen.virtual_placements.is_empty();
             for c in 0..max_c {
                 if view.rect.col.saturating_add(c) >= host_cols {
                     continue;
@@ -324,6 +328,9 @@ pub fn compose(
                     // truly blank so the fold summary's overlap check still works.
                     if dim && !cell.is_blank() {
                         cell.attrs |= Attrs::DIM;
+                    }
+                    if refold {
+                        refold_placeholder_cell(&mut cell, view.id.0);
                     }
                     screen.put(
                         pane_row_offset + view.rect.row.saturating_add(r),
@@ -805,7 +812,8 @@ pub fn compose(
         // Unicode-placeholder (virtual) placements: the terminal composites the
         // image onto the app's placeholder cells (which flow through the cell
         // diff), so we only surface the image data to transmit once + the box to
-        // emit. Raw id is kept (the placeholder cells reference it). No viewport
+        // emit. The wire id is folded per pane (matching the cell fg the content
+        // copy rewrote) so two panes sharing a raw id don't collide. No viewport
         // clipping; the placeholder cells are clipped by the cell copy.
         let mut virtual_placements: Vec<VisibleVirtualPlacement> = Vec::new();
         for v in panes {
@@ -819,7 +827,11 @@ pub fn compose(
                 let key = (u64::from(v.id.0) << 40) | (vp.seq & ((1u64 << 40) - 1));
                 virtual_placements.push(VisibleVirtualPlacement {
                     key,
-                    image_id: vp.image_id,
+                    // Fold per pane so two panes drawing the same raw id don't
+                    // clobber each other in the client's single terminal. The
+                    // content copy rewrites the placeholder cells' fg to this same
+                    // wire id (finding #3).
+                    image_id: virtual_host_image_id(v.id.0, vp.image_id),
                     placement_id: vp.placement_id,
                     generation: img.generation,
                     format: img.format,
@@ -1014,6 +1026,52 @@ fn host_image_id(pane_id: u32, raw_image_id: u32) -> u32 {
     let mixed =
         ((u64::from(pane_id) << 32) | u64::from(raw_image_id)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     ((mixed >> 32) as u32).max(1)
+}
+
+/// The Kitty Unicode-placeholder base character (U+10EEEE). A cell whose
+/// grapheme starts with it is a placeholder cell: its fg color carries the low
+/// 24 bits of the image id (the high byte, if the id needs one, rides a
+/// diacritic in the same cluster, which we never touch).
+const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
+
+/// Fold a pane id + a virtual (Unicode-placeholder) placement's raw image id
+/// into a per-pane wire id, so two panes drawing the same raw Kitty id don't
+/// composite into each other's placeholder cells the way `host_image_id` already
+/// keeps classic placements apart (finding #3, 2026-07-06 inline-graphics bug
+/// audit). Only the low 24 bits are re-folded — those are the part the placeholder
+/// cell's fg can carry — and the raw id's high byte is preserved as-is, because it
+/// rides a cell diacritic we leave untouched. That keeps the rewritten cell (fg =
+/// folded low 24 bits, diacritic = original high byte) and the transmitted image
+/// (`i=` = this same wire id) in sync without any diacritic surgery. Multiplicative
+/// hash into 24 bits; non-zero (Kitty treats `i=0` as "no id"). ponytail: collision
+/// ~ N²/2²⁵ over distinct (pane, raw-id) pairs, negligible at real pane/image
+/// counts — swap for a per-client id map if it ever bites.
+fn virtual_host_image_id(pane_id: u32, raw_image_id: u32) -> u32 {
+    let low24 = raw_image_id & 0x00FF_FFFF;
+    let mixed = ((u64::from(pane_id) << 24) | u64::from(low24)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let folded = ((mixed >> 40) as u32) & 0x00FF_FFFF;
+    (raw_image_id & 0xFF00_0000) | folded.max(1)
+}
+
+/// Re-fold a Kitty Unicode-placeholder cell's fg-encoded image id to this pane's
+/// per-pane wire id (matching `virtual_host_image_id`), so the cell references
+/// the same image the pane transmits under. No-op for non-placeholder cells and
+/// for cells with no explicit fg id (those reference id 0 = "no image"). Only the
+/// fg (the low 24 bits) is rewritten; any high-byte diacritic is preserved, so the
+/// full referenced id and the wire id stay identical (see `virtual_host_image_id`).
+fn refold_placeholder_cell(cell: &mut Cell, pane_id: u32) {
+    if !cell.grapheme.starts_with(KITTY_PLACEHOLDER) {
+        return;
+    }
+    let low24 = match cell.fg {
+        Color::Rgb(r, g, b) => (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b),
+        Color::Indexed(n) => u32::from(n),
+        Color::Default => return,
+    };
+    // `virtual_host_image_id` with a high-byte-free input returns a 24-bit value,
+    // so the fg re-encoding is exact.
+    let wire = virtual_host_image_id(pane_id, low24);
+    cell.fg = Color::Rgb((wire >> 16) as u8, (wire >> 8) as u8, wire as u8);
 }
 
 /// Map a cell-space clip to a source-pixel rectangle along one axis. Given the
@@ -6385,8 +6443,9 @@ mod tests {
         );
         assert_eq!(vs.virtual_placements.len(), 1);
         assert_eq!(
-            vs.virtual_placements[0].image_id, 9,
-            "raw id kept (no host fold)"
+            vs.virtual_placements[0].image_id,
+            virtual_host_image_id(1, 9),
+            "wire id folded per pane (finding #3)"
         );
 
         // Suppressed under a modal overlay.
@@ -6460,6 +6519,101 @@ mod tests {
         assert!(
             vs4.virtual_placements.is_empty(),
             "alt-screen suppresses virtual placements"
+        );
+    }
+
+    /// Build a pane screen that draws a Kitty Unicode-placeholder image under raw
+    /// id `id`: transmit + declare the virtual placement, then write one U+10EEEE
+    /// placeholder cell whose fg encodes the id's low 24 bits (what a real
+    /// image.nvim / `timg -p kitty` does).
+    fn screen_with_virtual_placeholder(id: u32, data: &str) -> Screen {
+        let mut e = Emulator::new(8, 20);
+        let cmd = format!("\x1b_Ga=T,U=1,i={id},f=24,s=10,v=20,c=1,r=1;{data}\x1b\\");
+        e.advance(cmd.as_bytes());
+        let low = id & 0x00FF_FFFF;
+        let (r, g, b) = ((low >> 16) & 0xFF, (low >> 8) & 0xFF, low & 0xFF);
+        let mut cells = format!("\x1b[38;2;{r};{g};{b}m");
+        cells.push('\u{10EEEE}');
+        cells.push_str("\x1b[m "); // reset + trailing space flushes the cluster
+        e.advance(cells.as_bytes());
+        e.screen().clone()
+    }
+
+    #[test]
+    fn virtual_placements_fold_per_pane_and_rewrite_placeholder_cells() {
+        // Finding #3 (2026-07-06 inline-graphics audit): two panes each draw a
+        // Unicode-placeholder image under the SAME raw Kitty id (id 1, the
+        // near-universal default) with different data. Without a per-pane fold
+        // both transmit under id 1 and both panes' placeholder cells reference id
+        // 1, so the terminal composites one image into BOTH panes. The fix folds
+        // the wire id per pane AND rewrites the placeholder cells' fg to match, so
+        // each pane keeps its own image and the cells stay in sync with the
+        // transmitted id.
+        let sa = screen_with_virtual_placeholder(1, "QUJD");
+        let sb = screen_with_virtual_placeholder(1, "REVG");
+        let va = PaneView {
+            id: PaneId(1),
+            ..plain_view(&sa, Rect::new(0, 0, 8, 20))
+        };
+        let vb = PaneView {
+            id: PaneId(2),
+            is_active: false,
+            ..plain_view(&sb, Rect::new(0, 20, 8, 20))
+        };
+        let vs = compose(
+            &[va, vb],
+            (9, 40),
+            None,
+            StatusPlacement::Bottom,
+            None,
+            None,
+            None,
+            None,
+            None,
+            TEST_COLOR,
+            ChromeColors::ansi_default(),
+        );
+        assert_eq!(vs.virtual_placements.len(), 2);
+        let ida = vs.virtual_placements[0].image_id;
+        let idb = vs.virtual_placements[1].image_id;
+        assert_ne!(
+            ida, idb,
+            "same raw id must fold to distinct per-pane wire ids"
+        );
+        assert_eq!(ida, virtual_host_image_id(1, 1));
+        assert_eq!(idb, virtual_host_image_id(2, 1));
+
+        // The placeholder cells must reference the SAME folded id their pane
+        // transmits under, or the terminal composites the wrong image / nothing.
+        let fg_id = |c: &Cell| match c.fg {
+            Color::Rgb(r, g, b) => (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b),
+            Color::Indexed(n) => u32::from(n),
+            Color::Default => 0,
+        };
+        let cell_a = vs.cell(0, 0).unwrap();
+        let cell_b = vs.cell(0, 20).unwrap();
+        assert!(
+            cell_a.grapheme.starts_with('\u{10EEEE}'),
+            "pane A placeholder cell present"
+        );
+        assert!(
+            cell_b.grapheme.starts_with('\u{10EEEE}'),
+            "pane B placeholder cell present"
+        );
+        assert_eq!(
+            fg_id(cell_a),
+            ida & 0x00FF_FFFF,
+            "cell A fg matches its wire id"
+        );
+        assert_eq!(
+            fg_id(cell_b),
+            idb & 0x00FF_FFFF,
+            "cell B fg matches its wire id"
+        );
+        assert_ne!(
+            fg_id(cell_a),
+            fg_id(cell_b),
+            "distinct panes → distinct placeholder-cell ids"
         );
     }
 
