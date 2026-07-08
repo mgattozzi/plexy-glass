@@ -837,13 +837,13 @@ fn ed3_clears_scrollback() {
 #[test]
 fn decscusr_sets_cursor_shape() {
     use plexy_glass_emulator::CursorShape;
-    // DECSCUSR (CSI Ps SP q): 0/1/2 block, 3/4 underline, 5/6 bar. Each case
-    // starts from a different shape to prove the sequence actually changes it.
+    // DECSCUSR (CSI Ps SP q): 0 default, 1/2 block, 3/4 underline, 5/6 bar. Each
+    // case starts from a different shape to prove the sequence actually changes it.
     let cases: &[(&[u8], CursorShape)] = &[
-        (b"\x1b[6 q", CursorShape::Bar), // from default Block
+        (b"\x1b[6 q", CursorShape::Bar), // from default (unset) shape
         (b"\x1b[4 q", CursorShape::Underline),
         (b"\x1b[6 q\x1b[2 q", CursorShape::Block), // Bar → Block
-        (b"\x1b[6 q\x1b[0 q", CursorShape::Block),
+        (b"\x1b[6 q\x1b[0 q", CursorShape::Default), // 0 = terminal default
         (b"\x1b[6 q\x1b[3 q", CursorShape::Underline),
     ];
     for (input, want) in cases {

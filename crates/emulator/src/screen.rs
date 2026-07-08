@@ -1373,18 +1373,24 @@ impl Screen {
                     let reply = format!("\x1bP>|plexy-glass({})\x1b\\", env!("CARGO_PKG_VERSION"));
                     self.replies.push(reply.into_bytes());
                 }
-                // \e[Ps SP q is DECSCUSR: set the cursor shape (blink bit ignored,
-                // we don't model blink). 0/1/2 block, 3/4 underline, 5/6 bar. The
-                // shape is stored on the cursor; forwarding it to the client's
-                // rendered cursor is a separate follow-up (see report).
+                // \e[Ps SP q is DECSCUSR: set the cursor shape and blink. 0 =
+                // terminal default; 1/2 block, 3/4 underline, 5/6 bar; odd (and
+                // 0) blink, even are steady. Stored on the cursor; the per-client
+                // renderer forwards it to the outer terminal (signals bundle).
                 Some(b' ') => {
-                    let shape = match first.unwrap_or(0) {
-                        0..=2 => CursorShape::Block,
+                    let ps = first.unwrap_or(0);
+                    self.cursor.shape = match ps {
+                        0 => CursorShape::Default,
+                        1..=2 => CursorShape::Block,
                         3..=4 => CursorShape::Underline,
                         5..=6 => CursorShape::Bar,
                         _ => self.cursor.shape,
                     };
-                    self.cursor.shape = shape;
+                    // 0 (default) and odd codes blink; even codes are steady.
+                    // Leave blink unchanged for an out-of-range Ps.
+                    if ps <= 6 {
+                        self.cursor.blink = ps == 0 || ps % 2 == 1;
+                    }
                 }
                 _ => {
                     tracing::trace!(?intermediates, "unhandled CSI q");
@@ -2201,6 +2207,34 @@ mod tests {
             .filter(|c| !c.is_wide_spacer())
             .map(|c| c.grapheme.as_str())
             .collect::<String>()
+    }
+
+    #[test]
+    fn decscusr_captures_shape_and_blink() {
+        // Ps: 0 default, 1 blink block, 2 steady block, 3 blink underline,
+        // 4 steady underline, 5 blink bar, 6 steady bar.
+        let cases = [
+            (0u16, CursorShape::Default, true),
+            (1, CursorShape::Block, true),
+            (2, CursorShape::Block, false),
+            (3, CursorShape::Underline, true),
+            (4, CursorShape::Underline, false),
+            (5, CursorShape::Bar, true),
+            (6, CursorShape::Bar, false),
+        ];
+        for (ps, shape, blink) in cases {
+            let mut e = crate::Emulator::new(24, 80);
+            e.advance(format!("\x1b[{ps} q").as_bytes());
+            let s = e.screen();
+            assert_eq!(s.cursor.shape, shape, "Ps={ps} shape");
+            assert_eq!(s.cursor.blink, blink, "Ps={ps} blink");
+        }
+    }
+
+    #[test]
+    fn cursor_defaults_to_default_shape() {
+        let e = crate::Emulator::new(24, 80);
+        assert_eq!(e.screen().cursor.shape, CursorShape::Default);
     }
 
     /// A 30×40px PNG as `a=T` chunked transmission: stored as an image, placed

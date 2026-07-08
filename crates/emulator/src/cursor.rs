@@ -5,6 +5,8 @@ use crate::color::Color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorShape {
+    /// No explicit DECSCUSR — the outer terminal's own default cursor.
+    Default,
     Block,
     Underline,
     Bar,
@@ -29,6 +31,8 @@ pub struct Cursor {
     pub pending_wrap: bool,
     pub visible: bool,
     pub shape: CursorShape,
+    /// DECSCUSR blink bit (Ps 0/odd = blink, even = steady).
+    pub blink: bool,
 }
 
 impl Default for Cursor {
@@ -44,7 +48,8 @@ impl Default for Cursor {
             hyperlink_id: None,
             pending_wrap: false,
             visible: true,
-            shape: CursorShape::Block,
+            shape: CursorShape::Default,
+            blink: true,
         }
     }
 }
@@ -87,11 +92,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_at_home_visible_block() {
+    fn default_at_home_visible_default_shape() {
         let c = Cursor::default();
         assert_eq!((c.row, c.col), (0, 0));
         assert!(c.visible);
-        assert_eq!(c.shape, CursorShape::Block);
+        assert_eq!(c.shape, CursorShape::Default);
         assert!(!c.pending_wrap);
     }
 
