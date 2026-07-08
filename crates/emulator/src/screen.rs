@@ -126,6 +126,15 @@ const fn dec_special_graphic(byte: u8) -> Option<&'static str> {
     })
 }
 
+/// An in-band notification request from a child program (OSC 9 / OSC 777).
+/// `title` is empty for OSC 9 (which carries only a message); the daemon fills
+/// a default title.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notification {
+    pub title: String,
+    pub body: String,
+}
+
 #[derive(Clone)]
 pub struct Screen {
     pub active: Grid,
@@ -161,6 +170,9 @@ pub struct Screen {
     /// `osc_dispatch`, not here, so this flags only genuine bells.) Used by the
     /// daemon for per-window bell monitoring.
     pub bell_pending: bool,
+    /// In-band notification requests (OSC 9 growl / OSC 777 notify) queued for
+    /// the daemon to raise as desktop toasts. Drained by `take_notifications`.
+    pub pending_notifications: Vec<Notification>,
     /// Per-pane keyboard-protocol negotiation state (modifyOtherKeys level +
     /// Kitty flag stacks). Read by the daemon's key re-encode stage.
     pub kbd: KeyboardState,
@@ -249,6 +261,7 @@ impl Screen {
             clipboard_writes: Vec::new(),
             color_queries: Vec::new(),
             bell_pending: false,
+            pending_notifications: Vec::new(),
             kbd: KeyboardState::default(),
             term: String::from("xterm-256color"),
             color_scheme_dark: true,
@@ -782,6 +795,12 @@ impl Screen {
     /// `Emulator::advance` to detect a bell for per-window monitoring.
     pub fn take_bell(&mut self) -> bool {
         mem::take(&mut self.bell_pending)
+    }
+
+    /// Drain queued notification requests (OSC 9 / OSC 777). The daemon calls
+    /// this after `Emulator::advance` and raises each as a desktop toast.
+    pub fn take_notifications(&mut self) -> Vec<Notification> {
+        mem::take(&mut self.pending_notifications)
     }
 
     pub const fn rows(&self) -> u16 {
@@ -1935,6 +1954,33 @@ impl Screen {
                     self.cursor.hyperlink_id = None;
                 } else {
                     self.cursor.hyperlink_id = self.hyperlinks.intern(&url);
+                }
+            }
+            "9" => {
+                // OSC 9 ; <text> ST is a growl/iTerm2 notification. OSC 9 ; 4 ; …
+                // is ConEmu progress (NOT a notification) — ignore it here.
+                if let Some(text) = params.get(1)
+                    && *text != b"4"
+                {
+                    self.pending_notifications.push(Notification {
+                        title: String::new(),
+                        body: String::from_utf8_lossy(text).into_owned(),
+                    });
+                }
+            }
+            "777" => {
+                // OSC 777 ; notify ; <title> ; <body> ST (urxvt/tmux).
+                if params.get(1).is_some_and(|p| *p == b"notify") {
+                    let title = params
+                        .get(2)
+                        .map(|b| String::from_utf8_lossy(b).into_owned())
+                        .unwrap_or_default();
+                    let body = params
+                        .get(3)
+                        .map(|b| String::from_utf8_lossy(b).into_owned())
+                        .unwrap_or_default();
+                    self.pending_notifications
+                        .push(Notification { title, body });
                 }
             }
             "10" => self.handle_osc_color_query(params, ColorQuery::Foreground),
@@ -4004,6 +4050,28 @@ mod tests {
         s.bell_pending = true;
         assert!(s.take_bell());
         assert!(!s.take_bell(), "second take is false");
+    }
+
+    #[test]
+    fn osc_9_and_777_populate_notifications() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b]9;build finished\x07");
+        e.advance(b"\x1b]777;notify;Tests;42 passed\x07");
+        let n = e.screen_mut().take_notifications();
+        assert_eq!(n.len(), 2);
+        assert_eq!(n[0].title, ""); // OSC 9 has no title; daemon fills a default
+        assert_eq!(n[0].body, "build finished");
+        assert_eq!(n[1].title, "Tests");
+        assert_eq!(n[1].body, "42 passed");
+        // Drained.
+        assert!(e.screen_mut().take_notifications().is_empty());
+    }
+
+    #[test]
+    fn osc_9_4_progress_is_not_a_notification() {
+        let mut e = crate::Emulator::new(24, 80);
+        e.advance(b"\x1b]9;4;1;60\x07"); // ConEmu progress, not a notification
+        assert!(e.screen_mut().take_notifications().is_empty());
     }
 
     #[test]
