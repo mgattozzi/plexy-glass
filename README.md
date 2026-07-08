@@ -72,6 +72,10 @@ integration.
   for cross-window moves; focus and zoom follow the slot, mark is preserved
 - Keyboard-protocol negotiation: Kitty keyboard protocol and modifyOtherKeys,
   per pane, with graceful fallback and clean teardown of the outer terminal
+- Cursor shape + blink (DECSCUSR) from the focused pane passes through to the
+  outer terminal's real cursor, so vim's bar and a shell's underline render as
+  themselves instead of a forced block; resets to the terminal default on
+  detach
 - Colored underlines (SGR 58/59), advertised to applications
 - Command-block awareness (OSC 133, [needs shell
   integration](#shell-integration-recommended)): navigate scrollback by prompt

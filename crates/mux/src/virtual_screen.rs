@@ -86,6 +86,12 @@ pub struct VirtualScreen {
     pub cells: Vec<Cell>,
     pub cursor: Option<(u16, u16)>,
     pub cursor_visible: bool,
+    /// Focused pane's live cursor style (shape, blink), forwarded to the
+    /// outer terminal by the per-client renderer. `None` = use the terminal
+    /// default (`CSI 0 SP q`): no live pane cursor (overlay/popup), or copy/
+    /// block mode owns the viewport. The style is remembered independently of
+    /// `cursor_visible` — a hidden-then-shown cursor keeps its shape.
+    pub cursor_style: Option<(plexy_glass_emulator::CursorShape, bool)>,
     pub rows: u16,
     pub cols: u16,
     /// Inline-image placements to transmit/place after the cell diff.
@@ -102,6 +108,7 @@ impl VirtualScreen {
             cells: vec![Cell::default(); rows as usize * cols as usize],
             cursor: None,
             cursor_visible: false,
+            cursor_style: None,
             rows,
             cols,
             placements: Vec::new(),

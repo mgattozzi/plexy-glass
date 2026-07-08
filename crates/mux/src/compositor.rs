@@ -886,6 +886,10 @@ pub fn compose(
             && c < host_cols
         {
             screen.cursor = Some((pane_row_offset + r, c));
+            if active.copy_mode.is_none() && active.block_mode.is_none() {
+                screen.cursor_style =
+                    Some((active.screen.cursor.shape, active.screen.cursor.blink));
+            }
         }
         screen.cursor_visible = match active.copy_mode {
             Some(_) => true,
@@ -1171,6 +1175,11 @@ fn paint_overlay(
     active_rect: Option<Rect>,
     chrome: ChromeColors,
 ) {
+    // A modal overlay always owns the cursor (block glyph, hidden, or the
+    // terminal default); it never forwards the background pane's DECSCUSR
+    // style. Every arm below also sets `cursor_visible`; this is the same
+    // suppression for style, done once instead of per-arm.
+    screen.cursor_style = None;
     match overlay {
         OverlayView::RenamePrompt { label, buf } => {
             // A full-width REVERSE bar on the bottom row of the pane band.
@@ -1976,6 +1985,11 @@ fn paint_popup(
     cols: u16,
     blocks: Option<&BlockBorderColors>,
 ) {
+    // A floating popup owns the cursor while open; the background pane's
+    // DECSCUSR style (set by the cursor block above) doesn't apply to it, so
+    // the outer terminal falls back to its own default rather than showing a
+    // shape the user set in a different pane.
+    screen.cursor_style = None;
     let rect = popup.rect;
     if rect.rows < 3 || rect.cols < 3 {
         return;
@@ -2342,6 +2356,82 @@ mod tests {
         );
         assert_eq!(vs.cell(0, 0).unwrap().grapheme.as_str(), "h");
         assert_eq!(vs.cursor, Some((0, 2)));
+    }
+
+    #[test]
+    fn live_focused_pane_cursor_style_follows_decscusr() {
+        let mut e = Emulator::new(4, 6);
+        // DECSCUSR Ps 5 = blinking bar.
+        pane(&mut e, b"hi \x1b[5 q");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 4, 6),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: None,
+            title: None,
+            marked: false,
+            drag_role: PaneDragRole::None,
+        };
+        let vs = compose(
+            &[view],
+            (4, 6),
+            None,
+            StatusPlacement::Bottom,
+            None,
+            None,
+            None,
+            None,
+            None,
+            plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61),
+            ChromeColors::ansi_default(),
+        );
+        assert_eq!(
+            vs.cursor_style,
+            Some((plexy_glass_emulator::CursorShape::Bar, true))
+        );
+    }
+
+    #[test]
+    fn overlay_suppresses_cursor_style() {
+        let mut e = Emulator::new(4, 6);
+        pane(&mut e, b"hi \x1b[5 q");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 4, 6),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: None,
+            title: None,
+            marked: false,
+            drag_role: PaneDragRole::None,
+        };
+        let lines = vec![("Ctrl+a c".to_string(), "New window".to_string())];
+        let ov = OverlayView::Help {
+            lines: &lines,
+            scroll: 0,
+        };
+        let vs = compose(
+            &[view],
+            (4, 6),
+            None,
+            StatusPlacement::Bottom,
+            None,
+            Some(&ov),
+            None,
+            None,
+            None,
+            plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61),
+            ChromeColors::ansi_default(),
+        );
+        assert_eq!(
+            vs.cursor_style, None,
+            "overlay must not carry a pane cursor style"
+        );
     }
 
     #[test]

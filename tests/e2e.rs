@@ -2910,6 +2910,36 @@ fn mixed_caps_clients_get_image_or_box() {
     );
 }
 
+/// A child that sets a blinking-bar cursor (DECSCUSR Ps 5) makes the daemon
+/// forward `CSI 5 q` to the client's real terminal. `\x1b[5 q` is echo-proof
+/// on its own: the shell echoes the typed printf source back as literal text
+/// (`\033[5 q`, never a real ESC byte 0x1b), so the only place a genuine ESC
+/// `[5 q` can appear in the buffer is the DiffRenderer's re-emit -- exactly
+/// what this test exercises.
+#[test]
+fn cursor_shape_forwarded_to_client() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+    // printf a marker then DECSCUSR Ps 5 (blink bar).
+    let (st, _, err) = run_cli(&env, &["send", "--enter", "printf 'CUR_''OK\\n\\033[5 q'"]);
+    assert!(st.success(), "send failed: {err}");
+    assert!(
+        sess.wait_for(b"CUR_OK", Duration::from_secs(15)),
+        "marker never rendered. pane: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for(b"\x1b[5 q", Duration::from_secs(10)),
+        "daemon did not forward the bar cursor (CSI 5 q). raw: {:?}",
+        sess.snapshot_str()
+    );
+}
+
 /// `prefix b` on a pane with no OSC 133 blocks (plain /bin/sh, no shell
 /// integration) refuses to open block mode and shows the no-blocks status hint.
 #[test]

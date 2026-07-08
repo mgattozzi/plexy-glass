@@ -70,11 +70,15 @@ impl HostTty {
         termios::tcsetattr(fd, SetArg::TCSANOW, &self.original)
             .map_err(|e| ClientError::Tty(e.to_string()))?;
         // Disable bracketed paste, mouse tracking, then re-enable cursor and
-        // exit alternate screen. The keyboard-protocol / focus / theme inverse
-        // (kitty pop, modkeys reset, ?1004l, ?2031l) is whatever negotiation
-        // actually enabled, see `negotiated_teardown_bytes`.
+        // exit alternate screen. Reset the cursor style to the terminal's own
+        // default (CSI 0 SP q) so a detach doesn't leave the real cursor stuck
+        // in whatever shape the focused pane last set via DECSCUSR. The
+        // keyboard-protocol / focus / theme inverse (kitty pop, modkeys reset,
+        // ?1004l, ?2031l) is whatever negotiation actually enabled, see
+        // `negotiated_teardown_bytes`.
         let mut out = io::stdout();
-        let _ = out.write_all(b"\x1b[?2004l\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l");
+        let _ = out
+            .write_all(b"\x1b[?2004l\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l\x1b[0 q");
         let _ = out.write_all(&negotiated_teardown_bytes());
         let _ = out.flush();
         self.restored = true;
@@ -209,7 +213,8 @@ fn restore_from_static() {
     let fd = unsafe { BorrowedFd::borrow_raw(fd) };
     let _ = termios::tcsetattr(fd, SetArg::TCSANOW, &snap);
     let mut out = io::stdout();
-    let _ = out.write_all(b"\x1b[?2004l\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l");
+    let _ =
+        out.write_all(b"\x1b[?2004l\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l\x1b[0 q");
     let _ = out.write_all(&negotiated_teardown_bytes());
     let _ = out.flush();
 }

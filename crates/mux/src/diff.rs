@@ -89,6 +89,9 @@ pub struct DiffRenderer {
     /// Host image id → the last `a=a` control state sent to this client, so
     /// it's only re-sent when it changes (or on first sight of the image).
     last_anim_sent: HashMap<u32, AnimControl>,
+    /// The last DECSCUSR `Ps` emitted to this client, so the cursor style is
+    /// only re-sent when it changes (not every frame).
+    last_cursor_ps: Option<u8>,
 }
 
 impl DiffRenderer {
@@ -105,6 +108,7 @@ impl DiffRenderer {
             reset_images: false,
             last_frame_seq: HashMap::new(),
             last_anim_sent: HashMap::new(),
+            last_cursor_ps: None,
         }
     }
 
@@ -118,6 +122,7 @@ impl DiffRenderer {
     pub fn invalidate(&mut self) {
         self.previous = None;
         self.reset_images = true;
+        self.last_cursor_ps = None;
     }
 
     pub fn render(&mut self, current: &VirtualScreen) -> Vec<u8> {
@@ -268,6 +273,14 @@ impl DiffRenderer {
             }
         } else {
             out.push_str("\x1b[?25l");
+        }
+
+        // Forward the focused pane's cursor style to the outer terminal, once
+        // per change (not every frame).
+        let ps = decscusr_ps(current.cursor_style);
+        if self.last_cursor_ps != Some(ps) {
+            let _ = write!(out, "\x1b[{ps} q");
+            self.last_cursor_ps = Some(ps);
         }
 
         // Reset SGR at the very end so we don't leave attrs leaking into the host.
@@ -972,12 +985,42 @@ fn apply_sgr_delta(out: &mut String, prev: &CellAttrs, cell: &Cell) {
     }
 }
 
+/// Map a cursor style to its DECSCUSR parameter (`CSI Ps SP q`). `None`
+/// (no live pane cursor) → 0 = the terminal's own default.
+const fn decscusr_ps(style: Option<(plexy_glass_emulator::CursorShape, bool)>) -> u8 {
+    use plexy_glass_emulator::CursorShape;
+    match style {
+        None | Some((CursorShape::Default, _)) => 0,
+        Some((CursorShape::Block, blink)) => {
+            if blink {
+                1
+            } else {
+                2
+            }
+        }
+        Some((CursorShape::Underline, blink)) => {
+            if blink {
+                3
+            } else {
+                4
+            }
+        }
+        Some((CursorShape::Bar, blink)) => {
+            if blink {
+                5
+            } else {
+                6
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use hegel::{TestCase, generators as gs};
-    use plexy_glass_emulator::{Image, ImageFormat, ImageProtocol, ImageStore};
+    use plexy_glass_emulator::{CursorShape, Image, ImageFormat, ImageProtocol, ImageStore};
     use smol_str::SmolStr;
 
     use super::*;
@@ -1019,6 +1062,29 @@ mod tests {
             !s.contains('A'),
             "second render should not re-emit unchanged cells: {s:?}"
         );
+    }
+
+    #[test]
+    fn cursor_style_emits_decscusr_on_change_only() {
+        let mut d = DiffRenderer::new();
+        let mut vs = frame_with(vec![]); // blank frame, cursor_style None
+        vs.cursor_style = Some((CursorShape::Bar, true));
+        let s1 = render_str(&mut d, &vs);
+        assert!(s1.contains("\x1b[5 q"), "bar+blink → Ps 5: {s1:?}");
+        // Same style next frame → no re-emit.
+        let s2 = render_str(&mut d, &vs);
+        assert!(
+            !s2.contains(" q"),
+            "unchanged style must not re-emit: {s2:?}"
+        );
+        // Change to steady underline → Ps 4.
+        vs.cursor_style = Some((CursorShape::Underline, false));
+        let s3 = render_str(&mut d, &vs);
+        assert!(s3.contains("\x1b[4 q"), "underline steady → Ps 4: {s3:?}");
+        // Back to None (default) → Ps 0.
+        vs.cursor_style = None;
+        let s4 = render_str(&mut d, &vs);
+        assert!(s4.contains("\x1b[0 q"), "None → Ps 0: {s4:?}");
     }
 
     #[test]
