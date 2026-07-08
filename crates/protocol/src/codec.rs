@@ -6,8 +6,22 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::errors::CodecError;
 
 /// Maximum permitted frame payload size. Frames larger than this are rejected
-/// before allocation, so a hostile peer cannot make us allocate gigabytes.
-pub const MAX_FRAME_BYTES: u32 = 1 << 20; // 1 MiB
+/// before allocation, so a bug or a corrupt peer can't make us allocate
+/// gigabytes. This is a sanity bound over a local same-user unix socket, not a
+/// security boundary.
+///
+/// It has to be large enough to hold ONE render frame, and a render frame that
+/// first transmits an inline image re-emits that image's whole base64 payload
+/// in a single `ServerMsg::Output`. A single image is bounded by the per-screen
+/// `ImageStore` budget (64 MiB in the emulator), so 128 MiB gives comfortable
+/// headroom for that plus a multi-pane repaint that transmits several images at
+/// once. At 1 MiB (the original value) any real inline image — `timg`, `chafa`,
+/// a screenshot — overran a single frame and `write_frame` returned
+/// `FrameTooLarge`, which tore the client down: the whole point of a
+/// "first-class images" mux crashing on the first real image. The renderer now
+/// also drops (rather than dies on) a frame over this cap, so an image too big
+/// even for 128 MiB degrades to "not painted" instead of a crash.
+pub const MAX_FRAME_BYTES: u32 = 128 << 20; // 128 MiB
 
 /// Stateless framing helpers. Wire format: little-endian u32 length prefix,
 /// followed by exactly that many bytes of payload.

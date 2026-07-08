@@ -5,9 +5,11 @@ use std::io::Error;
 use std::sync::Arc;
 
 use plexy_glass_mux::{DiffRenderer, VirtualScreen};
+use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{Codec, ServerMsg};
 use tokio::io::AsyncWrite;
 use tokio::sync::{mpsc, watch};
+use tracing::warn;
 
 use crate::error::DaemonError;
 
@@ -86,15 +88,36 @@ impl Renderer {
         }
     }
 
-    async fn send_output<W>(&self, writer: &mut W, bytes: Vec<u8>) -> Result<(), DaemonError>
+    async fn send_output<W>(&mut self, writer: &mut W, bytes: Vec<u8>) -> Result<(), DaemonError>
     where
         W: AsyncWrite + Unpin,
     {
         let msg = ServerMsg::Output(bytes::Bytes::from(bytes));
         let payload = postcard::to_allocvec(&msg)
             .map_err(|e| DaemonError::Io(Error::other(format!("encode: {e}"))))?;
-        Codec::write_frame(writer, &payload).await?;
-        Ok(())
+        match Codec::write_frame(writer, &payload).await {
+            Ok(()) => Ok(()),
+            // A render frame larger than the transport cap — almost always a
+            // first-frame transmit of one or more inline images too big for
+            // even MAX_FRAME_BYTES. Dropping the frame keeps the client alive
+            // (the over-cap image just doesn't paint) instead of tearing the
+            // connection down, which is what the old `?` did. Invalidate so the
+            // NEXT frame is a full repaint from a consistent state: without it,
+            // the diff would believe it already sent bytes it actually dropped
+            // and the pane could never recover.
+            Err(CodecError::FrameTooLarge { max, got }) => {
+                warn!(
+                    max,
+                    got,
+                    "render frame exceeds MAX_FRAME_BYTES; dropping it (an inline \
+                     image too large for one transport frame). The session stays \
+                     up; the image will not render."
+                );
+                self.diff.invalidate();
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
