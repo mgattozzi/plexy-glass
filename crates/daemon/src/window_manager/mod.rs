@@ -88,6 +88,17 @@ pub struct PendingNotification {
     pub event: CompletionEvent,
 }
 
+/// One in-band notification request (OSC 9 / OSC 777) drained from a pane,
+/// collected during a monitor drain. The policy (enabled / in-band / attended)
+/// is applied by the render coordinator, same split as `PendingNotification`.
+#[derive(Debug, Clone)]
+pub struct InbandNotification {
+    pub title: String,
+    pub body: String,
+    pub window_index: usize,
+    pub is_active_window: bool,
+}
+
 /// Outcome of one [`WindowManager::update_monitor_flags`] drain.
 #[derive(Debug, Default)]
 pub struct MonitorDrain {
@@ -95,6 +106,8 @@ pub struct MonitorDrain {
     pub alert_edge: bool,
     /// Command-completions to consider notifying about.
     pub notifications: Vec<PendingNotification>,
+    /// In-band (OSC 9 / OSC 777) notification requests to consider raising.
+    pub in_band: Vec<InbandNotification>,
 }
 
 pub struct WindowManager {
@@ -448,7 +461,9 @@ impl WindowManager {
     /// message is set here under the held lock, see `set_status_message`'s
     /// deadlock note in the coordinator); `notifications` lists every window's
     /// command-completion this drain for the coordinator's desktop-notification
-    /// policy to weigh (independent of the per-window `monitor-command` flag).
+    /// policy to weigh (independent of the per-window `monitor-command` flag);
+    /// `in_band` lists every OSC 9 / OSC 777 request drained from every pane
+    /// this drain, for the same policy to weigh.
     #[must_use = "schedule the TTL wake on alert_edge and apply the notification policy"]
     pub fn update_monitor_flags(&mut self) -> MonitorDrain {
         let active = self.active;
@@ -460,6 +475,7 @@ impl WindowManager {
         // Command-completions to weigh against the notification policy (every
         // window, regardless of the per-window monitor-command flag).
         let mut notifications: Vec<PendingNotification> = Vec::new();
+        let mut in_band: Vec<InbandNotification> = Vec::new();
         // Auto-named windows have an empty structural `name`; alert messages
         // must show the DERIVED name, so read the toggle once before the loop
         // (the loop borrows `self.windows` mutably).
@@ -483,6 +499,17 @@ impl WindowManager {
                     window_name: w.display_name(auto_rename),
                     is_active_window: i == active,
                     event,
+                });
+            }
+            // In-band (OSC 9 / OSC 777) requests are collected for EVERY
+            // window too, regardless of monitor state; the coordinator applies
+            // the notification policy.
+            for note in w.drain_pane_notifications() {
+                in_band.push(InbandNotification {
+                    title: note.title,
+                    body: note.body,
+                    window_index: i,
+                    is_active_window: i == active,
                 });
             }
             if i == active {
@@ -522,6 +549,7 @@ impl WindowManager {
         MonitorDrain {
             alert_edge,
             notifications,
+            in_band,
         }
     }
 

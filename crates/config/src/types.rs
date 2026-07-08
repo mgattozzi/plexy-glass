@@ -115,13 +115,17 @@ impl Default for MouseConfig {
     }
 }
 
-/// Desktop notifications on command completion (long + unattended).
+/// Desktop notifications on command completion (long + unattended) and
+/// in-band requests (OSC 9 / OSC 777).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationsConfig {
     /// Master switch.
     pub enabled: bool,
     /// Only notify for commands that ran at least this long (millis).
     pub min_duration_ms: u32,
+    /// Raise a toast for OSC 9 / OSC 777 requests from child programs, unless
+    /// you're looking right at the firing pane. Under `enabled`.
+    pub in_band: bool,
 }
 
 impl Default for NotificationsConfig {
@@ -129,6 +133,7 @@ impl Default for NotificationsConfig {
         Self {
             enabled: true,
             min_duration_ms: 30_000,
+            in_band: true,
         }
     }
 }

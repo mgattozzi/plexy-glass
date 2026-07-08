@@ -1,5 +1,6 @@
 use std::env;
 
+use plexy_glass_emulator::Notification;
 use plexy_glass_mux::{
     Command, HintAction, HintKind, HintState, HintTarget, KeyEvent, MouseButton, MouseEvent,
     MouseKind, PickerEntry, TreeAction, TreeNode, blocks,
@@ -3193,6 +3194,53 @@ async fn update_monitor_flags_collects_pending_notifications() {
     assert!(!n.is_active_window);
     assert_eq!(n.event.exit, Some(0));
     assert_eq!(n.event.duration_ms, Some(45_000));
+}
+
+#[tokio::test]
+async fn update_monitor_flags_collects_in_band_notifications() {
+    // OSC 9 / OSC 777 requests are collected for EVERY window, same split as
+    // completion events: the coordinator applies the notification policy.
+    let mut m = mk_mgr(); // window 0
+    m.new_window_with_spec(spec(), "api".into()).unwrap(); // window 1, active
+    m.handle_command(Command::SelectWindow(0)).unwrap(); // window 0 active; 1 background
+    let _ = m.update_monitor_flags().alert_edge; // baselines
+
+    // Queue a notification in each window's pane.
+    let pid0 = m.windows()[0].layout().panes()[0];
+    m.windows()[0].pane(pid0).unwrap().with_screen_mut(|s| {
+        s.pending_notifications.push(Notification {
+            title: String::new(),
+            body: "active window body".into(),
+        });
+    });
+    let pid1 = m.windows()[1].layout().panes()[0];
+    m.windows()[1].pane(pid1).unwrap().with_screen_mut(|s| {
+        s.pending_notifications.push(Notification {
+            title: "bg title".into(),
+            body: "background body".into(),
+        });
+    });
+
+    let drain = m.update_monitor_flags();
+    assert_eq!(drain.in_band.len(), 2);
+    let active = drain
+        .in_band
+        .iter()
+        .find(|n| n.window_index == 0)
+        .expect("notification from the active window");
+    assert!(active.is_active_window);
+    assert_eq!(active.body, "active window body");
+    let bg = drain
+        .in_band
+        .iter()
+        .find(|n| n.window_index == 1)
+        .expect("notification from the background window");
+    assert!(!bg.is_active_window);
+    assert_eq!(bg.title, "bg title");
+    assert_eq!(bg.body, "background body");
+
+    // Drained, not re-surfaced on the next call.
+    assert!(m.update_monitor_flags().in_band.is_empty());
 }
 
 #[tokio::test]

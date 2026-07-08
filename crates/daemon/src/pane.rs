@@ -12,7 +12,7 @@ use std::{env, thread};
 
 use bytes::Bytes;
 use plexy_glass_config::{Config, PaletteConfig};
-use plexy_glass_emulator::{ColorQuery, Emulator, Screen};
+use plexy_glass_emulator::{ColorQuery, Emulator, Notification, Screen};
 use plexy_glass_mux::PaneId;
 use plexy_glass_protocol::{ExitStatus, PtySize, SpawnSpec};
 use plexy_glass_status::Rgb;
@@ -458,6 +458,12 @@ impl Pane {
     /// Read-and-clear whether this pane emitted a BEL since the last call.
     pub fn take_bell(&self) -> bool {
         self.inner.bell.swap(false, Ordering::Relaxed)
+    }
+
+    /// Drain in-band notification requests (OSC 9 / OSC 777) queued by this
+    /// pane's emulator since the last call.
+    pub fn take_notifications(&self) -> Vec<Notification> {
+        self.with_screen_mut(Screen::take_notifications)
     }
 
     /// The user-assigned pane name, if any (cloned out from under the lock).

@@ -419,6 +419,28 @@ pub(super) async fn render_coordinator(
                 }
             }
         }
+        // Desktop notifications for in-band OSC 9 / OSC 777 requests (off the
+        // WM lock): "unless you're looking right at it" — attached, the
+        // firing window active, and the terminal focused.
+        if !monitor_drain.in_band.is_empty() {
+            let cfg = session.config_snapshot();
+            let nt = &cfg.notifications;
+            if nt.enabled && nt.in_band {
+                let (attached, any_focused, focus_reported) = session.client_attention().await;
+                let terminal_focused = !focus_reported || any_focused;
+                for note in &monitor_drain.in_band {
+                    let attended = attached > 0 && note.is_active_window && terminal_focused;
+                    if inband_should_fire(attended) {
+                        let title = if note.title.is_empty() {
+                            format!("plexy-glass: {}", session.name())
+                        } else {
+                            note.title.clone()
+                        };
+                        notify_desktop(title, note.body.clone());
+                    }
+                }
+            }
+        }
         if let Some(frame) = frame {
             let _ = frame_tx.send(Arc::new(frame));
         }
@@ -433,6 +455,14 @@ pub(super) async fn render_coordinator(
 /// client is attached AND the completing window is the active one.
 fn should_notify(enabled: bool, min_ms: u32, duration_ms: Option<u32>, attended: bool) -> bool {
     enabled && !attended && duration_ms.is_some_and(|d| d >= min_ms)
+}
+
+/// Pure in-band (OSC 9 / OSC 777) notification policy: fire unless you're
+/// looking right at the firing pane (`attended`, see `should_notify`'s doc).
+/// No duration threshold, unlike `should_notify` — an explicit request from
+/// the program has no "too short to bother" case.
+const fn inband_should_fire(attended: bool) -> bool {
+    !attended
 }
 
 /// Notification body: `"✓ cargo build · exit 0 · 2m03s"` (command best-effort;
@@ -885,6 +915,12 @@ mod tests {
             should_notify(true, 0, Some(1), false),
             "min 0 notifies any unattended"
         );
+    }
+
+    #[test]
+    fn inband_should_fire_gate() {
+        assert!(inband_should_fire(false), "unattended → fire");
+        assert!(!inband_should_fire(true), "looking right at it → suppress");
     }
 
     #[test]

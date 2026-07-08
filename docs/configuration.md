@@ -663,9 +663,10 @@ reload`). New colors and alphabet are picked up on the next overlay open.
 
 Desktop notifications when a command finishes running **long** and you're **not
 watching it**, so a build you walked away from (or that finished in a
-background window) reaches you. The daemon shells out to the platform notifier:
-**`osascript`** on macOS (toasts show under "Script Editor" because a bare CLI
-binary has no app bundle for macOS to attribute its own toasts to) and
+background window) reaches you — plus a toast for any program that explicitly
+asks for one via `OSC 9` / `OSC 777`. The daemon shells out to the platform
+notifier: **`osascript`** on macOS (toasts show under "Script Editor" because a
+bare CLI binary has no app bundle for macOS to attribute its own toasts to) and
 **`notify-send`** (libnotify) on Linux. Both are present by default on a
 desktop macOS / Linux. Note that if the notifier is missing or there's no
 desktop session (a headless / SSH daemon), the attempt is logged and silently
@@ -673,33 +674,50 @@ skipped, never an error.
 
 ```kdl
 notifications {
-    enabled #true            // master switch (default on)
-    min-duration "30s"       // only commands at least this long; "<int>ms" | "<float>s" | "0"
+    enabled #true             // master switch (default on)
+    min-duration "30s"        // only commands at least this long; "<int>ms" | "<float>s" | "0"
+    in-band #true             // OSC 9 / OSC 777 toasts from child programs (default on)
 }
 ```
 
-- `enabled`: `#true` (default) or `#false`.
+- `enabled`: `#true` (default) or `#false`. Master switch for both the
+  command-completion and in-band notifications below.
 - `min-duration`: minimum command duration to notify, default `"30s"`. Same
   grammar as `blocks`'s `duration-threshold` (`"500ms"`, `"2s"`, `"0"`); `"0"`
   notifies for every unattended completion. An unparseable value is a hard
   error.
+- `in-band`: `#true` (default) or `#false`. Toggles the `OSC 9` / `OSC 777`
+  path independently of `min-duration` (an explicit request has no
+  "too short to bother" case); still gated by the master `enabled`.
 
-**When it fires:** on a command block completing, if `enabled` **and** its
-duration ≥ `min-duration` **and** the completion is *unattended*. Unattended
-means any of: the session is **detached**; the completing window is **not the
-active one**; or the **terminal isn't focused** on your machine (you switched
-to another app). A command you're actively watching (attached, in the active
-window, terminal focused) never notifies. (Terminal focus uses `?1004` focus
-reporting; a terminal that doesn't report focus is treated as focused, so it
-never produces a false toast, and you still get the detached / other-window
-cases.) Independent of the per-window [`monitor-command`](command-blocks.md)
-flag (that's the in-terminal status-flag channel; this is the desktop channel).
+**When the completion toast fires:** on a command block completing, if
+`enabled` **and** its duration ≥ `min-duration` **and** the completion is
+*unattended*. Unattended means any of: the session is **detached**; the
+completing window is **not the active one**; or the **terminal isn't focused**
+on your machine (you switched to another app). A command you're actively
+watching (attached, in the active window, terminal focused) never notifies.
+(Terminal focus uses `?1004` focus reporting; a terminal that doesn't report
+focus is treated as focused, so it never produces a false toast, and you still
+get the detached / other-window cases.) Independent of the per-window
+[`monitor-command`](command-blocks.md) flag (that's the in-terminal
+status-flag channel; this is the desktop channel).
 
-The notification reads e.g. `plexy-glass: <session>` / `✓ cargo build · exit 0 ·
-2m03s`. It works while detached (the daemon fires it). On a host with no
-desktop / no notification bus (a headless or SSH daemon), the attempt is logged
-and silently skipped, never an error. Note that it requires OSC 133 shell
-integration, like all command-block features.
+The completion notification reads e.g. `plexy-glass: <session>` / `✓ cargo
+build · exit 0 · 2m03s`. It works while detached (the daemon fires it). On a
+host with no desktop / no notification bus (a headless or SSH daemon), the
+attempt is logged and silently skipped, never an error. Note that it requires
+OSC 133 shell integration, like all command-block features.
+
+**In-band notifications (`OSC 9` / `OSC 777`):** any program can ask for a
+desktop toast directly, no shell integration required — `OSC 9 ; <text> ST`
+(growl / iTerm2 form; body only, plexy-glass fills the title) or
+`OSC 777 ; notify ; <title> ; <body> ST` (urxvt / tmux form; explicit title).
+With `enabled` and `in-band` both on, it fires unless you're looking right at
+the firing pane — same attended check as the completion toast above,
+evaluated against the pane that actually requested it (so a background
+window's `notify-send`-alike still reaches you even while you're watching a
+different pane). `OSC 9 ; 4 ; …` (the ConEmu progress-bar form) is a distinct,
+unrelated protocol and does not raise a toast.
 
 ## `mouse`
 

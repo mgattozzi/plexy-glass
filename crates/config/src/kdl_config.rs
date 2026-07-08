@@ -296,6 +296,7 @@ fn decode_notifications(node: &KdlNode, src: &str) -> Result<NotificationsConfig
         for child in doc.nodes() {
             match child.name().value() {
                 "enabled" => n.enabled = bool_arg(child, 0, src, "enabled")?,
+                "in-band" => n.in_band = bool_arg(child, 0, src, "in-band")?,
                 "min-duration" => {
                     let s = string_arg(child, 0, src, "min-duration")?;
                     n.min_duration_ms = parse_duration_threshold(s).ok_or_else(|| {
@@ -2094,6 +2095,15 @@ session "dev" cwd="~/projects/app" {
     #[test]
     fn notifications_min_duration_invalid_errors() {
         assert!(parse_config(r#"notifications { min-duration "soon" }"#).is_err());
+    }
+
+    #[test]
+    fn notifications_in_band_defaults_true_and_parses() {
+        // `Config` has no `Default` impl (the real default constructor is
+        // `built_in_default`, same as `parse_config` uses for an absent node).
+        assert!(crate::built_in_default().notifications.in_band);
+        let cfg = parse_config("notifications {\n  in-band #false\n}\n").expect("parse");
+        assert!(!cfg.notifications.in_band);
     }
 
     #[test]

@@ -4304,3 +4304,74 @@ fn cli_monitor_bell_alerts_background_window() {
         sess.snapshot_str()
     );
 }
+
+/// In-band `OSC 9` / `OSC 777` requests raise a real desktop toast through the
+/// daemon's existing `notify_desktop` (stubbed `osascript` here, since it
+/// shells out by bare name and the auto-spawned daemon inherits the attach
+/// client's `PATH`) when they fire from a BACKGROUND window — "unless you're
+/// looking right at it". Same schedule-before-switch structure as
+/// `cli_monitor_command_alerts_background_completion`: `send --enter`
+/// backgrounds a delayed printf of both OSC forms into window 1's shell, then
+/// `Ctrl+a c` switches to a new window so window 1 is backgrounded when they
+/// fire. Covers both the OSC 777 explicit title and the OSC 9 empty-title
+/// default (`plexy-glass: <session>`).
+#[test]
+#[cfg(target_os = "macos")]
+fn cli_in_band_notification_toasts_from_background_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let log = tmp.path().join("notify.log");
+
+    // Stub `osascript` (the macOS notifier `notify_desktop` shells out to)
+    // that appends its argv to the log.
+    let stub_dir = tmp.path().join("stubs");
+    fs::create_dir_all(&stub_dir).unwrap();
+    let stub_path = stub_dir.join("osascript");
+    fs::write(
+        &stub_path,
+        format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&stub_path, Permissions::from_mode(0o755)).unwrap();
+
+    let mut sess = TestSession::builder(&env).path_prepend(&stub_dir).start();
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+
+    // Schedule a delayed OSC 9 (empty title) and OSC 777 (explicit title) into
+    // window 1's shell: after ~1s, emit both notify requests. Backgrounded so
+    // the shell returns immediately and we can switch windows before they fire.
+    let printf = r"( sleep 1; printf '\033]9;osc9 body\007\033]777;notify;explicit title;explicit body\007' ) &";
+    let (status, _o, stderr) = run_cli(&env, &["send", "--enter", printf]);
+    assert!(
+        status.success(),
+        "send backgrounded printf failed: {stderr}"
+    );
+
+    // Switch to a new window (Ctrl+a c) so window 1 is in the background when
+    // the notifications fire ~1s later.
+    sess.send_prefix(b'c');
+
+    // notify_desktop's spawn is async; poll the stub's log for both bodies.
+    assert!(
+        wait_for_file_contains(&log, "explicit body", Duration::from_secs(15)),
+        "stub osascript never saw the OSC 777 body. log: {:?}",
+        fs::read_to_string(&log).unwrap_or_default()
+    );
+    let contents = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        contents.contains("explicit title"),
+        "OSC 777 title missing: {contents:?}"
+    );
+    assert!(
+        contents.contains("osc9 body"),
+        "OSC 9 body missing: {contents:?}"
+    );
+    assert!(
+        contents.contains("plexy-glass: main"),
+        "OSC 9's empty title never defaulted to the session name: {contents:?}"
+    );
+}

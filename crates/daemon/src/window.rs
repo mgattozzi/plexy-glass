@@ -6,6 +6,7 @@ use std::io::Error;
 use std::sync::Arc;
 use std::time::Duration;
 
+use plexy_glass_emulator::Notification;
 use plexy_glass_mux::{
     CloseOutcome, LayoutError, LayoutTree, PaneId, Rect, SplitDir, SplitPosition, WindowId, blocks,
 };
@@ -714,6 +715,19 @@ impl Window {
             }
         }
         (acted, belled)
+    }
+
+    /// Read-and-clear every pane's queued in-band notifications (OSC 9 / OSC
+    /// 777), flattened in pane-iteration order. Always drains (so requests
+    /// never backlog); the coordinator applies the notification policy.
+    pub fn drain_pane_notifications(&mut self) -> Vec<Notification> {
+        let mut out = Vec::new();
+        for id in self.layout.panes() {
+            if let Some(p) = self.panes.get(&id) {
+                out.extend(p.take_notifications());
+            }
+        }
+        out
     }
 
     /// Fold this drain's activity signal into silence-timing bookkeeping.
