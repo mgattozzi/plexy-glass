@@ -1843,7 +1843,7 @@ impl Screen {
     pub fn handle_esc(&mut self, intermediates: &[u8], byte: u8) {
         // DECALN (ESC # 8) carries the `#` intermediate, so it must be handled
         // before the generic non-empty-intermediate bail below.
-        if intermediates == [b'#'] {
+        if intermediates == b"#" {
             if byte == b'8' {
                 self.decaln();
             } else {
