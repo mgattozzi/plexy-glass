@@ -2,6 +2,7 @@
 
 pub mod bridge;
 pub mod error;
+pub mod install;
 pub mod kill;
 pub mod negotiate;
 pub mod pump;

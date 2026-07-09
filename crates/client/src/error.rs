@@ -27,4 +27,6 @@ pub enum ClientError {
     Reload(String),
     #[error("remote `plexy-glass` not found on the host; pass --remote-bin <path> or --install")]
     RemoteNotFound,
+    #[error("install: {0}")]
+    Install(String),
 }

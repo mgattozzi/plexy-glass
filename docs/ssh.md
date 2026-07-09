@@ -60,12 +60,50 @@ remote `plexy-glass` not found on the host; pass --remote-bin <path> or --instal
 
 ## `--install` (provisioning a remote binary)
 
-Not yet implemented as of this writing — the flag is accepted but does
-nothing yet. It will provision a compatible `plexy-glass` on the remote by
-downloading the matching `nightly` release artifact and pushing it over the
-existing SSH connection, so a remote with nothing installed can be reached
-with one command. Track its landing in this doc's history; until then use
-`--remote-bin` to point at a binary you've placed on the remote yourself.
+```sh
+plexy-glass -H wsl2 --install attach
+```
+
+`--install` provisions a compatible `plexy-glass` on the remote before
+`open_transport` spawns the `bridge`, so a remote with nothing installed can
+be reached with one command. It's **local-download-then-push**: the binary is
+fetched on your machine and streamed to the remote over the existing SSH
+connection, rather than asking the remote to reach out to GitHub itself — this
+works even when the remote host has no outbound internet access (a common
+case for boxes behind a jump host or firewall).
+
+The flow, each SSH round trip kept to a minimum:
+
+1. One `ssh` call runs `uname -sm` on the remote and, if a binary is already
+   cached, hashes it (`sha256sum`, falling back to `shasum -a 256` on macOS
+   remotes) — both in a single command.
+2. The `uname` output maps to a Rust target triple. Supported today:
+   `x86_64`/`aarch64` Linux (static musl) and `x86_64`/`arm64` macOS
+   (`apple-darwin`). Anything else is a clear error telling you to use
+   `--remote-bin` instead.
+3. `curl` fetches `SHA256SUMS` from the `nightly` GitHub release, **on your
+   local machine**, and picks out the line for the matching triple's asset.
+4. If the remote's cached binary's checksum already matches, `--install` is a
+   no-op — safe to pass on every invocation.
+5. Otherwise `curl` downloads the matching `plexy-glass-<triple>` asset
+   locally and re-hashes it. If the downloaded bytes don't match
+   `SHA256SUMS`, `--install` aborts with an error and never touches the
+   remote — a corrupt or tampered download is never pushed.
+6. The verified bytes are streamed over `ssh` to
+   `~/.cache/plexy-glass/bin/plexy-glass` on the remote (`mkdir -p` +
+   `chmod +x`). `resolve_remote_bin` then prefers that cache path over bare
+   `plexy-glass` (an explicit `--remote-bin` still wins over both).
+
+Requirements: `curl` and a SHA-256 hasher (`sha256sum` or `shasum`) on your
+**local** machine; `sh`, `uname`, and one of those same hashers on the
+**remote**. No new dependency on plexy-glass's side — it shells out to tools
+that are already on macOS and Linux dev hosts. `--install` benefits from the
+same SSH conveniences as everything else in this doc (keys, agent forwarding,
+`ControlMaster` connection reuse), since steps 1 and 6 are just more `ssh`
+invocations against `<ssh-target>`.
+
+Only the `nightly` release channel is supported for now; there's no
+`--install-version` or stable-channel pin yet.
 
 ## Auth prompts
 

@@ -12,6 +12,7 @@ use tokio::time;
 use tracing::{debug, info};
 
 use crate::error::ClientError;
+use crate::install;
 
 /// How a connection opens: auto-spawn the daemon (interactive/list) or fail if
 /// none is running (scripting verbs).
@@ -34,10 +35,13 @@ pub struct Target {
 
 /// The remote path to invoke over SSH. `--remote-bin` wins; else the
 /// `--install` cache path if installing; else bare `plexy-glass` (found only on
-/// the remote's non-interactive PATH). NOTE: Task 4 inserts the cache tier.
+/// the remote's non-interactive PATH).
 pub fn resolve_remote_bin(target: &Target) -> String {
     if let Some(bin) = &target.remote_bin {
         return bin.clone();
+    }
+    if target.install {
+        return install::REMOTE_CACHE_BIN.to_string();
     }
     "plexy-glass".to_string()
 }
@@ -91,6 +95,20 @@ mod ssh_tests {
             install: false,
         };
         assert_eq!(resolve_remote_bin(&t2), "plexy-glass");
+        // --install (with no explicit --remote-bin) prefers the install cache
+        // path, even over an explicit --remote-bin it should still lose to.
+        let t3 = Target {
+            host: Some("h".into()),
+            remote_bin: None,
+            install: true,
+        };
+        assert_eq!(resolve_remote_bin(&t3), install::REMOTE_CACHE_BIN);
+        let t4 = Target {
+            host: Some("h".into()),
+            remote_bin: Some("/x/pg".into()),
+            install: true,
+        };
+        assert_eq!(resolve_remote_bin(&t4), "/x/pg");
     }
 }
 
@@ -133,7 +151,9 @@ pub async fn open_transport(target: &Target, connect: Connect) -> Result<Transpo
             })
         }
         Some(host) => {
-            // Task 4 inserts `if target.install { install_remote(...).await? }` here.
+            if target.install {
+                install::install_remote(host).await?;
+            }
             let remote_bin = resolve_remote_bin(target);
             let mut child = Command::new("ssh")
                 .args(ssh_args(host, &remote_bin, connect))
