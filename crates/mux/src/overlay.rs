@@ -9,6 +9,7 @@ use crate::command_prompt::{self, Completion};
 use crate::finder::{self, FilterList, FinderKey};
 use crate::hint::HintState;
 use crate::history::HistoryState;
+use crate::palette::PaletteState;
 use crate::tree::TreeState;
 use crate::{Direction, Key, KeyEvent, Modifiers};
 
@@ -82,6 +83,10 @@ pub enum Overlay {
     /// key dismisses it. Content is built at render time from config (the resolved
     /// prefix + config path), like the help overlay.
     Welcome,
+    /// The command palette (`Ctrl+a Space`). Driven by `palette::handle_palette`
+    /// at the daemon layer (Run/Prompt outcomes need the connection dispatch);
+    /// the state lives here so the compositor can render it.
+    Palette(PaletteState),
 }
 
 /// The caller's follow-up after feeding a key to an overlay.
@@ -115,12 +120,15 @@ pub fn handle(event: &KeyEvent, overlay: &mut Overlay) -> OverlayAction {
             completions,
         } => handle_command_prompt(event, buf, history, hist_idx, completions),
         Overlay::SessionPicker { entries, finder } => handle_session_picker(event, entries, finder),
-        // Tree / buffer-picker / history / hint overlays are handled by the
-        // daemon via their own pure handlers (actions need the registry); these
-        // arms only keep the match exhaustive and are never reached.
-        Overlay::Tree(_) | Overlay::BufferPicker(_) | Overlay::History(_) | Overlay::Hint(_) => {
-            OverlayAction::None
-        }
+        // Tree / buffer-picker / history / hint / palette overlays are handled
+        // by the daemon via their own pure handlers (actions need the
+        // registry or the connection dispatch); these arms only keep the
+        // match exhaustive and are never reached.
+        Overlay::Tree(_)
+        | Overlay::BufferPicker(_)
+        | Overlay::History(_)
+        | Overlay::Hint(_)
+        | Overlay::Palette(_) => OverlayAction::None,
     }
 }
 

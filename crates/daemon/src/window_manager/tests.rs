@@ -3,7 +3,7 @@ use std::env;
 use plexy_glass_emulator::Notification;
 use plexy_glass_mux::{
     Command, HintAction, HintKind, HintState, HintTarget, KeyEvent, MouseButton, MouseEvent,
-    MouseKind, PickerEntry, TreeAction, TreeNode, blocks,
+    MouseKind, PickerEntry, TreeAction, TreeNode, blocks, palette,
 };
 use tokio::sync::broadcast;
 use tokio::time;
@@ -5020,5 +5020,40 @@ async fn osc8_click_without_opener_reports_error() {
     assert_eq!(
         m.take_active_message(),
         Some("couldn't open (no system opener)")
+    );
+}
+
+// ----- command palette -----
+
+#[tokio::test]
+async fn palette_run_entry_yields_palette_run_and_closes() {
+    let mut m = mk_mgr();
+    m.open_palette(palette::catalog());
+    // Filter to "zoom pane" and Enter.
+    for c in "zoom pane".chars() {
+        m.handle_overlay_key(&okey(plexy_glass_mux::Key::Char(c)));
+    }
+    let r = m.handle_overlay_key(&okey(plexy_glass_mux::Key::Enter));
+    assert!(
+        matches!(
+            r,
+            OverlayKeyResult::PaletteRun(plexy_glass_mux::PromptCommand::Zoom)
+        ),
+        "got {r:?}"
+    );
+    assert!(m.overlay().is_none(), "palette closed after Run");
+}
+
+#[tokio::test]
+async fn palette_free_text_entry_yields_palette_prompt() {
+    let mut m = mk_mgr();
+    m.open_palette(palette::catalog());
+    for c in "rename window".chars() {
+        m.handle_overlay_key(&okey(plexy_glass_mux::Key::Char(c)));
+    }
+    let r = m.handle_overlay_key(&okey(plexy_glass_mux::Key::Enter));
+    assert!(
+        matches!(r, OverlayKeyResult::PalettePrompt(ref s) if s == "rename "),
+        "got {r:?}"
     );
 }

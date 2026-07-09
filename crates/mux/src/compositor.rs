@@ -13,6 +13,7 @@ use crate::buffer::BufferPickerState;
 use crate::hint::HintState;
 use crate::history::HistoryState;
 use crate::overlay::{PickerEntry, picker_filtered_indices};
+use crate::palette::PaletteState;
 use crate::pane_id::PaneId;
 use crate::rect::Rect;
 use crate::selection::Selection;
@@ -192,6 +193,10 @@ pub enum OverlayView<'a> {
     /// The one-time welcome modal: a centered box of pre-built lines (greeting,
     /// essential keys, how to get help/detach, how to disable). Any key dismisses.
     Welcome { lines: &'a [String] },
+    /// The command palette: a centered box with a filter line and one row per
+    /// matching command (label left, key right in an aligned column), the
+    /// selected row highlighted.
+    Palette { state: &'a PaletteState },
 }
 
 /// A render-ready view of the floating popup pane: a live PTY-backed grid in
@@ -1241,6 +1246,10 @@ fn paint_overlay(
             paint_history(screen, state, pane_row_offset, pane_area_rows, cols, chrome);
             screen.cursor_visible = false;
         }
+        OverlayView::Palette { state } => {
+            paint_palette(screen, state, pane_row_offset, pane_area_rows, cols, chrome);
+            screen.cursor_visible = false;
+        }
         OverlayView::Hint { state, colors } => {
             // Hint mode is pane-scoped: dim and label the FOCUSED pane only, at
             // its rect origin. Fall back to the full pane band if (impossibly)
@@ -1669,6 +1678,115 @@ fn paint_history(
         inner_right,
     );
     // Right-aligned live count (visible / total).
+    let count = format!("{}/{}", visible.len(), state.entries.len());
+    let cw = display_width(&count);
+    if inner_right > inner_left + cw {
+        put_str(
+            screen,
+            row0 + 1,
+            inner_right - cw,
+            &count,
+            plain,
+            inner_right,
+        );
+    }
+    if rows.is_empty() {
+        put_str(screen, row0 + 2, inner_left, empty_msg, plain, inner_right);
+    } else {
+        paint_selectable_rows(
+            screen,
+            &rows,
+            row0 + 2,
+            inner_left,
+            inner_right,
+            top,
+            visible_rows,
+            sel,
+        );
+    }
+}
+
+/// Draw the centered command-palette box: a filter line plus one row per
+/// matching command (label left, key right in an aligned column), the
+/// selected row REVERSE, scrolled to keep the selection visible. Mirrors
+/// `paint_history`.
+fn paint_palette(
+    screen: &mut VirtualScreen,
+    state: &PaletteState,
+    pane_row_offset: u16,
+    pane_area_rows: u16,
+    cols: u16,
+    chrome: ChromeColors,
+) {
+    let title = " Commands ";
+    let footer = " \u{2191}/\u{2193} select \u{b7} enter run \u{b7} esc cancel ";
+    let empty_msg = "(no matching commands)";
+    let visible = state.visible_indices();
+    let dw = |s: &str| display_width(s) as usize;
+    // Labels are ASCII; pad by char count into an aligned key column.
+    let label_w = visible
+        .iter()
+        .map(|&i| state.entries[i].label.len())
+        .max()
+        .unwrap_or(0);
+    let rows: Vec<String> = visible
+        .iter()
+        .map(|&i| {
+            let e = &state.entries[i];
+            let key = e.key.as_deref().unwrap_or("");
+            format!("{:<width$}  {}", e.label, key, width = label_w)
+        })
+        .collect();
+    let filter_line = format!("filter: {}", state.filter());
+
+    let max_visible = (pane_area_rows.saturating_sub(3)).max(1) as usize;
+    let row_count = rows.len().max(1);
+    let visible_rows = row_count.min(max_visible);
+
+    let content_w = rows
+        .iter()
+        .map(|s| dw(s))
+        .chain([
+            dw(&filter_line),
+            dw(title),
+            dw(footer),
+            if rows.is_empty() { dw(empty_msg) } else { 0 },
+        ])
+        .max()
+        .unwrap_or(0);
+    let inner_w = (content_w + 2).min(cols.saturating_sub(2) as usize);
+    let box_w = (inner_w + 2) as u16;
+    let box_h = (visible_rows as u16) + 3;
+    if box_w < 3 || box_h < 4 || box_w > cols || box_h > pane_area_rows {
+        return;
+    }
+
+    let sel = state
+        .selected()
+        .and_then(|s| visible.iter().position(|&i| i == s))
+        .unwrap_or(0);
+    let top = if sel >= visible_rows {
+        sel - visible_rows + 1
+    } else {
+        0
+    };
+
+    let row0 = pane_row_offset + (pane_area_rows.saturating_sub(box_h)) / 2;
+    let col0 = (cols.saturating_sub(box_w)) / 2;
+    let plain = plexy_glass_emulator::Attrs::empty();
+
+    draw_box(screen, row0, col0, box_h, box_w, title, footer, chrome);
+    let inner_left = col0 + 1;
+    let inner_right = col0 + box_w - 1;
+
+    put_str(
+        screen,
+        row0 + 1,
+        inner_left,
+        &format!("{filter_line}\u{2588}"),
+        plain,
+        inner_right,
+    );
     let count = format!("{}/{}", visible.len(), state.entries.len());
     let cw = display_width(&count);
     if inner_right > inner_left + cw {
@@ -2314,9 +2432,11 @@ mod tests {
     use plexy_glass_emulator::{Emulator, RowMark};
 
     use super::*;
+    use crate::PromptCommand;
     use crate::buffer::BufferEntry;
     use crate::finder::FilterList;
     use crate::history::HistoryEntry;
+    use crate::palette::{PaletteAction, PaletteEntry};
     use crate::tree::{NodeKey, TreeMode, TreeNode};
 
     fn pane(emu: &mut Emulator, bytes: &[u8]) {
@@ -3981,6 +4101,77 @@ mod tests {
             joined.contains("2/2"),
             "live visible/total count rendered: {joined:?}"
         );
+    }
+
+    #[test]
+    fn palette_box_renders_label_and_key() {
+        let mut e = Emulator::new(12, 60);
+        pane(&mut e, b"hi");
+        let view = PaneView {
+            id: PaneId(0),
+            rect: Rect::new(0, 0, 12, 60),
+            screen: e.screen(),
+            is_active: true,
+            scroll_offset: 0,
+            copy_mode: None,
+            block_mode: None,
+            title: None,
+            marked: false,
+            drag_role: PaneDragRole::None,
+        };
+        let entries = vec![
+            PaletteEntry {
+                label: "Zoom pane".into(),
+                aliases: vec![],
+                binding_verb: Some("zoom_toggle"),
+                key: Some("C-a z".into()),
+                action: PaletteAction::Run(PromptCommand::Zoom),
+                haystack: "zoom pane".into(),
+            },
+            PaletteEntry {
+                label: "Reload config".into(),
+                aliases: vec![],
+                binding_verb: Some("reload_config"),
+                key: None,
+                action: PaletteAction::Run(PromptCommand::Reload),
+                haystack: "reload config".into(),
+            },
+        ];
+        let state = PaletteState::new(entries);
+        let ov = OverlayView::Palette { state: &state };
+        let vs = compose(
+            &[view],
+            (12, 60),
+            None,
+            StatusPlacement::Bottom,
+            None,
+            Some(&ov),
+            None,
+            None,
+            None,
+            plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61),
+            ChromeColors::ansi_default(),
+        );
+
+        let mut found_corner = false;
+        let mut rows: Vec<String> = Vec::new();
+        for r in 0..12 {
+            let mut line = String::new();
+            for c in 0..60 {
+                let cell = vs.cell(r, c).unwrap();
+                line.push_str(cell.grapheme.as_str());
+                if cell.grapheme.as_str() == "\u{250c}" {
+                    found_corner = true;
+                }
+            }
+            rows.push(line);
+        }
+        assert!(found_corner, "palette box border drawn");
+        assert!(!vs.cursor_visible, "palette hides the pane cursor");
+        let joined = rows.join("\n");
+        assert!(joined.contains("Zoom pane"), "label rendered: {joined:?}");
+        assert!(joined.contains("C-a z"), "key rendered: {joined:?}");
+        assert!(joined.contains("Commands"), "title rendered: {joined:?}");
     }
 
     #[test]

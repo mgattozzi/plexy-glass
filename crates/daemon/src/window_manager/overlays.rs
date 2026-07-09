@@ -3,8 +3,9 @@ use std::mem;
 use plexy_glass_mux::{
     BufferAction, BufferEntry, BufferOutcome, BufferPickerState, FilterList, HintOutcome, HintPick,
     HintState, HistoryEntry, HistoryOutcome, HistoryState, HistoryTarget, KeyEvent, NodeKey,
-    Overlay, OverlayAction, PickerEntry, RenameTarget, TreeAction, TreeKind, TreeNode, TreeOutcome,
-    TreeState, handle_buffers, handle_hint, handle_history, handle_tree, overlay, session_label,
+    Overlay, OverlayAction, PaletteEntry, PaletteOutcome, PaletteState, PickerEntry, RenameTarget,
+    TreeAction, TreeKind, TreeNode, TreeOutcome, TreeState, handle_buffers, handle_hint,
+    handle_history, handle_palette, handle_tree, overlay, session_label,
 };
 
 use super::{COMMAND_HISTORY_CAP, WindowManager};
@@ -38,6 +39,12 @@ pub enum OverlayKeyResult {
     /// A hint-mode pick: copy or open the chosen span (handled at the connection
     /// layer, which needs the clipboard + paste-buffer registry).
     Hint(HintPick),
+    /// The palette chose a run-immediately command; dispatch it like a
+    /// committed command-prompt line.
+    PaletteRun(plexy_glass_mux::PromptCommand),
+    /// The palette chose a free-text command; open the command prompt
+    /// pre-filled with this string.
+    PalettePrompt(String),
 }
 
 impl WindowManager {
@@ -94,12 +101,26 @@ impl WindowManager {
     /// names for Tab-completing a `switch ` argument. History is cloned from the
     /// durable list so Up/Down recall survives reopening within the session.
     pub fn open_command_prompt(&mut self, completions: Vec<String>) {
+        self.open_command_prompt_prefilled(completions, String::new());
+    }
+
+    /// Like `open_command_prompt` but seeds the input buffer (cursor at end),
+    /// used by the palette's free-text handoff.
+    pub fn open_command_prompt_prefilled(&mut self, completions: Vec<String>, prefill: String) {
         self.set_overlay(Overlay::Command {
-            buf: String::new(),
+            buf: prefill,
             history: self.command_history.clone(),
             hist_idx: None,
             completions,
         });
+    }
+
+    /// Open the command palette over a pre-built catalog (assembled at the
+    /// connection layer, keys resolved from the active keymap). Driven by
+    /// `palette::handle_palette`; Run/Prompt outcomes are dispatched at the
+    /// connection layer.
+    pub fn open_palette(&mut self, entries: Vec<PaletteEntry>) {
+        self.set_overlay(Overlay::Palette(PaletteState::new(entries)));
     }
 
     /// Open the session picker over a snapshot of live sessions (sorted by name,
@@ -238,6 +259,27 @@ impl WindowManager {
                 HistoryOutcome::Jump(target) => {
                     self.close_overlay();
                     OverlayKeyResult::History(target)
+                }
+            };
+        }
+        // Command palette: driven by the pure `handle_palette`; Run/Prompt are
+        // dispatched at the connection layer. Cancel/Run/Prompt close the
+        // overlay here (Run may open another overlay via set_overlay-replace).
+        if let Some(Overlay::Palette(state)) = self.overlay.as_mut() {
+            return match handle_palette(event, state) {
+                PaletteOutcome::None => OverlayKeyResult::Ignored,
+                PaletteOutcome::Redraw => OverlayKeyResult::Redraw,
+                PaletteOutcome::Cancel => {
+                    self.close_overlay();
+                    OverlayKeyResult::Redraw
+                }
+                PaletteOutcome::Run(cmd) => {
+                    self.close_overlay();
+                    OverlayKeyResult::PaletteRun(cmd)
+                }
+                PaletteOutcome::Prompt(prefill) => {
+                    self.close_overlay();
+                    OverlayKeyResult::PalettePrompt(prefill)
                 }
             };
         }

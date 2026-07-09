@@ -326,6 +326,9 @@ pub(super) async fn render_coordinator(
                 Some(plexy_glass_mux::Overlay::History(state)) => {
                     Some(plexy_glass_mux::OverlayView::History { state })
                 }
+                Some(plexy_glass_mux::Overlay::Palette(state)) => {
+                    Some(plexy_glass_mux::OverlayView::Palette { state })
+                }
                 Some(plexy_glass_mux::Overlay::Hint(state)) => {
                     let cfg = session.config_snapshot();
                     Some(plexy_glass_mux::OverlayView::Hint {

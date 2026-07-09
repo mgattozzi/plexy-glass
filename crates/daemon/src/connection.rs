@@ -1614,6 +1614,27 @@ async fn run_connection_verb(ctx: &mut ClientCtx<'_>, keymap: &mut Keymap, verb:
     false
 }
 
+/// Dispatch a parsed `PromptCommand` exactly as a committed command-prompt line:
+/// connection-layer verbs go through `run_connection_verb`, the rest through
+/// `Session::handle_prompt_command`. Returns `true` on a detach request.
+async fn dispatch_prompt_command(
+    ctx: &mut ClientCtx<'_>,
+    keymap: &mut Keymap,
+    cmd: PromptCommand,
+) -> bool {
+    match ConnVerb::from_prompt(cmd) {
+        Ok(verb) => run_connection_verb(ctx, keymap, verb).await,
+        Err(other) => {
+            match ctx.session.handle_prompt_command(other).await {
+                Ok(Some(msg)) => ctx.session.set_status_info(msg).await,
+                Ok(None) => {}
+                Err(e) => ctx.session.set_status_error(e.to_string()).await,
+            }
+            false
+        }
+    }
+}
+
 /// Apply the result of one key delivered to an open overlay, the block that
 /// grows with every new overlay, extracted so the input loop stays shallow.
 /// Returns `true` when the result requested a detach (`:detach` from the
@@ -1664,22 +1685,28 @@ async fn apply_overlay_result(
                 }
             }
         }
+        OverlayKeyResult::PaletteRun(cmd) => {
+            return dispatch_prompt_command(ctx, keymap, cmd).await;
+        }
+        OverlayKeyResult::PalettePrompt(prefill) => {
+            let names: Vec<String> = ctx
+                .registry
+                .list()
+                .await
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
+            {
+                let mut m = ctx.session.window_manager.lock().await;
+                m.open_command_prompt_prefilled(names, prefill);
+            }
+            ctx.session.notify.notify_one();
+        }
         OverlayKeyResult::Command(line) => match command_prompt::parse(&line) {
             Err(e) => {
                 ctx.session.set_status_error(e.to_string()).await;
             }
-            Ok(cmd) => match ConnVerb::from_prompt(cmd) {
-                Ok(verb) => return run_connection_verb(ctx, keymap, verb).await,
-                Err(other) => match ctx.session.handle_prompt_command(other).await {
-                    Ok(Some(msg)) => {
-                        ctx.session.set_status_info(msg).await;
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        ctx.session.set_status_error(e.to_string()).await;
-                    }
-                },
-            },
+            Ok(cmd) => return dispatch_prompt_command(ctx, keymap, cmd).await,
         },
     }
     false
