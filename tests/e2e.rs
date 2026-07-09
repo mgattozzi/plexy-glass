@@ -9,7 +9,9 @@
 //! $HOME so the daemon writes its socket, lockfile, and logs in isolation
 //! and never collides between tests.
 
-use std::fs::{self, Permissions};
+use std::fs;
+#[cfg(target_os = "macos")]
+use std::fs::Permissions;
 use std::io::Write;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -188,7 +190,10 @@ impl TestSessionBuilder<'_> {
         self
     }
 
-    /// Prepend `dir` to `PATH` (for stub `open`/`pbcopy` binaries).
+    /// Prepend `dir` to `PATH` (for stub `open`/`pbcopy` binaries). Only used by
+    /// the macOS notifier-stub tests, so it's gated to avoid a dead-code lint on
+    /// Linux (where those tests are `#[cfg]`'d out).
+    #[cfg(target_os = "macos")]
     fn path_prepend(mut self, dir: &Path) -> Self {
         self.path_prepend = Some(format!("{}:/usr/bin:/bin", dir.display()));
         self
@@ -440,7 +445,9 @@ impl Drop for TestSession {
     }
 }
 
-/// Poll `path` until it exists, bounded by `timeout`.
+/// Poll `path` until it exists, bounded by `timeout`. Only used by the macOS
+/// notifier-stub tests, so it's gated to avoid a dead-code lint on Linux.
+#[cfg(target_os = "macos")]
 fn wait_for_file_exists(path: &Path, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
