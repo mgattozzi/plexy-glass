@@ -70,6 +70,9 @@ where
         term,
         kbd: NegotiatedKbd::Legacy,
         graphics: GraphicsCaps::default(),
+        // A one-shot request/reply handshake never registers a client, so its
+        // remoteness is irrelevant here.
+        remote: false,
     };
     client_handshake_with(reader, writer, hello).await
 }
@@ -176,6 +179,7 @@ mod tests {
             term: "x".into(),
             kbd: NegotiatedKbd::Legacy,
             graphics: GraphicsCaps::default(),
+            remote: false,
         };
         let bytes = postcard::to_allocvec(&bogus).unwrap();
         Codec::write_frame(&mut a, &bytes).await.unwrap();
@@ -209,6 +213,7 @@ mod tests {
             term: "x".into(),
             kbd: NegotiatedKbd::Legacy,
             graphics: GraphicsCaps::default(),
+            remote: false,
         };
         let got = client_handshake_with(&mut cr, &mut cw, hello)
             .await
@@ -233,6 +238,7 @@ mod tests {
             term: "x".into(),
             kbd: NegotiatedKbd::Legacy,
             graphics: GraphicsCaps::default(),
+            remote: false,
         };
         let err = client_handshake_with(&mut cr, &mut cw, hello)
             .await
@@ -259,6 +265,7 @@ mod tests {
             term: "vt100".into(),
             kbd: NegotiatedKbd::Kitty(31),
             graphics: GraphicsCaps::default(),
+            remote: false,
         };
         let bytes = postcard::to_allocvec(&bogus).unwrap();
         Codec::write_frame(&mut a, &bytes).await.unwrap();

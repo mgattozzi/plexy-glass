@@ -171,6 +171,7 @@ pub async fn run(
         term,
         kbd: probe.kbd,
         graphics: probe.graphics,
+        remote: target.host.is_some(),
     };
     let server_hello = match client_handshake_with(&mut t.reader, &mut t.writer, hello).await {
         Ok(h) => h,

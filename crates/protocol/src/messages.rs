@@ -60,7 +60,9 @@ pub enum ExitStatus {
 ///   (output text + exit code + command line)
 /// - v10: `ClientHello.graphics`: per-client inline-graphics capabilities
 ///   (Kitty/Sixel/iTerm2)
-pub const PROTOCOL_VERSION: u16 = 10;
+/// - v11: `ClientHello.remote`: the client flags whether it reached the
+///   daemon over `-H`/SSH
+pub const PROTOCOL_VERSION: u16 = 11;
 
 /// Inline-graphics protocols the client's *outer* terminal supports, probed at
 /// attach. The daemon renders images for a client only in a protocol its
@@ -99,6 +101,9 @@ pub struct ClientHello {
     pub kbd: NegotiatedKbd,
     /// Inline-graphics protocols the client's outer terminal supports.
     pub graphics: GraphicsCaps,
+    /// The client reached the daemon over `-H`/SSH (drives the `ssh` status
+    /// marker). `false` for a local-socket attach.
+    pub remote: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,6 +255,23 @@ mod tests {
     }
 
     #[test]
+    fn client_hello_round_trips_including_remote() {
+        for remote in [false, true] {
+            let hello = ClientHello {
+                version: PROTOCOL_VERSION,
+                term: "xterm-256color".to_string(),
+                kbd: NegotiatedKbd::Legacy,
+                graphics: GraphicsCaps::default(),
+                remote,
+            };
+            let bytes = postcard::to_allocvec(&hello).expect("serialize");
+            let decoded: ClientHello = postcard::from_bytes(&bytes).expect("deserialize");
+            assert_eq!(decoded.remote, remote);
+            assert_eq!(decoded.version, 11);
+        }
+    }
+
+    #[test]
     fn spawn_spec_round_trips_through_postcard() {
         let spec = SpawnSpec {
             program: "/bin/sh".into(),
@@ -351,6 +373,7 @@ mod tests {
             term: "xterm-256color".into(),
             kbd: NegotiatedKbd::Legacy,
             graphics: GraphicsCaps::default(),
+            remote: false,
         };
         let server = ServerHello {
             version: PROTOCOL_VERSION,
@@ -388,6 +411,7 @@ mod tests {
                 sixel: false,
                 iterm2: false,
             },
+            remote: false,
         };
         let bytes = postcard::to_allocvec(&hello).expect("serialize");
         let decoded: ClientHello = postcard::from_bytes(&bytes).expect("deserialize");
