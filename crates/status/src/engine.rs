@@ -13,7 +13,7 @@ use crate::widget::{Segment, StyledText, Widget};
 use crate::widgets::{
     AttachedClientsWidget, BatteryWidget, CpuLoadWidget, CwdWidget, GitBranchWidget,
     HostnameWidget, MemoryWidget, PrefixIndicatorWidget, SeparatorWidget, SessionWidget,
-    ShellWidget, TextWidget, TimeWidget, WindowListWidget,
+    ShellWidget, SshWidget, TextWidget, TimeWidget, WindowListWidget,
 };
 use crate::{GlyphSet, resolve_style};
 
@@ -47,6 +47,9 @@ pub struct EvalContext<'a> {
     /// Index of the window currently being drag-reordered, if any. The window
     /// list renders it with a distinct (reversed) style.
     pub dragging_window: Option<usize>,
+    /// The attached client reached the daemon over `-H`/SSH (session-level
+    /// aggregate). Drives the `ssh` marker widget.
+    pub remote: bool,
 }
 
 struct WidgetSlot {
@@ -117,6 +120,10 @@ fn build_slot(spec: &WidgetSpec, palette: &PaletteConfig, glyphs: &GlyphSet) -> 
             style: resolve_style(style, palette),
             content: SmolStr::new(content),
             icon: SmolStr::new(glyphs.prefix),
+        }),
+        WidgetSpec::Ssh { style, content } => Box::new(SshWidget {
+            style: resolve_style(style, palette),
+            content: SmolStr::new(content),
         }),
         WidgetSpec::AttachedClients { style, min_count } => Box::new(AttachedClientsWidget {
             style: resolve_style(style, palette),
@@ -225,6 +232,7 @@ impl SnapshotCtx {
             sync_active: self.sync_active,
             zoom_active: self.zoom_active,
             dragging_window: None,
+            remote: false,
         }
     }
 }
@@ -493,6 +501,7 @@ mod tests {
             sync_active: false,
             zoom_active: false,
             dragging_window: None,
+            remote: false,
         };
         inner.refresh_event_driven(&ctx).await;
         let snap = inner.snapshot().await;

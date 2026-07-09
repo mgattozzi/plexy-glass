@@ -187,6 +187,7 @@ pub(super) async fn render_coordinator(
             // Any-client-armed aggregate; same WM→clients lock order as the
             // `attached_clients` read above.
             let prefix_active = session.any_prefix_armed().await;
+            let remote = session.any_client_remote().await;
             let ctx = plexy_glass_status::EvalContext {
                 session_name: &session_name,
                 windows: &windows_data,
@@ -198,6 +199,7 @@ pub(super) async fn render_coordinator(
                 sync_active,
                 zoom_active,
                 dragging_window: m.dragging_window_idx(),
+                remote,
             };
             let engine = session.status_engine_snapshot();
             engine.refresh_event_driven(&ctx).await;

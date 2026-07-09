@@ -95,6 +95,7 @@ mod tests {
             sync_active: false,
             zoom_active: false,
             dragging_window: None,
+            remote: false,
         };
         let out = w.evaluate(&ctx).await;
         assert_eq!(out.segments.len(), 2);
@@ -135,6 +136,7 @@ mod tests {
             sync_active: false,
             zoom_active: false,
             dragging_window: None,
+            remote: false,
         };
         let out = w.evaluate(&ctx).await;
         let actions: Vec<_> = out.segments.iter().filter_map(|s| s.click_action).collect();
@@ -182,6 +184,7 @@ mod tests {
             sync_active: false,
             zoom_active: false,
             dragging_window: None,
+            remote: false,
         };
         let out = w.evaluate(&ctx).await;
         assert!(
@@ -235,6 +238,7 @@ mod tests {
             sync_active: false,
             zoom_active: false,
             dragging_window: None,
+            remote: false,
         };
         let out = w.evaluate(&ctx).await;
         assert!(out.segments[1].text.contains("ok✓"), "exit-0 done → '✓'");
@@ -272,6 +276,7 @@ mod tests {
             sync_active: false,
             zoom_active: false,
             dragging_window: None,
+            remote: false,
         };
         let out = w.evaluate(&ctx).await;
         assert!(out.segments.is_empty());
@@ -317,6 +322,7 @@ mod tests {
             sync_active: false,
             zoom_active: false,
             dragging_window: Some(1),
+            remote: false,
         };
         let out = w.evaluate(&ctx).await;
         assert!(

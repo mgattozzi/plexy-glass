@@ -195,6 +195,28 @@ impl Widget for PrefixIndicatorWidget {
     }
 }
 
+/// The `ssh` marker: renders its `content` styled when the attached client is
+/// remote (`EvalContext.remote`), and nothing at all otherwise — a conditional
+/// widget like the prefix indicator, minus the mode composition.
+pub struct SshWidget {
+    pub style: ResolvedStyle,
+    pub content: SmolStr,
+}
+
+#[async_trait]
+impl Widget for SshWidget {
+    fn interval(&self) -> Option<Duration> {
+        None
+    }
+    async fn evaluate(&mut self, ctx: &EvalContext<'_>) -> StyledText {
+        if ctx.remote {
+            StyledText::single(self.content.clone(), self.style)
+        } else {
+            StyledText::empty()
+        }
+    }
+}
+
 pub struct CwdWidget {
     pub style: ResolvedStyle,
     pub max_components: Option<u8>,
@@ -259,6 +281,7 @@ mod tests {
             sync_active: false,
             zoom_active: false,
             dragging_window: None,
+            remote: false,
         }
     }
 
@@ -498,5 +521,33 @@ mod tests {
         };
         let out = w.evaluate(&ctx).await;
         assert_eq!(out.segments[0].text.as_str(), " SYNC ");
+    }
+
+    #[tokio::test]
+    async fn ssh_widget_renders_only_when_remote() {
+        fn ctx(remote: bool) -> EvalContext<'static> {
+            EvalContext {
+                session_name: "",
+                windows: &[],
+                active_window: 0,
+                attached_clients: 1,
+                prefix_active: false,
+                active_pane_cwd: None,
+                copy_mode_active: false,
+                sync_active: false,
+                zoom_active: false,
+                dragging_window: None,
+                remote,
+            }
+        }
+        let mut w = SshWidget {
+            style: ResolvedStyle::default(),
+            content: SmolStr::new("ssh"),
+        };
+        // Local → nothing painted.
+        assert!(w.evaluate(&ctx(false)).await.segments.is_empty());
+        // Remote → the content.
+        let out = w.evaluate(&ctx(true)).await;
+        assert_eq!(out.segments[0].text.as_str(), "ssh");
     }
 }

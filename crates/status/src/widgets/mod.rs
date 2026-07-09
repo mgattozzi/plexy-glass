@@ -9,7 +9,7 @@ pub use git_branch::GitBranchWidget;
 pub use shell::ShellWidget;
 pub use simple::{
     AttachedClientsWidget, CwdWidget, HostnameWidget, PrefixIndicatorWidget, SeparatorWidget,
-    SessionWidget, TextWidget,
+    SessionWidget, SshWidget, TextWidget,
 };
 pub use system::{BatteryWidget, CpuLoadWidget, MemoryWidget};
 pub use time::TimeWidget;

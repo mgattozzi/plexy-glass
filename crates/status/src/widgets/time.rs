@@ -67,6 +67,7 @@ mod tests {
             sync_active: false,
             zoom_active: false,
             dragging_window: None,
+            remote: false,
         }
     }
 

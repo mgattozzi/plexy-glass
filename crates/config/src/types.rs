@@ -232,6 +232,10 @@ pub enum WidgetSpec {
         style: StyleConfig,
         content: String,
     },
+    Ssh {
+        style: StyleConfig,
+        content: String,
+    },
     AttachedClients {
         style: StyleConfig,
         min_count: u8,
