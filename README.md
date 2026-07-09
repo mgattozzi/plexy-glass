@@ -312,6 +312,7 @@ Other topic docs:
 - [docs/scripting.md](docs/scripting.md) covers the `cmd`, `send`, `capture`, and `run` CLI verbs
 - [docs/command-blocks.md](docs/command-blocks.md) covers OSC 133 command-block navigation and capture
 - [docs/inline-graphics.md](docs/inline-graphics.md) covers inline images in panes (Kitty graphics, Sixel, and iTerm2; per-client placeholder box fallback)
+- [docs/releasing.md](docs/releasing.md) covers the nightly release pipeline, the target matrix, and building a Linux binary locally
 - [Testing](docs/testing.md) covers running the suite + code coverage
 
 ## Troubleshooting
