@@ -2,11 +2,16 @@ use std::process;
 
 use clap::{Parser, Subcommand};
 
+// Compiled only for tests: exercises the version formatter that `build.rs`
+// shares via `#[path]`. Not present in release builds (no dead code).
+#[cfg(test)]
+mod version_fmt;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "plexy-glass",
     about = "A terminal multiplexer with first-class OSC handling",
-    version
+    version = env!("PLEXY_GLASS_VERSION")
 )]
 struct Cli {
     #[command(subcommand)]
