@@ -310,15 +310,13 @@ pub(super) async fn render_coordinator(
                 Some(plexy_glass_mux::Overlay::Command { buf, .. }) => {
                     Some(plexy_glass_mux::OverlayView::Command { buf })
                 }
-                Some(plexy_glass_mux::Overlay::SessionPicker {
-                    entries,
-                    filter,
-                    selected,
-                }) => Some(plexy_glass_mux::OverlayView::SessionPicker {
-                    entries,
-                    filter,
-                    selected: *selected,
-                }),
+                Some(plexy_glass_mux::Overlay::SessionPicker { entries, finder }) => {
+                    Some(plexy_glass_mux::OverlayView::SessionPicker {
+                        entries,
+                        filter: &finder.filter,
+                        selected: finder.cursor,
+                    })
+                }
                 Some(plexy_glass_mux::Overlay::Tree(state)) => {
                     Some(plexy_glass_mux::OverlayView::Tree { state })
                 }

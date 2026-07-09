@@ -1,9 +1,9 @@
 use std::mem;
 
 use plexy_glass_mux::{
-    BufferAction, BufferEntry, BufferOutcome, BufferPickerState, HintOutcome, HintPick, HintState,
-    HistoryEntry, HistoryOutcome, HistoryState, HistoryTarget, KeyEvent, NodeKey, Overlay,
-    OverlayAction, PickerEntry, RenameTarget, TreeAction, TreeKind, TreeNode, TreeOutcome,
+    BufferAction, BufferEntry, BufferOutcome, BufferPickerState, FilterList, HintOutcome, HintPick,
+    HintState, HistoryEntry, HistoryOutcome, HistoryState, HistoryTarget, KeyEvent, NodeKey,
+    Overlay, OverlayAction, PickerEntry, RenameTarget, TreeAction, TreeKind, TreeNode, TreeOutcome,
     TreeState, handle_buffers, handle_hint, handle_history, handle_tree, overlay, session_label,
 };
 
@@ -107,8 +107,7 @@ impl WindowManager {
     pub fn open_session_picker(&mut self, entries: Vec<PickerEntry>) {
         self.set_overlay(Overlay::SessionPicker {
             entries,
-            filter: String::new(),
-            selected: 0,
+            finder: FilterList::new(),
         });
     }
 
