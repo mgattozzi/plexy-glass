@@ -32,7 +32,9 @@ jobs:
           tool: cargo-nextest
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo nextest run --workspace
+      # --no-fail-fast so a red run reports EVERY failure at once (full CI
+      # visibility), not just the first — no cost when the suite is green.
+      - run: cargo nextest run --workspace --no-fail-fast
       - run: cargo test --workspace --doc
 
   build:

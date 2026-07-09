@@ -1254,7 +1254,9 @@ mod tests {
     #[tokio::test]
     async fn emulator_records_sgr_attributes_from_child() {
         let spec = SpawnSpec {
-            program: "/bin/sh".into(),
+            // bash, not /bin/sh: `\x1b` is a bash printf escape, and /bin/sh is
+            // dash on Linux (which prints it literally) but bash on macOS.
+            program: "/bin/bash".into(),
             args: vec!["-c".into(), "printf '\\x1b[1mhi\\x1b[0m'".into()],
             env: vec![],
             cwd: None,
