@@ -169,6 +169,7 @@ pub fn parse_command(s: &str) -> Result<Command, KeyParseError> {
         "rename_pane" => Command::RenamePane,
         "show_help" => Command::ShowHelp,
         "command_prompt" => Command::CommandPrompt,
+        "command_palette" => Command::CommandPalette,
         "choose_session" => Command::ChooseSession,
         "choose_tree" => Command::ChooseTree,
         "history" => Command::History,
@@ -483,6 +484,14 @@ mod tests {
     fn parses_next_layout() {
         let c = parse_command("next_layout").unwrap();
         assert_eq!(c, Command::NextLayout);
+    }
+
+    #[test]
+    fn parses_command_palette() {
+        assert_eq!(
+            parse_command("command_palette").unwrap(),
+            Command::CommandPalette
+        );
     }
 
     #[test]

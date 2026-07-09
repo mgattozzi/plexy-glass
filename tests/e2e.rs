@@ -600,6 +600,35 @@ fn rename_window_via_overlay_updates_status_bar() {
     );
 }
 
+/// prefix Space opens the command palette and renders its box.
+#[test]
+fn command_palette_opens_via_prefix_space() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+    sess.send_prefix(b' '); // Ctrl+a then Space
+    assert!(
+        sess.wait_for(b"Commands", Duration::from_secs(10)),
+        "palette box did not render. pane: {}",
+        sess.snapshot_str()
+    );
+    // A catalog label is present too (further echo-proof: never typed). Just
+    // "Zoom", not "Zoom pane": the diff renderer skips cells that are
+    // unchanged from the underlying (blank) pane, and an internal space in a
+    // non-selected row's label routinely lands on such a cell, so a
+    // multi-word literal isn't a reliable byte-for-byte needle. A bare word
+    // has no such gap.
+    assert!(
+        sess.wait_for(b"Zoom", Duration::from_secs(5)),
+        "palette rows did not render. pane: {}",
+        sess.snapshot_str()
+    );
+}
+
 // Keyboard follow-ups (K3): on a legacy-classified client (the TestSession PTY
 // negotiates Legacy, like a real older terminal), a BARE `\x1b` byte must
 // cancel an open overlay. That's the Esc-idle-flush path the choose-tree
@@ -1950,10 +1979,10 @@ fn next_layout_cycles_without_breaking_input() {
         sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)),
         "no split separator"
     );
-    // Cycle through three presets with Ctrl+a Space.
-    sess.send_prefix(b' ');
-    sess.send_prefix(b' ');
-    sess.send_prefix(b' ');
+    // Cycle through three presets with Ctrl+a i.
+    sess.send_prefix(b'i');
+    sess.send_prefix(b'i');
+    sess.send_prefix(b'i');
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut ok = false;
     while Instant::now() < deadline {

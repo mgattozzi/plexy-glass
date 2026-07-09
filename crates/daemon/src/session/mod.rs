@@ -1,6 +1,6 @@
 //! A named session: a WindowManager + attached clients + broadcasting renderer.
 
-mod coordinator;
+pub(crate) mod coordinator;
 mod restore;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -844,6 +844,7 @@ impl Session {
             | PromptCommand::ChooseTree
             | PromptCommand::History
             | PromptCommand::Hints
+            | PromptCommand::CommandPalette
             | PromptCommand::PasteBuffer(_)
             | PromptCommand::ChooseBuffer
             | PromptCommand::CopyOutput

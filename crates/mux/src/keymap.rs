@@ -51,6 +51,8 @@ pub enum Command {
     RenamePane,
     ShowHelp,
     CommandPrompt,
+    /// Open the command palette (fuzzy finder over every command).
+    CommandPalette,
     ChooseSession,
     ChooseTree,
     /// Open the structured history palette (cross-session block finder).

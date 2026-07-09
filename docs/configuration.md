@@ -474,7 +474,7 @@ themselves contain colons and spaces.
 | Command | Action |
 |---|---|
 | `layout:<name>` | Apply a preset layout: `even-horizontal`, `even-vertical`, `main-horizontal`, `main-vertical`, or `tiled` (for the `main-*` presets the active pane takes the main slot) |
-| `next_layout` | Cycle to the next preset (remembered per window); default `Ctrl+a Space` |
+| `next_layout` | Cycle to the next preset (remembered per window); default `Ctrl+a i` (moved off `Ctrl+a Space` to make room for `command_palette`) |
 
 **Pane mobility**
 
@@ -519,6 +519,7 @@ themselves contain colons and spaces.
 | `history` | Structured history palette (cross-session block finder) |
 | `hints` | Hint mode: overlay labels on URLs, paths, and git hashes, press a label key to copy |
 | `command_prompt` | Open the `:` command prompt |
+| `command_palette` | Open the command palette: a fuzzy finder over every command, default `Ctrl+a Space` |
 | `show_help` | Keybinding help overlay |
 | `detach` | Detach this client |
 
@@ -1151,6 +1152,7 @@ cancels. Parse errors appear as a transient status-line message.
 | `tree` | — | Choose-tree |
 | `history` | — | Structured history palette (cross-session block finder) |
 | `hints` | — | Hint mode (labels on-screen URLs/paths/hashes; key copies) |
+| `palette` | — | Command palette (fuzzy finder over every command) |
 | `switch` | `<session>` | Switch to a session in place |
 | `reload` | — | Reload the config |
 | `detach` | — | Detach |

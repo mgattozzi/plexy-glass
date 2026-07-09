@@ -326,6 +326,7 @@ impl WindowManager {
             | Command::ChooseTree
             | Command::History
             | Command::Hints
+            | Command::CommandPalette
             | Command::PasteBuffer
             | Command::ChooseBuffer
             | Command::EnterBlockMode

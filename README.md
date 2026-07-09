@@ -38,8 +38,10 @@ integration.
   `:pipe-pane <cmd>` (e.g. `:pipe-pane tee -a session.log`), scriptable via
   `plexy-glass cmd`
 - Preset layouts: five tmux-style presets (`even-horizontal`, `even-vertical`,
-  `main-horizontal`, `main-vertical`, `tiled`), cycled with `Ctrl+a Space` or
+  `main-horizontal`, `main-vertical`, `tiled`), cycled with `Ctrl+a i` or
   applied by name with `:layout <name>`
+- Command palette: `Ctrl+a Space` or `:palette` opens a fuzzy finder over
+  every command, with its bound key shown alongside each entry
 - Paste buffers: copy-mode yanks push a named-buffer stack; paste the newest
   with `Ctrl+a ]` or a named one with `:paste bufferN`, pick one with
   `Ctrl+a =`, and bridge text/files with `:set-buffer`, `:save-buffer`, and
@@ -226,6 +228,7 @@ rebindable via the `keymap` block in `config.kdl` (see the
 | `Ctrl+a /` | History palette (cross-session block finder) |
 | `Ctrl+a f` | Hint mode (label on-screen URLs/paths/hashes; key to copy) |
 | `Ctrl+a :` | Command prompt |
+| `Ctrl+a Space` | Command palette (fuzzy finder over every command) |
 | `Ctrl+a ?` | Help |
 | `Ctrl+a R` | Reload config |
 
@@ -264,7 +267,7 @@ rebindable via the `keymap` block in `config.kdl` (see the
 
 | Keys | Action |
 |---|---|
-| `Ctrl+a Space` | Next layout |
+| `Ctrl+a i` | Next layout |
 | `Ctrl+a P` | Popup (scratch shell) |
 | `Ctrl+a q` | Close popup |
 

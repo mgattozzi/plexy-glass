@@ -9,8 +9,8 @@ use std::time::Duration;
 use std::{env, fs, future, mem};
 
 use plexy_glass_mux::{
-    Command, Keymap, KeymapAction, PromptCommand, VirtualScreen, block_mode, blocks,
-    command_prompt, copy_mode, hint,
+    Command, Keymap, KeymapAction, PaletteEntry, PromptCommand, VirtualScreen, block_mode, blocks,
+    command_prompt, copy_mode, hint, palette,
 };
 use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
@@ -25,6 +25,7 @@ use crate::error::DaemonError;
 use crate::input_router::decode_protocol;
 use crate::registry::SessionRegistry;
 use crate::renderer::Renderer;
+use crate::session::coordinator::binding_keys;
 use crate::session::{Session, SessionHistory, SessionTree};
 use crate::window_manager::{OverlayKeyResult, Severity};
 use crate::{InputEvent, InputRouter, osc_actions};
@@ -1157,6 +1158,30 @@ async fn open_hints_overlay(session: &Arc<Session>) {
     session.notify.notify_one();
 }
 
+/// Build the palette catalog for the attached client: the static catalog with
+/// each entry's key resolved from the active keymap via its `binding_verb`.
+fn build_palette_entries(config: &plexy_glass_config::Config) -> Vec<PaletteEntry> {
+    let keys = binding_keys(config);
+    let mut entries = palette::catalog();
+    for e in &mut entries {
+        if let Some(v) = e.binding_verb {
+            e.key = keys.get(v).cloned();
+        }
+    }
+    entries
+}
+
+/// Build the catalog (keys resolved from the active keymap) and open the palette.
+async fn open_palette_overlay(session: &Arc<Session>) {
+    let cfg = session.config_snapshot();
+    let entries = build_palette_entries(&cfg);
+    {
+        let mut m = session.window_manager.lock().await;
+        m.open_palette(entries);
+    }
+    session.notify.notify_one();
+}
+
 /// Flatten per-session block snapshots into palette entries, ordered: the
 /// current pane's blocks first, then the rest of the current session, then other
 /// sessions, each pane's blocks already newest-first from `history_snapshot`.
@@ -1452,6 +1477,7 @@ enum ConnVerb {
     ChooseTree,
     History,
     Hints,
+    CommandPalette,
     PasteBuffer(Option<String>),
     ChooseBuffer,
     CopyOutput,
@@ -1475,6 +1501,7 @@ impl ConnVerb {
             Command::ChooseTree => Ok(Self::ChooseTree),
             Command::History => Ok(Self::History),
             Command::Hints => Ok(Self::Hints),
+            Command::CommandPalette => Ok(Self::CommandPalette),
             Command::PasteBuffer => Ok(Self::PasteBuffer(None)),
             Command::ChooseBuffer => Ok(Self::ChooseBuffer),
             Command::CopyOutput => Ok(Self::CopyOutput),
@@ -1496,6 +1523,7 @@ impl ConnVerb {
             PromptCommand::ChooseTree => Ok(Self::ChooseTree),
             PromptCommand::History => Ok(Self::History),
             PromptCommand::Hints => Ok(Self::Hints),
+            PromptCommand::CommandPalette => Ok(Self::CommandPalette),
             PromptCommand::PasteBuffer(name) => Ok(Self::PasteBuffer(name)),
             PromptCommand::ChooseBuffer => Ok(Self::ChooseBuffer),
             PromptCommand::CopyOutput => Ok(Self::CopyOutput),
@@ -1576,6 +1604,9 @@ async fn run_connection_verb(ctx: &mut ClientCtx<'_>, keymap: &mut Keymap, verb:
         }
         ConnVerb::Hints => {
             open_hints_overlay(ctx.session).await;
+        }
+        ConnVerb::CommandPalette => {
+            open_palette_overlay(ctx.session).await;
         }
         ConnVerb::PasteBuffer(None) => {
             paste_top_buffer(ctx.session, ctx.registry).await;
@@ -2005,6 +2036,7 @@ async fn run_prompt_line(
         PromptCommand::ChooseTree => refuse("tree"),
         PromptCommand::History => refuse("history"),
         PromptCommand::Hints => refuse("hints"),
+        PromptCommand::CommandPalette => refuse("palette"),
         PromptCommand::ChooseBuffer => refuse("buffers"),
         other => match session.handle_prompt_command(other).await {
             Ok(message) => (true, message),
@@ -3081,6 +3113,66 @@ mod tests {
             m.overlay().is_some()
         };
         assert!(!overlay, "overlay must not open when hints.enabled = false");
+        session.terminate_panes().await;
+    }
+
+    #[test]
+    fn build_palette_entries_resolves_bound_keys() {
+        let cfg = plexy_glass_config::built_in_default();
+        let entries = build_palette_entries(&cfg);
+        let zoom = entries.iter().find(|e| e.label == "Zoom pane").unwrap();
+        // zoom_toggle is bound to `prefix z`; the resolved prefix is C-a by default.
+        assert!(
+            zoom.key.as_deref().unwrap_or("").contains('z'),
+            "{:?}",
+            zoom.key
+        );
+        // Layout presets have no default binding of their own (only the
+        // next_layout cycle chord is bound), so they show no key.
+        let np = entries.iter().find(|e| e.label == "Layout: tiled").unwrap();
+        assert_eq!(
+            np.key, None,
+            "unbound-by-default layout preset shows no key"
+        );
+    }
+
+    /// `palette` is interactive-only (opens an overlay over the active pane).
+    /// Headless `cmd "palette"` must be refused with the standard message.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn palette_verb_refused_headless() {
+        let _g = isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("p".into(), script_cat(), script_size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
+        let (ok, message) = run_prompt_line(&session, &registry, "palette").await;
+        assert!(!ok, "palette must be refused headless");
+        assert_eq!(
+            message.unwrap_or_default(),
+            "palette: requires an attached client"
+        );
+        session.terminate_panes().await;
+    }
+
+    /// `open_palette_overlay` opens the palette with keys resolved from the
+    /// active keymap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_palette_overlay_opens_overlay() {
+        let _g = isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let session = registry
+            .attach_or_create("p2".into(), script_cat(), script_size(), Arc::clone(&cfg))
+            .await
+            .unwrap();
+        open_palette_overlay(&session).await;
+        let overlay = {
+            let m = session.window_manager.lock().await;
+            m.overlay().is_some()
+        };
+        assert!(overlay, "palette overlay must be open");
         session.terminate_panes().await;
     }
 
@@ -4786,6 +4878,7 @@ mod tests {
             "tree",
             "history",
             "hints",
+            "palette",
             "buffers",
             "help",
             "block-mode",

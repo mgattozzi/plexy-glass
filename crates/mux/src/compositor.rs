@@ -1723,10 +1723,13 @@ fn paint_palette(
     let empty_msg = "(no matching commands)";
     let visible = state.visible_indices();
     let dw = |s: &str| display_width(s) as usize;
-    // Labels are ASCII; pad by char count into an aligned key column.
+    // Pad the label to the widest DISPLAY width so the key column aligns. Labels
+    // are single-width (ASCII plus a trailing `…`), so `{:<width$}`'s char-count
+    // padding matches display columns — but width the column by display_width,
+    // not bytes (a `…` is 3 bytes, 1 column).
     let label_w = visible
         .iter()
-        .map(|&i| state.entries[i].label.len())
+        .map(|&i| dw(&state.entries[i].label))
         .max()
         .unwrap_or(0);
     let rows: Vec<String> = visible

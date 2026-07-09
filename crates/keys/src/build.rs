@@ -229,16 +229,24 @@ mod tests {
     }
 
     #[test]
-    fn default_bindings_include_next_layout_on_space() {
+    fn default_bindings_include_next_layout_and_command_palette() {
         let km_cfg = plexy_glass_config::built_in_keymap();
         let mut km = build_keymap(&km_cfg);
-        // Ctrl+a Space → NextLayout
+        // Ctrl+a i → NextLayout
         let e1 = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
         assert!(matches!(km.consume(e1, vec![0x01]), KeymapAction::Pending));
-        let e2 = KeyEvent::new(Key::Char(' '), Modifiers::empty());
+        let e2 = KeyEvent::new(Key::Char('i'), Modifiers::empty());
         assert!(matches!(
-            km.consume(e2, b" ".to_vec()),
+            km.consume(e2, b"i".to_vec()),
             KeymapAction::Command(Command::NextLayout)
+        ));
+        // Ctrl+a Space → CommandPalette
+        let e3 = KeyEvent::new(Key::Char('a'), Modifiers::CTRL);
+        assert!(matches!(km.consume(e3, vec![0x01]), KeymapAction::Pending));
+        let e4 = KeyEvent::new(Key::Char(' '), Modifiers::empty());
+        assert!(matches!(
+            km.consume(e4, b" ".to_vec()),
+            KeymapAction::Command(Command::CommandPalette)
         ));
     }
 

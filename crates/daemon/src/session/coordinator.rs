@@ -619,6 +619,29 @@ fn build_help_lines(config: &plexy_glass_config::Config) -> Vec<(String, String)
     lines
 }
 
+/// Map each keymap command string to its resolved key chord for display:
+/// the built-in binding (first-seen per command) unless the user rebinds it.
+/// Shares the resolution with `build_help_lines`. Note: this projects
+/// command→key, while the real keymap and the help overlay resolve key→command
+/// (last-wins per chord); the two agree for every non-self-conflicting config,
+/// and only the displayed key (never which command runs) can differ if a user
+/// binds one chord to two commands.
+pub fn binding_keys(config: &plexy_glass_config::Config) -> HashMap<String, String> {
+    let km = &config.keymap;
+    let prefix = &km.prefix;
+    let mut map: HashMap<String, String> = HashMap::new();
+    if km.inherit_defaults {
+        for b in plexy_glass_config::built_in_keymap().bindings {
+            map.entry(b.command.clone())
+                .or_insert_with(|| substitute_prefix_token(&b.keys, prefix));
+        }
+    }
+    for b in &km.bindings {
+        map.insert(b.command.clone(), substitute_prefix_token(&b.keys, prefix));
+    }
+    map
+}
+
 /// The one-time welcome modal's content: a greeting, the essential prefix-keys,
 /// how to detach and get full help, where config lives, and how to turn this
 /// off. The keys are shown bare; the intro line says to press the prefix first.
@@ -683,6 +706,7 @@ fn command_label(command: &str) -> String {
         "rename_pane" => "Rename pane",
         "show_help" => "Help",
         "command_prompt" => "Command prompt",
+        "command_palette" => "Command palette",
         "choose_session" => "Choose session",
         "choose_tree" => "Choose tree",
         "history" => "History palette",

@@ -55,6 +55,8 @@ pub enum PromptCommand {
     ChooseTree,
     History,
     Hints,
+    /// Open the command palette.
+    CommandPalette,
     MarkPane,
     BreakPane,
     JoinPane(SplitDir),
@@ -139,6 +141,7 @@ pub const VERBS: &[&str] = &[
     "new",
     "next",
     "next-prompt",
+    "palette",
     "paste",
     "pipe-pane",
     "popup",
@@ -219,6 +222,7 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
         "tree" => no_args(PromptCommand::ChooseTree),
         "history" => no_args(PromptCommand::History),
         "hints" => no_args(PromptCommand::Hints),
+        "palette" => no_args(PromptCommand::CommandPalette),
         "mark" => no_args(PromptCommand::MarkPane),
         "break" => no_args(PromptCommand::BreakPane),
         "paste" => match args.as_slice() {
@@ -749,6 +753,15 @@ mod tests {
             "paste: expected a buffer name or no argument"
         );
         assert!(p("buffers x").is_err());
+    }
+
+    #[test]
+    fn palette_verb() {
+        assert_eq!(p("palette").unwrap(), PromptCommand::CommandPalette);
+        assert_eq!(
+            p("palette x").unwrap_err().to_string(),
+            "palette: takes no arguments"
+        );
     }
 
     #[test]
