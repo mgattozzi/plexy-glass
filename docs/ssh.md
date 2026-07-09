@@ -21,6 +21,14 @@ Every verb that talks to a daemon: `attach`, `list`, `kill`, `reload`, `cmd`,
 after the subcommand. `shell-integration`, `daemon`, and `bridge` don't take
 it — they aren't client→daemon connections.
 
+`kill` is a little different from the rest. `kill -n <session>` is a normal
+daemon request and rides the bridge like everything else. But `kill` with no
+`-n` stops the daemon *process* by signalling it, which the client can only do
+locally — so for `-H` it runs `<remote-bin> kill` **on the remote host** over
+SSH (same PATH-then-cache binary resolution as the bridge) and prints the
+remote's outcome. `plexy-glass -H host kill` therefore stops the *remote*
+daemon, never your local one.
+
 The local terminal negotiation (Kitty keyboard protocol, graphics, focus,
 color scheme) still runs against **your** terminal, not the remote's — the
 result travels to the remote daemon inside `ClientHello`. A remote daemon

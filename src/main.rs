@@ -152,9 +152,14 @@ async fn main() -> anyhow::Result<()> {
         Subcommands::Kill { name, all } => {
             if let Some(session_name) = name {
                 plexy_glass_client::client_kill_session(&target, session_name).await?;
+            } else if target.host.is_some() {
+                // No `-n`, remote: `kill` signals a process, not a daemon-protocol
+                // request, so it must run ON the remote (a local kill would stop
+                // THIS machine's daemon). Runs `<remote-bin> kill [--all]` over SSH.
+                plexy_glass_client::client_kill_remote(&target, all).await?;
             } else {
-                // No `-n`: stop the daemon. Default scopes to this runtime dir's
-                // daemon; `--all` sweeps every daemon for the user.
+                // No `-n`, local: stop the daemon. Default scopes to this runtime
+                // dir's daemon; `--all` sweeps every daemon for the user.
                 let outcome = if all {
                     plexy_glass_client::kill_all().await?
                 } else {

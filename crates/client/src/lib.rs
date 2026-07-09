@@ -26,6 +26,7 @@ use plexy_glass_protocol::{
 pub use pump::{handshake_spawn, pump};
 pub use shell_integration::shell_integration_snippet;
 use tokio::io as tokio_io;
+use tokio::process::Command;
 use tokio::signal::unix;
 use tokio::sync::mpsc;
 use tracing::info;
@@ -315,6 +316,31 @@ pub async fn client_kill_session(target: &Target, name: String) -> Result<(), Cl
             "unexpected reply from daemon: {other:?}"
         )))),
     }
+}
+
+/// Stop the daemon on the REMOTE host over SSH (`-H … kill [--all]`).
+///
+/// Unlike the connection verbs, `kill` signals a process rather than speaking
+/// the daemon protocol, so for `-H` it must execute ON the remote: the local
+/// [`kill`] targets THIS machine's runtime dir, so running it for a remote host
+/// would stop the wrong daemon (the user's local one). We run the remote binary's
+/// own `kill` over SSH, reusing the bridge's PATH-then-cache resolution; it prints
+/// its own outcome (inherited stdio) and we propagate its exit status.
+pub async fn client_kill_remote(target: &Target, all: bool) -> Result<(), ClientError> {
+    // invariant: only called for a remote target (main.rs guards on host).
+    let host = target.host.as_deref().expect("remote kill requires a host");
+    let cmd: &[&str] = if all { &["kill", "--all"] } else { &["kill"] };
+    let status = Command::new("ssh")
+        .args(transport::ssh_remote_args(host, target, cmd))
+        .status()
+        .await
+        .map_err(ClientError::Io)?;
+    if !status.success() {
+        return Err(ClientError::Io(io::Error::other(format!(
+            "remote kill on {host} failed"
+        ))));
+    }
+    Ok(())
 }
 
 /// List all sessions and print a table to stdout.

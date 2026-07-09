@@ -34,8 +34,9 @@ pub struct Target {
     pub install: bool,
 }
 
-/// Build the argv for `ssh` (after the program name). `-T` disables remote PTY
-/// allocation so the framed byte stream stays 8-bit clean.
+/// Build the argv for `ssh` (after the program name) to run `<remote-bin> cmd…`
+/// on the host. `-T` disables remote PTY allocation so a framed byte stream
+/// (the `bridge`) stays 8-bit clean.
 ///
 /// With `--remote-bin`, we invoke that exact path directly. Otherwise we try
 /// `plexy-glass` on the remote's non-interactive PATH first, then fall back to
@@ -43,29 +44,35 @@ pub struct Target {
 /// `--install`-provisioned binary both work with no extra flag. That fallback is
 /// a shell conditional, so it runs under `sh -c` (via [`remote_sh`], correct
 /// whatever the remote login shell is) and `exec` hands the raw stdio to the
-/// chosen binary for the byte relay. If neither exists the final `exec` fails
-/// 127, which the client surfaces as [`ClientError::RemoteNotFound`].
-pub fn ssh_args(host: &str, target: &Target, connect: Connect) -> Vec<String> {
+/// chosen binary. If neither exists the final `exec` fails 127, which the client
+/// surfaces as [`ClientError::RemoteNotFound`]. `cmd` is the subcommand + flags,
+/// e.g. `["bridge"]`, `["bridge", "--no-spawn"]`, or `["kill", "--all"]`.
+pub fn ssh_remote_args(host: &str, target: &Target, cmd: &[&str]) -> Vec<String> {
     let mut args = vec!["-T".to_string(), host.to_string()];
     if let Some(bin) = &target.remote_bin {
         args.push(bin.clone());
-        args.push("bridge".to_string());
-        if connect == Connect::Only {
-            args.push("--no-spawn".to_string());
-        }
+        args.extend(cmd.iter().map(|s| (*s).to_string()));
     } else {
-        let no_spawn = if connect == Connect::Only {
-            " --no-spawn"
-        } else {
-            ""
-        };
         let cache = install::REMOTE_CACHE_BIN;
+        let tail = cmd.join(" ");
         let script = format!(
-            "command -v plexy-glass >/dev/null 2>&1 && exec plexy-glass bridge{no_spawn} || exec {cache} bridge{no_spawn}"
+            "command -v plexy-glass >/dev/null 2>&1 && exec plexy-glass {tail} || exec {cache} {tail}"
         );
         args.push(remote_sh(&script));
     }
     args
+}
+
+/// The `ssh` argv to run the `bridge` for a connection verb (attach + every
+/// request/reply). `Connect::Only` appends `--no-spawn` so a scripting verb
+/// never starts a remote daemon.
+pub fn ssh_args(host: &str, target: &Target, connect: Connect) -> Vec<String> {
+    let cmd: &[&str] = if connect == Connect::Only {
+        &["bridge", "--no-spawn"]
+    } else {
+        &["bridge"]
+    };
+    ssh_remote_args(host, target, cmd)
 }
 
 #[cfg(test)]
@@ -112,6 +119,24 @@ mod ssh_tests {
             b[2],
             format!(
                 "sh -c 'command -v plexy-glass >/dev/null 2>&1 && exec plexy-glass bridge --no-spawn || exec {cache} bridge --no-spawn'"
+            )
+        );
+    }
+
+    #[test]
+    fn ssh_remote_args_runs_kill_on_the_remote() {
+        let cache = install::REMOTE_CACHE_BIN;
+        // Explicit bin: `kill --all` as direct argv.
+        assert_eq!(
+            ssh_remote_args("prod", &target(Some("/opt/pg")), &["kill", "--all"]),
+            vec!["-T", "prod", "/opt/pg", "kill", "--all"]
+        );
+        // Default: the same PATH-then-cache fallback, running `kill` remotely.
+        let k = ssh_remote_args("prod", &target(None), &["kill"]);
+        assert_eq!(
+            k[2],
+            format!(
+                "sh -c 'command -v plexy-glass >/dev/null 2>&1 && exec plexy-glass kill || exec {cache} kill'"
             )
         );
     }
