@@ -1,5 +1,6 @@
 //! plexy-glass client.
 
+pub mod bridge;
 pub mod error;
 pub mod kill;
 pub mod negotiate;
@@ -12,6 +13,7 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::time::Duration;
 use std::{env, io, process};
 
+pub use bridge::run_bridge;
 pub use error::ClientError;
 pub use kill::{KillOutcome, kill, kill_all};
 use plexy_glass_protocol::errors::CodecError;

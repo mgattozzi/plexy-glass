@@ -105,6 +105,13 @@ enum Subcommands {
     },
     /// Start the daemon (used internally by auto-spawn; `--foreground` for dev).
     Daemon(plexy_glass_daemon::DaemonArgs),
+    /// Relay stdio to the local daemon's socket (used by `-H` over SSH; run on
+    /// the remote host). Not typically invoked by hand.
+    Bridge {
+        /// Connect only; do not spawn a daemon if none is running.
+        #[arg(long = "no-spawn")]
+        no_spawn: bool,
+    },
 }
 
 #[tokio::main]
@@ -224,6 +231,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Subcommands::Daemon(args) => {
             plexy_glass_daemon::run(args).await?;
+        }
+        Subcommands::Bridge { no_spawn } => {
+            plexy_glass_client::run_bridge(no_spawn).await?;
         }
     }
     Ok(())
