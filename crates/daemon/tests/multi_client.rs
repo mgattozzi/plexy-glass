@@ -41,6 +41,7 @@ async fn two_clients_effective_size_is_min() {
                 pixel_height: 0,
             },
             Arc::new(AtomicBool::new(false)),
+            false,
         )
     })
     .await
@@ -57,6 +58,7 @@ async fn two_clients_effective_size_is_min() {
                 pixel_height: 0,
             },
             Arc::new(AtomicBool::new(false)),
+            false,
         )
     })
     .await
@@ -115,6 +117,7 @@ async fn concurrent_register_is_safe() {
                     pixel_height: 0,
                 },
                 Arc::new(AtomicBool::new(false)),
+                false,
             )
         });
         handles.push(h);

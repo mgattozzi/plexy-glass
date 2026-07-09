@@ -36,11 +36,12 @@ async fn default_status_includes_session_name() {
 
     // Register a client so the coordinator knows the effective size.
     let s2 = Arc::clone(&s);
-    let _h =
-        task::spawn_blocking(move || s2.register_client(size(), Arc::new(AtomicBool::new(false))))
-            .await
-            .unwrap()
-            .unwrap();
+    let _h = task::spawn_blocking(move || {
+        s2.register_client(size(), Arc::new(AtomicBool::new(false)), false)
+    })
+    .await
+    .unwrap()
+    .unwrap();
 
     // Wait for the coordinator to publish at least one frame after registration.
     let mut rx = s.frame_rx_template.clone();

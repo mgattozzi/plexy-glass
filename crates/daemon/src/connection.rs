@@ -273,6 +273,7 @@ where
     // Per-connection decode context from the handshake. `kbd` scopes THIS
     // client's key decode (deterministic, replacing the Permissive default).
     let client_kbd = client_hello.kbd;
+    let client_remote = client_hello.remote;
 
     // Resolve or create the session. `session` is reassigned in place by
     // `switch_session` when the client switches to another session.
@@ -330,7 +331,7 @@ where
     let session_for_register = Arc::clone(&session);
     let prefix_for_register = Arc::clone(&prefix_active);
     let handle = match task::spawn_blocking(move || {
-        session_for_register.register_client(size, prefix_for_register)
+        session_for_register.register_client(size, prefix_for_register, client_remote)
     })
     .await
     {
@@ -462,6 +463,7 @@ where
                             registry: &registry,
                             switch_tx: &switch_tx,
                             prefix_armed: &prefix_active,
+                            remote: client_remote,
                         };
                         dispatch_input_event(&mut ctx, &mut keymap, client_kbd, event).await
                     };
@@ -510,6 +512,7 @@ where
                         registry: &registry,
                         switch_tx: &switch_tx,
                         prefix_armed: &prefix_active,
+                        remote: client_remote,
                     };
                     if dispatch_input_event(&mut ctx, &mut keymap, client_kbd, event).await {
                         detach_requested = true;
@@ -922,6 +925,9 @@ struct ClientCtx<'a> {
     /// The connection's live prefix-armed flag; re-registered on the target
     /// session during a switch so re-arming keeps working afterwards.
     prefix_armed: &'a Arc<AtomicBool>,
+    /// Whether the connection reached the daemon over `-H`/SSH; re-registered on
+    /// the target session during a switch so the `ssh` marker survives the switch.
+    remote: bool,
 }
 
 impl ClientCtx<'_> {
@@ -978,9 +984,11 @@ impl ClientCtx<'_> {
         let target_for_register = Arc::clone(&target);
         let size = self.size;
         let prefix_armed = Arc::clone(self.prefix_armed);
-        let Ok(Ok(new_handle)) =
-            task::spawn_blocking(move || target_for_register.register_client(size, prefix_armed))
-                .await
+        let remote = self.remote;
+        let Ok(Ok(new_handle)) = task::spawn_blocking(move || {
+            target_for_register.register_client(size, prefix_armed, remote)
+        })
+        .await
         else {
             self.session
                 .set_status_error(format!("cannot switch to {name}"))
@@ -2879,6 +2887,7 @@ mod tests {
             registry: &registry,
             switch_tx: &switch_tx,
             prefix_armed: &prefix_armed,
+            remote: false,
         };
         // Jump to the "ls" block (prompt line 0) in the same session.
         ctx.dispatch_history_jump(plexy_glass_mux::HistoryTarget {
@@ -3403,6 +3412,7 @@ mod tests {
             registry: &registry,
             switch_tx: &switch_tx,
             prefix_armed: &prefix_armed,
+            remote: false,
         };
         ctx.dispatch_tree_action(TreeAction::RenameSession {
             old: "beta".into(),
@@ -3511,6 +3521,7 @@ mod tests {
             registry: &registry,
             switch_tx: &switch_tx,
             prefix_armed: &prefix_armed,
+            remote: false,
         };
         ctx.dispatch_tree_action(TreeAction::RenameSession {
             old: "beta".into(),
@@ -3582,6 +3593,7 @@ mod tests {
             registry: &registry,
             switch_tx: &switch_tx,
             prefix_armed: &prefix_armed,
+            remote: false,
         };
         ctx.dispatch_tree_action(TreeAction::RenameSession {
             old: "alpha".into(),

@@ -38,6 +38,11 @@ pub struct ClientHandle {
     /// read by the render paths for the any-client-armed aggregate that
     /// drives the `prefix-indicator` status widget.
     pub prefix_armed: Arc<AtomicBool>,
+    /// Whether this client reached the daemon over `-H`/SSH. Fixed at attach
+    /// time from `ClientHello.remote`; drives the session-level `any_client_remote`
+    /// aggregate behind the `ssh` status marker. Rides `ClientCtx` across session
+    /// switches so it never re-derives per session.
+    pub remote: bool,
 }
 
 pub struct Session {
@@ -397,6 +402,7 @@ impl Session {
         self: &Arc<Self>,
         size: PtySize,
         prefix_armed: Arc<AtomicBool>,
+        remote: bool,
     ) -> Result<ClientHandle, DaemonError> {
         if self.closing.load(Ordering::SeqCst) {
             return Err(DaemonError::Protocol(ProtocolError::SessionNotFound {
@@ -415,6 +421,7 @@ impl Session {
                 focused: false,
                 focus_reported: false,
                 prefix_armed: Arc::clone(&prefix_armed),
+                remote,
             });
         }
         self.recompute_size_and_notify();
@@ -425,6 +432,7 @@ impl Session {
             focused: false,
             focus_reported: false,
             prefix_armed,
+            remote,
         })
     }
 
@@ -666,6 +674,13 @@ impl Session {
         clients
             .iter()
             .any(|c| c.prefix_armed.load(Ordering::SeqCst))
+    }
+
+    /// Any-client-remote aggregate for the `ssh` status marker: true iff at least
+    /// one attached client reached the daemon over `-H`/SSH. Mirrors
+    /// `any_prefix_armed`.
+    pub async fn any_client_remote(&self) -> bool {
+        self.clients.lock().await.iter().any(|c| c.remote)
     }
 
     /// Re-encode a canonical key event into the active pane's negotiated
@@ -1800,6 +1815,7 @@ mod tests {
                     pixel_height: 960,
                 },
                 Arc::new(AtomicBool::new(false)),
+                false,
             )
         })
         .await
@@ -1815,6 +1831,7 @@ mod tests {
                     pixel_height: 0,
                 },
                 Arc::new(AtomicBool::new(false)),
+                false,
             )
         })
         .await
@@ -1846,6 +1863,7 @@ mod tests {
                     pixel_height: 0,
                 },
                 Arc::new(AtomicBool::new(false)),
+                false,
             )
         })
         .await
@@ -1878,6 +1896,7 @@ mod tests {
                     pixel_height: 0,
                 },
                 Arc::new(AtomicBool::new(false)),
+                false,
             )
         })
         .await
@@ -1893,6 +1912,7 @@ mod tests {
                     pixel_height: 0,
                 },
                 Arc::new(AtomicBool::new(false)),
+                false,
             )
         })
         .await
@@ -1924,6 +1944,7 @@ mod tests {
                     pixel_height: 0,
                 },
                 Arc::new(AtomicBool::new(false)),
+                false,
             )
         })
         .await
@@ -1950,13 +1971,13 @@ mod tests {
         let flag_b = Arc::new(AtomicBool::new(false));
         let s2 = Arc::clone(&s);
         let fa = Arc::clone(&flag_a);
-        let _a = task::spawn_blocking(move || s2.register_client(size(), fa))
+        let _a = task::spawn_blocking(move || s2.register_client(size(), fa, false))
             .await
             .unwrap()
             .unwrap();
         let s2 = Arc::clone(&s);
         let fb = Arc::clone(&flag_b);
-        let b = task::spawn_blocking(move || s2.register_client(size(), fb))
+        let b = task::spawn_blocking(move || s2.register_client(size(), fb, false))
             .await
             .unwrap()
             .unwrap();
@@ -1983,6 +2004,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn any_client_remote_aggregates_across_clients() {
+        let _g = test_env::isolate();
+        let s = Session::new("remoteagg".into(), spec(), size(), cfg()).unwrap();
+        let s2 = Arc::clone(&s);
+        // A local client → aggregate false.
+        let local = task::spawn_blocking(move || {
+            s2.register_client(size(), Arc::new(AtomicBool::new(false)), false)
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(
+            !s.any_client_remote().await,
+            "one local client → not remote"
+        );
+        // Add a remote client → aggregate true.
+        let s2 = Arc::clone(&s);
+        let remote = task::spawn_blocking(move || {
+            s2.register_client(size(), Arc::new(AtomicBool::new(false)), true)
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(s.any_client_remote().await, "a remote client → remote");
+        // Drop the remote client → back to false.
+        let s2 = Arc::clone(&s);
+        let rid = remote.client_id;
+        task::spawn_blocking(move || s2.deregister_client(rid))
+            .await
+            .unwrap();
+        assert!(!s.any_client_remote().await, "remote gone → not remote");
+        let lid = local.client_id;
+        let s2 = Arc::clone(&s);
+        task::spawn_blocking(move || s2.deregister_client(lid))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn smallest_client_wins() {
         let _g = test_env::isolate();
         let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
@@ -1996,6 +2056,7 @@ mod tests {
                     pixel_height: 0,
                 },
                 Arc::new(AtomicBool::new(false)),
+                false,
             )
         })
         .await
@@ -2011,6 +2072,7 @@ mod tests {
                     pixel_height: 0,
                 },
                 Arc::new(AtomicBool::new(false)),
+                false,
             )
         })
         .await
@@ -2317,7 +2379,7 @@ mod tests {
         s.closing.store(true, Ordering::SeqCst);
         let s2 = Arc::clone(&s);
         let result = task::spawn_blocking(move || {
-            s2.register_client(size(), Arc::new(AtomicBool::new(false)))
+            s2.register_client(size(), Arc::new(AtomicBool::new(false)), false)
         })
         .await
         .unwrap();
@@ -2712,9 +2774,10 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let _g = test_env::isolate();
         let s = Session::new("sp".into(), spec(), size(), cfg()).unwrap();
-        let handle =
-            task::block_in_place(|| s.register_client(size(), Arc::new(AtomicBool::new(false))))
-                .unwrap();
+        let handle = task::block_in_place(|| {
+            s.register_client(size(), Arc::new(AtomicBool::new(false)), false)
+        })
+        .unwrap();
         let frame_rx = handle.frame_rx.clone();
 
         // Real bidirectional socket, split exactly like serve_attach does.
