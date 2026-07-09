@@ -86,8 +86,11 @@ fn isolate_dirs(tmp: &tempfile::TempDir) -> TestEnv {
             ),
             ("HOME".into(), home.to_string_lossy().into_owned()),
             ("TMPDIR".into(), tmp.path().to_string_lossy().into_owned()),
-            // Keep the child shell deterministic.
-            ("SHELL".into(), "/bin/sh".into()),
+            // Keep the child shell deterministic AND consistent across platforms.
+            // `/bin/sh` is bash-in-posix-mode on macOS but dash on Linux, and some
+            // e2e snippets use bash builtins (`read -d`/`-t`), so pin bash itself —
+            // it exists at `/bin/bash` on both macOS and the CI Linux runners.
+            ("SHELL".into(), "/bin/bash".into()),
             // Suppress the one-time welcome modal so it can't occupy the message
             // row and fragment byte-level status assertions (test-only knob).
             ("PLEXY_GLASS_NO_WELCOME".into(), "1".into()),
@@ -1756,7 +1759,8 @@ fn pane_kitty_keyboard_query_gets_flags_reply() {
     // child reads the reply itself (bounded by `read -t`) up to the `u`
     // terminator, strips the ESC, and prints it inside a sentinel marker. This
     // is mode-independent: `read` consumes the reply regardless of echo state.
-    // (`read -d`/`-t` are bash builtins; the e2e shell is /bin/sh = bash here.)
+    // (`read -d`/`-t` are bash builtins; isolate_dirs pins SHELL=/bin/bash so this
+    // holds on Linux too, where /bin/sh would be dash.)
     let tmp = tempfile::tempdir().unwrap();
     let env = isolate_dirs(&tmp);
     let mut sess = TestSession::spawn(&env);
