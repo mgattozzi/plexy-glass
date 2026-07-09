@@ -14,6 +14,7 @@ pub mod compositor;
 pub mod copy_mode;
 pub mod diff;
 pub mod direction;
+pub mod finder;
 pub mod hint;
 pub mod history;
 pub mod key;
@@ -45,6 +46,7 @@ pub use compositor::{
 pub use copy_mode::{CopyMode, CopyModeAction, MatchSpan, SearchState};
 pub use diff::{DiffRenderer, GraphicsCaps};
 pub use direction::{Direction, SplitDir};
+pub use finder::{FilterList, FinderKey, classify, filtered_indices};
 pub use hint::{
     DEFAULT_ALPHABET, HintAction, HintKind, HintOutcome, HintPick, HintState, HintTarget,
     assign_labels, effective_alphabet, handle_hint, scan_hints,
