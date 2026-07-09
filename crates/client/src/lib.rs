@@ -9,7 +9,8 @@ pub mod shell_integration;
 pub mod transport;
 pub mod tty;
 
-use std::os::fd::{AsFd, OwnedFd};
+use std::io::Write;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::time::Duration;
 use std::{env, io, process};
 
@@ -18,8 +19,8 @@ pub use error::ClientError;
 pub use kill::{KillOutcome, kill, kill_all};
 use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
-    ClientHello, ClientMsg, Codec, PROTOCOL_VERSION, ServerMsg, SpawnSpec, client_handshake,
-    client_handshake_with,
+    ClientHello, ClientMsg, Codec, GraphicsCaps, NegotiatedKbd, PROTOCOL_VERSION, ServerMsg,
+    SpawnSpec, client_handshake, client_handshake_with,
 };
 pub use pump::{handshake_spawn, pump};
 pub use shell_integration::shell_integration_snippet;
@@ -33,28 +34,22 @@ pub use transport::{
 };
 pub use tty::{HostTty, current_size};
 
-/// Attach to (or create) a session and drive the terminal interactively.
-///
-/// - `name`: which session to target; `None` lets the daemon pick.
-/// - `create_if_missing`: when `true` the daemon creates the session if it
-///   does not yet exist; when `false` it returns `SessionNotFound`.
-/// - `spawn_cmd`: override the program spawned in new sessions; `None` uses
-///   the current `$SHELL`.
-pub async fn run(
-    name: Option<String>,
-    create_if_missing: bool,
-    spawn_cmd: Option<SpawnSpec>,
-) -> Result<(), ClientError> {
-    let socket = default_socket_path()?;
-    let stream = connect_or_spawn(&socket).await?;
-    let (mut reader, mut writer) = tokio_io::split(stream);
+/// The outer terminal's negotiated keyboard/graphics capabilities and any
+/// type-ahead sent during the probe window. Captured by [`run_probe`] so the
+/// SSH path can probe (raw), drop back to cooked for auth, then carry the
+/// result across `open_transport`.
+struct ProbeOutcome {
+    kbd: NegotiatedKbd,
+    graphics: GraphicsCaps,
+    caps: negotiate::EnabledCaps,
+    type_ahead: Vec<u8>,
+}
 
-    let stdin = tokio_io::stdin();
-    let stdin_fd = stdin.as_fd();
-    let mut tty_guard = HostTty::enter_raw(stdin_fd)?;
-
-    // --- Negotiation phase (runs in raw mode, before the dumb pump) ---
-    use std::io::Write as _;
+/// Probe the LOCAL outer terminal for Kitty / XTVERSION / graphics support and
+/// capture any type-ahead sent during the probe window. The caller must
+/// already hold a raw-mode guard (`negotiate::read_probe_reply` reads the fd
+/// directly); this touches only the outer tty, never the daemon connection.
+fn run_probe(stdin_fd: BorrowedFd<'_>) -> ProbeOutcome {
     let mut stdout = io::stdout();
     // Probe the outer terminal for Kitty / XTVERSION support.
     let _ = stdout.write_all(negotiate::PROBE);
@@ -68,7 +63,7 @@ pub async fn run(
     // a test hook so the e2e harness (whose PTY can't answer the graphics
     // query) can exercise the full image render path. No effect unless set.
     let mut graphics = if env::var_os("PLEXY_FORCE_KITTY").is_some() {
-        plexy_glass_protocol::GraphicsCaps {
+        GraphicsCaps {
             kitty: true,
             sixel: false,
             iterm2: false,
@@ -100,7 +95,58 @@ pub async fn run(
         focus_events: true,
         color_scheme: true,
     };
+    ProbeOutcome {
+        kbd,
+        graphics,
+        caps,
+        type_ahead,
+    }
+}
 
+/// Attach to (or create) a session and drive the terminal interactively.
+///
+/// - `target`: local daemon or a remote one over SSH (`-H`).
+/// - `name`: which session to target; `None` lets the daemon pick.
+/// - `create_if_missing`: when `true` the daemon creates the session if it
+///   does not yet exist; when `false` it returns `SessionNotFound`.
+/// - `spawn_cmd`: override the program spawned in new sessions; `None` uses
+///   the current `$SHELL`.
+pub async fn run(
+    target: &Target,
+    name: Option<String>,
+    create_if_missing: bool,
+    spawn_cmd: Option<SpawnSpec>,
+) -> Result<(), ClientError> {
+    let stdin = tokio_io::stdin();
+    let stdin_fd = stdin.as_fd();
+
+    // The local terminal probe needs raw mode; SSH interactive auth
+    // (password/passphrase/host-key, read from /dev/tty by ssh) needs cooked
+    // mode; the pump needs raw mode again. LOCAL keeps the pre-SSH ordering
+    // exactly (connect, THEN one raw guard spanning probe/enable/handshake/
+    // pump) so local attach is behaviorally unchanged. SSH probes in a brief
+    // raw window, drops back to cooked before the `ssh` child spawns (so auth
+    // prompts land normally), then opens the transport and re-enters raw for
+    // the handshake + session.
+    let (mut t, mut tty_guard, probe) = if target.host.is_none() {
+        let t = open_transport(target, Connect::Spawn).await?;
+        let tty_guard = HostTty::enter_raw(stdin_fd)?;
+        let probe = run_probe(stdin_fd);
+        (t, tty_guard, probe)
+    } else {
+        let probe = {
+            let _raw = HostTty::enter_raw(stdin_fd)?;
+            run_probe(stdin_fd)
+        }; // _raw drops here, restoring cooked mode for SSH auth
+        let t = open_transport(target, Connect::Spawn).await?;
+        let tty_guard = HostTty::enter_raw(stdin_fd)?;
+        (t, tty_guard, probe)
+    };
+
+    // --- Enable escapes + emergency restore. Host-terminal-local (never goes
+    // over the wire), so this runs once here for both paths, inside the raw
+    // guard that now covers the rest of the session. ---
+    let mut stdout = io::stdout();
     // Enable SGR-encoded mouse coords (?1006h), button-event tracking (?1002h,
     // motion only while a button is held; ?1003h would flood with hover), and
     // bracketed paste (?2004h). These are kept OUT of `EnabledCaps` (and so out of
@@ -109,25 +155,32 @@ pub async fn run(
     // matter since DEC private modes are independent.
     let _ = stdout.write_all(b"\x1b[?1006h\x1b[?1002h\x1b[?2004h");
     // Enable exactly the keyboard/focus/theme caps we classified.
-    let _ = stdout.write_all(&caps.enable_bytes());
+    let _ = stdout.write_all(&probe.caps.enable_bytes());
     let _ = stdout.flush();
 
     // Record the enabled set for both the normal and emergency teardown paths,
     // then install the emergency restore (which reads the recorded caps).
-    tty::set_enabled_caps(caps);
+    tty::set_enabled_caps(probe.caps);
     tty::install_emergency_restore(stdin_fd, tty_guard.original_termios());
 
     let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
     let hello = ClientHello {
         version: PROTOCOL_VERSION,
         term,
-        kbd,
-        graphics,
+        kbd: probe.kbd,
+        graphics: probe.graphics,
     };
-    let server_hello = client_handshake_with(&mut reader, &mut writer, hello).await?;
+    let server_hello = match client_handshake_with(&mut t.reader, &mut t.writer, hello).await {
+        Ok(h) => h,
+        Err(e) => {
+            // On SSH, a remote-binary-not-found (exit 127) shows up as a bare
+            // EOF; surface the actionable hint instead (mirrors `request_reply`).
+            return Err(t.ssh_not_found().await.unwrap_or_else(|| e.into()));
+        }
+    };
     info!(
         daemon_pid = server_hello.daemon_pid,
-        ?kbd,
+        kbd = ?probe.kbd,
         "connected to daemon"
     );
 
@@ -135,8 +188,8 @@ pub async fn run(
 
     let spec = spawn_cmd.unwrap_or_else(default_spawn_spec);
     handshake_spawn(
-        &mut reader,
-        &mut writer,
+        &mut t.reader,
+        &mut t.writer,
         name,
         create_if_missing,
         Some(spec),
@@ -147,10 +200,10 @@ pub async fn run(
     // Replay probe-window type-ahead now that a pane exists to receive it. These
     // are plain keystrokes: focus/theme/mouse/paste modes are enabled only after
     // the probe, so the post-DA1 tail can't carry those events. Send it as Input.
-    if !type_ahead.is_empty() {
+    if !probe.type_ahead.is_empty() {
         pump::send_client_msg(
-            &mut writer,
-            &ClientMsg::Input(bytes::Bytes::from(type_ahead)),
+            &mut t.writer,
+            &ClientMsg::Input(bytes::Bytes::from(probe.type_ahead)),
         )
         .await?;
     }
@@ -172,8 +225,10 @@ pub async fn run(
     // error path rather than returning, and restore the TTY first, since
     // `process::exit` skips destructors. (Errors *before* pump can still use
     // `?`: the blocking reader hasn't been spawned yet, so the runtime drops
-    // cleanly there.)
-    let exit_status = match pump(reader, writer, stdin_for_pump, stdout, resize_rx).await {
+    // cleanly there.) `t.child` (the SSH process, if any) rides along unused
+    // from here on — dropping it is a no-op (`kill_on_drop` defaults false),
+    // and `process::exit` below never even runs that drop.
+    let exit_status = match pump(t.reader, t.writer, stdin_for_pump, stdout, resize_rx).await {
         Ok(s) => s,
         Err(e) => {
             info!(error = %e, "session ended with error");
@@ -306,9 +361,12 @@ async fn list_sessions_inline(
 /// other sessions (declared or otherwise) happen to be running. The old
 /// sole-session fallback silently attached plain `attach` to a config-declared
 /// session.
-pub async fn client_attach_smart(explicit_name: Option<String>) -> Result<(), ClientError> {
+pub async fn client_attach_smart(
+    target: &Target,
+    explicit_name: Option<String>,
+) -> Result<(), ClientError> {
     let name = explicit_name.unwrap_or_else(|| "main".to_string());
-    run(Some(name), true, Some(default_spawn_spec())).await
+    run(target, Some(name), true, Some(default_spawn_spec())).await
 }
 
 /// Run one or more command-prompt lines against a session.

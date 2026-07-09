@@ -144,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
     // Default to `attach` with no name when no subcommand is given.
     match cli.command.unwrap_or(Subcommands::Attach { name: None }) {
         Subcommands::Attach { name } => {
-            plexy_glass_client::client_attach_smart(name).await?;
+            plexy_glass_client::client_attach_smart(&target, name).await?;
         }
         Subcommands::List => {
             plexy_glass_client::client_list(&target).await?;

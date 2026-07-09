@@ -194,10 +194,8 @@ impl TestSessionBuilder<'_> {
         self
     }
 
-    /// Prepend `dir` to `PATH` (for stub `open`/`pbcopy` binaries). Only the
-    /// macOS notifier-stub tests use it (the ssh-stub e2e uses
-    /// `run_cli_with_path`), so it's gated to avoid a dead-code lint on Linux.
-    #[cfg(target_os = "macos")]
+    /// Prepend `dir` to `PATH` (for stub binaries: `open`/`pbcopy` on the
+    /// macOS notifier tests, `ssh` on the interactive SSH-transport e2e).
     fn path_prepend(mut self, dir: &Path) -> Self {
         self.path_prepend = Some(format!("{}:/usr/bin:/bin", dir.display()));
         self
@@ -2060,6 +2058,29 @@ fn run_cli_with_path(
     )
 }
 
+/// Write a stub `ssh` binary at `<dir>/ssh` that strips a leading `-T` and the
+/// host arg, then `exec`s the rest (the remote command, e.g. `<remote-bin>
+/// bridge`) locally — no network. Shared by every stubbed-ssh e2e.
+fn write_ssh_stub(dir: &Path) {
+    fs::create_dir_all(dir).unwrap();
+    let ssh = dir.join("ssh");
+    fs::write(
+        &ssh,
+        // Drop `-T` and the host, record that the stub actually ran (so a test
+        // can prove the SSH branch was taken, not a silent local fallthrough),
+        // then exec the remote command (`<remote-bin> bridge ...`).
+        "#!/bin/sh\nwhile [ \"$1\" = \"-T\" ]; do shift; done\nshift\n\
+         [ -n \"$PLEXY_SSH_STUB_MARKER\" ] && : > \"$PLEXY_SSH_STUB_MARKER\"\nexec \"$@\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&ssh, Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 /// `-H <host> list` over a stubbed `ssh` that execs `plexy-glass bridge`
 /// locally: the client tunnels through the bridge to the daemon and lists it.
 /// Proves the SSH transport + bridge are protocol-transparent, no network.
@@ -2074,22 +2095,9 @@ fn ssh_transport_list_over_stubbed_ssh() {
         "daemon never rendered"
     );
 
-    // Stub `ssh`: drop `-T` and the host arg, exec the rest (the remote command
-    // = `<remote-bin> bridge`). Written to a dir we prepend to PATH.
+    // Written to a dir we prepend to PATH.
     let stub_dir = tmp.path().join("stub");
-    fs::create_dir_all(&stub_dir).unwrap();
-    let ssh = stub_dir.join("ssh");
-    fs::write(
-        &ssh,
-        "#!/bin/sh\nwhile [ \"$1\" = \"-T\" ]; do shift; done\nshift\nexec \"$@\"\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::fs::Permissions;
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&ssh, Permissions::from_mode(0o755)).unwrap();
-    }
+    write_ssh_stub(&stub_dir);
 
     // `-H` with the stub on PATH and --remote-bin pointing at THIS binary (so
     // the stub can exec an absolute path, not a bare name).
@@ -2103,6 +2111,63 @@ fn ssh_transport_list_over_stubbed_ssh() {
     assert!(
         out.contains("main"),
         "remote list should show the session: {out}"
+    );
+}
+
+/// `attach -H <host>` over the same stubbed `ssh`, but interactively: a second
+/// client attaches through the bridge to the SAME session a normal local
+/// attach already created, and drives a live shell round trip through it.
+/// `ssh_transport_list_over_stubbed_ssh` proves the transport for one-shot
+/// request/reply; this proves it for the sustained pump (the SSH auth-
+/// ordering path in `run()`).
+#[test]
+fn ssh_transport_attach_over_stubbed_ssh() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    // Bring the "remote" (really local) daemon + "main" session up first via a
+    // normal local attach.
+    let sess1 = TestSession::spawn(&env);
+    assert!(
+        sess1.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+
+    let stub_dir = tmp.path().join("stub");
+    write_ssh_stub(&stub_dir);
+
+    // A second, interactive client attaches over the stubbed SSH transport —
+    // no `-n`, so it lands on the same default "main" session as `sess1`
+    // (multi-client).
+    let bin = env!("CARGO_BIN_EXE_plexy-glass");
+    // The stub touches this marker when invoked; asserting it exists proves the
+    // attach actually went through the SSH transport (not a silent local path).
+    let ssh_marker = tmp.path().join("ssh_stub_ran");
+    let mut sess2 = TestSession::builder(&env)
+        .args(&["-H", "fakehost", "--remote-bin", bin, "attach"])
+        .path_prepend(&stub_dir)
+        .env("PLEXY_SSH_STUB_MARKER", ssh_marker.to_str().unwrap())
+        .start();
+    assert!(
+        sess2.wait_ready("main", Duration::from_secs(20)),
+        "ssh-tunneled attach never rendered: {}",
+        sess2.snapshot_str()
+    );
+
+    // Echo-proof round trip: quote-concatenation means the raw typed line (and
+    // its PTY echo) never contains the unbroken marker, only the shell's
+    // *executed* printf output does.
+    sess2.send_str("printf 'SSH_''ATTACH\\n'\n");
+    assert!(
+        sess2.wait_for(b"SSH_ATTACH", Duration::from_secs(10)),
+        "did not see SSH_ATTACH through the ssh-tunneled attach. raw: {}",
+        sess2.snapshot_str()
+    );
+
+    // Discrimination: the SSH branch really ran (the stub was exec'd), so this
+    // isn't a local-fallthrough that would pass identically on the shared daemon.
+    assert!(
+        ssh_marker.exists(),
+        "ssh stub was never invoked — the -H attach did not use the SSH transport"
     );
 }
 

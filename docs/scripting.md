@@ -12,6 +12,10 @@ plexy-glass send -n work --enter "cargo test"
 plexy-glass capture -n work | grep "test result: ok"
 ```
 
+All four verbs accept `-H`/`--host <ssh-target>` to target a daemon on a
+remote host over SSH instead of the local socket, e.g.
+`plexy-glass -H prod capture -n work`; see [docs/ssh.md](ssh.md).
+
 ## Verbs
 
 | Verb | Flags | What it does |
