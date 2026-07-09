@@ -187,13 +187,13 @@ pub async fn run(
 
     let initial_size = current_size(stdin_fd)?;
 
-    let spec = spawn_cmd.unwrap_or_else(default_spawn_spec);
+    let cmd = resolve_attach_spec(target.host.is_some(), spawn_cmd);
     handshake_spawn(
         &mut t.reader,
         &mut t.writer,
         name,
         create_if_missing,
-        Some(spec),
+        cmd,
         initial_size,
     )
     .await?;
@@ -367,7 +367,9 @@ pub async fn client_attach_smart(
     explicit_name: Option<String>,
 ) -> Result<(), ClientError> {
     let name = explicit_name.unwrap_or_else(|| "main".to_string());
-    run(target, Some(name), true, Some(default_spawn_spec())).await
+    // `None` lets `run` pick the shell: the local default for a local daemon, or
+    // the remote's own `$SHELL` for a remote one (see the spec resolution there).
+    run(target, Some(name), true, None).await
 }
 
 /// Run one or more command-prompt lines against a session.
@@ -637,6 +639,23 @@ fn default_spawn_spec() -> SpawnSpec {
     }
 }
 
+/// The spawn spec to send in `AttachOrCreate` when creating a session.
+///
+/// A REMOTE daemon must spawn the REMOTE's shell, so we send `None` and let it
+/// resolve its own `$SHELL`; the local client's `$SHELL` (e.g. `/bin/zsh` on
+/// macOS) often doesn't exist on the remote host, and sending it fails the
+/// session spawn and drops the connection with a bare "daemon closed before
+/// Attached". A LOCAL daemon resolves the shell here (identical to the daemon's
+/// own default, so behavior is unchanged). An explicit command is honored on
+/// both.
+fn resolve_attach_spec(is_remote: bool, explicit: Option<SpawnSpec>) -> Option<SpawnSpec> {
+    match (is_remote, explicit) {
+        (_, Some(cmd)) => Some(cmd),
+        (true, None) => None,
+        (false, None) => Some(default_spawn_spec()),
+    }
+}
+
 fn spawn_sigwinch_task(tx: mpsc::Sender<plexy_glass_protocol::PtySize>, fd: OwnedFd) {
     tokio::spawn(async move {
         let Ok(mut sig) = unix::signal(unix::SignalKind::window_change()) else {
@@ -666,5 +685,32 @@ mod tests {
         assert_eq!(exec_timeout_ms(Some(5)), Some(5000));
         // Saturates instead of overflowing.
         assert_eq!(exec_timeout_ms(Some(u64::MAX)), Some(u64::MAX));
+    }
+
+    #[test]
+    fn remote_attach_sends_no_spec_so_the_daemon_picks_its_own_shell() {
+        // The regression: a remote create must NOT ship the local $SHELL (which
+        // may be /bin/zsh, absent on the remote) — it sends None so the daemon
+        // spawns the remote's own $SHELL.
+        assert_eq!(resolve_attach_spec(true, None), None);
+        // Local still resolves a concrete spec here.
+        assert!(resolve_attach_spec(false, None).is_some());
+        // An explicit command is honored regardless of remoteness.
+        let explicit = SpawnSpec {
+            program: "/bin/dash".to_string(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        assert_eq!(
+            resolve_attach_spec(true, Some(explicit.clone()))
+                .unwrap()
+                .program,
+            "/bin/dash"
+        );
+        assert_eq!(
+            resolve_attach_spec(false, Some(explicit)).unwrap().program,
+            "/bin/dash"
+        );
     }
 }
