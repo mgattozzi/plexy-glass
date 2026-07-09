@@ -40,22 +40,30 @@ invokes it for you as the SSH command.
 
 ## `--remote-bin`
 
-The command plexy-glass runs on the remote resolves in order:
+Without `--remote-bin`, plexy-glass tries `plexy-glass` on the remote's PATH
+first and falls back to the `--install` cache path, so both a system install
+and an `--install`-provisioned binary work with no extra flag:
 
-1. `--remote-bin <path>` — explicit, always wins.
-2. the `--install` cache path (`~/.cache/plexy-glass/bin/plexy-glass`), if
-   `--install` has provisioned one there.
-3. bare `plexy-glass` — found only if it's on the remote's **non-interactive**
-   PATH. `ssh host cmd` runs a non-login shell, so `~/.cargo/bin` and similar
+1. `--remote-bin <path>` — explicit, always wins. Invoked directly, no fallback.
+2. bare `plexy-glass` — used if it's on the remote's **non-interactive** PATH.
+   `ssh host cmd` runs a non-login shell, so `~/.cargo/bin` and similar
    user-local install locations often aren't there even if they'd be on PATH
-   in an interactive session — a common miss if `plexy-glass` isn't on the
-   remote's system PATH.
+   in an interactive session; put `plexy-glass` on the remote's system PATH
+   (e.g. `/usr/local/bin`) for this to hit.
+3. the `--install` cache path (`~/.cache/plexy-glass/bin/plexy-glass`) — where
+   `--install` provisions the binary. This is the fallback when it isn't on
+   PATH, so `--install` once and then plain `-H <host> <verb>` both find it.
 
-If the resolved command isn't found, SSH exits 127 and plexy-glass reports it
-directly instead of hanging or printing a bare connection error:
+The fallback (steps 2 and 3) runs as a single `sh -c` conditional on the
+remote, so it's correct whatever the remote **login** shell is — `ssh host cmd`
+re-parses the command through the login shell, which may be nushell or fish,
+not POSIX `sh`.
+
+If neither PATH nor the cache path has a binary, SSH exits 127 and plexy-glass
+reports it directly instead of hanging or printing a bare connection error:
 
 ```
-remote `plexy-glass` not found on the host; pass --remote-bin <path> or --install
+remote `plexy-glass` not found on the host (neither on PATH nor at ~/.cache/plexy-glass/bin); either run with --install, or install it on the remote and add it to your PATH (or pass --remote-bin <path>)
 ```
 
 ## `--install` (provisioning a remote binary)
@@ -91,8 +99,9 @@ The flow, each SSH round trip kept to a minimum:
    remote — a corrupt or tampered download is never pushed.
 6. The verified bytes are streamed over `ssh` to
    `~/.cache/plexy-glass/bin/plexy-glass` on the remote (`mkdir -p` +
-   `chmod +x`). `resolve_remote_bin` then prefers that cache path over bare
-   `plexy-glass` (an explicit `--remote-bin` still wins over both).
+   `chmod +x`). Later connections fall back to that cache path when
+   `plexy-glass` isn't on the remote PATH (see `--remote-bin` above), so a
+   plain `-H <host> <verb>` finds it with no repeated `--install`.
 
 Requirements: `curl` and a SHA-256 hasher (`sha256sum` or `shasum`) on your
 **local** machine; `sh`, `uname`, and one of those same hashers on the

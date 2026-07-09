@@ -13,6 +13,7 @@ use tracing::{debug, info};
 
 use crate::error::ClientError;
 use crate::install;
+use crate::install::remote_sh;
 
 /// How a connection opens: auto-spawn the daemon (interactive/list) or fail if
 /// none is running (scripting verbs).
@@ -33,30 +34,36 @@ pub struct Target {
     pub install: bool,
 }
 
-/// The remote path to invoke over SSH. `--remote-bin` wins; else the
-/// `--install` cache path if installing; else bare `plexy-glass` (found only on
-/// the remote's non-interactive PATH).
-pub fn resolve_remote_bin(target: &Target) -> String {
-    if let Some(bin) = &target.remote_bin {
-        return bin.clone();
-    }
-    if target.install {
-        return install::REMOTE_CACHE_BIN.to_string();
-    }
-    "plexy-glass".to_string()
-}
-
 /// Build the argv for `ssh` (after the program name). `-T` disables remote PTY
 /// allocation so the framed byte stream stays 8-bit clean.
-pub fn ssh_args(host: &str, remote_bin: &str, connect: Connect) -> Vec<String> {
-    let mut args = vec![
-        "-T".to_string(),
-        host.to_string(),
-        remote_bin.to_string(),
-        "bridge".to_string(),
-    ];
-    if connect == Connect::Only {
-        args.push("--no-spawn".to_string());
+///
+/// With `--remote-bin`, we invoke that exact path directly. Otherwise we try
+/// `plexy-glass` on the remote's non-interactive PATH first, then fall back to
+/// the `--install` cache path, so a manual PATH install and an
+/// `--install`-provisioned binary both work with no extra flag. That fallback is
+/// a shell conditional, so it runs under `sh -c` (via [`remote_sh`], correct
+/// whatever the remote login shell is) and `exec` hands the raw stdio to the
+/// chosen binary for the byte relay. If neither exists the final `exec` fails
+/// 127, which the client surfaces as [`ClientError::RemoteNotFound`].
+pub fn ssh_args(host: &str, target: &Target, connect: Connect) -> Vec<String> {
+    let mut args = vec!["-T".to_string(), host.to_string()];
+    if let Some(bin) = &target.remote_bin {
+        args.push(bin.clone());
+        args.push("bridge".to_string());
+        if connect == Connect::Only {
+            args.push("--no-spawn".to_string());
+        }
+    } else {
+        let no_spawn = if connect == Connect::Only {
+            " --no-spawn"
+        } else {
+            ""
+        };
+        let cache = install::REMOTE_CACHE_BIN;
+        let script = format!(
+            "command -v plexy-glass >/dev/null 2>&1 && exec plexy-glass bridge{no_spawn} || exec {cache} bridge{no_spawn}"
+        );
+        args.push(remote_sh(&script));
     }
     args
 }
@@ -65,50 +72,48 @@ pub fn ssh_args(host: &str, remote_bin: &str, connect: Connect) -> Vec<String> {
 mod ssh_tests {
     use super::*;
 
-    #[test]
-    fn ssh_args_spawn_has_no_no_spawn_flag() {
-        assert_eq!(
-            ssh_args("prod", "plexy-glass", Connect::Spawn),
-            vec!["-T", "prod", "plexy-glass", "bridge"]
-        );
+    fn target(remote_bin: Option<&str>) -> Target {
+        Target {
+            host: Some("h".into()),
+            remote_bin: remote_bin.map(str::to_string),
+            install: false,
+        }
     }
 
     #[test]
-    fn ssh_args_only_appends_no_spawn() {
+    fn ssh_args_explicit_bin_is_invoked_directly() {
         assert_eq!(
-            ssh_args("u@h", "/opt/pg", Connect::Only),
+            ssh_args("prod", &target(Some("/opt/pg")), Connect::Spawn),
+            vec!["-T", "prod", "/opt/pg", "bridge"]
+        );
+        assert_eq!(
+            ssh_args("u@h", &target(Some("/opt/pg")), Connect::Only),
             vec!["-T", "u@h", "/opt/pg", "bridge", "--no-spawn"]
         );
     }
 
     #[test]
-    fn resolve_remote_bin_prefers_explicit() {
-        let t = Target {
-            host: Some("h".into()),
-            remote_bin: Some("/x/pg".into()),
-            install: false,
-        };
-        assert_eq!(resolve_remote_bin(&t), "/x/pg");
-        let t2 = Target {
-            host: Some("h".into()),
-            remote_bin: None,
-            install: false,
-        };
-        assert_eq!(resolve_remote_bin(&t2), "plexy-glass");
-        // --install (with no explicit --remote-bin) prefers the install cache
-        // path, even over an explicit --remote-bin it should still lose to.
-        let t3 = Target {
-            host: Some("h".into()),
-            remote_bin: None,
-            install: true,
-        };
-        assert_eq!(resolve_remote_bin(&t3), install::REMOTE_CACHE_BIN);
-        let t4 = Target {
-            host: Some("h".into()),
-            remote_bin: Some("/x/pg".into()),
-            install: true,
-        };
-        assert_eq!(resolve_remote_bin(&t4), "/x/pg");
+    fn ssh_args_default_falls_back_path_then_cache() {
+        let cache = install::REMOTE_CACHE_BIN;
+        // Spawn: try PATH, then the cache path.
+        let a = ssh_args("prod", &target(None), Connect::Spawn);
+        assert_eq!(a[0], "-T");
+        assert_eq!(a[1], "prod");
+        assert_eq!(a.len(), 3);
+        assert_eq!(
+            a[2],
+            format!(
+                "sh -c 'command -v plexy-glass >/dev/null 2>&1 && exec plexy-glass bridge || exec {cache} bridge'"
+            )
+        );
+        // Only: --no-spawn rides both branches.
+        let b = ssh_args("prod", &target(None), Connect::Only);
+        assert_eq!(
+            b[2],
+            format!(
+                "sh -c 'command -v plexy-glass >/dev/null 2>&1 && exec plexy-glass bridge --no-spawn || exec {cache} bridge --no-spawn'"
+            )
+        );
     }
 }
 
@@ -154,9 +159,8 @@ pub async fn open_transport(target: &Target, connect: Connect) -> Result<Transpo
             if target.install {
                 install::install_remote(host).await?;
             }
-            let remote_bin = resolve_remote_bin(target);
             let mut child = Command::new("ssh")
-                .args(ssh_args(host, &remote_bin, connect))
+                .args(ssh_args(host, target, connect))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit()) // SSH's prompts/errors reach the user

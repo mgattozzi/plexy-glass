@@ -25,7 +25,9 @@ pub enum ClientError {
     DaemonError(ProtocolError),
     #[error("config reload error: {0}")]
     Reload(String),
-    #[error("remote `plexy-glass` not found on the host; pass --remote-bin <path> or --install")]
+    #[error(
+        "remote `plexy-glass` not found on the host (neither on PATH nor at ~/.cache/plexy-glass/bin); either run with --install, or install it on the remote and add it to your PATH (or pass --remote-bin <path>)"
+    )]
     RemoteNotFound,
     #[error("install: {0}")]
     Install(String),

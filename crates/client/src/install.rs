@@ -10,7 +10,7 @@ use tokio::process::Command;
 
 use crate::error::ClientError;
 
-/// The `~/.cache` path `--install` writes to and `resolve_remote_bin` prefers.
+/// The `~/.cache` path `--install` writes to and the SSH bridge falls back to.
 pub const REMOTE_CACHE_BIN: &str = "~/.cache/plexy-glass/bin/plexy-glass";
 
 /// Base URL for the rolling nightly release assets.
@@ -62,10 +62,12 @@ pub fn parse_probe(output: &str) -> Option<(String, String, Option<String>)> {
 /// Provision `REMOTE_CACHE_BIN` on `host` from the nightly release, idempotently.
 pub async fn install_remote(host: &str) -> Result<(), ClientError> {
     // 1. One SSH call: uname + the cached binary's checksum (if any).
+    // `cut -c1-64` (the sha256 hex is 64 chars) not `cut -d' '` — the script
+    // must contain no single quote (see `remote_sh`).
     let probe = ssh_capture(
         host,
         &format!(
-            "uname -sm; (sha256sum {REMOTE_CACHE_BIN} 2>/dev/null || shasum -a 256 {REMOTE_CACHE_BIN} 2>/dev/null) | cut -d' ' -f1"
+            "uname -sm; (sha256sum {REMOTE_CACHE_BIN} 2>/dev/null || shasum -a 256 {REMOTE_CACHE_BIN} 2>/dev/null) | cut -c1-64"
         ),
     )
     .await?;
@@ -98,13 +100,8 @@ pub async fn install_remote(host: &str) -> Result<(), ClientError> {
         )));
     }
 
-    // 5. Push over SSH (binary on stdin).
-    ssh_push(
-        host,
-        &bytes,
-        &format!("mkdir -p ~/.cache/plexy-glass/bin && cat > {REMOTE_CACHE_BIN} && chmod +x {REMOTE_CACHE_BIN}"),
-    )
-    .await?;
+    // 5. Push over SSH (binary streamed on stdin).
+    ssh_push(host, &bytes).await?;
     Ok(())
 }
 
@@ -118,14 +115,34 @@ fn have(prog: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// `ssh <host> sh -c '<script>'`, returning stdout (stderr inherited so SSH's
-/// own prompts/errors reach the user).
+/// Wrap `script` as ONE ssh command argument that runs it under POSIX `sh` on the
+/// remote, whatever the remote LOGIN shell is. `ssh host a b c` joins its command
+/// argv with spaces into one string the login shell re-parses, and that shell may
+/// be nushell/fish, not POSIX sh. Single-quoting the whole script makes every
+/// login shell we care about (POSIX sh, nushell, fish) pass it verbatim to
+/// `sh -c`. The script MUST contain no single quote: portable single-quote
+/// escaping across those shells doesn't exist (POSIX `'\''` mis-parses under
+/// nushell), so every caller here uses a quote-free script. This keeps the login
+/// shell out of the STDIN byte path, so a command run this way reads a clean
+/// stdin from the start and `ssh_push` can stream the raw binary through it. An
+/// `sh -s` script fed on stdin fails instead: shells that block-buffer the `-s`
+/// read swallow trailing binary bytes into the buffer. Shared with the transport,
+/// which wraps its PATH-then-cache-path bridge fallback the same way.
+pub(crate) fn remote_sh(script: &str) -> String {
+    debug_assert!(
+        !script.contains('\''),
+        "remote script must contain no single quote"
+    );
+    format!("sh -c '{script}'")
+}
+
+/// `ssh <host> "sh -c '<script>'"`, returning stdout (stderr inherited so SSH's
+/// own prompts/errors reach the user). No stdin — the probe only runs commands.
 async fn ssh_capture(host: &str, script: &str) -> Result<String, ClientError> {
     let out = Command::new("ssh")
         .arg(host)
-        .arg("sh")
-        .arg("-c")
-        .arg(script)
+        .arg(remote_sh(script))
+        .stdin(Stdio::null())
         .stderr(Stdio::inherit())
         .output()
         .await
@@ -180,14 +197,20 @@ async fn sha256_hex(bytes: &[u8]) -> Result<String, ClientError> {
         .ok_or_else(|| ClientError::Install("empty checksum output".into()))
 }
 
-/// `ssh <host> sh -c '<script>'` with `bytes` streamed to the remote command's
-/// stdin (the binary being installed).
-async fn ssh_push(host: &str, bytes: &[u8], script: &str) -> Result<(), ClientError> {
+/// Install `bytes` as the remote cache binary in one SSH call. The mkdir, `cat >
+/// file`, and chmod script rides the argv via `remote_sh`, so the binary is the
+/// only thing on stdin and `cat` reads it clean from the start. Feeding the
+/// script itself on stdin via `sh -s` instead fails on shells that block-buffer
+/// the `-s` read: they swallow trailing binary bytes into the script buffer and
+/// truncate the file. This needs no base64/scp; nushell and sh forward the raw
+/// stdin through to `cat` intact.
+async fn ssh_push(host: &str, bytes: &[u8]) -> Result<(), ClientError> {
+    let script = format!(
+        "mkdir -p ~/.cache/plexy-glass/bin && cat > {REMOTE_CACHE_BIN} && chmod +x {REMOTE_CACHE_BIN}"
+    );
     let mut child = Command::new("ssh")
         .arg(host)
-        .arg("sh")
-        .arg("-c")
-        .arg(script)
+        .arg(remote_sh(&script))
         .stdin(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -196,8 +219,7 @@ async fn ssh_push(host: &str, bytes: &[u8], script: &str) -> Result<(), ClientEr
     let mut stdin = child.stdin.take().expect("ssh push stdin piped");
     stdin.write_all(bytes).await.map_err(ClientError::Io)?;
     drop(stdin);
-    let status = child.wait().await.map_err(ClientError::Io)?;
-    if !status.success() {
+    if !child.wait().await.map_err(ClientError::Io)?.success() {
         return Err(ClientError::Install(format!("push to {host} failed")));
     }
     Ok(())
@@ -206,6 +228,17 @@ async fn ssh_push(host: &str, bytes: &[u8], script: &str) -> Result<(), ClientEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_sh_single_quote_wraps_for_sh_c() {
+        assert_eq!(remote_sh("uname -sm"), "sh -c 'uname -sm'");
+        // The real scripts (pipes, redirects, &&) stay literal inside the quotes
+        // — the remote login shell hands the whole thing to `sh -c`.
+        assert_eq!(
+            remote_sh("a 2>/dev/null | cut -c1-64 && b"),
+            "sh -c 'a 2>/dev/null | cut -c1-64 && b'"
+        );
+    }
 
     #[test]
     fn triple_map_covers_supported_pairs_and_rejects_others() {

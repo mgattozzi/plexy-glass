@@ -31,7 +31,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 pub use transport::{
     Connect, Target, Transport, connect_only, connect_or_spawn, default_socket_path,
-    open_transport, resolve_remote_bin, ssh_args,
+    open_transport, ssh_args,
 };
 pub use tty::{HostTty, current_size};
 
