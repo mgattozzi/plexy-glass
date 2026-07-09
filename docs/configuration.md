@@ -220,6 +220,18 @@ Unknown widget names, unknown properties, and unknown child nodes are all
 decode errors, so typos fail loudly (and on reload, loudly means falling
 back to the default config, see above).
 
+#### `ssh`
+
+A marker shown when any client attached to the session reached the daemon over
+`-H`/SSH (see [docs/ssh.md](ssh.md)); it's a session-level cue, so it renders
+nothing on a purely local session. Both props are optional: `content` (default
+`ssh`) and a `style` child (default the theme default; the shipped config uses
+`accent`). It ships first in the default left cluster.
+
+```kdl
+ssh content="ssh" { style { fg "accent" } }
+```
+
 #### `session`
 
 The current session name. Optional `style`, and the only widget that takes

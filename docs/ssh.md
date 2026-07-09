@@ -35,6 +35,20 @@ result travels to the remote daemon inside `ClientHello`. A remote daemon
 needs no awareness that it's remote; it just receives frames over a socket
 instead of a local one.
 
+## The `ssh` status marker
+
+When you attach with `-H`, the status bar's left cluster leads with a small `ssh`
+badge so you never forget the session lives on another host. The marker is
+session-scoped: it shows whenever any client attached to the session is remote,
+so a purely local session shows nothing, while a local view co-attached to a
+session that also has a remote client sees it too. Style it via the `ssh` status
+widget (see [docs/configuration.md](configuration.md)).
+
+Note that the marker rides protocol v11: after you upgrade past it, re-run
+`--install` once per remote host so the remote daemon matches (a v11 client
+against a v10 daemon prints `handshake: peer speaks protocol version 10, we
+speak 11` until you do).
+
 ## How it works: the `bridge`
 
 `-H` spawns `ssh -T <target> <remote-bin> bridge` and treats the child's

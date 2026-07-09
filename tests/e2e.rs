@@ -2132,6 +2132,13 @@ fn ssh_transport_attach_over_stubbed_ssh() {
         "daemon never rendered"
     );
 
+    // The local session shows no ssh marker yet.
+    assert!(
+        !sess1.snapshot_str().contains("ssh"),
+        "local session should not show the ssh marker: {}",
+        sess1.snapshot_str()
+    );
+
     let stub_dir = tmp.path().join("stub");
     write_ssh_stub(&stub_dir);
 
@@ -2150,6 +2157,13 @@ fn ssh_transport_attach_over_stubbed_ssh() {
     assert!(
         sess2.wait_ready("main", Duration::from_secs(20)),
         "ssh-tunneled attach never rendered: {}",
+        sess2.snapshot_str()
+    );
+
+    // Attaching over the SSH transport lights the left-cluster ssh marker.
+    assert!(
+        sess2.wait_for(b"ssh", Duration::from_secs(10)),
+        "ssh marker never appeared on the remote-attached client: {}",
         sess2.snapshot_str()
     );
 
