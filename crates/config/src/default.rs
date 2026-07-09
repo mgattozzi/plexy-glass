@@ -55,6 +55,15 @@ pub fn built_in_default() -> Config {
             position: Position::Bottom,
             refresh: Duration::from_secs(5),
             left: vec![
+                WidgetSpec::Ssh {
+                    style: StyleConfig {
+                        fg: Some("accent".into()),
+                        bg: Some("bg_bar".into()),
+                        bold: true,
+                        ..Default::default()
+                    },
+                    content: " ssh ".into(),
+                },
                 WidgetSpec::Session {
                     style: StyleConfig {
                         fg: Some("bg".into()),
@@ -259,5 +268,17 @@ mod tests {
                 .iter()
                 .all(|w| !matches!(w, WidgetSpec::Text { value, .. } if value.trim().is_empty()))
         );
+    }
+
+    #[test]
+    fn default_left_cluster_leads_with_ssh_marker() {
+        let cfg = built_in_default();
+        match cfg.status.left.first() {
+            Some(WidgetSpec::Ssh { style, content }) => {
+                assert_eq!(content, " ssh ");
+                assert_eq!(style.fg.as_deref(), Some("accent"));
+            }
+            other => panic!("expected leading Ssh widget, got {other:?}"),
+        }
     }
 }

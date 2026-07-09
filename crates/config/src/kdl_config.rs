@@ -1042,6 +1042,14 @@ fn decode_widget(node: &KdlNode, src: &str) -> Result<WidgetSpec, ConfigError> {
                 content: require_prop_str(node, "content", src)?.to_string(),
             }
         }
+        "ssh" => {
+            ensure_only_props(node, &["content"], src)?;
+            ensure_only_children(node, &["style"], src)?;
+            WidgetSpec::Ssh {
+                style: opt_style(node, "style", src)?,
+                content: prop_str(node, "content").unwrap_or("ssh").to_string(),
+            }
+        }
         "attached-clients" => {
             ensure_only_props(node, &["min-count"], src)?;
             ensure_only_children(node, &["style"], src)?;
@@ -1296,6 +1304,7 @@ status {
     position "bottom"
     refresh "5s"
     left {
+        ssh content=" ssh " { style fg="accent" bg="bg_bar" bold=#true }
         session { style fg="bg" bg="accent" bold=#true; padding 1 1 }
         prefix-indicator content=" PFX " { style fg="bg" bg="highlight" bold=#true }
     }
@@ -1473,6 +1482,31 @@ keymap {
         // Both fields are required (no defaults).
         assert!(parse_config(r#"status { left { prefix-indicator { style fg="fg" } } }"#).is_err());
         assert!(parse_config(r#"status { left { prefix-indicator content=" PFX " } }"#).is_err());
+    }
+
+    #[test]
+    fn ssh_widget_decodes_with_optional_content_and_style() {
+        // Bare node → defaults: content "ssh", theme-default style. NOT an error
+        // (unlike prefix-indicator, both props are optional).
+        let cfg = parse_config(r"status { left { ssh } }").unwrap();
+        assert_eq!(
+            cfg.status.left[0],
+            WidgetSpec::Ssh {
+                style: StyleConfig::default(),
+                content: "ssh".to_string()
+            }
+        );
+        // Explicit content + style are honored.
+        let cfg =
+            parse_config(r#"status { left { ssh content="remote" { style { fg "warn" } } } } "#)
+                .unwrap();
+        match &cfg.status.left[0] {
+            WidgetSpec::Ssh { content, style } => {
+                assert_eq!(content, "remote");
+                assert_eq!(style.fg.as_deref(), Some("warn"));
+            }
+            other => panic!("expected Ssh, got {other:?}"),
+        }
     }
 
     #[test]

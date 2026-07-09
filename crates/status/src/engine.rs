@@ -505,9 +505,12 @@ mod tests {
         };
         inner.refresh_event_driven(&ctx).await;
         let snap = inner.snapshot().await;
-        // The session widget (first slot in left) should have a non-empty cache
-        // containing "demo".
-        assert!(!snap.left[0].is_empty());
-        assert!(snap.left[0][0].text.contains("demo"));
+        // The Ssh marker leads the left cluster but renders empty when
+        // `remote` is false (as here), so it should surface no cells.
+        assert!(snap.left[0].is_empty());
+        // The session widget (second slot in left) should have a non-empty
+        // cache containing "demo".
+        assert!(!snap.left[1].is_empty());
+        assert!(snap.left[1][0].text.contains("demo"));
     }
 }
