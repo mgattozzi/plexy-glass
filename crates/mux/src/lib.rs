@@ -22,6 +22,7 @@ pub mod keymap;
 pub mod layout;
 pub mod mouse;
 pub mod overlay;
+pub mod palette;
 pub mod pane_id;
 pub mod preset;
 pub mod rect;
@@ -60,6 +61,7 @@ pub use mouse::{
     MouseParser, encode_for_child,
 };
 pub use overlay::{Overlay, OverlayAction, PickerEntry, RenameTarget, picker_filtered_indices};
+pub use palette::{PaletteAction, PaletteEntry, PaletteOutcome, PaletteState, handle_palette};
 pub use pane_id::{PaneId, WindowId};
 pub use preset::LayoutPreset;
 pub use rect::Rect;
