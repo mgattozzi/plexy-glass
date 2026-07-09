@@ -9,6 +9,7 @@
 //! $HOME so the daemon writes its socket, lockfile, and logs in isolation
 //! and never collides between tests.
 
+use std::env;
 use std::fs;
 #[cfg(target_os = "macos")]
 use std::fs::Permissions;
@@ -193,9 +194,9 @@ impl TestSessionBuilder<'_> {
         self
     }
 
-    /// Prepend `dir` to `PATH` (for stub `open`/`pbcopy` binaries). Only used by
-    /// the macOS notifier-stub tests, so it's gated to avoid a dead-code lint on
-    /// Linux (where those tests are `#[cfg]`'d out).
+    /// Prepend `dir` to `PATH` (for stub `open`/`pbcopy` binaries). Only the
+    /// macOS notifier-stub tests use it (the ssh-stub e2e uses
+    /// `run_cli_with_path`), so it's gated to avoid a dead-code lint on Linux.
     #[cfg(target_os = "macos")]
     fn path_prepend(mut self, dir: &Path) -> Self {
         self.path_prepend = Some(format!("{}:/usr/bin:/bin", dir.display()));
@@ -2028,6 +2029,81 @@ fn run_cli(env: &TestEnv, args: &[&str]) -> (ExitStatus, String, String) {
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+/// Like `run_cli`, but prepends `path_dir` to the child's `PATH` (for a stub
+/// binary, e.g. a fake `ssh`), keeping the rest of the real `PATH` behind it
+/// so other tools the CLI shells out to still resolve.
+fn run_cli_with_path(
+    env: &TestEnv,
+    path_dir: &Path,
+    args: &[&str],
+) -> (ExitStatus, String, String) {
+    let out = Command::cargo_bin("plexy-glass")
+        .unwrap()
+        .args(args)
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                path_dir.display(),
+                env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .output()
+        .expect("run plexy-glass");
+    (
+        out.status,
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// `-H <host> list` over a stubbed `ssh` that execs `plexy-glass bridge`
+/// locally: the client tunnels through the bridge to the daemon and lists it.
+/// Proves the SSH transport + bridge are protocol-transparent, no network.
+#[test]
+fn ssh_transport_list_over_stubbed_ssh() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    // Bring a daemon up first (the "remote" daemon), via a normal local attach.
+    let sess = TestSession::spawn(&env);
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+
+    // Stub `ssh`: drop `-T` and the host arg, exec the rest (the remote command
+    // = `<remote-bin> bridge`). Written to a dir we prepend to PATH.
+    let stub_dir = tmp.path().join("stub");
+    fs::create_dir_all(&stub_dir).unwrap();
+    let ssh = stub_dir.join("ssh");
+    fs::write(
+        &ssh,
+        "#!/bin/sh\nwhile [ \"$1\" = \"-T\" ]; do shift; done\nshift\nexec \"$@\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&ssh, Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // `-H` with the stub on PATH and --remote-bin pointing at THIS binary (so
+    // the stub can exec an absolute path, not a bare name).
+    let bin = env!("CARGO_BIN_EXE_plexy-glass");
+    let (st, out, err) = run_cli_with_path(
+        &env,
+        &stub_dir,
+        &["-H", "fakehost", "--remote-bin", bin, "list"],
+    );
+    assert!(st.success(), "-H list failed: {err}");
+    assert!(
+        out.contains("main"),
+        "remote list should show the session: {out}"
+    );
 }
 
 /// `plexy-glass send --enter` writes text into the attached session's pane and

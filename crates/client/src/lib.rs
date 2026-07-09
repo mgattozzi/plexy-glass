@@ -27,7 +27,10 @@ use tokio::io as tokio_io;
 use tokio::signal::unix;
 use tokio::sync::mpsc;
 use tracing::info;
-pub use transport::{connect_only, connect_or_spawn, default_socket_path};
+pub use transport::{
+    Connect, Target, Transport, connect_only, connect_or_spawn, default_socket_path,
+    open_transport, resolve_remote_bin, ssh_args,
+};
 pub use tty::{HostTty, current_size};
 
 /// Attach to (or create) a session and drive the terminal interactively.
@@ -188,38 +191,34 @@ pub async fn run(
     process::exit(code);
 }
 
-/// How the request/reply scaffold opens its connection.
-enum Connect {
-    /// Auto-spawn the daemon if it isn't already running (interactive/list paths).
-    Spawn,
-    /// Fail with `ClientError::Connect` when no daemon is running (scripting verbs).
-    Only,
-}
-
-/// Shared request/reply scaffold: open one connection (spawning the daemon or
-/// not, per `connect`), handshake, encode + write `msg`, then read and decode
-/// exactly one reply frame. Callers do their own per-message reply branching.
-async fn request_reply(connect: Connect, msg: ClientMsg) -> Result<ServerMsg, ClientError> {
-    let socket = default_socket_path()?;
-    let stream = match connect {
-        Connect::Spawn => connect_or_spawn(&socket).await?,
-        Connect::Only => connect_only(&socket).await?,
-    };
-    let (mut reader, mut writer) = tokio_io::split(stream);
-    client_handshake(&mut reader, &mut writer).await?;
+/// Shared request/reply scaffold: open one connection to `target` (spawning
+/// the daemon or not, per `connect`; local socket or SSH `bridge`), handshake,
+/// encode + write `msg`, then read and decode exactly one reply frame. Callers
+/// do their own per-message reply branching.
+async fn request_reply(
+    target: &Target,
+    connect: Connect,
+    msg: ClientMsg,
+) -> Result<ServerMsg, ClientError> {
+    let mut t = open_transport(target, connect).await?;
+    if let Err(e) = client_handshake(&mut t.reader, &mut t.writer).await {
+        // On SSH, a remote-binary-not-found (exit 127) shows up as a bare EOF;
+        // surface the actionable hint instead.
+        return Err(t.ssh_not_found().await.unwrap_or_else(|| e.into()));
+    }
 
     let payload = postcard::to_allocvec(&msg).map_err(|e| CodecError::Encode(e.to_string()))?;
-    Codec::write_frame(&mut writer, &payload).await?;
+    Codec::write_frame(&mut t.writer, &payload).await?;
 
-    let frame = Codec::read_frame(&mut reader)
+    let frame = Codec::read_frame(&mut t.reader)
         .await?
         .ok_or_else(|| ClientError::Io(io::Error::other("daemon closed before reply")))?;
     postcard::from_bytes(&frame).map_err(|e| CodecError::Decode(e.to_string()).into())
 }
 
 /// Send `ReloadConfig` to the daemon and print the result.
-pub async fn client_reload_config() -> Result<(), ClientError> {
-    let reply = request_reply(Connect::Spawn, ClientMsg::ReloadConfig).await?;
+pub async fn client_reload_config(target: &Target) -> Result<(), ClientError> {
+    let reply = request_reply(target, Connect::Spawn, ClientMsg::ReloadConfig).await?;
     match reply {
         ServerMsg::ConfigReloaded { error: None } => {
             println!("config reloaded");
@@ -241,8 +240,8 @@ pub async fn client_reload_config() -> Result<(), ClientError> {
 /// Connect-only: killing a session must never *start* a daemon. With none
 /// running there is nothing to kill, so a connect failure prints the same
 /// "no daemon running" note as the bare `kill` path and exits 0.
-pub async fn client_kill_session(name: String) -> Result<(), ClientError> {
-    let reply = match request_reply(Connect::Only, ClientMsg::KillSession { name }).await {
+pub async fn client_kill_session(target: &Target, name: String) -> Result<(), ClientError> {
+    let reply = match request_reply(target, Connect::Only, ClientMsg::KillSession { name }).await {
         Ok(r) => r,
         Err(ClientError::Connect { .. }) => {
             println!("no daemon running");
@@ -263,8 +262,8 @@ pub async fn client_kill_session(name: String) -> Result<(), ClientError> {
 }
 
 /// List all sessions and print a table to stdout.
-pub async fn client_list() -> Result<(), ClientError> {
-    let entries = list_sessions_inline().await?;
+pub async fn client_list(target: &Target) -> Result<(), ClientError> {
+    let entries = list_sessions_inline(target).await?;
     print_sessions_table(&entries);
     Ok(())
 }
@@ -288,8 +287,10 @@ pub fn print_sessions_table(entries: &[plexy_glass_protocol::SessionEntry]) {
 }
 
 /// Shared helper: open a connection, handshake, send `ListSessions`, return entries.
-async fn list_sessions_inline() -> Result<Vec<plexy_glass_protocol::SessionEntry>, ClientError> {
-    let reply = request_reply(Connect::Spawn, ClientMsg::ListSessions).await?;
+async fn list_sessions_inline(
+    target: &Target,
+) -> Result<Vec<plexy_glass_protocol::SessionEntry>, ClientError> {
+    let reply = request_reply(target, Connect::Spawn, ClientMsg::ListSessions).await?;
     match reply {
         ServerMsg::SessionList { entries } => Ok(entries),
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
@@ -320,6 +321,7 @@ pub async fn client_attach_smart(explicit_name: Option<String>) -> Result<(), Cl
 /// "No daemon running" surfaces as `ClientError::Connect` (the scripting verbs
 /// use `connect_only`, never the auto-spawning path, per spec).
 pub async fn client_run_commands(
+    target: &Target,
     name: Option<String>,
     lines: Vec<String>,
 ) -> Result<bool, ClientError> {
@@ -328,7 +330,7 @@ pub async fn client_run_commands(
             session: name.clone(),
             line,
         };
-        let reply = request_reply(Connect::Only, msg).await?;
+        let reply = request_reply(target, Connect::Only, msg).await?;
         match reply {
             ServerMsg::CommandResult { ok: true, message } => {
                 if let Some(m) = message {
@@ -357,12 +359,16 @@ pub async fn client_run_commands(
 ///
 /// Single round-trip. Returns `Ok(true)` on success, `Ok(false)` when the
 /// daemon reports an error (message printed to stderr). No daemon → `Err`.
-pub async fn client_send_input(name: Option<String>, bytes: Vec<u8>) -> Result<bool, ClientError> {
+pub async fn client_send_input(
+    target: &Target,
+    name: Option<String>,
+    bytes: Vec<u8>,
+) -> Result<bool, ClientError> {
     let msg = ClientMsg::SendInput {
         session: name,
         bytes: bytes::Bytes::from(bytes),
     };
-    let reply = request_reply(Connect::Only, msg).await?;
+    let reply = request_reply(target, Connect::Only, msg).await?;
     match reply {
         ServerMsg::CommandResult { ok: true, message } => {
             if let Some(m) = message {
@@ -393,13 +399,17 @@ pub async fn client_send_input(name: Option<String>, bytes: Vec<u8>) -> Result<b
 ///
 /// Returns `Ok(true)` on success, `Ok(false)` when the daemon reports an error
 /// (message on stderr). No daemon → `Err`.
-pub async fn client_capture(name: Option<String>, last_command: bool) -> Result<bool, ClientError> {
+pub async fn client_capture(
+    target: &Target,
+    name: Option<String>,
+    last_command: bool,
+) -> Result<bool, ClientError> {
     let msg = if last_command {
         ClientMsg::CaptureLastCommand { session: name }
     } else {
         ClientMsg::CapturePane { session: name }
     };
-    let reply = request_reply(Connect::Only, msg).await?;
+    let reply = request_reply(target, Connect::Only, msg).await?;
     match reply {
         ServerMsg::PaneCapture { text } => {
             println!("{text}");
@@ -430,8 +440,16 @@ pub async fn client_capture(name: Option<String>, last_command: bool) -> Result<
 /// Returns `Ok(true)` on success, `Ok(false)` when the daemon reports an error
 /// (plain message on stderr, since errors are not results they are never JSON).
 /// No daemon → `Err`.
-pub async fn client_capture_block(name: Option<String>) -> Result<bool, ClientError> {
-    let reply = request_reply(Connect::Only, ClientMsg::CaptureLastBlock { session: name }).await?;
+pub async fn client_capture_block(
+    target: &Target,
+    name: Option<String>,
+) -> Result<bool, ClientError> {
+    let reply = request_reply(
+        target,
+        Connect::Only,
+        ClientMsg::CaptureLastBlock { session: name },
+    )
+    .await?;
     match reply {
         ServerMsg::BlockCapture {
             text,
@@ -482,6 +500,7 @@ pub async fn client_capture_block(name: Option<String>) -> Result<bool, ClientEr
 ///
 /// No daemon → `Err` (run never auto-spawns, like the other scripting verbs).
 pub async fn client_exec(
+    target: &Target,
     name: Option<String>,
     text: String,
     timeout_secs: Option<u64>,
@@ -493,7 +512,7 @@ pub async fn client_exec(
         text,
         timeout_ms: exec_timeout_ms(timeout_secs),
     };
-    let reply = request_reply(Connect::Only, msg).await?;
+    let reply = request_reply(target, Connect::Only, msg).await?;
     match reply {
         ServerMsg::ExecDone {
             exit,

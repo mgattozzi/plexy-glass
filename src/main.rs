@@ -16,6 +16,18 @@ mod version_fmt;
 struct Cli {
     #[command(subcommand)]
     command: Option<Subcommands>,
+
+    /// Run against a daemon on a remote host over SSH (an ssh_config alias or
+    /// user@host). Applies to any connection verb.
+    #[arg(short = 'H', long = "host", global = true)]
+    host: Option<String>,
+    /// Path to `plexy-glass` on the remote (default: found on PATH, or the
+    /// --install cache path).
+    #[arg(long = "remote-bin", global = true)]
+    remote_bin: Option<String>,
+    /// Provision the remote binary from the nightly release before connecting.
+    #[arg(long = "install", global = true)]
+    install: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -124,17 +136,22 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let target = plexy_glass_client::Target {
+        host: cli.host,
+        remote_bin: cli.remote_bin,
+        install: cli.install,
+    };
     // Default to `attach` with no name when no subcommand is given.
     match cli.command.unwrap_or(Subcommands::Attach { name: None }) {
         Subcommands::Attach { name } => {
             plexy_glass_client::client_attach_smart(name).await?;
         }
         Subcommands::List => {
-            plexy_glass_client::client_list().await?;
+            plexy_glass_client::client_list(&target).await?;
         }
         Subcommands::Kill { name, all } => {
             if let Some(session_name) = name {
-                plexy_glass_client::client_kill_session(session_name).await?;
+                plexy_glass_client::client_kill_session(&target, session_name).await?;
             } else {
                 // No `-n`: stop the daemon. Default scopes to this runtime dir's
                 // daemon; `--all` sweeps every daemon for the user.
@@ -159,10 +176,10 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Subcommands::Reload => {
-            plexy_glass_client::client_reload_config().await?;
+            plexy_glass_client::client_reload_config(&target).await?;
         }
         Subcommands::Cmd { name, lines } => {
-            match plexy_glass_client::client_run_commands(name, lines).await {
+            match plexy_glass_client::client_run_commands(&target, name, lines).await {
                 Ok(true) => {}
                 Ok(false) => process::exit(1),
                 Err(e) => {
@@ -176,7 +193,7 @@ async fn main() -> anyhow::Result<()> {
             if enter {
                 bytes.push(b'\r');
             }
-            match plexy_glass_client::client_send_input(name, bytes).await {
+            match plexy_glass_client::client_send_input(&target, name, bytes).await {
                 Ok(true) => {}
                 Ok(false) => process::exit(1),
                 Err(e) => {
@@ -191,9 +208,9 @@ async fn main() -> anyhow::Result<()> {
             json,
         } => {
             let result = if json {
-                plexy_glass_client::client_capture_block(name).await
+                plexy_glass_client::client_capture_block(&target, name).await
             } else {
-                plexy_glass_client::client_capture(name, last_command).await
+                plexy_glass_client::client_capture(&target, name, last_command).await
             };
             match result {
                 Ok(true) => {}
@@ -210,7 +227,9 @@ async fn main() -> anyhow::Result<()> {
             json,
             text,
         } => {
-            match plexy_glass_client::client_exec(name, text.join(" "), timeout, json).await {
+            match plexy_glass_client::client_exec(&target, name, text.join(" "), timeout, json)
+                .await
+            {
                 // 0 falls through to the normal `Ok(())` return; any other code
                 // (command exit passthrough, 124 timeout, 1 refusal) exits now.
                 Ok(0) => {}

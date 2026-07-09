@@ -1,16 +1,158 @@
 use std::fs::OpenOptions;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 use std::{env, io};
 
 use nix::libc;
+use tokio::io::{AsyncRead, AsyncWrite, split};
 use tokio::net::UnixStream;
+use tokio::process::{Child, Command};
 use tokio::time;
 use tracing::{debug, info};
 
 use crate::error::ClientError;
+
+/// How a connection opens: auto-spawn the daemon (interactive/list) or fail if
+/// none is running (scripting verbs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Connect {
+    Spawn,
+    Only,
+}
+
+/// Where a verb runs: the local daemon, or a remote one over SSH.
+#[derive(Debug, Clone, Default)]
+pub struct Target {
+    /// `Some(ssh-target)` routes over SSH; `None` uses the local socket.
+    pub host: Option<String>,
+    /// Explicit remote `plexy-glass` path (`--remote-bin`).
+    pub remote_bin: Option<String>,
+    /// `--install`: provision the remote binary before connecting.
+    pub install: bool,
+}
+
+/// The remote path to invoke over SSH. `--remote-bin` wins; else the
+/// `--install` cache path if installing; else bare `plexy-glass` (found only on
+/// the remote's non-interactive PATH). NOTE: Task 4 inserts the cache tier.
+pub fn resolve_remote_bin(target: &Target) -> String {
+    if let Some(bin) = &target.remote_bin {
+        return bin.clone();
+    }
+    "plexy-glass".to_string()
+}
+
+/// Build the argv for `ssh` (after the program name). `-T` disables remote PTY
+/// allocation so the framed byte stream stays 8-bit clean.
+pub fn ssh_args(host: &str, remote_bin: &str, connect: Connect) -> Vec<String> {
+    let mut args = vec![
+        "-T".to_string(),
+        host.to_string(),
+        remote_bin.to_string(),
+        "bridge".to_string(),
+    ];
+    if connect == Connect::Only {
+        args.push("--no-spawn".to_string());
+    }
+    args
+}
+
+#[cfg(test)]
+mod ssh_tests {
+    use super::*;
+
+    #[test]
+    fn ssh_args_spawn_has_no_no_spawn_flag() {
+        assert_eq!(
+            ssh_args("prod", "plexy-glass", Connect::Spawn),
+            vec!["-T", "prod", "plexy-glass", "bridge"]
+        );
+    }
+
+    #[test]
+    fn ssh_args_only_appends_no_spawn() {
+        assert_eq!(
+            ssh_args("u@h", "/opt/pg", Connect::Only),
+            vec!["-T", "u@h", "/opt/pg", "bridge", "--no-spawn"]
+        );
+    }
+
+    #[test]
+    fn resolve_remote_bin_prefers_explicit() {
+        let t = Target {
+            host: Some("h".into()),
+            remote_bin: Some("/x/pg".into()),
+            install: false,
+        };
+        assert_eq!(resolve_remote_bin(&t), "/x/pg");
+        let t2 = Target {
+            host: Some("h".into()),
+            remote_bin: None,
+            install: false,
+        };
+        assert_eq!(resolve_remote_bin(&t2), "plexy-glass");
+    }
+}
+
+/// A daemon connection as a split reader/writer, from the local socket or an
+/// SSH `bridge` child. `child` keeps the SSH process (and thus the pipes)
+/// alive for the transport's lifetime, and lets `ssh_not_found` inspect its
+/// exit status; `None` for local.
+pub struct Transport {
+    pub reader: Box<dyn AsyncRead + Send + Unpin>,
+    pub writer: Box<dyn AsyncWrite + Send + Unpin>,
+    child: Option<Child>,
+}
+
+impl Transport {
+    /// After a failed handshake/read on an SSH transport, check whether the ssh
+    /// child exited 127 (remote command not found) and, if so, return the
+    /// clearer error to surface instead of a bare EOF. `None` for local, or when
+    /// the child exited for another reason.
+    pub async fn ssh_not_found(&mut self) -> Option<ClientError> {
+        let child = self.child.as_mut()?;
+        let status = child.wait().await.ok()?;
+        (status.code() == Some(127)).then_some(ClientError::RemoteNotFound)
+    }
+}
+
+/// Open a connection to the target daemon (local socket or SSH `bridge`).
+pub async fn open_transport(target: &Target, connect: Connect) -> Result<Transport, ClientError> {
+    match &target.host {
+        None => {
+            let socket = default_socket_path()?;
+            let stream = match connect {
+                Connect::Spawn => connect_or_spawn(&socket).await?,
+                Connect::Only => connect_only(&socket).await?,
+            };
+            let (r, w) = split(stream);
+            Ok(Transport {
+                reader: Box::new(r),
+                writer: Box::new(w),
+                child: None,
+            })
+        }
+        Some(host) => {
+            // Task 4 inserts `if target.install { install_remote(...).await? }` here.
+            let remote_bin = resolve_remote_bin(target);
+            let mut child = Command::new("ssh")
+                .args(ssh_args(host, &remote_bin, connect))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit()) // SSH's prompts/errors reach the user
+                .spawn()
+                .map_err(ClientError::Io)?;
+            // invariant: stdin/stdout are piped above, so take() is Some.
+            let writer = child.stdin.take().expect("ssh stdin piped");
+            let reader = child.stdout.take().expect("ssh stdout piped");
+            Ok(Transport {
+                reader: Box::new(reader),
+                writer: Box::new(writer),
+                child: Some(child),
+            })
+        }
+    }
+}
 
 /// Connect to the daemon socket without spawning one if absent.
 ///
