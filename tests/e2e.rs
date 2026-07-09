@@ -2291,6 +2291,29 @@ fn cross_window_swap_pane_exchanges_panes() {
         sess.snapshot_str()
     );
 
+    // Window 2's shell is freshly spawned. Unlike window 1 (whose readiness came
+    // from `wait_ready`), the `list` count==2 above only proves the window STRUCT
+    // exists, not that its shell has started reading its PTY — a blind send can
+    // race that startup and be lost. Re-send a probe until the shell echoes it,
+    // proving it's live and routing to window 2, then send the real payload.
+    let w2_ready = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            sess.send_str("printf 'W2_''UP\\n'\n");
+            if sess.wait_for(b"W2_UP", Duration::from_millis(500)) {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+        }
+    };
+    assert!(
+        w2_ready,
+        "window 2's shell never became ready. raw: {}",
+        sess.snapshot_str()
+    );
+
     // Window 2: print a unique needle then keep alive.
     sess.send_str("printf 'SWAP_''W2\\n'; exec tail -f /dev/null\n");
     assert!(
