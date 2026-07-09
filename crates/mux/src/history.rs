@@ -2,10 +2,12 @@
 //! command blocks across all sessions. The daemon assembles the entries (a
 //! registry walk) and adapts [`HistoryOutcome`] to its `OverlayKeyResult`; this
 //! core has no daemon dependency, so it builds and tests standalone (like
-//! `tree.rs`). Fuzzy-finder input model: printables type into the filter,
-//! arrows / Ctrl-P/N move, Enter jumps, Esc cancels.
+//! `tree.rs`). Built on the shared `finder` core: printables type into the
+//! filter (resetting selection to the top), arrows / Ctrl-k / Ctrl-j move,
+//! Ctrl-U clears, Enter jumps, Esc cancels.
 
-use crate::{Direction, Key, KeyEvent, Modifiers, PaneId, WindowId};
+use crate::finder::{self, FilterList, FinderKey};
+use crate::{KeyEvent, PaneId, WindowId};
 
 /// One block in the palette.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,10 +38,8 @@ pub struct HistoryTarget {
 pub struct HistoryState {
     /// Pre-sorted: current pane first, newest-first within each pane.
     pub entries: Vec<HistoryEntry>,
-    /// Index into `entries`, kept on a VISIBLE row by every mutator.
-    pub selected: usize,
-    /// Live query (original case; matched lowercased against `haystack`).
-    pub filter: String,
+    /// Filter + selection cursor (shared finder core).
+    pub finder: FilterList,
 }
 
 /// history.rs-local follow-up; the daemon adapts it to `OverlayKeyResult`.
@@ -55,105 +55,77 @@ impl HistoryState {
     pub const fn new(entries: Vec<HistoryEntry>) -> Self {
         Self {
             entries,
-            selected: 0,
-            filter: String::new(),
+            finder: FilterList::new(),
         }
     }
 
-    /// Indices of entries whose haystack contains the (lowercased) filter,
-    /// preserving the pre-sorted order. Empty filter = all.
+    /// The per-entry lowercased haystacks (command + capped output), in order.
+    fn haystacks(&self) -> Vec<&str> {
+        self.entries.iter().map(|e| e.haystack.as_str()).collect()
+    }
+
+    /// Absolute indices of entries matching the live filter, in order.
     pub fn visible_indices(&self) -> Vec<usize> {
-        if self.filter.is_empty() {
-            return (0..self.entries.len()).collect();
-        }
-        let needle = self.filter.to_lowercase();
-        (0..self.entries.len())
-            .filter(|&i| self.entries[i].haystack.contains(&needle))
-            .collect()
+        finder::filtered_indices(&self.haystacks(), &self.finder.filter)
     }
 
-    /// Keep `selected` on a visible row after the visible set changes.
-    fn clamp_to_visible(&mut self, vis: &[usize]) {
-        if !vis.is_empty() && !vis.contains(&self.selected) {
-            self.selected = vis[0];
-        }
+    /// The absolute index of the selected entry, or `None` when nothing matches.
+    pub fn selected(&self) -> Option<usize> {
+        self.finder.selected(&self.haystacks())
+    }
+
+    /// The live filter text.
+    pub fn filter(&self) -> &str {
+        &self.finder.filter
     }
 }
 
-/// Apply one key. No-op on an empty entry list (every action is guarded by a
-/// visible row existing, so an empty result set can only `Cancel`).
+/// Apply one key. An empty filtered view can only `Cancel` (Accept returns
+/// `None` because nothing is selected).
 pub fn handle_history(event: &KeyEvent, state: &mut HistoryState) -> HistoryOutcome {
-    let vis = state.visible_indices();
-    let pos = vis.iter().position(|&i| i == state.selected);
-    let last = vis.len().saturating_sub(1);
-    match (event.mods, event.key) {
-        (m, Key::Escape) if m.is_empty() => HistoryOutcome::Cancel,
-        (m, Key::Arrow(Direction::Up)) if m.is_empty() => move_sel(state, &vis, pos, false),
-        (m, Key::Char('p')) if m == Modifiers::CTRL => move_sel(state, &vis, pos, false),
-        (m, Key::Arrow(Direction::Down)) if m.is_empty() => move_sel(state, &vis, pos, true),
-        (m, Key::Char('n')) if m == Modifiers::CTRL => move_sel(state, &vis, pos, true),
-        (m, Key::Home) if m.is_empty() => select_visible(state, &vis, 0),
-        (m, Key::End) if m.is_empty() => select_visible(state, &vis, last),
-        (_, Key::Enter | Key::KeypadEnter) if pos.is_some() => {
-            let e = &state.entries[state.selected];
-            HistoryOutcome::Jump(HistoryTarget {
-                session: e.session.clone(),
-                window: e.window,
-                pane: e.pane,
-                prompt_line: e.prompt_line,
-                command: e.command.clone(),
-            })
+    // Build the haystacks from the entries field directly (not via a &self
+    // method) so the finder field can be borrowed mutably alongside.
+    let hs: Vec<&str> = state.entries.iter().map(|e| e.haystack.as_str()).collect();
+    let redraw = |changed: bool| {
+        if changed {
+            HistoryOutcome::Redraw
+        } else {
+            HistoryOutcome::None
         }
-        (m, Key::Backspace) if m.is_empty() => {
-            if state.filter.pop().is_some() {
-                let vis = state.visible_indices();
-                state.clamp_to_visible(&vis);
-                HistoryOutcome::Redraw
-            } else {
-                HistoryOutcome::None
+    };
+    match finder::classify(event) {
+        FinderKey::Cancel => HistoryOutcome::Cancel,
+        FinderKey::Accept => match state.finder.selected(&hs) {
+            Some(i) => {
+                let e = &state.entries[i];
+                HistoryOutcome::Jump(HistoryTarget {
+                    session: e.session.clone(),
+                    window: e.window,
+                    pane: e.pane,
+                    prompt_line: e.prompt_line,
+                    command: e.command.clone(),
+                })
             }
-        }
-        (m, Key::Char(c)) if m.is_empty() || m == Modifiers::SHIFT => {
-            state.filter.push(c);
-            let vis = state.visible_indices();
-            state.clamp_to_visible(&vis);
+            None => HistoryOutcome::None,
+        },
+        FinderKey::Up => redraw(state.finder.up()),
+        FinderKey::Down => redraw(state.finder.down(&hs)),
+        FinderKey::Home => redraw(state.finder.home()),
+        FinderKey::End => redraw(state.finder.end(&hs)),
+        FinderKey::Clear => redraw(state.finder.clear()),
+        FinderKey::Backspace => redraw(state.finder.backspace(&hs)),
+        FinderKey::Char(c) => {
+            state.finder.push(c);
             HistoryOutcome::Redraw
         }
-        _ => HistoryOutcome::None,
-    }
-}
-
-fn move_sel(
-    state: &mut HistoryState,
-    vis: &[usize],
-    pos: Option<usize>,
-    down: bool,
-) -> HistoryOutcome {
-    if vis.is_empty() {
-        return HistoryOutcome::None;
-    }
-    let cur = pos.unwrap_or(0);
-    let next = if down {
-        (cur + 1).min(vis.len() - 1)
-    } else {
-        cur.saturating_sub(1)
-    };
-    state.selected = vis[next];
-    HistoryOutcome::Redraw
-}
-
-fn select_visible(state: &mut HistoryState, vis: &[usize], idx: usize) -> HistoryOutcome {
-    if let Some(&i) = vis.get(idx) {
-        state.selected = i;
-        HistoryOutcome::Redraw
-    } else {
-        HistoryOutcome::None
+        FinderKey::Pass => HistoryOutcome::None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Direction, Key, Modifiers};
 
     fn entry(session: &str, cmd: &str, out: &str, line: u32) -> HistoryEntry {
         HistoryEntry {
@@ -188,15 +160,15 @@ mod tests {
     #[test]
     fn visible_filters_command_and_output_case_insensitive() {
         let mut s = state();
-        s.filter = "REFUSED".into();
+        s.finder.filter = "REFUSED".into();
         assert_eq!(
             s.visible_indices(),
             vec![1],
             "matches output, case-insensitive"
         );
-        s.filter = "docker".into();
+        s.finder.filter = "docker".into();
         assert_eq!(s.visible_indices(), vec![0], "matches command");
-        s.filter = "zzz".into();
+        s.finder.filter = "zzz".into();
         assert!(s.visible_indices().is_empty());
     }
 
@@ -206,7 +178,9 @@ mod tests {
         for c in "cargo".chars() {
             assert_eq!(handle_history(&chr(c), &mut s), HistoryOutcome::Redraw);
         }
-        assert_eq!(s.selected, 1, "selection clamped to the only visible row");
+        // Only entry 1 matches; the cursor reset to the top of the filtered view
+        // (index 0) which maps to absolute entry 1.
+        assert_eq!(s.selected(), Some(1));
         match handle_history(&key(Key::Enter), &mut s) {
             HistoryOutcome::Jump(t) => {
                 assert_eq!(t.command, "cargo test");
@@ -219,7 +193,7 @@ mod tests {
     #[test]
     fn enter_with_empty_result_is_none() {
         let mut s = state();
-        s.filter = "zzz".into();
+        s.finder.filter = "zzz".into();
         assert_eq!(
             handle_history(&key(Key::Enter), &mut s),
             HistoryOutcome::None
@@ -236,48 +210,56 @@ mod tests {
     }
 
     #[test]
-    fn arrows_and_ctrl_np_move_within_visible() {
+    fn arrows_and_ctrl_jk_move_within_visible() {
         let mut s = state();
         assert_eq!(
             handle_history(&key(Key::Arrow(Direction::Down)), &mut s),
             HistoryOutcome::Redraw
         );
-        assert_eq!(s.selected, 1);
+        assert_eq!(s.selected(), Some(1));
         handle_history(&key(Key::Arrow(Direction::Down)), &mut s); // clamp at end
-        assert_eq!(s.selected, 1);
-        assert_eq!(handle_history(&ctrl('p'), &mut s), HistoryOutcome::Redraw);
-        assert_eq!(s.selected, 0, "Ctrl-P moves up");
-        assert_eq!(handle_history(&ctrl('n'), &mut s), HistoryOutcome::Redraw);
-        assert_eq!(s.selected, 1, "Ctrl-N moves down");
+        assert_eq!(s.selected(), Some(1));
+        assert_eq!(handle_history(&ctrl('k'), &mut s), HistoryOutcome::Redraw);
+        assert_eq!(s.selected(), Some(0), "Ctrl-k moves up");
+        assert_eq!(handle_history(&ctrl('j'), &mut s), HistoryOutcome::Redraw);
+        assert_eq!(s.selected(), Some(1), "Ctrl-j moves down");
     }
 
     #[test]
     fn home_and_end_jump_to_ends() {
         let mut s = state();
-        // Start at 0; End → last visible (1); Home → first visible (0).
         assert_eq!(
             handle_history(&key(Key::End), &mut s),
             HistoryOutcome::Redraw
         );
-        assert_eq!(s.selected, 1);
+        assert_eq!(s.selected(), Some(1));
         assert_eq!(
             handle_history(&key(Key::Home), &mut s),
             HistoryOutcome::Redraw
         );
-        assert_eq!(s.selected, 0);
+        assert_eq!(s.selected(), Some(0));
     }
 
     #[test]
     fn backspace_pops_filter_and_reclamps() {
         let mut s = state();
-        s.filter = "cargo".into();
-        s.selected = 1;
+        s.finder.filter = "cargo".into();
         // pop to "carg" still matches only entry 1.
         assert_eq!(
             handle_history(&key(Key::Backspace), &mut s),
             HistoryOutcome::Redraw
         );
-        assert_eq!(s.filter, "carg");
-        assert_eq!(s.selected, 1);
+        assert_eq!(s.finder.filter, "carg");
+        assert_eq!(s.selected(), Some(1));
+    }
+
+    #[test]
+    fn ctrl_u_clears_filter() {
+        let mut s = state();
+        for c in "cargo".chars() {
+            handle_history(&chr(c), &mut s);
+        }
+        assert_eq!(handle_history(&ctrl('u'), &mut s), HistoryOutcome::Redraw);
+        assert_eq!(s.finder.filter, "");
     }
 }

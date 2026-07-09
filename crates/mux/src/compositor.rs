@@ -1616,7 +1616,7 @@ fn paint_history(
             )
         })
         .collect();
-    let filter_line = format!("filter: {}", state.filter);
+    let filter_line = format!("filter: {}", state.filter());
 
     let max_visible = (pane_area_rows.saturating_sub(3)).max(1) as usize;
     let row_count = rows.len().max(1);
@@ -1642,9 +1642,9 @@ fn paint_history(
     }
 
     // Position of the selected entry within the visible list.
-    let sel = visible
-        .iter()
-        .position(|&i| i == state.selected)
+    let sel = state
+        .selected()
+        .and_then(|s| visible.iter().position(|&i| i == s))
         .unwrap_or(0);
     let top = if sel >= visible_rows {
         sel - visible_rows + 1
@@ -2315,6 +2315,7 @@ mod tests {
 
     use super::*;
     use crate::buffer::BufferEntry;
+    use crate::finder::FilterList;
     use crate::history::HistoryEntry;
     use crate::tree::{NodeKey, TreeMode, TreeNode};
 
@@ -3924,8 +3925,10 @@ mod tests {
                 mk("api", "docker compose up", Some(0), Some(2300), 10),
                 mk("web", "cargo test", Some(1), Some(45_000), 4),
             ],
-            selected: 1,
-            filter: String::new(),
+            finder: FilterList {
+                filter: String::new(),
+                cursor: 1,
+            },
         };
         let ov = OverlayView::History { state: &state };
         let vs = compose(
