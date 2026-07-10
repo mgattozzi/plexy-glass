@@ -62,7 +62,9 @@ pub enum ExitStatus {
 ///   (Kitty/Sixel/iTerm2)
 /// - v11: `ClientHello.remote`: the client flags whether it reached the
 ///   daemon over `-H`/SSH
-pub const PROTOCOL_VERSION: u16 = 11;
+/// - v12: `ServerMsg::OpenSessionPicker`, `ClientMsg::SwitchSession` /
+///   `ClientMsg::Redraw`: the client-rendered multi-daemon session picker
+pub const PROTOCOL_VERSION: u16 = 12;
 
 /// Inline-graphics protocols the client's *outer* terminal supports, probed at
 /// attach. The daemon renders images for a client only in a protocol its
@@ -179,6 +181,15 @@ pub enum ClientMsg {
     CaptureLastBlock {
         session: Option<String>,
     },
+    /// Switch the attached client to another session ON THE SAME DAEMON (the
+    /// client picker's same-host fast path). Routed to `switch_session`.
+    SwitchSession {
+        name: String,
+    },
+    /// Re-emit a full frame (invalidate the diff). The client sends this to
+    /// clear its own picker overlay on cancel, since a same-size Resize is a
+    /// no-op for the DiffRenderer.
+    Redraw,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +246,12 @@ pub enum ServerMsg {
         exit: Option<i32>,
         command_line: Option<String>,
     },
+    /// Tell a v12+ client to open ITS session picker (replaces the daemon
+    /// overlay). Carries the daemon's own session list + current session.
+    OpenSessionPicker {
+        sessions: Vec<SessionEntry>,
+        current: String,
+    },
 }
 
 #[cfg(test)]
@@ -267,7 +284,7 @@ mod tests {
             let bytes = postcard::to_allocvec(&hello).expect("serialize");
             let decoded: ClientHello = postcard::from_bytes(&bytes).expect("deserialize");
             assert_eq!(decoded.remote, remote);
-            assert_eq!(decoded.version, 11);
+            assert_eq!(decoded.version, 12);
         }
     }
 
@@ -615,6 +632,34 @@ mod tests {
         for m in replies {
             let enc = postcard::to_allocvec(&m).unwrap();
             assert_eq!(postcard::from_bytes::<ServerMsg>(&enc).unwrap(), m);
+        }
+    }
+
+    #[test]
+    fn v12_messages_round_trip() {
+        assert_eq!(PROTOCOL_VERSION, 12);
+        let open = ServerMsg::OpenSessionPicker {
+            sessions: vec![SessionEntry {
+                name: "main".into(),
+                windows: 1,
+                panes: 1,
+                clients: 1,
+                created: SystemTime::UNIX_EPOCH,
+            }],
+            current: "main".into(),
+        };
+        let bytes = postcard::to_allocvec(&open).expect("serialize");
+        let back: ServerMsg = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(back, open);
+        for msg in [
+            ClientMsg::SwitchSession {
+                name: "other".into(),
+            },
+            ClientMsg::Redraw,
+        ] {
+            let bytes = postcard::to_allocvec(&msg).expect("serialize");
+            let back: ClientMsg = postcard::from_bytes(&bytes).expect("deserialize");
+            assert_eq!(back, msg);
         }
     }
 }
