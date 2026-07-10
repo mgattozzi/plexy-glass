@@ -7,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::error::ClientError;
-use crate::picker::{PickerOutcome, PickerRow, PickerState};
+use crate::picker::{PickerOutcome, PickerRow, PickerState, RowKind, RowStatus};
 
 const STDIN_CHUNK: usize = 4096;
 
@@ -176,18 +176,21 @@ where
                         // (crates/daemon/src/connection.rs) verbatim, so the
                         // client-rendered picker reads the same as the old
                         // daemon-rendered one.
+                        // Milestone A/local-only rows: the current daemon's own
+                        // sessions, tagged local (`host: None`). Task 5 threads
+                        // the real current host and unions in the remote roster;
+                        // for now every row is a live local session.
                         let rows = sessions
                             .into_iter()
-                            .map(|e| {
-                                let is_current = e.name == current;
-                                PickerRow {
-                                    label: format!(
-                                        "{} \u{2014} {} win, {} panes, {} clients",
-                                        e.name, e.windows, e.panes, e.clients
-                                    ),
-                                    name: e.name,
-                                    is_current,
-                                }
+                            .map(|e| PickerRow {
+                                label: format!(
+                                    "{} \u{2014} {} win, {} panes, {} clients",
+                                    e.name, e.windows, e.panes, e.clients
+                                ),
+                                name: e.name,
+                                host: None,
+                                kind: RowKind::Session,
+                                status: RowStatus::Live,
                             })
                             .collect();
                         let state = PickerState::new(rows);
@@ -241,6 +244,24 @@ where
                         }
                         Some(PickerOutcome::Cancel) => {
                             send_client_msg(&mut *daemon_write, &ClientMsg::Redraw).await?;
+                        }
+                        Some(
+                            PickerOutcome::Reconnect { .. }
+                            | PickerOutcome::New { .. }
+                            | PickerOutcome::Forget { .. },
+                        ) => {
+                            // TODO(Task 6): route cross-daemon reconnect /
+                            // new-on-host / forget (`PumpExit::ReconnectTo` +
+                            // roster rewrite). Milestone-A local-only rows never
+                            // yield these, so this is currently unreachable; we
+                            // re-render and stay in the picker rather than strand
+                            // a cleared screen if a stray outcome ever appears.
+                            stdout
+                                .write_all(&state.render())
+                                .await
+                                .map_err(ClientError::Io)?;
+                            stdout.flush().await.map_err(ClientError::Io)?;
+                            picker = Some((state, current));
                         }
                         None => {
                             stdout.write_all(&state.render()).await.map_err(ClientError::Io)?;
