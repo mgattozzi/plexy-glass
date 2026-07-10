@@ -3,6 +3,8 @@
 //! the user has `-H`'d into. Pure assemble/dedup logic plus the file I/O and
 //! config read that feed it; wiring into the picker itself is a later task.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
@@ -52,9 +54,33 @@ pub fn assemble(configured: &[String], adhoc: &[String]) -> Vec<RosterHost> {
 /// The operator's LOCAL config remotes. Client-side config parse errors are
 /// swallowed here (the picker still works from the ad-hoc file + this session's
 /// hosts); the daemon logs its own config error separately.
+#[cfg(not(test))]
 pub fn config_remotes() -> Vec<String> {
     let (cfg, _err) = plexy_glass_config::load_or_default();
     cfg.remotes
+}
+
+// Under `cfg(test)` the roster sources read a per-thread override instead of
+// the real config / ad-hoc files, so a pump-level test can seed a roster
+// (`set_test_roster`) deterministically without touching the user's real
+// `config.kdl` or `remotes` file. Defaults to empty, so tests that don't seed
+// one (the existing `pump_picker_*` tests) see NO remotes and never fire a
+// real query.
+#[cfg(test)]
+thread_local! {
+    static TEST_ROSTER: RefCell<(Vec<String>, Vec<String>)> =
+        const { RefCell::new((Vec::new(), Vec::new())) };
+}
+
+/// Seed the per-thread roster override (configured, ad-hoc) for a test.
+#[cfg(test)]
+pub(crate) fn set_test_roster(configured: Vec<String>, adhoc: Vec<String>) {
+    TEST_ROSTER.with(|c| *c.borrow_mut() = (configured, adhoc));
+}
+
+#[cfg(test)]
+pub fn config_remotes() -> Vec<String> {
+    TEST_ROSTER.with(|c| c.borrow().0.clone())
 }
 
 fn adhoc_path() -> Option<PathBuf> {
@@ -63,6 +89,7 @@ fn adhoc_path() -> Option<PathBuf> {
         .map(|p| p.log_dir.join("remotes"))
 }
 
+#[cfg(not(test))]
 pub fn load_adhoc() -> Vec<String> {
     let Some(p) = adhoc_path() else {
         return Vec::new();
@@ -77,6 +104,11 @@ pub fn load_adhoc() -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub fn load_adhoc() -> Vec<String> {
+    TEST_ROSTER.with(|c| c.borrow().1.clone())
 }
 
 pub fn add_adhoc(host: &str) {

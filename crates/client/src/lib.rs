@@ -259,6 +259,7 @@ pub async fn run(
             &mut stdin,
             &mut stdout,
             &mut resize_rx,
+            target,
         )
         .await
         {

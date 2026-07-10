@@ -105,6 +105,60 @@ impl PickerState {
         }
     }
 
+    /// Like [`new`](Self::new) but parks the cursor on the current daemon's
+    /// current session row (matched by `host` + `name`) instead of row 0,
+    /// restoring Milestone A's cursor-on-current behavior that the flat
+    /// `is_current` drop lost. Falls back to the first row (the current-daemon
+    /// anchor) when that session isn't present.
+    pub fn new_with_current(
+        rows: Vec<PickerRow>,
+        current_host: &Option<String>,
+        current_session: &str,
+    ) -> Self {
+        let cursor = rows
+            .iter()
+            .position(|r| {
+                r.kind == RowKind::Session
+                    && r.host == *current_host
+                    && r.name == current_session
+            })
+            .unwrap_or(0);
+        Self {
+            rows,
+            adhoc: Vec::new(),
+            filter: String::new(),
+            cursor,
+            mode: PickerMode::Navigate,
+        }
+    }
+
+    /// Fold a resolved daemon's streaming query result into the rows: set that
+    /// host's `Host` anchor status and replace its `Session` child rows (both
+    /// matched by `host`, so `None` targets the local anchor). `sessions` is
+    /// empty for anything but a `Live` result; a `Live` daemon's sessions are
+    /// spliced in right after its anchor. Idempotent — a re-resolve drops the
+    /// prior session rows first — and re-clamps the cursor.
+    pub fn resolve_host(
+        &mut self,
+        host: &Option<String>,
+        status: RowStatus,
+        mut sessions: Vec<PickerRow>,
+    ) {
+        self.rows
+            .retain(|r| !(r.kind == RowKind::Session && r.host == *host));
+        if let Some(idx) = self
+            .rows
+            .iter()
+            .position(|r| r.kind == RowKind::Host && r.host == *host)
+        {
+            self.rows[idx].status = status;
+            let mut tail = self.rows.split_off(idx + 1);
+            self.rows.append(&mut sessions);
+            self.rows.append(&mut tail);
+        }
+        self.clamp();
+    }
+
     /// Tell the picker which hosts are ad-hoc (vs configured). Drives `x`→Forget
     /// gating and the render-time divider. Called by the pump once the roster is
     /// assembled (Task 5).
@@ -310,7 +364,13 @@ impl PickerState {
             let is_local = row.host.is_none();
             let is_adhoc = row.host.as_deref().is_some_and(|h| self.is_adhoc(h));
             if is_local && !emitted_local {
-                out.push_str("local\r\n");
+                // A local Host ANCHOR (the current daemon, Task 5) is its own
+                // selectable header, so it needs no synthesized text line; only
+                // a bare local Session block with no anchor (the Milestone A
+                // local-only path) gets the synthesized "local".
+                if row.kind == RowKind::Session {
+                    out.push_str("local\r\n");
+                }
                 emitted_local = true;
             }
             if is_adhoc && emitted_any && !emitted_divider {
@@ -354,12 +414,18 @@ impl PickerState {
         match row.kind {
             RowKind::Host => {
                 let name = &row.name;
-                let tag = if row.host.as_deref().is_some_and(|h| self.is_adhoc(h)) {
-                    "ad-hoc"
+                if row.host.is_none() {
+                    // The current/local daemon anchor: not a configured or
+                    // ad-hoc remote, so no `(tag)`.
+                    format!("{glyph} {name}")
                 } else {
-                    "configured"
-                };
-                format!("{glyph} {name}  ({tag})")
+                    let tag = if row.host.as_deref().is_some_and(|h| self.is_adhoc(h)) {
+                        "ad-hoc"
+                    } else {
+                        "configured"
+                    };
+                    format!("{glyph} {name}  ({tag})")
+                }
             }
             RowKind::Session => {
                 let label = &row.label;
@@ -400,6 +466,17 @@ mod tests {
             host: Some(host.into()),
             kind: RowKind::Host,
             status,
+        }
+    }
+
+    /// The current LOCAL daemon's anchor row (Task 5): a `Host` row, `host` None.
+    fn host_row_local() -> PickerRow {
+        PickerRow {
+            name: "local".into(),
+            label: "local".into(),
+            host: None,
+            kind: RowKind::Host,
+            status: RowStatus::Live,
         }
     }
 
@@ -612,6 +689,82 @@ mod tests {
         assert_eq!(
             s.handle_key(b'\r'),
             Some(PickerOutcome::Switch("main".into()))
+        );
+    }
+
+    // --- (f) Task 5: cursor-on-current + the streaming resolve_host drain ---
+
+    #[test]
+    fn new_with_current_parks_cursor_on_current_session() {
+        // Rows: local anchor (0), then the two local sessions. The cursor must
+        // land on the CURRENT session ("build"), not row 0.
+        let rows = vec![
+            host_row_local(),
+            session("main", None),
+            session("build", None),
+        ];
+        let s = PickerState::new_with_current(rows, &None, "build");
+        assert_eq!(s.selected().map(|r| r.name.clone()), Some("build".into()));
+    }
+
+    #[test]
+    fn new_with_current_falls_back_to_row_zero_when_session_absent() {
+        let rows = vec![host_row_local(), session("main", None)];
+        let s = PickerState::new_with_current(rows, &None, "ghost");
+        // No "ghost" row → cursor parks at 0 (the anchor).
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
+    }
+
+    #[test]
+    fn resolve_host_live_inserts_sessions_and_sets_status() {
+        let mut s = PickerState::new(vec![
+            host_row_local(),
+            session("main", None),
+            host_row("prod", RowStatus::Pending),
+        ]);
+        s.resolve_host(
+            &Some("prod".into()),
+            RowStatus::Live,
+            vec![session("api", Some("prod"))],
+        );
+        let rows: Vec<_> = s.visible().into_iter().cloned().collect();
+        let prod = rows.iter().position(|r| r.name == "prod").expect("prod row");
+        assert_eq!(rows[prod].status, RowStatus::Live, "anchor now Live");
+        assert_eq!(rows[prod + 1].name, "api", "session spliced after its anchor");
+        assert_eq!(rows[prod + 1].kind, RowKind::Session);
+        assert_eq!(rows[prod + 1].host.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn resolve_host_unreachable_sets_status_only() {
+        let mut s = PickerState::new(vec![host_row("prod", RowStatus::Pending)]);
+        s.resolve_host(&Some("prod".into()), RowStatus::Unreachable, vec![]);
+        assert_eq!(
+            s.selected().map(|r| r.status.clone()),
+            Some(RowStatus::Unreachable)
+        );
+        assert_eq!(s.visible().len(), 1, "no session rows added");
+    }
+
+    #[test]
+    fn resolve_host_is_idempotent_on_reresolve() {
+        let mut s = PickerState::new(vec![host_row("prod", RowStatus::Pending)]);
+        let live = |name: &str| session(name, Some("prod"));
+        s.resolve_host(&Some("prod".into()), RowStatus::Live, vec![live("a"), live("b")]);
+        // A second Live result replaces (does not duplicate) the child rows.
+        s.resolve_host(&Some("prod".into()), RowStatus::Live, vec![live("c")]);
+        let names: Vec<_> = s.visible().iter().map(|r| r.name.clone()).collect();
+        assert_eq!(names, vec!["prod".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn render_local_anchor_has_no_configured_tag() {
+        let s = PickerState::new(vec![host_row_local(), session("main", None)]);
+        let text = String::from_utf8(s.render()).expect("render output is valid UTF-8");
+        assert!(text.contains("local"), "the local anchor renders");
+        assert!(
+            !text.contains("(configured)"),
+            "the local anchor is not a configured remote"
         );
     }
 
