@@ -189,6 +189,11 @@ pub async fn open_transport(target: &Target, connect: Connect) -> Result<Transpo
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit()) // SSH's prompts/errors reach the user
+                // A timed-out query (query.rs) drops the Transport without ever
+                // reading ssh's exit status; without this the ssh child (and the
+                // remote session it holds open) would orphan instead of getting
+                // reaped.
+                .kill_on_drop(true)
                 .spawn()
                 .map_err(ClientError::Io)?;
             // invariant: stdin/stdout are piped above, so take() is Some.

@@ -7,6 +7,7 @@ pub mod kill;
 pub mod negotiate;
 pub mod picker;
 pub mod pump;
+pub mod query;
 pub mod roster;
 pub mod shell_integration;
 pub mod transport;
@@ -244,9 +245,14 @@ pub async fn run(
             .map_err(ClientError::Io)?;
         spawn_sigwinch_task(resize_tx, owned_fd);
 
-        // `t.child` (the SSH process, if any) rides along unused from here on —
-        // dropping it is a no-op (`kill_on_drop` defaults false), and the
-        // `process::exit` after the loop never runs that drop anyway.
+        // `t.child` (the SSH process, if any) rides along unused from here on.
+        // `Transport`'s ssh `Command` sets `kill_on_drop(true)` (so a timed-out
+        // `query::spawn_query` reaps its child instead of orphaning it), which
+        // means dropping `t` here — on `break` or on the next loop iteration's
+        // `ReconnectTo` — signals the ssh child to exit. That's fine: by the time
+        // we get here the session has already ended or we're moving to a
+        // different daemon, so tearing down the old ssh connection promptly is
+        // the behavior we want, not a regression.
         match pump(
             &mut t.reader,
             &mut t.writer,
@@ -292,7 +298,7 @@ pub async fn run(
 /// the daemon or not, per `connect`; local socket or SSH `bridge`), handshake,
 /// encode + write `msg`, then read and decode exactly one reply frame. Callers
 /// do their own per-message reply branching.
-async fn request_reply(
+pub(crate) async fn request_reply(
     target: &Target,
     connect: Connect,
     msg: ClientMsg,
