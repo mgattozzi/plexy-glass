@@ -597,7 +597,13 @@ where
                     version: client_version,
                     inject_tx: &inject_tx,
                 };
-                ctx.switch_session(name).await;
+                // On success `switch_session` invalidates via `switch_tx`. A
+                // failure (target vanished between picker-open and Enter)
+                // repaints nothing, but the client already cleared its screen
+                // for the picker — so force a repaint over the blank.
+                if !ctx.switch_session(name).await {
+                    let _ = inject_tx.send(RenderInject::Invalidate);
+                }
             }
             ClientMsg::Redraw => {
                 let _ = inject_tx.send(RenderInject::Invalidate);

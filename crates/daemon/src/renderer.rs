@@ -97,7 +97,22 @@ impl Renderer {
                 inj = inject_rx.recv() => {
                     match inj {
                         Some(RenderInject::Msg(msg)) => self.write_msg(&mut writer, &msg).await?,
-                        Some(RenderInject::Invalidate) => self.diff.invalidate(),
+                        // Force a full repaint AND push it now. `invalidate()`
+                        // only sets the dirty flag; without an immediate render
+                        // the client (which just cleared its screen for the
+                        // picker) stays blank until the next coordinator tick
+                        // (~status.refresh, 5s idle). Mirror the switch arm.
+                        // Force a full repaint AND push it now. `invalidate()`
+                        // only sets the dirty flag; without an immediate render
+                        // the client (which just cleared its screen for the
+                        // picker) stays blank until the next coordinator tick
+                        // (~status.refresh, 5s idle). Mirror the switch arm.
+                        Some(RenderInject::Invalidate) => {
+                            self.diff.invalidate();
+                            let frame = frame_rx.borrow_and_update().clone();
+                            let bytes = self.diff.render(&frame);
+                            self.send_output(&mut writer, bytes).await?;
+                        }
                         // Input loop gone; connection is ending, `renderer_task`
                         // will be aborted by the caller.
                         None => {}
@@ -158,9 +173,12 @@ impl Default for Renderer {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use plexy_glass_emulator::Cell;
     use tokio::io;
     use tokio::io::AsyncRead;
+    use tokio::time::timeout;
 
     use super::*;
 
@@ -217,6 +235,37 @@ mod tests {
             next_output(&mut client_sock).await.contains('B'),
             "post-switch frame is B"
         );
+
+        task.abort();
+    }
+
+    // `RenderInject::Invalidate` must EMIT a full frame immediately, not just
+    // set the diff's dirty flag. Regression: the old arm only called
+    // `invalidate()`, so an Esc-cancel / reselect left the client blank until
+    // the next coordinator tick (~5s idle). No `frame_rx` change here — the
+    // frame must arrive purely from the inject.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalidate_emits_a_frame_immediately() {
+        let (_tx_a, rx_a) = watch::channel(screen_with("A"));
+        let (_switch_tx, switch_rx) = mpsc::unbounded_channel();
+        let (inject_tx, inject_rx) = mpsc::unbounded_channel();
+        let (server_sock, mut client_sock) = io::duplex(64 * 1024);
+
+        let task = tokio::spawn(async move {
+            let _ = Renderer::new()
+                .run(rx_a, switch_rx, inject_rx, server_sock)
+                .await;
+        });
+
+        // Drain the initial attach frame.
+        assert!(next_output(&mut client_sock).await.contains('A'));
+
+        inject_tx.send(RenderInject::Invalidate).unwrap();
+        // A full repaint of the (unchanged) frame must arrive promptly.
+        let out = timeout(Duration::from_secs(2), next_output(&mut client_sock))
+            .await
+        .expect("Invalidate must emit a frame without waiting for a coordinator tick");
+        assert!(out.contains('A'), "invalidate repaint contains the frame");
 
         task.abort();
     }
