@@ -4593,3 +4593,124 @@ fn cli_in_band_notification_toasts_from_background_window() {
         "OSC 9's empty title never defaulted to the session name: {contents:?}"
     );
 }
+
+/// End-to-end for the multi-daemon session picker's Milestone A (a real v12
+/// client, not the daemon test harness that drives `ClientCtx` directly —
+/// that's `session_picker_delegate_then_switch_session_switches` in
+/// `crates/daemon/src/connection.rs`). `Ctrl+a w` opens the CLIENT-rendered
+/// picker (`crates/client/src/picker.rs` via `crates/client/src/pump.rs`);
+/// this drives it through a real PTY: the picker paints both session names,
+/// a filter narrows to one, and Enter commits `ClientMsg::SwitchSession` —
+/// the target session's own content becomes visible on the same connection.
+#[test]
+fn session_picker_filters_and_switches_through_real_client() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // Bring up "beta" first, plant a distinctive marker in its scrollback,
+    // then detach — the daemon keeps it alive in memory (see "Sessions are
+    // in-memory" in docs/configuration.md), so it's a real second row in the
+    // picker with content of its own to prove the switch landed on it.
+    {
+        let mut beta = TestSession::builder(&env)
+            .args(&["attach", "-n", "beta"])
+            .start();
+        assert!(
+            beta.wait_ready("beta", Duration::from_secs(20)),
+            "beta session never rendered: {}",
+            beta.snapshot_str()
+        );
+        beta.send_str("echo BETA_MARKER\n");
+        assert!(
+            beta.wait_for(b"BETA_MARKER", Duration::from_secs(10)),
+            "beta session never echoed its marker: {}",
+            beta.snapshot_str()
+        );
+        beta.send_prefix(b'd'); // detach; session persists in the daemon
+        assert!(
+            beta.wait_exit(Duration::from_secs(10)),
+            "beta client did not exit on detach"
+        );
+    }
+
+    // Attach "alpha" — the session we'll drive the picker from.
+    let mut sess = TestSession::builder(&env)
+        .args(&["attach", "-n", "alpha"])
+        .start();
+    assert!(
+        sess.wait_ready("alpha", Duration::from_secs(20)),
+        "alpha session never rendered: {}",
+        sess.snapshot_str()
+    );
+
+    // Ctrl+a w: a v12 client (the default), so this delegates to the client
+    // picker rather than the old daemon overlay.
+    sess.send_prefix(b'w');
+    assert!(
+        sess.wait_for(b"switch session", Duration::from_secs(10)),
+        "picker title never painted: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for(b"alpha", Duration::from_secs(5)),
+        "picker never listed alpha: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for(b"beta", Duration::from_secs(5)),
+        "picker never listed beta: {}",
+        sess.snapshot_str()
+    );
+
+    // Filter to "beta" (case-insensitive substring on the row label, so this
+    // also excludes "alpha") and commit with Enter.
+    sess.send_str("beta");
+    sess.send(b"\r");
+
+    // The daemon switches this connection in place (same-daemon fast path,
+    // `ClientMsg::SwitchSession`) and re-renders beta's own scrollback,
+    // including the marker planted before detach.
+    assert!(
+        sess.wait_for(b"BETA_MARKER", Duration::from_secs(10)),
+        "switch never landed on beta's content: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// Esc cancels the client picker and repaints the original session (the
+/// `ClientMsg::Redraw` path — the picker's own `\x1b[2J\x1b[H` clear would
+/// otherwise leave the screen blank, since nothing else repaints it on an
+/// idle session).
+#[test]
+fn session_picker_esc_cancels_and_redraws_original_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    let mut sess = TestSession::builder(&env)
+        .args(&["attach", "-n", "gamma"])
+        .start();
+    assert!(
+        sess.wait_ready("gamma", Duration::from_secs(20)),
+        "gamma session never rendered: {}",
+        sess.snapshot_str()
+    );
+
+    sess.send_prefix(b'w');
+    assert!(
+        sess.wait_for(b"switch session", Duration::from_secs(10)),
+        "picker title never painted: {}",
+        sess.snapshot_str()
+    );
+
+    // Mark the offset so the post-Esc assertion only matches the REPAINT, not
+    // the session name that already appeared in `wait_ready` or the picker's
+    // own row listing.
+    let before_esc = sess.buffer_len();
+    sess.send(b"\x1b"); // Esc
+
+    assert!(
+        sess.wait_for_from(before_esc, b"gamma", Duration::from_secs(10)),
+        "original session did not repaint after Esc: {}",
+        sess.snapshot_str()
+    );
+}

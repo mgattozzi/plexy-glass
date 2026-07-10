@@ -115,9 +115,12 @@ the whole UI moves together when you retheme (override these):
 
 - **Pane border rings**: the focused pane uses `highlight`, a marked pane uses
   `warn`, and a pane-swap drag uses `info` (source) / `ok` (target).
-- **Overlay boxes** (help, session picker, choose-tree, history, buffers): the
-  border is `accent`, the title `highlight`, the footer `muted`, and the
-  interior `bg_bar`.
+- **Overlay boxes** (help, choose-tree, history, buffers): the border is
+  `accent`, the title `highlight`, the footer `muted`, and the interior
+  `bg_bar`. (The [session picker](#session-picker-ctrla-w) is the one
+  exception: as of protocol v12 it's client-rendered — a flat unstyled list
+  outside the compositor, so it doesn't take the palette. A v11 client still
+  gets the old palette-driven overlay.)
 - The default status bar puts the **active window tab** on `highlight` so it
   stands apart from the `accent` session pill and the `bg_bar` inactive tabs.
 
@@ -1072,6 +1075,30 @@ it in `config.kdl` (see [`session`](#session--declarative-sessions)): declared
 sessions are built fresh at boot and on first attach. (The only thing the
 daemon keeps on disk is its log and the one-time [`welcome`](#welcome)
 marker.)
+
+## Session picker (`Ctrl+a w`)
+
+`Ctrl+a w` (or `:sessions`) opens a full-screen list of the sessions on the
+current daemon, one row per session (`name — N win, M panes, K clients`, the
+current session marked `*`). As of protocol v12 the picker is
+**client-rendered**: the daemon sends the session list once and the client
+draws and drives the list itself, so filtering and moving the cursor are
+local and don't round-trip to the daemon on every keystroke. (An older v11
+client falls back to the daemon-rendered overlay this replaced; the keys
+below behave the same either way.)
+
+| Key | Action |
+|---|---|
+| Any printable | Narrow the list (case-insensitive substring on the row) |
+| Backspace | Remove the last filter character |
+| `↓` / `Ctrl+n` / `Ctrl+j` | Move selection down |
+| `↑` / `Ctrl+p` / `Ctrl+k` | Move selection up |
+| `Enter` | Switch to the selected session (in place, same connection) |
+| `Esc` | Cancel and return to the current session |
+
+The picker currently lists only the **local daemon's** sessions. Attaching to
+another host over SSH gives that host's own picker; a single picker spanning
+multiple daemons/hosts at once is planned for a later milestone.
 
 ## Choose-tree (`Ctrl+a W`)
 
