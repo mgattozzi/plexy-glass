@@ -20,10 +20,10 @@ pub use error::ClientError;
 pub use kill::{KillOutcome, kill, kill_all};
 use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
-    ClientHello, ClientMsg, Codec, GraphicsCaps, NegotiatedKbd, PROTOCOL_VERSION, ServerMsg,
-    SpawnSpec, client_handshake, client_handshake_with,
+    ClientHello, ClientMsg, Codec, ExitStatus, GraphicsCaps, NegotiatedKbd, PROTOCOL_VERSION,
+    ServerMsg, SpawnSpec, client_handshake, client_handshake_with,
 };
-pub use pump::{handshake_spawn, pump};
+pub use pump::{PumpExit, handshake_spawn, pump};
 pub use shell_integration::shell_integration_snippet;
 use tokio::io as tokio_io;
 use tokio::process::Command;
@@ -119,134 +119,171 @@ pub async fn run(
     create_if_missing: bool,
     spawn_cmd: Option<SpawnSpec>,
 ) -> Result<(), ClientError> {
-    let stdin = tokio_io::stdin();
-    let stdin_fd = stdin.as_fd();
+    // ONE async stdin reader + one async stdout for the whole client life. A
+    // second `tokio::io::stdin()` would race the first on fd 0 (each spawns its
+    // own blocking read thread), so the outer loop owns a single reader that
+    // every attach borrows. That blocking read thread never joins once it has
+    // read (the PTY stdin has no further input and is not closed), so dropping
+    // the runtime would HANG on it — which is why the loop ends in a single
+    // `process::exit` (skipping destructors) rather than returning, and we
+    // restore the tty ourselves first.
+    let mut stdin = tokio_io::stdin();
+    let mut stdout = tokio_io::stdout();
 
-    // The local terminal probe needs raw mode; SSH interactive auth
-    // (password/passphrase/host-key, read from /dev/tty by ssh) needs cooked
-    // mode; the pump needs raw mode again. LOCAL keeps the pre-SSH ordering
-    // exactly (connect, THEN one raw guard spanning probe/enable/handshake/
-    // pump) so local attach is behaviorally unchanged. SSH probes in a brief
-    // raw window, drops back to cooked before the `ssh` child spawns (so auth
-    // prompts land normally), then opens the transport and re-enters raw for
-    // the handshake + session.
-    let (mut t, mut tty_guard, probe) = if target.host.is_none() {
-        let t = open_transport(target, Connect::Spawn).await?;
-        let tty_guard = HostTty::enter_raw(stdin_fd)?;
-        let probe = run_probe(stdin_fd);
-        (t, tty_guard, probe)
-    } else {
-        let probe = {
-            let _raw = HostTty::enter_raw(stdin_fd)?;
-            run_probe(stdin_fd)
-        }; // _raw drops here, restoring cooked mode for SSH auth
-        let t = open_transport(target, Connect::Spawn).await?;
-        let tty_guard = HostTty::enter_raw(stdin_fd)?;
-        (t, tty_guard, probe)
-    };
+    // The session to attach to. From Milestone B on, `pump` can ask to
+    // re-attach to a different daemon via `PumpExit::ReconnectTo`; the loop
+    // threads that back through `next`. In Milestone A `pump` only ever returns
+    // `Ended`, so this loop runs exactly once and single-attach behavior is
+    // byte-identical to before.
+    let mut next: (Target, Option<String>) = (target.clone(), name);
 
-    // --- Enable escapes + emergency restore. Host-terminal-local (never goes
-    // over the wire), so this runs once here for both paths, inside the raw
-    // guard that now covers the rest of the session. ---
-    let mut stdout = io::stdout();
-    // Enable SGR-encoded mouse coords (?1006h), button-event tracking (?1002h,
-    // motion only while a button is held; ?1003h would flood with hover), and
-    // bracketed paste (?2004h). These are kept OUT of `EnabledCaps` (and so out of
-    // its teardown inverse) because HostTty disables ?1006/?1002/?2004
-    // unconditionally on restore, and order relative to the kbd enables doesn't
-    // matter since DEC private modes are independent.
-    let _ = stdout.write_all(b"\x1b[?1006h\x1b[?1002h\x1b[?2004h");
-    // Enable exactly the keyboard/focus/theme caps we classified.
-    let _ = stdout.write_all(&probe.caps.enable_bytes());
-    let _ = stdout.flush();
+    let outcome: Result<ExitStatus, ClientError> = loop {
+        let target = &next.0;
+        let name = next.1.clone();
+        let stdin_fd = stdin.as_fd();
 
-    // Record the enabled set for both the normal and emergency teardown paths,
-    // then install the emergency restore (which reads the recorded caps).
-    tty::set_enabled_caps(probe.caps);
-    tty::install_emergency_restore(stdin_fd, tty_guard.original_termios());
+        // The local terminal probe needs raw mode; SSH interactive auth
+        // (password/passphrase/host-key, read from /dev/tty by ssh) needs cooked
+        // mode; the pump needs raw mode again. LOCAL keeps the pre-SSH ordering
+        // exactly (connect, THEN one raw guard spanning probe/enable/handshake/
+        // pump) so local attach is behaviorally unchanged. SSH probes in a brief
+        // raw window, drops back to cooked before the `ssh` child spawns (so auth
+        // prompts land normally), then opens the transport and re-enters raw for
+        // the handshake + session.
+        let (mut t, guard, probe) = if target.host.is_none() {
+            let t = open_transport(target, Connect::Spawn).await?;
+            let guard = HostTty::enter_raw(stdin_fd)?;
+            let probe = run_probe(stdin_fd);
+            (t, guard, probe)
+        } else {
+            let probe = {
+                let _raw = HostTty::enter_raw(stdin_fd)?;
+                run_probe(stdin_fd)
+            }; // _raw drops here, restoring cooked mode for SSH auth
+            let t = open_transport(target, Connect::Spawn).await?;
+            let guard = HostTty::enter_raw(stdin_fd)?;
+            (t, guard, probe)
+        };
 
-    let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
-    let hello = ClientHello {
-        version: PROTOCOL_VERSION,
-        term,
-        kbd: probe.kbd,
-        graphics: probe.graphics,
-        remote: target.host.is_some(),
-    };
-    let server_hello = match client_handshake_with(&mut t.reader, &mut t.writer, hello).await {
-        Ok(h) => h,
-        Err(e) => {
-            // On SSH, a remote-binary-not-found (exit 127) shows up as a bare
-            // EOF; surface the actionable hint instead (mirrors `request_reply`).
-            return Err(t.ssh_not_found().await.unwrap_or_else(|| e.into()));
-        }
-    };
-    info!(
-        daemon_pid = server_hello.daemon_pid,
-        kbd = ?probe.kbd,
-        "connected to daemon"
-    );
+        // --- Enable escapes + emergency restore. Host-terminal-local (never goes
+        // over the wire), so this runs once here for both paths, inside the raw
+        // guard that now covers the rest of the session. ---
+        let mut out = io::stdout();
+        // Enable SGR-encoded mouse coords (?1006h), button-event tracking (?1002h,
+        // motion only while a button is held; ?1003h would flood with hover), and
+        // bracketed paste (?2004h). These are kept OUT of `EnabledCaps` (and so out of
+        // its teardown inverse) because HostTty disables ?1006/?1002/?2004
+        // unconditionally on restore, and order relative to the kbd enables doesn't
+        // matter since DEC private modes are independent.
+        let _ = out.write_all(b"\x1b[?1006h\x1b[?1002h\x1b[?2004h");
+        // Enable exactly the keyboard/focus/theme caps we classified.
+        let _ = out.write_all(&probe.caps.enable_bytes());
+        let _ = out.flush();
 
-    let initial_size = current_size(stdin_fd)?;
+        // Record the enabled set for both the normal and emergency teardown paths,
+        // then install the emergency restore (which reads the recorded caps). The
+        // `guard` local lives to the end of this iteration, so its `Drop` restores
+        // the tty on `break` (session end) and on any early `?` return before
+        // `pump` — exactly as the old per-attach guard did.
+        tty::set_enabled_caps(probe.caps);
+        tty::install_emergency_restore(stdin_fd, guard.original_termios());
 
-    let cmd = resolve_attach_spec(target.host.is_some(), spawn_cmd);
-    handshake_spawn(
-        &mut t.reader,
-        &mut t.writer,
-        name,
-        create_if_missing,
-        cmd,
-        initial_size,
-    )
-    .await?;
+        let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
+        let hello = ClientHello {
+            version: PROTOCOL_VERSION,
+            term,
+            kbd: probe.kbd,
+            graphics: probe.graphics,
+            remote: target.host.is_some(),
+        };
+        let server_hello = match client_handshake_with(&mut t.reader, &mut t.writer, hello).await {
+            Ok(h) => h,
+            Err(e) => {
+                // On SSH, a remote-binary-not-found (exit 127) shows up as a bare
+                // EOF; surface the actionable hint instead (mirrors `request_reply`).
+                return Err(t.ssh_not_found().await.unwrap_or_else(|| e.into()));
+            }
+        };
+        info!(
+            daemon_pid = server_hello.daemon_pid,
+            kbd = ?probe.kbd,
+            "connected to daemon"
+        );
 
-    // Replay probe-window type-ahead now that a pane exists to receive it. These
-    // are plain keystrokes: focus/theme/mouse/paste modes are enabled only after
-    // the probe, so the post-DA1 tail can't carry those events. Send it as Input.
-    if !probe.type_ahead.is_empty() {
-        pump::send_client_msg(
+        let initial_size = current_size(stdin_fd)?;
+
+        let cmd = resolve_attach_spec(target.host.is_some(), spawn_cmd.clone());
+        handshake_spawn(
+            &mut t.reader,
             &mut t.writer,
-            &ClientMsg::Input(bytes::Bytes::from(probe.type_ahead)),
+            name,
+            create_if_missing,
+            cmd,
+            initial_size,
         )
         .await?;
-    }
 
-    // SIGWINCH plumbing.
-    let (resize_tx, resize_rx) = mpsc::channel(4);
-    let owned_fd = stdin
-        .as_fd()
-        .try_clone_to_owned()
-        .map_err(ClientError::Io)?;
-    spawn_sigwinch_task(resize_tx, owned_fd);
+        // Replay probe-window type-ahead now that a pane exists to receive it. These
+        // are plain keystrokes: focus/theme/mouse/paste modes are enabled only after
+        // the probe, so the post-DA1 tail can't carry those events. Send it as Input.
+        if !probe.type_ahead.is_empty() {
+            pump::send_client_msg(
+                &mut t.writer,
+                &ClientMsg::Input(bytes::Bytes::from(probe.type_ahead)),
+            )
+            .await?;
+        }
 
-    let stdout = tokio_io::stdout();
-    let stdin_for_pump = tokio_io::stdin();
-    // Once `pump` has read stdin, `tokio::io::stdin()` has spawned an internal
-    // blocking read thread that never finishes (the PTY stdin has no further
-    // input and is not closed), so dropping the runtime would HANG waiting for
-    // it. We must therefore `std::process::exit` on BOTH the success and the
-    // error path rather than returning, and restore the TTY first, since
-    // `process::exit` skips destructors. (Errors *before* pump can still use
-    // `?`: the blocking reader hasn't been spawned yet, so the runtime drops
-    // cleanly there.) `t.child` (the SSH process, if any) rides along unused
-    // from here on — dropping it is a no-op (`kill_on_drop` defaults false),
-    // and `process::exit` below never even runs that drop.
-    let exit_status = match pump(t.reader, t.writer, stdin_for_pump, stdout, resize_rx).await {
-        Ok(s) => s,
+        // SIGWINCH plumbing.
+        let (resize_tx, mut resize_rx) = mpsc::channel(4);
+        let owned_fd = stdin
+            .as_fd()
+            .try_clone_to_owned()
+            .map_err(ClientError::Io)?;
+        spawn_sigwinch_task(resize_tx, owned_fd);
+
+        // `t.child` (the SSH process, if any) rides along unused from here on —
+        // dropping it is a no-op (`kill_on_drop` defaults false), and the
+        // `process::exit` after the loop never runs that drop anyway.
+        match pump(
+            &mut t.reader,
+            &mut t.writer,
+            &mut stdin,
+            &mut stdout,
+            &mut resize_rx,
+        )
+        .await
+        {
+            Ok(PumpExit::Ended(status)) => break Ok(status),
+            Ok(PumpExit::ReconnectTo {
+                target: reconnect_target,
+                name: reconnect_name,
+            }) => {
+                next = (reconnect_target, Some(reconnect_name));
+            }
+            Err(e) => break Err(e),
+        }
+    };
+
+    // The tty is already restored: the loop-body `guard` dropped as we broke
+    // out. All that's left is to `process::exit` once (see the stdin comment
+    // above: the parked blocking reader can't be joined, so returning would
+    // hang the runtime drop).
+    match outcome {
+        Ok(exit_status) => {
+            info!(?exit_status, "session ended");
+            let code = match exit_status {
+                ExitStatus::Code(c) => c,
+                _ => 0,
+            };
+            process::exit(code);
+        }
         Err(e) => {
             info!(error = %e, "session ended with error");
-            let _ = tty_guard.restore();
             eprintln!("plexy-glass: {e}");
             process::exit(1);
         }
-    };
-    info!(?exit_status, "session ended");
-    let _ = tty_guard.restore();
-    let code = match exit_status {
-        plexy_glass_protocol::ExitStatus::Code(c) => c,
-        _ => 0,
-    };
-    process::exit(code);
+    }
 }
 
 /// Shared request/reply scaffold: open one connection to `target` (spawning

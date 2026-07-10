@@ -81,34 +81,51 @@ fn parse_color_scheme(b: &[u8]) -> Option<(ColorScheme, usize)> {
     Some((scheme, PREFIX.len() + j + 1))
 }
 
+/// Why the pump handed control back to the outer attach loop.
+#[derive(Debug)]
+pub enum PumpExit {
+    /// The child exited or the daemon closed — the client should quit.
+    Ended(ExitStatus),
+    /// (Milestone B) the picker chose a session on a DIFFERENT daemon; the outer
+    /// loop should re-attach. Unused in Milestone A but defined so the pump's
+    /// return type is stable across milestones.
+    #[allow(
+        dead_code,
+        reason = "wired by the outer attach loop; only produced once the picker lands (Milestone B)"
+    )]
+    ReconnectTo { target: crate::Target, name: String },
+}
+
 /// Run the three concurrent pumps:
 ///   stdin  -> ClientMsg::Input(bytes)  -> daemon
 ///   daemon -> ServerMsg::Output(bytes) -> stdout
 ///   SIGWINCH (delivered via `resize_rx`) -> ClientMsg::Resize(size) -> daemon
 ///
-/// Returns the child's exit status when the daemon sends `Exited`.
+/// Borrows all of its IO from the caller's outer attach loop (it never spawns,
+/// so the `Send + 'static` bounds are unnecessary). Returns `PumpExit::Ended`
+/// when the child exits or the daemon closes; `ReconnectTo` is reserved for the
+/// picker (Milestone B) and never produced here.
 pub async fn pump<R, W, In, Out>(
-    mut daemon_read: R,
-    mut daemon_write: W,
-    mut stdin: In,
-    mut stdout: Out,
-    mut resize_rx: mpsc::Receiver<PtySize>,
-) -> Result<ExitStatus, ClientError>
+    daemon_read: &mut R,
+    daemon_write: &mut W,
+    stdin: &mut In,
+    stdout: &mut Out,
+    resize_rx: &mut mpsc::Receiver<PtySize>,
+) -> Result<PumpExit, ClientError>
 where
-    R: AsyncRead + Unpin + Send + 'static,
-    W: AsyncWrite + Unpin + Send + 'static,
-    In: AsyncRead + Unpin + Send + 'static,
-    Out: AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    In: AsyncRead + Unpin,
+    Out: AsyncWrite + Unpin,
 {
     let mut stdin_buf = BytesMut::with_capacity(STDIN_CHUNK);
-    let exit_status: ExitStatus;
     // Cancel-safety: `Codec::read_frame` is `read_exact`-based and NOT
     // cancel-safe. If `select!` drops it mid-frame (because a stdin byte or a
     // resize won the race while a daemon Output frame was still arriving) the
     // bytes already consumed from the socket are lost and the stream desyncs.
     // So the read future is pinned across iterations and recreated only after
     // it completes, mirroring the daemon's `serve_attach` (see connection.rs).
-    let mut read_fut = Box::pin(Codec::read_frame(&mut daemon_read));
+    let mut read_fut = Box::pin(Codec::read_frame(&mut *daemon_read));
     loop {
         stdin_buf.clear();
         stdin_buf.resize(STDIN_CHUNK, 0);
@@ -116,8 +133,7 @@ where
             // Daemon -> client
             frame = &mut read_fut => {
                 let Some(frame) = frame? else {
-                    exit_status = ExitStatus::Unknown;
-                    break;
+                    return Ok(PumpExit::Ended(ExitStatus::Unknown));
                 };
                 // Recreate the pinned read future for the next iteration, and only ever
                 // after it completed, so no buffered frame bytes are lost. Drop the old
@@ -125,7 +141,7 @@ where
                 // the new one reborrows it.
                 read_fut = {
                     drop(read_fut);
-                    Box::pin(Codec::read_frame(&mut daemon_read))
+                    Box::pin(Codec::read_frame(&mut *daemon_read))
                 };
                 let msg: ServerMsg = postcard::from_bytes(&frame)
                     .map_err(|e| CodecError::Decode(e.to_string()))?;
@@ -135,8 +151,7 @@ where
                         stdout.flush().await.map_err(ClientError::Io)?;
                     }
                     ServerMsg::Exited { status } => {
-                        exit_status = status;
-                        break;
+                        return Ok(PumpExit::Ended(status));
                     }
                     ServerMsg::Error(e) => {
                         return Err(ClientError::DaemonError(e));
@@ -167,20 +182,19 @@ where
                         OuterEvent::FocusOut => ClientMsg::FocusOut,
                         OuterEvent::ColorScheme(s) => ClientMsg::ColorScheme(s),
                     };
-                    send_client_msg(&mut daemon_write, &msg).await?;
+                    send_client_msg(&mut *daemon_write, &msg).await?;
                 }
                 if !chunk.is_empty() {
                     let msg = ClientMsg::Input(bytes::Bytes::from(chunk));
-                    send_client_msg(&mut daemon_write, &msg).await?;
+                    send_client_msg(&mut *daemon_write, &msg).await?;
                 }
             }
             // Client -> daemon (resize)
             Some(size) = resize_rx.recv() => {
-                send_client_msg(&mut daemon_write, &ClientMsg::Resize(size)).await?;
+                send_client_msg(&mut *daemon_write, &ClientMsg::Resize(size)).await?;
             }
         }
     }
-    Ok(exit_status)
 }
 
 pub async fn send_client_msg<W>(writer: &mut W, msg: &ClientMsg) -> Result<(), ClientError>
@@ -242,13 +256,13 @@ mod tests {
 
     #[tokio::test]
     async fn pump_writes_output_to_stdout_and_exits_on_exited() {
-        let (mut server_w, client_r) = duplex(64 * 1024);
-        let (server_r, client_w) = duplex(64 * 1024);
+        let (mut server_w, mut client_r) = duplex(64 * 1024);
+        let (server_r, mut client_w) = duplex(64 * 1024);
         drop(server_r); // we don't read from the client in this test
-        let (stdin_w, stdin_r) = duplex(64);
+        let (stdin_w, mut stdin_r) = duplex(64);
         drop(stdin_w);
-        let (mut stdout_r, stdout_w) = duplex(64 * 1024);
-        let (_tx, resize_rx) = mpsc::channel(4);
+        let (mut stdout_r, mut stdout_w) = duplex(64 * 1024);
+        let (_tx, mut resize_rx) = mpsc::channel(4);
 
         // Server-side: emit one `Output` and then `Exited`.
         let server = tokio::spawn(async move {
@@ -262,11 +276,23 @@ mod tests {
             Codec::write_frame(&mut server_w, &bytes).await.unwrap();
         });
 
-        let status = pump(client_r, client_w, stdin_r, stdout_w, resize_rx)
-            .await
-            .unwrap();
-        assert!(matches!(status, ExitStatus::Code(0)), "got: {status:?}");
+        let status = pump(
+            &mut client_r,
+            &mut client_w,
+            &mut stdin_r,
+            &mut stdout_w,
+            &mut resize_rx,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(status, PumpExit::Ended(ExitStatus::Code(0))),
+            "got: {status:?}"
+        );
 
+        // `pump` now borrows `stdout_w`, so it no longer drops on return; close it
+        // here so `read_to_end` sees EOF instead of blocking to the timeout.
+        drop(stdout_w);
         let mut out = Vec::new();
         let _ = time::timeout(Duration::from_millis(200), stdout_r.read_to_end(&mut out)).await;
         assert_eq!(&out, b"abc");
@@ -282,11 +308,11 @@ mod tests {
         // `select!` race. A tiny daemon->client pipe (16 bytes) forces the 8 KiB
         // payload to fragment into hundreds of reads; a feeder hammers stdin
         // throughout. The full payload must still reach stdout intact.
-        let (mut server_w, client_r) = duplex(16);
-        let (server_r, client_w) = duplex(64 * 1024);
-        let (mut stdin_w, stdin_r) = duplex(64 * 1024);
-        let (mut stdout_r, stdout_w) = duplex(256 * 1024);
-        let (_tx, resize_rx) = mpsc::channel(4);
+        let (mut server_w, mut client_r) = duplex(16);
+        let (server_r, mut client_w) = duplex(64 * 1024);
+        let (mut stdin_w, mut stdin_r) = duplex(64 * 1024);
+        let (mut stdout_r, mut stdout_w) = duplex(256 * 1024);
+        let (_tx, mut resize_rx) = mpsc::channel(4);
 
         let payload = vec![b'x'; 8192];
 
@@ -324,11 +350,28 @@ mod tests {
             Codec::write_frame(&mut server_w, &bytes).await.unwrap();
         });
 
-        let status = pump(client_r, client_w, stdin_r, stdout_w, resize_rx)
-            .await
-            .expect("pump must not error on interleaved stdin");
-        assert!(matches!(status, ExitStatus::Code(0)), "got: {status:?}");
+        let status = pump(
+            &mut client_r,
+            &mut client_w,
+            &mut stdin_r,
+            &mut stdout_w,
+            &mut resize_rx,
+        )
+        .await
+        .expect("pump must not error on interleaved stdin");
+        assert!(
+            matches!(status, PumpExit::Ended(ExitStatus::Code(0))),
+            "got: {status:?}"
+        );
 
+        // `pump` borrows its IO now, so it drops nothing on return. Close the
+        // ends the helper tasks wait on: the stdout write end so `read_to_end`
+        // sees EOF, the stdin read end so the feeder's `write_all` errors and its
+        // loop ends, and the client->daemon write end so the `drain` task reading
+        // the daemon side sees EOF and returns.
+        drop(stdout_w);
+        drop(stdin_r);
+        drop(client_w);
         let mut out = Vec::new();
         time::timeout(Duration::from_secs(5), stdout_r.read_to_end(&mut out))
             .await
