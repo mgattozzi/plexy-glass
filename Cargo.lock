@@ -1131,6 +1131,7 @@ dependencies = [
  "bytes",
  "nix 0.31.3",
  "plexy-glass-daemon",
+ "plexy-glass-emulator",
  "plexy-glass-protocol",
  "portable-pty",
  "postcard",

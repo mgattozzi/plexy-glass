@@ -5,6 +5,7 @@ pub mod error;
 pub mod install;
 pub mod kill;
 pub mod negotiate;
+pub mod picker;
 pub mod pump;
 pub mod shell_integration;
 pub mod transport;

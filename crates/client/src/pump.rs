@@ -7,6 +7,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::error::ClientError;
+use crate::picker::{PickerOutcome, PickerRow, PickerState};
 
 const STDIN_CHUNK: usize = 4096;
 
@@ -126,6 +127,12 @@ where
     // So the read future is pinned across iterations and recreated only after
     // it completes, mirroring the daemon's `serve_attach` (see connection.rs).
     let mut read_fut = Box::pin(Codec::read_frame(&mut *daemon_read));
+    // The in-pump session-picker sub-mode (`ServerMsg::OpenSessionPicker`).
+    // `Some` pairs the picker's own state with the session name it was
+    // opened against, so `PickerOutcome::Switch` can no-op a reselect of the
+    // already-attached session. While `Some`, stdin routes to the picker
+    // (never the daemon) and `ServerMsg::Output` frames are dropped.
+    let mut picker: Option<(PickerState, String)> = None;
     loop {
         stdin_buf.clear();
         stdin_buf.resize(STDIN_CHUNK, 0);
@@ -147,14 +154,42 @@ where
                     .map_err(|e| CodecError::Decode(e.to_string()))?;
                 match msg {
                     ServerMsg::Output(b) => {
-                        stdout.write_all(&b).await.map_err(ClientError::Io)?;
-                        stdout.flush().await.map_err(ClientError::Io)?;
+                        // While the picker is up, daemon output is dropped rather
+                        // than written underneath the picker's own drawing.
+                        if picker.is_none() {
+                            stdout.write_all(&b).await.map_err(ClientError::Io)?;
+                            stdout.flush().await.map_err(ClientError::Io)?;
+                        }
                     }
                     ServerMsg::Exited { status } => {
                         return Ok(PumpExit::Ended(status));
                     }
                     ServerMsg::Error(e) => {
                         return Err(ClientError::DaemonError(e));
+                    }
+                    ServerMsg::OpenSessionPicker { sessions, current } => {
+                        // Row label matches `open_session_picker_overlay`
+                        // (crates/daemon/src/connection.rs) verbatim, so the
+                        // client-rendered picker reads the same as the old
+                        // daemon-rendered one.
+                        let rows = sessions
+                            .into_iter()
+                            .map(|e| {
+                                let is_current = e.name == current;
+                                PickerRow {
+                                    label: format!(
+                                        "{} \u{2014} {} win, {} panes, {} clients",
+                                        e.name, e.windows, e.panes, e.clients
+                                    ),
+                                    name: e.name,
+                                    is_current,
+                                }
+                            })
+                            .collect();
+                        let state = PickerState::new(rows);
+                        stdout.write_all(&state.render()).await.map_err(ClientError::Io)?;
+                        stdout.flush().await.map_err(ClientError::Io)?;
+                        picker = Some((state, current));
                     }
                     // `Attached` was already handled by the caller; `ServerMsg`
                     // is `#[non_exhaustive]`, so ignore it and any future variants.
@@ -173,6 +208,44 @@ where
                     continue;
                 }
                 let mut chunk = stdin_buf.split_to(n).to_vec();
+                if picker.is_some() {
+                    // Picker sub-mode: stdin goes only to the picker, never the
+                    // daemon. `take()` sidesteps borrowing `picker` across the
+                    // `picker = Some(..)` reassignment in the re-render arm below.
+                    // invariant: just checked is_some(), so take() cannot yield None.
+                    let (mut state, current) = picker.take().expect("picker.is_some() checked above");
+                    match feed_picker_bytes(&mut state, &chunk) {
+                        Some(PickerOutcome::Switch(name)) => {
+                            if name == current {
+                                // Reselecting the already-attached session: no
+                                // SwitchSession needed, but the picker already
+                                // painted a `\x1b[2J\x1b[H` clear over the screen and
+                                // nothing else will repaint it on an idle session.
+                                // Redraw exactly like the Cancel arm below so the
+                                // daemon re-emits a full frame over the cleared
+                                // screen.
+                                send_client_msg(&mut *daemon_write, &ClientMsg::Redraw).await?;
+                            } else {
+                                send_client_msg(
+                                    &mut *daemon_write,
+                                    &ClientMsg::SwitchSession { name },
+                                )
+                                .await?;
+                            }
+                            // Same-session reselect or a real switch: either way the
+                            // picker is done; leave `picker` at None (already taken).
+                        }
+                        Some(PickerOutcome::Cancel) => {
+                            send_client_msg(&mut *daemon_write, &ClientMsg::Redraw).await?;
+                        }
+                        None => {
+                            stdout.write_all(&state.render()).await.map_err(ClientError::Io)?;
+                            stdout.flush().await.map_err(ClientError::Io)?;
+                            picker = Some((state, current));
+                        }
+                    }
+                    continue;
+                }
                 // Extract outer-terminal focus/theme events; relay them as
                 // dedicated `ClientMsg`s, forward the remaining bytes as Input.
                 let events = scan_outer_events(&mut chunk);
@@ -195,6 +268,43 @@ where
             }
         }
     }
+}
+
+/// Feed a raw stdin chunk to the picker one logical key at a time, decoding
+/// the two arrow-key escape sequences (`\e[A`/`\e[B`) to the picker's
+/// Ctrl-P/Ctrl-N up/down bytes first (`PickerState::handle_key` only sees
+/// single bytes; arrows arrive as three). Stops and returns the outcome as
+/// soon as one key commits or cancels the picker; any bytes still unread in
+/// the chunk are dropped (typing ahead of Enter/Esc in the picker is rare
+/// and not worth threading through).
+///
+/// Per-call scan with no cross-call state, same caveat as
+/// `scan_outer_events`: an arrow escape split across two `stdin.read` chunks
+/// (the `\e[` at the tail of one chunk, the rest at the head of the next) is
+/// NOT reassembled, so the lone `\x1b` misfires as a bare Esc (Cancel).
+fn feed_picker_bytes(state: &mut PickerState, bytes: &[u8]) -> Option<PickerOutcome> {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 2 < bytes.len() && bytes[i + 1] == b'[' {
+            let arrow = match bytes[i + 2] {
+                b'A' => Some(0x10), // up (Ctrl-P equivalent)
+                b'B' => Some(0x0e), // down (Ctrl-N equivalent)
+                _ => None,
+            };
+            if let Some(key) = arrow {
+                if let Some(outcome) = state.handle_key(key) {
+                    return Some(outcome);
+                }
+                i += 3;
+                continue;
+            }
+        }
+        if let Some(outcome) = state.handle_key(bytes[i]) {
+            return Some(outcome);
+        }
+        i += 1;
+    }
+    None
 }
 
 pub async fn send_client_msg<W>(writer: &mut W, msg: &ClientMsg) -> Result<(), ClientError>
@@ -245,10 +355,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use bytes::Bytes;
-    use plexy_glass_protocol::{ExitStatus, ServerMsg};
+    use plexy_glass_protocol::{ExitStatus, ServerMsg, SessionEntry};
     use tokio::io::duplex;
     use tokio::{task, time};
 
@@ -423,5 +533,157 @@ mod tests {
         );
         // The control sequences are stripped; ordinary bytes survive in order.
         assert_eq!(input, b"abcd");
+    }
+
+    fn picker_entry(name: &str, clients: u8) -> SessionEntry {
+        SessionEntry {
+            name: name.into(),
+            windows: 1,
+            panes: 1,
+            clients,
+            created: SystemTime::now(),
+        }
+    }
+
+    /// Read until `buf` contains `needle` or a single read stalls past
+    /// `per_read`. The picker's render is one `write_all` call on the daemon
+    /// side, so in practice this returns after the first read; the loop is
+    /// just insurance against the duplex pipe splitting it.
+    async fn read_until_contains<R>(r: &mut R, needle: &str, per_read: Duration) -> Vec<u8>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = time::timeout(per_read, r.read(&mut chunk))
+                .await
+                .expect("read timed out waiting for picker render")
+                .expect("stdout read failed");
+            assert_ne!(n, 0, "stdout closed before {needle:?} appeared");
+            buf.extend_from_slice(&chunk[..n]);
+            if String::from_utf8_lossy(&buf).contains(needle) {
+                return buf;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pump_picker_reselect_current_session_sends_redraw() {
+        // Regression for the same-session-reselect bug: the picker clears the
+        // screen (`\x1b[2J\x1b[H`) when it opens, and nothing else repaints it
+        // on an idle session. Reselecting the already-attached session (the
+        // cursor starts there, so a bare Enter does this) must still send
+        // `ClientMsg::Redraw` so the daemon re-emits a full frame over the
+        // cleared screen. Before the fix, this arm sent nothing at all.
+        let (mut server_w, mut client_r) = duplex(64 * 1024);
+        let (mut server_r, mut client_w) = duplex(64 * 1024);
+        let (mut stdin_w, mut stdin_r) = duplex(64);
+        let (mut stdout_r, mut stdout_w) = duplex(64 * 1024);
+        let (_tx, mut resize_rx) = mpsc::channel(4);
+
+        let driver = tokio::spawn(async move {
+            let open = ServerMsg::OpenSessionPicker {
+                sessions: vec![picker_entry("main", 1)],
+                current: "main".into(),
+            };
+            let bytes = postcard::to_allocvec(&open).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+
+            let rendered =
+                read_until_contains(&mut stdout_r, "main", Duration::from_secs(1)).await;
+            assert!(
+                String::from_utf8_lossy(&rendered).contains("switch session"),
+                "picker did not render"
+            );
+
+            // Enter with the cursor on the current session -> reselect.
+            stdin_w.write_all(b"\r").await.unwrap();
+
+            let frame = time::timeout(Duration::from_secs(2), Codec::read_frame(&mut server_r))
+                .await
+                .expect("timed out waiting for a ClientMsg")
+                .unwrap()
+                .expect("daemon channel closed before a ClientMsg arrived");
+            let msg: ClientMsg = postcard::from_bytes(&frame).unwrap();
+            assert_eq!(msg, ClientMsg::Redraw);
+
+            // Let pump return.
+            let done = ServerMsg::Exited {
+                status: ExitStatus::Code(0),
+            };
+            let bytes = postcard::to_allocvec(&done).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+        });
+
+        let status = pump(
+            &mut client_r,
+            &mut client_w,
+            &mut stdin_r,
+            &mut stdout_w,
+            &mut resize_rx,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(status, PumpExit::Ended(ExitStatus::Code(0))),
+            "got: {status:?}"
+        );
+
+        driver.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pump_picker_esc_sends_redraw() {
+        // Esc cancels the picker; the pump must send `ClientMsg::Redraw` so
+        // the daemon repaints over the picker's own screen clear.
+        let (mut server_w, mut client_r) = duplex(64 * 1024);
+        let (mut server_r, mut client_w) = duplex(64 * 1024);
+        let (mut stdin_w, mut stdin_r) = duplex(64);
+        let (mut stdout_r, mut stdout_w) = duplex(64 * 1024);
+        let (_tx, mut resize_rx) = mpsc::channel(4);
+
+        let driver = tokio::spawn(async move {
+            let open = ServerMsg::OpenSessionPicker {
+                sessions: vec![picker_entry("main", 1), picker_entry("build", 0)],
+                current: "main".into(),
+            };
+            let bytes = postcard::to_allocvec(&open).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+
+            read_until_contains(&mut stdout_r, "build", Duration::from_secs(1)).await;
+
+            stdin_w.write_all(b"\x1b").await.unwrap();
+
+            let frame = time::timeout(Duration::from_secs(2), Codec::read_frame(&mut server_r))
+                .await
+                .expect("timed out waiting for a ClientMsg")
+                .unwrap()
+                .expect("daemon channel closed before a ClientMsg arrived");
+            let msg: ClientMsg = postcard::from_bytes(&frame).unwrap();
+            assert_eq!(msg, ClientMsg::Redraw);
+
+            let done = ServerMsg::Exited {
+                status: ExitStatus::Code(0),
+            };
+            let bytes = postcard::to_allocvec(&done).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+        });
+
+        let status = pump(
+            &mut client_r,
+            &mut client_w,
+            &mut stdin_r,
+            &mut stdout_w,
+            &mut resize_rx,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(status, PumpExit::Ended(ExitStatus::Code(0))),
+            "got: {status:?}"
+        );
+
+        driver.await.unwrap();
     }
 }
