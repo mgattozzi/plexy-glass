@@ -32,6 +32,7 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
     let mut seen_glyphs = false;
     let mut seen_auto_rename = false;
     let mut seen_welcome = false;
+    let mut seen_remotes = false;
     for node in doc.nodes() {
         match node.name().value() {
             "palette" => {
@@ -83,6 +84,11 @@ pub fn parse_config(src: &str) -> Result<Config, ConfigError> {
                 dup_check(seen_welcome, "welcome", node, src)?;
                 seen_welcome = true;
                 config.welcome = bool_arg(node, 0, src, "#true or #false")?;
+            }
+            "remotes" => {
+                dup_check(seen_remotes, "remotes", node, src)?;
+                seen_remotes = true;
+                config.remotes = decode_remotes(node, src)?;
             }
             "session" => {
                 let template = decode_session(node, src)?;
@@ -688,6 +694,18 @@ fn decode_env_child(node: &KdlNode, src: &str) -> Result<Vec<(String, String)>, 
             let val = string_arg(entry, 0, src, &format!("env value for `{key}`"))?.to_string();
             out.push((key, val));
         }
+    }
+    Ok(out)
+}
+
+/// Decode the `remotes { host "x"; … }` node: a roster of remote host names
+/// the session picker spans alongside the local daemon (Milestone B).
+fn decode_remotes(node: &KdlNode, src: &str) -> Result<Vec<String>, ConfigError> {
+    ensure_only_children(node, &["host"], src)?;
+    ensure_only_props(node, &[], src)?;
+    let mut out = Vec::new();
+    for child in node.iter_children().filter(|c| c.name().value() == "host") {
+        out.push(string_arg(child, 0, src, "remotes host")?.to_string());
     }
     Ok(out)
 }
@@ -2330,6 +2348,14 @@ hints {
     fn rejects_shift_and_unknown_mouse_node() {
         assert!(parse_config("mouse {\n  drag-modifier \"shift\"\n}\n").is_err());
         assert!(parse_config("mouse {\n  bogus \"x\"\n}\n").is_err());
+    }
+
+    #[test]
+    fn remotes_decodes_host_children() {
+        let cfg = parse_config("remotes { host \"wsl2\"; host \"prod\" }").unwrap();
+        assert_eq!(cfg.remotes, vec!["wsl2".to_string(), "prod".to_string()]);
+        assert!(parse_config("").unwrap().remotes.is_empty());
+        assert!(parse_config("remotes { host \"a\" }\nremotes { host \"b\" }").is_err()); // dup section
     }
 
     #[test]

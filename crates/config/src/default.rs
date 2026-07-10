@@ -51,6 +51,7 @@ pub fn built_in_default() -> Config {
         glyph_tier: GlyphTier::Unicode,
         auto_rename: true,
         welcome: true,
+        remotes: Vec::new(),
         status: StatusConfig {
             position: Position::Bottom,
             refresh: Duration::from_secs(5),

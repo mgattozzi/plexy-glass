@@ -31,6 +31,9 @@ pub struct Config {
     /// a state-dir marker, so it appears once). Default true; set `welcome
     /// #false` to skip it. nushell's `show_banner`, as a modal.
     pub welcome: bool,
+    /// Roster of remote hosts (`remotes { host "x" }`) the session picker spans
+    /// alongside the local daemon. Empty by default (local-only).
+    pub remotes: Vec<String>,
 }
 
 /// Configuration for the block exit-status border feature.
