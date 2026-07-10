@@ -1,0 +1,134 @@
+//! The client-side session-picker roster: the union of config `remotes`
+//! (declared in `config.kdl`) and an ad-hoc client-side file recording hosts
+//! the user has `-H`'d into. Pure assemble/dedup logic plus the file I/O and
+//! config read that feed it; wiring into the picker itself is a later task.
+
+use std::collections::HashSet;
+use std::fs;
+use std::io::{self, Write};
+use std::path::PathBuf;
+
+use plexy_glass_daemon::RuntimePaths;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RosterSource {
+    Configured,
+    AdHoc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterHost {
+    pub host: String,
+    pub source: RosterSource,
+}
+
+/// Assemble the roster: every distinct `configured` host (sorted, source
+/// `Configured`) followed by every distinct `adhoc` host that isn't already
+/// configured (sorted, source `AdHoc`).
+pub fn assemble(configured: &[String], adhoc: &[String]) -> Vec<RosterHost> {
+    let mut cfg: Vec<String> = configured.to_vec();
+    cfg.sort();
+    cfg.dedup();
+    let cfgset: HashSet<&String> = cfg.iter().collect();
+    let mut ad: Vec<String> = adhoc
+        .iter()
+        .filter(|h| !cfgset.contains(*h))
+        .cloned()
+        .collect();
+    ad.sort();
+    ad.dedup();
+    cfg.into_iter()
+        .map(|host| RosterHost {
+            host,
+            source: RosterSource::Configured,
+        })
+        .chain(ad.into_iter().map(|host| RosterHost {
+            host,
+            source: RosterSource::AdHoc,
+        }))
+        .collect()
+}
+
+/// The operator's LOCAL config remotes. Client-side config parse errors are
+/// swallowed here (the picker still works from the ad-hoc file + this session's
+/// hosts); the daemon logs its own config error separately.
+pub fn config_remotes() -> Vec<String> {
+    let (cfg, _err) = plexy_glass_config::load_or_default();
+    cfg.remotes
+}
+
+fn adhoc_path() -> Option<PathBuf> {
+    RuntimePaths::for_current_user()
+        .ok()
+        .map(|p| p.log_dir.join("remotes"))
+}
+
+pub fn load_adhoc() -> Vec<String> {
+    let Some(p) = adhoc_path() else {
+        return Vec::new();
+    };
+    fs::read_to_string(&p)
+        .ok()
+        .map(|s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn add_adhoc(host: &str) {
+    let mut cur = load_adhoc();
+    if cur.iter().any(|h| h == host) {
+        return;
+    }
+    cur.push(host.to_string());
+    if let Err(e) = write_adhoc(&cur) {
+        tracing::warn!(%host, error=%e, "roster: add_adhoc write failed");
+    }
+}
+
+pub fn forget_adhoc(host: &str) {
+    let cur: Vec<String> = load_adhoc().into_iter().filter(|h| h != host).collect();
+    if let Err(e) = write_adhoc(&cur) {
+        tracing::warn!(%host, error=%e, "roster: forget_adhoc write failed");
+    }
+}
+
+fn write_adhoc(hosts: &[String]) -> io::Result<()> {
+    let Some(p) = adhoc_path() else {
+        return Ok(());
+    };
+    if let Some(dir) = p.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut f = fs::File::create(&p)?;
+    for h in hosts {
+        writeln!(f, "{h}")?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assemble_dedups_adhoc_against_configured_and_orders() {
+        let hosts = assemble(
+            &["prod".into(), "wsl2".into()],
+            &["scratch".into(), "wsl2".into()],
+        );
+        let got: Vec<_> = hosts.iter().map(|h| (h.host.as_str(), h.source)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("prod", RosterSource::Configured),
+                ("wsl2", RosterSource::Configured),
+                ("scratch", RosterSource::AdHoc),
+            ]
+        );
+    }
+}

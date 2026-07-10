@@ -7,6 +7,7 @@ pub mod kill;
 pub mod negotiate;
 pub mod picker;
 pub mod pump;
+pub mod roster;
 pub mod shell_integration;
 pub mod transport;
 pub mod tty;

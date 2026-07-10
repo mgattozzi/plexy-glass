@@ -1129,7 +1129,9 @@ name = "plexy-glass-client"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "hegeltest",
  "nix 0.31.3",
+ "plexy-glass-config",
  "plexy-glass-daemon",
  "plexy-glass-emulator",
  "plexy-glass-protocol",
