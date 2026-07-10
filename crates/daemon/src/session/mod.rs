@@ -2788,8 +2788,9 @@ mod tests {
         // No session switch in this test; keep the sender alive so the switch
         // arm simply never fires.
         let (_switch_tx, switch_rx) = mpsc::unbounded_channel();
+        let (_inject_tx, inject_rx) = mpsc::unbounded_channel();
         let mut renderer_task = tokio::spawn(async move {
-            let _ = renderer.run(frame_rx, switch_rx, server_write).await;
+            let _ = renderer.run(frame_rx, switch_rx, inject_rx, server_write).await;
         });
 
         // Mini serve_attach: hold the read half, break when the renderer ends,

@@ -13,6 +13,15 @@ use tracing::warn;
 
 use crate::error::DaemonError;
 
+/// Out-of-band signals from the connection's input loop to its renderer task.
+/// The renderer owns the writer, so anything the input loop wants to SEND to the
+/// client (or invalidate) goes through here.
+#[derive(Debug)]
+pub enum RenderInject {
+    Msg(ServerMsg),
+    Invalidate,
+}
+
 pub struct Renderer {
     diff: DiffRenderer,
 }
@@ -34,6 +43,7 @@ impl Renderer {
         mut self,
         mut frame_rx: watch::Receiver<Arc<VirtualScreen>>,
         mut switch_rx: mpsc::UnboundedReceiver<watch::Receiver<Arc<VirtualScreen>>>,
+        mut inject_rx: mpsc::UnboundedReceiver<RenderInject>,
         mut writer: W,
     ) -> Result<(), DaemonError>
     where
@@ -84,6 +94,15 @@ impl Renderer {
                         Err(_) => return Ok(()),
                     }
                 }
+                inj = inject_rx.recv() => {
+                    match inj {
+                        Some(RenderInject::Msg(msg)) => self.write_msg(&mut writer, &msg).await?,
+                        Some(RenderInject::Invalidate) => self.diff.invalidate(),
+                        // Input loop gone; connection is ending, `renderer_task`
+                        // will be aborted by the caller.
+                        None => {}
+                    }
+                }
             }
         }
     }
@@ -93,7 +112,17 @@ impl Renderer {
         W: AsyncWrite + Unpin,
     {
         let msg = ServerMsg::Output(bytes::Bytes::from(bytes));
-        let payload = postcard::to_allocvec(&msg)
+        self.write_msg(writer, &msg).await
+    }
+
+    /// Serialize + frame any `ServerMsg` onto this connection's writer. The
+    /// single write path for both regular output frames and out-of-band
+    /// injected messages (e.g. `OpenSessionPicker`) — do not add a second one.
+    async fn write_msg<W>(&mut self, writer: &mut W, msg: &ServerMsg) -> Result<(), DaemonError>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let payload = postcard::to_allocvec(msg)
             .map_err(|e| DaemonError::Io(Error::other(format!("encode: {e}"))))?;
         match Codec::write_frame(writer, &payload).await {
             Ok(()) => Ok(()),
@@ -165,12 +194,15 @@ mod tests {
         let (_tx_a, rx_a) = watch::channel(screen_with("A"));
         let (_tx_b, rx_b) = watch::channel(screen_with("B"));
         let (switch_tx, switch_rx) = mpsc::unbounded_channel();
+        let (_inject_tx, inject_rx) = mpsc::unbounded_channel();
         // The renderer writes to `server_sock`; we read its output from the
         // opposite duplex endpoint `client_sock`.
         let (server_sock, mut client_sock) = io::duplex(64 * 1024);
 
         let task = tokio::spawn(async move {
-            let _ = Renderer::new().run(rx_a, switch_rx, server_sock).await;
+            let _ = Renderer::new()
+                .run(rx_a, switch_rx, inject_rx, server_sock)
+                .await;
         });
 
         // Initial frame is session A.
@@ -195,10 +227,13 @@ mod tests {
     async fn dropping_switch_sender_does_not_end_renderer() {
         let (tx_a, rx_a) = watch::channel(screen_with("A"));
         let (switch_tx, switch_rx) = mpsc::unbounded_channel();
+        let (_inject_tx, inject_rx) = mpsc::unbounded_channel();
         let (server_sock, mut client_sock) = io::duplex(64 * 1024);
 
         let task = tokio::spawn(async move {
-            let _ = Renderer::new().run(rx_a, switch_rx, server_sock).await;
+            let _ = Renderer::new()
+                .run(rx_a, switch_rx, inject_rx, server_sock)
+                .await;
         });
         assert!(next_output(&mut client_sock).await.contains('A'));
 

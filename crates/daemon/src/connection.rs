@@ -24,7 +24,7 @@ use crate::declared::expand_tilde;
 use crate::error::DaemonError;
 use crate::input_router::decode_protocol;
 use crate::registry::SessionRegistry;
-use crate::renderer::Renderer;
+use crate::renderer::{RenderInject, Renderer};
 use crate::session::coordinator::binding_keys;
 use crate::session::{Session, SessionHistory, SessionTree};
 use crate::window_manager::{OverlayKeyResult, Severity};
@@ -274,6 +274,7 @@ where
     // client's key decode (deterministic, replacing the Permissive default).
     let client_kbd = client_hello.kbd;
     let client_remote = client_hello.remote;
+    let client_version = client_hello.version;
 
     // Resolve or create the session. `session` is reassigned in place by
     // `switch_session` when the client switches to another session.
@@ -361,6 +362,10 @@ where
     // writer.
     let frame_rx = handle.frame_rx.clone();
     let (switch_tx, switch_rx) = mpsc::unbounded_channel::<watch::Receiver<Arc<VirtualScreen>>>();
+    // `inject_tx` lets the input loop hand the renderer a message to WRITE (or
+    // an invalidate) without reclaiming the writer it owns, e.g. a v12+
+    // client's `OpenSessionPicker` on `Ctrl+a w`.
+    let (inject_tx, inject_rx) = mpsc::unbounded_channel::<RenderInject>();
     let mut renderer = Renderer::new();
     // Thread this client's negotiated graphics caps so the renderer emits image
     // protocols only its outer terminal supports.
@@ -371,7 +376,7 @@ where
         iterm2: g.iterm2,
     });
     let mut renderer_task = tokio::spawn(async move {
-        let _ = renderer.run(frame_rx, switch_rx, writer).await;
+        let _ = renderer.run(frame_rx, switch_rx, inject_rx, writer).await;
     });
 
     // Input loop. Scope key decode to the client's negotiated outer-terminal
@@ -464,6 +469,8 @@ where
                             switch_tx: &switch_tx,
                             prefix_armed: &prefix_active,
                             remote: client_remote,
+                            version: client_version,
+                            inject_tx: &inject_tx,
                         };
                         dispatch_input_event(&mut ctx, &mut keymap, client_kbd, event).await
                     };
@@ -513,6 +520,8 @@ where
                         switch_tx: &switch_tx,
                         prefix_armed: &prefix_active,
                         remote: client_remote,
+                        version: client_version,
+                        inject_tx: &inject_tx,
                     };
                     if dispatch_input_event(&mut ctx, &mut keymap, client_kbd, event).await {
                         detach_requested = true;
@@ -572,6 +581,26 @@ where
                 // ?2031 subscribers.
                 let dark = matches!(scheme, plexy_glass_protocol::ColorScheme::Dark);
                 session.forward_color_scheme(dark).await;
+            }
+            ClientMsg::SwitchSession { name } => {
+                // Same-daemon fast switch (the v12+ client picker's same-host
+                // path): reuse the overlay-driven machinery. It already
+                // invalidates the renderer via `switch_tx`, so no extra redraw.
+                let mut ctx = ClientCtx {
+                    session: &mut session,
+                    client_id: &mut client_id,
+                    size,
+                    registry: &registry,
+                    switch_tx: &switch_tx,
+                    prefix_armed: &prefix_active,
+                    remote: client_remote,
+                    version: client_version,
+                    inject_tx: &inject_tx,
+                };
+                ctx.switch_session(name).await;
+            }
+            ClientMsg::Redraw => {
+                let _ = inject_tx.send(RenderInject::Invalidate);
             }
             _ => {}
         }
@@ -928,6 +957,12 @@ struct ClientCtx<'a> {
     /// Whether the connection reached the daemon over `-H`/SSH; re-registered on
     /// the target session during a switch so the `ssh` marker survives the switch.
     remote: bool,
+    /// The client's negotiated protocol version; gates v12+ features (the
+    /// client-rendered picker) so an older downgraded client keeps the daemon
+    /// overlay.
+    version: u16,
+    /// Out-of-band sender to this connection's renderer task.
+    inject_tx: &'a mpsc::UnboundedSender<RenderInject>,
 }
 
 impl ClientCtx<'_> {
@@ -1602,7 +1637,16 @@ async fn run_connection_verb(ctx: &mut ClientCtx<'_>, keymap: &mut Keymap, verb:
             ctx.switch_session(name).await;
         }
         ConnVerb::ChooseSession => {
-            open_session_picker_overlay(ctx.session, ctx.registry).await;
+            if ctx.version >= 12 {
+                // v12+ client renders its own picker; hand it our session list.
+                let sessions = ctx.registry.list().await;
+                let current = ctx.session.name();
+                let _ = ctx.inject_tx.send(RenderInject::Msg(
+                    ServerMsg::OpenSessionPicker { sessions, current },
+                ));
+            } else {
+                open_session_picker_overlay(ctx.session, ctx.registry).await;
+            }
         }
         ConnVerb::ChooseTree => {
             open_tree_overlay(ctx.session, ctx.registry).await;
@@ -2662,10 +2706,14 @@ mod tests {
         server.abort();
     }
 
-    // `Ctrl+a w` opens the picker; typing `b` filters to session "b"; Enter
-    // switches there. Exercises the picker open → filter → commit → switch path.
+    // A real (v12) client handshake means `Ctrl+a w` delegates to the client
+    // picker rather than opening the daemon overlay (see
+    // `choose_session_version_gates_daemon_overlay_vs_client_picker` for that
+    // gate in isolation); the client commits its choice by sending
+    // `ClientMsg::SwitchSession` back over the wire, the same-daemon fast path.
+    // Exercises that end-to-end: attach → delegate → `SwitchSession` → switch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn session_picker_filters_and_switches() {
+    async fn session_picker_delegate_then_switch_session_switches() {
         let _g = isolate();
         use std::time::{Duration, Instant};
 
@@ -2737,14 +2785,110 @@ mod tests {
         };
         wait_until(1, 0).await;
 
-        // Ctrl+a w (0x01 'w') opens the picker; "b" filters to "beta"; Enter (0x0d).
-        let input = ClientMsg::Input(bytes::Bytes::from_static(b"\x01wb\r"));
+        // Ctrl+a w (0x01 'w'): on this v12 client, delegates to the client
+        // picker instead of opening the daemon overlay (drained by the reader
+        // task above; the delegation itself is covered in isolation by
+        // `choose_session_version_gates_daemon_overlay_vs_client_picker`).
+        let input = ClientMsg::Input(bytes::Bytes::from_static(b"\x01w"));
         Codec::write_frame(&mut cw, &postcard::to_allocvec(&input).unwrap())
+            .await
+            .unwrap();
+
+        // The client renders its own picker and commits the choice by sending
+        // `SwitchSession` back — the same-daemon fast path this task wires up.
+        let switch = ClientMsg::SwitchSession {
+            name: "beta".into(),
+        };
+        Codec::write_frame(&mut cw, &postcard::to_allocvec(&switch).unwrap())
             .await
             .unwrap();
 
         wait_until(0, 1).await;
         server.abort();
+    }
+
+    // `ConnVerb::ChooseSession` is version-gated: a v11 `ClientCtx` still opens
+    // the daemon overlay (nothing on `inject_tx`); a v12+ `ClientCtx` sends
+    // `OpenSessionPicker` on `inject_tx` and does NOT open the daemon overlay
+    // (the client renders its own).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn choose_session_version_gates_daemon_overlay_vs_client_picker() {
+        let _g = isolate();
+        let registry = Arc::new(crate::SessionRegistry::new());
+        let cfg = Arc::new(plexy_glass_config::built_in_default());
+        let (km, _skips) = plexy_glass_keys::build_keymap_with_skips(&cfg.keymap);
+        let mut keymap = km;
+
+        // v11: falls back to the daemon overlay.
+        {
+            let mut session = registry
+                .attach_or_create("v11".into(), script_cat(), script_size(), Arc::clone(&cfg))
+                .await
+                .unwrap();
+            let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
+            let (inject_tx, mut inject_rx) = mpsc::unbounded_channel();
+            let mut client_id = 0u64;
+            let prefix_armed = Arc::new(AtomicBool::new(false));
+            let mut ctx = ClientCtx {
+                session: &mut session,
+                client_id: &mut client_id,
+                size: script_size(),
+                registry: &registry,
+                switch_tx: &switch_tx,
+                prefix_armed: &prefix_armed,
+                remote: false,
+                version: 11,
+                inject_tx: &inject_tx,
+            };
+            run_connection_verb(&mut ctx, &mut keymap, ConnVerb::ChooseSession).await;
+            let overlay_open = {
+                let m = session.window_manager.lock().await;
+                m.overlay().is_some()
+            };
+            assert!(overlay_open, "v11 client still gets the daemon overlay");
+            assert!(
+                inject_rx.try_recv().is_err(),
+                "v11 client gets nothing on inject_tx"
+            );
+            session.terminate_panes().await;
+        }
+
+        // v12: delegates to the client, no daemon overlay.
+        {
+            let mut session = registry
+                .attach_or_create("v12".into(), script_cat(), script_size(), Arc::clone(&cfg))
+                .await
+                .unwrap();
+            let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
+            let (inject_tx, mut inject_rx) = mpsc::unbounded_channel();
+            let mut client_id = 0u64;
+            let prefix_armed = Arc::new(AtomicBool::new(false));
+            let mut ctx = ClientCtx {
+                session: &mut session,
+                client_id: &mut client_id,
+                size: script_size(),
+                registry: &registry,
+                switch_tx: &switch_tx,
+                prefix_armed: &prefix_armed,
+                remote: false,
+                version: 12,
+                inject_tx: &inject_tx,
+            };
+            run_connection_verb(&mut ctx, &mut keymap, ConnVerb::ChooseSession).await;
+            let overlay_open = {
+                let m = session.window_manager.lock().await;
+                m.overlay().is_some()
+            };
+            assert!(!overlay_open, "v12 client does not get the daemon overlay");
+            match inject_rx.try_recv() {
+                Ok(RenderInject::Msg(ServerMsg::OpenSessionPicker { sessions, current })) => {
+                    assert_eq!(current, "v12");
+                    assert!(sessions.iter().any(|e| e.name == "v12"));
+                }
+                other => panic!("expected OpenSessionPicker on inject_tx, got {other:?}"),
+            }
+            session.terminate_panes().await;
+        }
     }
 
     // `Ctrl+a W` opens the choose-tree; the tree lists every session
@@ -2878,6 +3022,7 @@ mod tests {
         };
 
         let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
+        let (inject_tx, _inject_rx) = mpsc::unbounded_channel();
         let mut client_id = 0u64;
         let prefix_armed = Arc::new(AtomicBool::new(false));
         let mut ctx = ClientCtx {
@@ -2888,6 +3033,8 @@ mod tests {
             switch_tx: &switch_tx,
             prefix_armed: &prefix_armed,
             remote: false,
+            version: 12,
+            inject_tx: &inject_tx,
         };
         // Jump to the "ls" block (prompt line 0) in the same session.
         ctx.dispatch_history_jump(plexy_glass_mux::HistoryTarget {
@@ -3403,6 +3550,7 @@ mod tests {
         }
 
         let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
+        let (inject_tx, _inject_rx) = mpsc::unbounded_channel();
         let mut client_id = 0u64;
         let prefix_armed = Arc::new(AtomicBool::new(false));
         let mut ctx = ClientCtx {
@@ -3413,6 +3561,8 @@ mod tests {
             switch_tx: &switch_tx,
             prefix_armed: &prefix_armed,
             remote: false,
+            version: 12,
+            inject_tx: &inject_tx,
         };
         ctx.dispatch_tree_action(TreeAction::RenameSession {
             old: "beta".into(),
@@ -3512,6 +3662,7 @@ mod tests {
         };
 
         let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
+        let (inject_tx, _inject_rx) = mpsc::unbounded_channel();
         let mut client_id = 0u64;
         let prefix_armed = Arc::new(AtomicBool::new(false));
         let mut ctx = ClientCtx {
@@ -3522,6 +3673,8 @@ mod tests {
             switch_tx: &switch_tx,
             prefix_armed: &prefix_armed,
             remote: false,
+            version: 12,
+            inject_tx: &inject_tx,
         };
         ctx.dispatch_tree_action(TreeAction::RenameSession {
             old: "beta".into(),
@@ -3584,6 +3737,7 @@ mod tests {
             .unwrap();
 
         let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
+        let (inject_tx, _inject_rx) = mpsc::unbounded_channel();
         let mut client_id = 0u64;
         let prefix_armed = Arc::new(AtomicBool::new(false));
         let mut ctx = ClientCtx {
@@ -3594,6 +3748,8 @@ mod tests {
             switch_tx: &switch_tx,
             prefix_armed: &prefix_armed,
             remote: false,
+            version: 12,
+            inject_tx: &inject_tx,
         };
         ctx.dispatch_tree_action(TreeAction::RenameSession {
             old: "alpha".into(),
