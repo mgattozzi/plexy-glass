@@ -277,6 +277,18 @@ where
                             // attaches and a fresh one creates, so New needs no
                             // separate flag. `picker`/`picker_rx` are dropped
                             // along with the rest of `pump`'s state on return.
+                            //
+                            // A host-anchor Enter reconnects to that daemon's
+                            // DEFAULT session, which `accept()` encodes as an
+                            // empty `name`; normalize it to the same `"main"`
+                            // default `client_attach_smart` uses so an empty name
+                            // never reaches the wire (the daemon rejects `""`
+                            // with `EmptyName`, which would eject the client).
+                            let name = if name.is_empty() {
+                                "main".to_string()
+                            } else {
+                                name
+                            };
                             return Ok(PumpExit::ReconnectTo {
                                 target: Target {
                                     host,
@@ -1175,20 +1187,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pump_picker_reconnect_returns_reconnect_to() {
-        // The current daemon's OWN sessions are tagged with its (remote) host,
-        // so `accept()` routes Enter on one through `Reconnect`, not `Switch`
-        // (see `picker.rs::accept`) — the simplest way to drive a deterministic
-        // `Reconnect{host,name}` outcome with no real network round trip: the
-        // "sessions" come straight from the fake driver's `OpenSessionPicker`
-        // payload, not a live query. `pump` must hand this back as
-        // `PumpExit::ReconnectTo` rather than act on it.
-        roster::set_test_roster(vec![], vec![]);
-        let target = Target {
-            host: Some("h".into()),
-            remote_bin: None,
-            install: false,
-        };
+    async fn pump_picker_reconnect_to_other_host_anchor_normalizes_empty_name() {
+        // Critical #1 + Finding 2 through the pump: Enter on a DIFFERENT
+        // daemon's host anchor reconnects to that daemon's default session.
+        // `accept()` emits an empty `name` for a host anchor; the pump must
+        // NORMALIZE it to `"main"` (never send `Some("")`, which the daemon
+        // rejects with `EmptyName` and ejects the client). Attached-local, so
+        // the roster's `nonexistent.invalid` host is an OTHER daemon whose
+        // Pending anchor renders on the first paint (no query round-trip needed
+        // to select it).
+        roster::set_test_roster(vec!["nonexistent.invalid".into()], vec![]);
 
         let (mut server_w, mut client_r) = duplex(64 * 1024);
         let (server_r, mut client_w) = duplex(64 * 1024);
@@ -1197,28 +1205,26 @@ mod tests {
         let (mut stdout_r, mut stdout_w) = duplex(64 * 1024);
         let (_tx, mut resize_rx) = mpsc::channel(4);
 
-        // `pump` returns `ReconnectTo` purely from processing stdin — no daemon
-        // round-trip to synchronize on — so a driver that finishes (dropping its
-        // write ends) right after writing the keystroke would race `pump`'s
-        // daemon-closed branch against its stdin-ready branch (a `tokio::spawn`
-        // task ending drops `server_w`/`stdin_w`, which can close before `pump`
-        // gets to the buffered `\r`). Racing `pump` against a driver that parks
-        // in `pending()` after its writes keeps both ends open until `pump`
-        // itself resolves, so the win is deterministic either way.
+        // Same race note as `pump_picker_new_on_host_returns_reconnect_to`:
+        // `ReconnectTo` returns without a daemon round-trip, so keep the driver
+        // parked in `pending()` after its writes rather than letting a completing
+        // task drop `server_w`/`stdin_w` out from under `pump`.
         let driver = async {
             let open = ServerMsg::OpenSessionPicker {
-                sessions: vec![picker_entry("s", 1)],
-                current: "s".into(),
+                sessions: vec![picker_entry("main", 1)],
+                current: "main".into(),
             };
             let bytes = postcard::to_allocvec(&open).unwrap();
             Codec::write_frame(&mut server_w, &bytes).await.unwrap();
 
-            // `new_with_current` parks the cursor on "s" (the current session).
-            read_until_contains(&mut stdout_r, "switch session", Duration::from_secs(1)).await;
+            read_until_contains(&mut stdout_r, "nonexistent.invalid", Duration::from_secs(1)).await;
+            // Cursor parks on "main"; one down-move lands on the host anchor.
+            stdin_w.write_all(b"\x0e").await.unwrap();
             stdin_w.write_all(b"\r").await.unwrap();
             pending::<()>().await;
         };
 
+        let local = Target::default();
         let status = tokio::select! {
             status = pump(
                 &mut client_r,
@@ -1226,14 +1232,17 @@ mod tests {
                 &mut stdin_r,
                 &mut stdout_w,
                 &mut resize_rx,
-                &target,
+                &local,
             ) => status.unwrap(),
             () = driver => unreachable!("driver parks forever after its writes"),
         };
         match status {
             PumpExit::ReconnectTo { target: t, name } => {
-                assert_eq!(t.host.as_deref(), Some("h"));
-                assert_eq!(name, "s");
+                assert_eq!(t.host.as_deref(), Some("nonexistent.invalid"));
+                assert_eq!(
+                    name, "main",
+                    "empty host-anchor name normalized to the daemon default"
+                );
             }
             other => panic!("expected ReconnectTo, got {other:?}"),
         }

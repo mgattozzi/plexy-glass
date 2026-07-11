@@ -1145,18 +1145,25 @@ pending host just shows `…` until it resolves, and that polish is deferred.
 | Backspace | Remove the last filter character |
 | `↓` / `Ctrl+n` / `Ctrl+j` | Move selection down |
 | `↑` / `Ctrl+p` / `Ctrl+k` | Move selection up |
-| `Enter` on a local session | Switch to it in place (same connection) |
-| `Enter` on a remote session | Reconnect: re-attach this client to that daemon and session |
-| `Enter` on a host anchor | Reconnect to that daemon's default session |
+| `Enter` on a session on the daemon you're attached to | Switch to it in place (fast, same connection, no reconnect) |
+| `Enter` on a session on another daemon | Reconnect: re-attach this client to that daemon and session |
+| `Enter` on the current daemon's own anchor | No-op; just closes the picker (you're already here) |
+| `Enter` on another daemon's anchor | Reconnect to that daemon's default session |
 | `n` | New session on the host under the cursor (prompts for a name) |
 | `x` | Forget the ad-hoc host under the cursor |
 | `Esc` | Cancel and return to the current session |
 
-`Enter` on a session on a **different** daemon does a brief reconnect: the live
-attach tears down and re-attaches to that host over SSH, so the picker doubles
-as a cross-host jump. `n` works on any host anchor, **including the current
-daemon's**, so it's also the fastest way to spin up a fresh named session right
-where you are; the new session is created when the reconnect lands.
+`Enter` routes by whether the row lives on the daemon you're currently attached
+to. A session on that daemon is a fast in-place switch over the live connection;
+a session (or an anchor) on a **different** daemon does a brief reconnect, the
+live attach tears down and re-attaches to that host over SSH, so the picker
+doubles as a cross-host jump. Note that the current daemon's own anchor has
+nothing to jump to, so `Enter` on it is a no-op that just closes the picker
+rather than reconnecting you to where you already are. `n` works on any host
+anchor, **including the current daemon's**, so it's also the fastest way to spin
+up a fresh named session right where you are; the new session is created when
+the reconnect lands (an empty name is refused, so a bare `n` then `Enter` stays
+in the prompt).
 
 `n` and `x` are actions **only when the filter is empty** and the cursor is on a
 host anchor, otherwise they're ordinary filter input, so typing `nginx`,

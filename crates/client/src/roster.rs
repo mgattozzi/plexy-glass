@@ -118,6 +118,13 @@ pub fn load_adhoc() -> Vec<String> {
 }
 
 pub fn add_adhoc(host: &str) {
+    // A host that's already a configured remote doesn't belong in the ad-hoc
+    // file — `assemble` filters it out at read time anyway, but skipping the
+    // append keeps the file from accumulating configured hosts (and lets one
+    // drop out on the next write once it's promoted to `config.kdl`).
+    if config_remotes().iter().any(|h| h == host) {
+        return;
+    }
     let mut cur = load_adhoc();
     if cur.iter().any(|h| h == host) {
         return;
@@ -188,6 +195,20 @@ mod tests {
         );
         forget_adhoc("existing");
         assert_eq!(load_adhoc(), vec!["new-host".to_string()]);
+    }
+
+    #[test]
+    fn add_adhoc_skips_a_host_thats_already_configured() {
+        // Finding 3: `-H`'ing a host that's already a config `remotes` entry must
+        // NOT append it to the ad-hoc file — `assemble` filters it at read time,
+        // but keeping it out of the file lets it drop out on the next write.
+        set_test_roster(vec!["prod".into()], vec![]);
+        add_adhoc("prod");
+        assert_eq!(
+            load_adhoc(),
+            Vec::<String>::new(),
+            "a configured host is not written into the ad-hoc roster"
+        );
     }
 
     #[test]

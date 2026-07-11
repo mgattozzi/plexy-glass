@@ -89,6 +89,14 @@ pub struct PickerState {
     /// Host names that came from the ad-hoc roster file (not `config.kdl`).
     /// Set by the pump after `new` (Task 5); empty for the local-only picker.
     adhoc: Vec<String>,
+    /// The daemon this client is currently attached to — `None` when attached
+    /// to the LOCAL daemon, `Some(host)` when attached to a remote. Drives
+    /// `accept`: a row on the current daemon fast-switches (`Switch`, no
+    /// reconnect) and the current daemon's own host anchor is a no-op `Cancel`,
+    /// while anything on a DIFFERENT daemon reconnects. Defaults to `None` for
+    /// the `new` (local-only) path; the pump seeds the real value via
+    /// `new_with_current`.
+    current_host: Option<String>,
     filter: String,
     cursor: usize,
     mode: PickerMode,
@@ -99,6 +107,7 @@ impl PickerState {
         Self {
             rows,
             adhoc: Vec::new(),
+            current_host: None,
             filter: String::new(),
             cursor: 0,
             mode: PickerMode::Navigate,
@@ -124,6 +133,7 @@ impl PickerState {
         Self {
             rows,
             adhoc: Vec::new(),
+            current_host: current_host.clone(),
             filter: String::new(),
             cursor,
             mode: PickerMode::Navigate,
@@ -290,6 +300,13 @@ impl PickerState {
                 let PickerMode::Prompting { host, buf } = &self.mode else {
                     return None; // invariant: only reached while Prompting
                 };
+                if buf.is_empty() {
+                    // Refuse an empty-named New: stay in Prompting rather than
+                    // commit `New{name:""}` (which the daemon's `validate_name`
+                    // rejects with `EmptyName`, ejecting the client). The user
+                    // types a name or hits Esc to abandon.
+                    return None;
+                }
                 let outcome = PickerOutcome::New {
                     host: host.clone(),
                     name: buf.clone(),
@@ -313,19 +330,29 @@ impl PickerState {
         }
     }
 
-    /// Enter on the cursor row: a local session switches in place, a remote
-    /// session reconnects, a host row reconnects to that daemon (default
-    /// session). An empty filtered view yields `None` (cursor parked).
+    /// Enter on the cursor row, routed by whether the row belongs to the daemon
+    /// we're already attached to (`row.host == self.current_host`):
+    /// - **Session on the current daemon** → `Switch` (a fast `SwitchSession`
+    ///   over the live transport, no reconnect). Unambiguous: the current daemon
+    ///   is excluded from the roster query, so no other row carries its host.
+    /// - **Session on a different daemon** → `Reconnect` (a full re-attach).
+    /// - **Current daemon's own host anchor** → `Cancel`: you're already here,
+    ///   so Enter on it just closes the picker (no eject, no empty-name attach).
+    /// - **A different daemon's host anchor** → `Reconnect` to that daemon's
+    ///   DEFAULT session (empty `name`, normalized to the daemon default in the
+    ///   pump before it hits the wire).
+    ///
+    /// An empty filtered view yields `None` (cursor parked).
     fn accept(&self) -> Option<PickerOutcome> {
         let row = self.selected()?;
+        let same_daemon = row.host == self.current_host;
         match row.kind {
-            RowKind::Session => match &row.host {
-                Some(host) => Some(PickerOutcome::Reconnect {
-                    host: Some(host.clone()),
-                    name: row.name.clone(),
-                }),
-                None => Some(PickerOutcome::Switch(row.name.clone())),
-            },
+            RowKind::Session if same_daemon => Some(PickerOutcome::Switch(row.name.clone())),
+            RowKind::Session => Some(PickerOutcome::Reconnect {
+                host: row.host.clone(),
+                name: row.name.clone(),
+            }),
+            RowKind::Host if same_daemon => Some(PickerOutcome::Cancel),
             RowKind::Host => Some(PickerOutcome::Reconnect {
                 host: row.host.clone(),
                 name: String::new(),
@@ -739,11 +766,7 @@ mod tests {
     fn x_on_local_anchor_is_a_true_no_op() {
         let mut s = PickerState::new(vec![host_row_local(), session("main", None)]);
         assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
-        assert_eq!(
-            s.handle_key(b'x'),
-            None,
-            "x on the local anchor is a no-op"
-        );
+        assert_eq!(s.handle_key(b'x'), None, "x on the local anchor is a no-op");
         assert_eq!(s.filter(), "", "the no-op does not leak into the filter");
     }
 
@@ -932,5 +955,111 @@ mod tests {
                 name: "api".into()
             })
         );
+    }
+
+    // --- (h) host-aware accept: current-daemon anchor no-ops, other daemons
+    // reconnect, same-daemon sessions fast-switch (Findings 1 + 2) ---
+
+    /// Critical #1: Enter on the CURRENT daemon's own host anchor
+    /// (`host == current_host`) must be a no-op `Cancel`, not a
+    /// `Reconnect{name:""}` that the daemon rejects and ejects the client on.
+    #[test]
+    fn enter_on_current_daemon_anchor_cancels_not_reconnect() {
+        let mut s = PickerState::new_with_current(
+            vec![host_row_local(), session("main", None)],
+            &None,
+            "main",
+        );
+        s.handle_key(0x10); // up → the local anchor (host None == current_host None)
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
+        assert_eq!(
+            s.handle_key(b'\r'),
+            Some(PickerOutcome::Cancel),
+            "Enter on the current daemon's anchor closes the picker; it does NOT reconnect with an empty name"
+        );
+    }
+
+    /// Enter on a DIFFERENT daemon's host anchor reconnects to that daemon's
+    /// default session — `accept` emits an empty `name` (the pump normalizes it
+    /// to the daemon default before the wire; see the pump test).
+    #[test]
+    fn enter_on_other_host_anchor_reconnects_with_empty_name() {
+        let mut s = PickerState::new_with_current(
+            vec![host_row_local(), host_row("prod", RowStatus::Pending)],
+            &None,
+            "main",
+        );
+        s.handle_key(0x0e); // down → prod anchor (host Some("prod") != current None)
+        assert_eq!(s.selected().map(|r| r.name.clone()), Some("prod".into()));
+        assert_eq!(
+            s.handle_key(b'\r'),
+            Some(PickerOutcome::Reconnect {
+                host: Some("prod".into()),
+                name: String::new(),
+            })
+        );
+    }
+
+    /// Finding 2: attached to remote `h`, the current daemon's own sessions are
+    /// tagged `Some("h")`. Picking one must fast-`Switch` (same transport), and
+    /// picking a session on a DIFFERENT daemon must `Reconnect`.
+    #[test]
+    fn attached_remote_same_daemon_switches_other_reconnects() {
+        let host = Some("h".to_string());
+        let mut s = PickerState::new_with_current(
+            vec![
+                host_row("h", RowStatus::Live), // current daemon's anchor (host Some("h"))
+                session("a", Some("h")),        // a session ON the current daemon
+                host_row("other", RowStatus::Pending),
+                session("b", Some("other")), // a session on a DIFFERENT daemon
+            ],
+            &host,
+            "a",
+        );
+        // Cursor parks on "a" (the current session). Same daemon → Switch, not
+        // a full reconnect.
+        assert_eq!(s.selected().map(|r| r.name.clone()), Some("a".into()));
+        assert_eq!(
+            s.handle_key(b'\r'),
+            Some(PickerOutcome::Switch("a".into())),
+            "a session on the daemon we're attached to fast-switches, no reconnect"
+        );
+        s.handle_key(0x0e); // → other anchor
+        s.handle_key(0x0e); // → b
+        assert_eq!(s.selected().map(|r| r.name.clone()), Some("b".into()));
+        assert_eq!(
+            s.handle_key(b'\r'),
+            Some(PickerOutcome::Reconnect {
+                host: Some("other".into()),
+                name: "b".into(),
+            }),
+            "a session on a different daemon reconnects"
+        );
+    }
+
+    /// Critical #1 (source b): `n` then an immediate Enter with an empty buffer
+    /// must NOT commit `New{name:""}` — it stays in `Prompting` so no empty name
+    /// can reach the wire. Typing a real name afterward still commits.
+    #[test]
+    fn n_then_empty_enter_refuses_new_and_stays_prompting() {
+        let mut s = PickerState::new(vec![host_row_local(), session("main", None)]);
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
+        assert_eq!(s.handle_key(b'n'), None, "n opens the prompt");
+        assert_eq!(
+            s.handle_key(b'\r'),
+            None,
+            "Enter on an empty name is refused: no New, no eject"
+        );
+        // Still Prompting — typing a name and committing proves it.
+        for c in "fresh".chars() {
+            assert_eq!(s.handle_key(c as u8), None);
+        }
+        match s.handle_key(b'\r') {
+            Some(PickerOutcome::New { host, name }) => {
+                assert_eq!(host, None);
+                assert_eq!(name, "fresh");
+            }
+            other => panic!("expected New after typing a name, got {other:?}"),
+        }
     }
 }
