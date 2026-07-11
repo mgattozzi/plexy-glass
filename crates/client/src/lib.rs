@@ -226,6 +226,16 @@ pub async fn run(
         )
         .await?;
 
+        // Remember this host in the ad-hoc roster so the session picker can
+        // list it next time, whether this is the initial `-H` attach or a
+        // picker-driven reconnect (`ReconnectTo` loops back through here). Only
+        // fires for a remote; best-effort (`add_adhoc` already swallows its own
+        // write errors). No double-listing: this host becomes `current_target`
+        // for the NEXT picker open, which excludes it from the query set.
+        if let Some(host) = &target.host {
+            roster::add_adhoc(host);
+        }
+
         // Replay probe-window type-ahead now that a pane exists to receive it. These
         // are plain keystrokes: focus/theme/mouse/paste modes are enabled only after
         // the probe, so the post-DA1 tail can't carry those events. Send it as Input.

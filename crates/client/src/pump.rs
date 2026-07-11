@@ -95,13 +95,12 @@ fn parse_color_scheme(b: &[u8]) -> Option<(ColorScheme, usize)> {
 pub enum PumpExit {
     /// The child exited or the daemon closed — the client should quit.
     Ended(ExitStatus),
-    /// (Milestone B) the picker chose a session on a DIFFERENT daemon; the outer
-    /// loop should re-attach. Unused in Milestone A but defined so the pump's
-    /// return type is stable across milestones.
-    #[allow(
-        dead_code,
-        reason = "wired by the outer attach loop; only produced once the picker lands (Milestone B)"
-    )]
+    /// (Milestone B) the picker chose a session on a DIFFERENT daemon (or a new
+    /// one on a host); the outer loop re-attaches (`lib.rs::run`'s `next =
+    /// (reconnect_target, Some(reconnect_name))`). `target.host: None` reconnects
+    /// on the LOCAL daemon; `create_if_missing` is globally `true`
+    /// (`client_attach_smart`), so a fresh `name` creates and an existing one
+    /// attaches — no flag needed here.
     ReconnectTo { target: crate::Target, name: String },
 }
 
@@ -267,21 +266,45 @@ where
                             picker_rx = None;
                         }
                         Some(
-                            PickerOutcome::Reconnect { .. }
-                            | PickerOutcome::New { .. }
-                            | PickerOutcome::Forget { .. },
+                            PickerOutcome::Reconnect { host, name }
+                            | PickerOutcome::New { host, name },
                         ) => {
-                            // TODO(Task 6): route cross-daemon reconnect /
-                            // new-on-host / forget (`PumpExit::ReconnectTo` +
-                            // roster rewrite). Milestone-A local-only rows never
-                            // yield these, so this is currently unreachable; we
-                            // re-render and stay in the picker rather than strand
-                            // a cleared screen if a stray outcome ever appears.
+                            // Cross-daemon jump (Reconnect) or a brand-new
+                            // session on a host (New): hand it back to the outer
+                            // attach loop rather than acting on it here. `host:
+                            // None` re-attaches on the LOCAL daemon; the global
+                            // `create_if_missing = true` means an existing `name`
+                            // attaches and a fresh one creates, so New needs no
+                            // separate flag. `picker`/`picker_rx` are dropped
+                            // along with the rest of `pump`'s state on return.
+                            return Ok(PumpExit::ReconnectTo {
+                                target: Target {
+                                    host,
+                                    remote_bin: None,
+                                    install: false,
+                                },
+                                name,
+                            });
+                        }
+                        Some(PickerOutcome::Forget { host }) => {
+                            // Forget an ad-hoc host: rewrite the roster file,
+                            // then rebuild just the OTHER-daemon rows (the
+                            // current daemon's own anchor + sessions are
+                            // untouched) and restart their query, exactly like
+                            // the initial `OpenSessionPicker` assembly — the
+                            // forgotten host's row (and any already-resolved
+                            // session rows under it) disappears. Stay in the
+                            // picker; do NOT return.
+                            roster::forget_adhoc(&host);
+                            let fresh = build_roster_rows(current_target.host.as_deref());
+                            state.replace_other_rows(&current_target.host, fresh.rows, fresh.adhoc);
                             stdout
                                 .write_all(&state.render())
                                 .await
                                 .map_err(ClientError::Io)?;
                             stdout.flush().await.map_err(ClientError::Io)?;
+                            picker_rx =
+                                Some(spawn_picker_query(fresh.remote_hosts, fresh.query_local));
                             picker = Some((state, current));
                         }
                         None => {
@@ -387,10 +410,38 @@ fn build_picker_rows(sessions: Vec<SessionEntry>, current_host: Option<&str>) ->
         rows.push(session_row(e, current_host.map(String::from)));
     }
 
+    let mut roster_rows = build_roster_rows(current_host);
+    rows.append(&mut roster_rows.rows);
+
+    PickerAssembly {
+        rows,
+        adhoc: roster_rows.adhoc,
+        remote_hosts: roster_rows.remote_hosts,
+        query_local: roster_rows.query_local,
+    }
+}
+
+/// The OTHER-daemon host rows, assembled fresh from the roster: a `local`
+/// Pending anchor when we're attached to a REMOTE (so local is an OTHER
+/// daemon), plus one Pending anchor per roster host in `{config} ∪ ad-hoc`
+/// MINUS `current_host`. This is exactly the second half of
+/// `build_picker_rows` — the current daemon's own anchor + session rows are
+/// never part of this set — factored out so the `x`/Forget rebuild (Task 6)
+/// can re-run it after the roster file changes, without re-fetching or
+/// disturbing the current daemon's rows.
+struct RosterRows {
+    rows: Vec<PickerRow>,
+    adhoc: Vec<String>,
+    remote_hosts: Vec<String>,
+    query_local: bool,
+}
+
+fn build_roster_rows(current_host: Option<&str>) -> RosterRows {
     let roster = roster::assemble(&roster::config_remotes(), &roster::load_adhoc());
     // The local daemon (host `None`) is an OTHER daemon only when we're attached
     // to a remote; attached-local, it IS the current daemon and is excluded.
     let query_local = current_host.is_some();
+    let mut rows = Vec::new();
     if query_local {
         rows.push(PickerRow {
             name: "local".to_string(),
@@ -419,7 +470,7 @@ fn build_picker_rows(sessions: Vec<SessionEntry>, current_host: Option<&str>) ->
         remote_hosts.push(h.host);
     }
 
-    PickerAssembly {
+    RosterRows {
         rows,
         adhoc,
         remote_hosts,
@@ -1034,6 +1085,265 @@ mod tests {
             matches!(status, PumpExit::Ended(ExitStatus::Code(0))),
             "got: {status:?}"
         );
+
+        driver.await.unwrap();
+    }
+
+    // --- Task 6: connect (reconnect / new-on-host / forget) ---
+
+    #[tokio::test]
+    async fn pump_picker_switch_to_different_session_sends_switch_session() {
+        // Baseline (unchanged from Milestone A): Enter on a DIFFERENT local
+        // session sends a real `SwitchSession`, not just a `Redraw` (that's only
+        // the same-session-reselect case, covered above).
+        let (mut server_w, mut client_r) = duplex(64 * 1024);
+        let (mut server_r, mut client_w) = duplex(64 * 1024);
+        let (mut stdin_w, mut stdin_r) = duplex(64);
+        let (mut stdout_r, mut stdout_w) = duplex(64 * 1024);
+        let (_tx, mut resize_rx) = mpsc::channel(4);
+
+        let driver = tokio::spawn(async move {
+            let open = ServerMsg::OpenSessionPicker {
+                sessions: vec![picker_entry("main", 1), picker_entry("build", 0)],
+                current: "main".into(),
+            };
+            let bytes = postcard::to_allocvec(&open).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+
+            read_until_contains(&mut stdout_r, "build", Duration::from_secs(1)).await;
+
+            // Cursor starts on "main" (the current session); move to "build".
+            stdin_w.write_all(b"\x0e").await.unwrap();
+            stdin_w.write_all(b"\r").await.unwrap();
+
+            let frame = time::timeout(Duration::from_secs(2), Codec::read_frame(&mut server_r))
+                .await
+                .expect("timed out waiting for a ClientMsg")
+                .unwrap()
+                .expect("daemon channel closed before a ClientMsg arrived");
+            let msg: ClientMsg = postcard::from_bytes(&frame).unwrap();
+            assert_eq!(msg, ClientMsg::SwitchSession { name: "build".into() });
+
+            let done = ServerMsg::Exited {
+                status: ExitStatus::Code(0),
+            };
+            let bytes = postcard::to_allocvec(&done).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+        });
+
+        let status = pump(
+            &mut client_r,
+            &mut client_w,
+            &mut stdin_r,
+            &mut stdout_w,
+            &mut resize_rx,
+            &Target::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(status, PumpExit::Ended(ExitStatus::Code(0))),
+            "got: {status:?}"
+        );
+
+        driver.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pump_picker_reconnect_returns_reconnect_to() {
+        // The current daemon's OWN sessions are tagged with its (remote) host,
+        // so `accept()` routes Enter on one through `Reconnect`, not `Switch`
+        // (see `picker.rs::accept`) — the simplest way to drive a deterministic
+        // `Reconnect{host,name}` outcome with no real network round trip: the
+        // "sessions" come straight from the fake driver's `OpenSessionPicker`
+        // payload, not a live query. `pump` must hand this back as
+        // `PumpExit::ReconnectTo` rather than act on it.
+        roster::set_test_roster(vec![], vec![]);
+        let target = Target {
+            host: Some("h".into()),
+            remote_bin: None,
+            install: false,
+        };
+
+        let (mut server_w, mut client_r) = duplex(64 * 1024);
+        let (server_r, mut client_w) = duplex(64 * 1024);
+        drop(server_r); // no ClientMsg is expected on this path
+        let (mut stdin_w, mut stdin_r) = duplex(64);
+        let (mut stdout_r, mut stdout_w) = duplex(64 * 1024);
+        let (_tx, mut resize_rx) = mpsc::channel(4);
+
+        // `pump` returns `ReconnectTo` purely from processing stdin — no daemon
+        // round-trip to synchronize on — so a driver that finishes (dropping its
+        // write ends) right after writing the keystroke would race `pump`'s
+        // daemon-closed branch against its stdin-ready branch (a `tokio::spawn`
+        // task ending drops `server_w`/`stdin_w`, which can close before `pump`
+        // gets to the buffered `\r`). Racing `pump` against a driver that parks
+        // in `pending()` after its writes keeps both ends open until `pump`
+        // itself resolves, so the win is deterministic either way.
+        let driver = async {
+            let open = ServerMsg::OpenSessionPicker {
+                sessions: vec![picker_entry("s", 1)],
+                current: "s".into(),
+            };
+            let bytes = postcard::to_allocvec(&open).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+
+            // `new_with_current` parks the cursor on "s" (the current session).
+            read_until_contains(&mut stdout_r, "switch session", Duration::from_secs(1)).await;
+            stdin_w.write_all(b"\r").await.unwrap();
+            pending::<()>().await;
+        };
+
+        let status = tokio::select! {
+            status = pump(
+                &mut client_r,
+                &mut client_w,
+                &mut stdin_r,
+                &mut stdout_w,
+                &mut resize_rx,
+                &target,
+            ) => status.unwrap(),
+            () = driver => unreachable!("driver parks forever after its writes"),
+        };
+        match status {
+            PumpExit::ReconnectTo { target: t, name } => {
+                assert_eq!(t.host.as_deref(), Some("h"));
+                assert_eq!(name, "s");
+            }
+            other => panic!("expected ReconnectTo, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pump_picker_new_on_host_returns_reconnect_to() {
+        // `n` on a remote host's anchor row opens the new-session prompt;
+        // committing it must hand `New{host,name}` back as `ReconnectTo`, same
+        // as `Reconnect` — the global `create_if_missing=true` is what actually
+        // creates the fresh session once the outer loop re-attaches.
+        roster::set_test_roster(vec!["nonexistent.invalid".into()], vec![]);
+
+        let (mut server_w, mut client_r) = duplex(64 * 1024);
+        let (server_r, mut client_w) = duplex(64 * 1024);
+        drop(server_r);
+        let (mut stdin_w, mut stdin_r) = duplex(64);
+        let (mut stdout_r, mut stdout_w) = duplex(64 * 1024);
+        let (_tx, mut resize_rx) = mpsc::channel(4);
+
+        // Same race as `pump_picker_reconnect_returns_reconnect_to`: `New`
+        // returns without a daemon round-trip, so keep `server_w`/`stdin_w`
+        // open until `pump` itself resolves rather than letting a completing
+        // driver task drop them out from under it.
+        let driver = async {
+            let open = ServerMsg::OpenSessionPicker {
+                sessions: vec![picker_entry("main", 1)],
+                current: "main".into(),
+            };
+            let bytes = postcard::to_allocvec(&open).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+
+            read_until_contains(&mut stdout_r, "nonexistent.invalid", Duration::from_secs(1))
+                .await;
+
+            // Cursor starts on "main"; one down-move lands on the host anchor.
+            stdin_w.write_all(b"\x0e").await.unwrap();
+            stdin_w.write_all(b"n").await.unwrap();
+            stdin_w.write_all(b"fresh").await.unwrap();
+            stdin_w.write_all(b"\r").await.unwrap();
+            pending::<()>().await;
+        };
+
+        let local = Target::default();
+        let status = tokio::select! {
+            status = pump(
+                &mut client_r,
+                &mut client_w,
+                &mut stdin_r,
+                &mut stdout_w,
+                &mut resize_rx,
+                &local,
+            ) => status.unwrap(),
+            () = driver => unreachable!("driver parks forever after its writes"),
+        };
+        match status {
+            PumpExit::ReconnectTo { target: t, name } => {
+                assert_eq!(t.host.as_deref(), Some("nonexistent.invalid"));
+                assert_eq!(name, "fresh");
+            }
+            other => panic!("expected ReconnectTo, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pump_picker_forget_removes_host_and_stays_in_picker() {
+        // `x` on an ad-hoc host row rewrites the roster file and rebuilds the
+        // picker's other-daemon rows in place — WITHOUT returning. Prove both:
+        // the forgotten host's row is gone from the next render, and the picker
+        // is still live afterward (Esc still cancels it normally).
+        roster::set_test_roster(vec![], vec!["nonexistent.invalid".into()]);
+
+        let (mut server_w, mut client_r) = duplex(64 * 1024);
+        let (mut server_r, mut client_w) = duplex(64 * 1024);
+        let (mut stdin_w, mut stdin_r) = duplex(64);
+        let (mut stdout_r, mut stdout_w) = duplex(64 * 1024);
+        let (_tx, mut resize_rx) = mpsc::channel(4);
+
+        let driver = tokio::spawn(async move {
+            let open = ServerMsg::OpenSessionPicker {
+                sessions: vec![picker_entry("main", 1)],
+                current: "main".into(),
+            };
+            let bytes = postcard::to_allocvec(&open).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+
+            let first =
+                read_until_contains(&mut stdout_r, "nonexistent.invalid", Duration::from_secs(1))
+                    .await;
+            assert!(String::from_utf8_lossy(&first).contains("(ad-hoc)"));
+
+            // Cursor starts on "main"; one down-move lands on the host anchor.
+            stdin_w.write_all(b"\x0e").await.unwrap();
+            stdin_w.write_all(b"x").await.unwrap();
+
+            let second = read_until_contains(&mut stdout_r, "filter:", Duration::from_secs(1)).await;
+            assert!(
+                !String::from_utf8_lossy(&second).contains("nonexistent.invalid"),
+                "forgotten host's row is gone from the rebuilt rows"
+            );
+
+            // Still in the picker: Esc cancels normally and sends Redraw.
+            stdin_w.write_all(b"\x1b").await.unwrap();
+            let frame = time::timeout(Duration::from_secs(2), Codec::read_frame(&mut server_r))
+                .await
+                .expect("timed out waiting for a ClientMsg")
+                .unwrap()
+                .expect("daemon channel closed before a ClientMsg arrived");
+            let msg: ClientMsg = postcard::from_bytes(&frame).unwrap();
+            assert_eq!(msg, ClientMsg::Redraw);
+
+            let done = ServerMsg::Exited {
+                status: ExitStatus::Code(0),
+            };
+            let bytes = postcard::to_allocvec(&done).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+        });
+
+        let status = pump(
+            &mut client_r,
+            &mut client_w,
+            &mut stdin_r,
+            &mut stdout_w,
+            &mut resize_rx,
+            &Target::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(status, PumpExit::Ended(ExitStatus::Code(0))),
+            "got: {status:?}"
+        );
+
+        // Confirm the roster hook itself is gone, not just the rendered row.
+        assert_eq!(roster::load_adhoc(), Vec::<String>::new());
 
         driver.await.unwrap();
     }

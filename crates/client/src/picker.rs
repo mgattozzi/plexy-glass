@@ -166,6 +166,26 @@ impl PickerState {
         self.adhoc = hosts;
     }
 
+    /// Replace every OTHER-daemon row (anything not the current daemon's own
+    /// anchor/session rows, matched by `host`) with a freshly assembled set —
+    /// the picker's `x`/Forget rebuild (Task 6): the roster changed underneath
+    /// (a host was forgotten), so its host rows — and any already-resolved
+    /// session rows spliced under them — are discarded and replaced with fresh
+    /// `Pending` anchors from the updated roster; the current daemon's own rows
+    /// are untouched. Also refreshes the ad-hoc set (`set_adhoc_hosts`) and
+    /// re-clamps the cursor (mirrors `resolve_host`).
+    pub fn replace_other_rows(
+        &mut self,
+        current_host: &Option<String>,
+        rows: Vec<PickerRow>,
+        adhoc: Vec<String>,
+    ) {
+        self.rows.retain(|r| &r.host == current_host);
+        self.rows.extend(rows);
+        self.adhoc = adhoc;
+        self.clamp();
+    }
+
     /// Rows matching the live filter (case-insensitive substring on the label),
     /// in original order. Every visible row is selectable — headers/dividers are
     /// synthesized at render time and are not rows.
@@ -755,6 +775,42 @@ mod tests {
         s.resolve_host(&Some("prod".into()), RowStatus::Live, vec![live("c")]);
         let names: Vec<_> = s.visible().iter().map(|r| r.name.clone()).collect();
         assert_eq!(names, vec!["prod".to_string(), "c".to_string()]);
+    }
+
+    // --- (g) Task 6: `x`/Forget rebuild ---
+
+    #[test]
+    fn replace_other_rows_drops_other_daemon_rows_and_keeps_current() {
+        // A resolved "prod" (with a spliced session) plus a still-Pending
+        // "scratch" sit alongside the current-local anchor + its own session.
+        // Rebuilding with a fresh (smaller) roster set must drop BOTH old
+        // other-daemon rows — including "prod"'s already-resolved child — and
+        // keep the current daemon's own rows untouched.
+        let mut s = PickerState::new(vec![
+            host_row_local(),
+            session("main", None),
+            host_row("prod", RowStatus::Live),
+            session("api", Some("prod")),
+            host_row("scratch", RowStatus::Pending),
+        ]);
+        s.replace_other_rows(
+            &None,
+            vec![host_row("scratch", RowStatus::Pending)],
+            vec!["scratch".into()],
+        );
+        let names: Vec<_> = s.visible().iter().map(|r| r.name.clone()).collect();
+        assert_eq!(names, vec!["local".to_string(), "main".to_string(), "scratch".to_string()]);
+        assert!(!names.contains(&"prod".to_string()), "forgotten host's row is gone");
+    }
+
+    #[test]
+    fn replace_other_rows_reclamps_a_cursor_that_lost_its_row() {
+        let mut s = PickerState::new(vec![host_row_local(), host_row("prod", RowStatus::Live)]);
+        s.handle_key(0x0e); // cursor -> "prod" (index 1)
+        assert_eq!(s.selected().map(|r| r.name.clone()), Some("prod".into()));
+        s.replace_other_rows(&None, vec![], vec![]);
+        assert_eq!(s.visible().len(), 1, "prod's row was dropped, none replaced it");
+        assert!(s.selected().is_some(), "cursor re-clamped instead of dangling");
     }
 
     #[test]

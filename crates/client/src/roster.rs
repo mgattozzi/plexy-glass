@@ -6,10 +6,15 @@
 #[cfg(test)]
 use std::cell::RefCell;
 use std::collections::HashSet;
+#[cfg(not(test))]
 use std::fs;
-use std::io::{self, Write};
+use std::io;
+#[cfg(not(test))]
+use std::io::Write;
+#[cfg(not(test))]
 use std::path::PathBuf;
 
+#[cfg(not(test))]
 use plexy_glass_daemon::RuntimePaths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +88,7 @@ pub fn config_remotes() -> Vec<String> {
     TEST_ROSTER.with(|c| c.borrow().0.clone())
 }
 
+#[cfg(not(test))]
 fn adhoc_path() -> Option<PathBuf> {
     RuntimePaths::for_current_user()
         .ok()
@@ -129,6 +135,7 @@ pub fn forget_adhoc(host: &str) {
     }
 }
 
+#[cfg(not(test))]
 fn write_adhoc(hosts: &[String]) -> io::Result<()> {
     let Some(p) = adhoc_path() else {
         return Ok(());
@@ -143,9 +150,42 @@ fn write_adhoc(hosts: &[String]) -> io::Result<()> {
     Ok(())
 }
 
+// Under test, `add_adhoc`/`forget_adhoc` must not touch the operator's real
+// ad-hoc roster file (this crate has no per-test isolated HOME/XDG dir the way
+// the daemon crate's `test_env::isolate` gives the persist layer — see
+// `#[cfg(not(test))] adhoc_path` above). Route the write through the same
+// per-thread `TEST_ROSTER` override `load_adhoc` already reads under test, so
+// a pump-level test can seed + forget a host and observe the round trip
+// deterministically.
+// The `io::Result` return never actually errors here (there's no fallible I/O,
+// just a thread_local write) — kept only so this matches the `#[cfg(not(test))]`
+// signature above, which callers (`add_adhoc`/`forget_adhoc`) invoke identically
+// in both configurations.
+#[cfg(test)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "signature must match the #[cfg(not(test))] fallible version callers share"
+)]
+fn write_adhoc(hosts: &[String]) -> io::Result<()> {
+    TEST_ROSTER.with(|c| c.borrow_mut().1 = hosts.to_vec());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn add_adhoc_and_forget_adhoc_round_trip_through_the_test_hook() {
+        // Task 6: `write_adhoc` is cfg(test)-gated to update `TEST_ROSTER`
+        // instead of the real remotes file, so `add_adhoc`/`forget_adhoc` are
+        // safe to call from a test without touching the operator's disk.
+        set_test_roster(vec![], vec!["existing".into()]);
+        add_adhoc("new-host");
+        assert_eq!(load_adhoc(), vec!["existing".to_string(), "new-host".to_string()]);
+        forget_adhoc("existing");
+        assert_eq!(load_adhoc(), vec!["new-host".to_string()]);
+    }
 
     #[test]
     fn assemble_dedups_adhoc_against_configured_and_orders() {
