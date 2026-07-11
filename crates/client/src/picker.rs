@@ -121,10 +121,21 @@ pub enum PickerOutcome {
     /// Nothing chosen; repaint and resume.
     Cancel,
     /// Cross-daemon jump: attach to `host`'s daemon and `name` (the routing —
-    /// `PumpExit::ReconnectTo` — is wired in Task 6).
-    Reconnect { host: Option<String>, name: String },
+    /// `PumpExit::ReconnectTo` — is wired in Task 6). `install` carries the
+    /// picker's persistent `i` toggle through to the reconnect `Target`.
+    Reconnect {
+        host: Option<String>,
+        name: String,
+        install: bool,
+    },
     /// New session `name` on `host`'s daemon (create-if-missing at reconnect).
-    New { host: Option<String>, name: String },
+    /// `install` carries the picker's persistent `i` toggle through to the
+    /// reconnect `Target`.
+    New {
+        host: Option<String>,
+        name: String,
+        install: bool,
+    },
     /// Forget an ad-hoc host from the client-side roster file.
     Forget { host: String },
 }
@@ -160,6 +171,10 @@ pub struct PickerState {
     filter: String,
     cursor: usize,
     mode: PickerMode,
+    /// Persistent connect-with-install toggle (`i`), gated like `n`/`x`: empty
+    /// filter + a host row. Carried into `PickerOutcome::{Reconnect,New}` at
+    /// commit and read by the pump into the reconnect `Target`.
+    install: bool,
     /// The client's terminal size, seeded at build and updated on SIGWINCH, so
     /// `render` can center + size the box. Defaults to 24x80 for unit tests.
     size: PtySize,
@@ -177,6 +192,7 @@ impl PickerState {
             filter: String::new(),
             cursor: 0,
             mode: PickerMode::Navigate,
+            install: false,
             size: PtySize {
                 rows: 24,
                 cols: 80,
@@ -210,6 +226,7 @@ impl PickerState {
             filter: String::new(),
             cursor,
             mode: PickerMode::Navigate,
+            install: false,
             size: PtySize {
                 rows: 24,
                 cols: 80,
@@ -305,6 +322,11 @@ impl PickerState {
         &self.filter
     }
 
+    /// Whether the next host connect provisions the remote binary first.
+    pub const fn install_enabled(&self) -> bool {
+        self.install
+    }
+
     /// Apply one input byte. Returns `Some(outcome)` when the key commits/cancels
     /// the picker, `None` while navigating/filtering/prompting.
     ///
@@ -361,6 +383,20 @@ impl PickerState {
                 }
                 None
             }
+            // `i` toggles the persistent connect-with-install flag, gated
+            // exactly like `n`/`x`: empty filter AND a host row, else it's
+            // ordinary filter input (so `i-0abc` still searches). Unlike `n`/`x`
+            // it never produces an outcome — it flips `self.install` and stays
+            // in Navigate; the toggle is read at `accept`/`New`-commit time.
+            b'i' if self.filter.is_empty() => {
+                match self.selected() {
+                    Some(row) if row.kind == RowKind::Host => {
+                        self.install = !self.install;
+                    }
+                    _ => self.push_filter(b'i'),
+                }
+                None
+            }
             b'x' if self.filter.is_empty() => match self.selected() {
                 Some(row) if row.kind == RowKind::Host => match &row.host {
                     Some(h) if self.is_adhoc(h) => Some(PickerOutcome::Forget { host: h.clone() }),
@@ -400,6 +436,7 @@ impl PickerState {
                 let outcome = PickerOutcome::New {
                     host: host.clone(),
                     name: buf.clone(),
+                    install: self.install,
                 };
                 self.mode = PickerMode::Navigate;
                 Some(outcome)
@@ -441,11 +478,13 @@ impl PickerState {
             RowKind::Session => Some(PickerOutcome::Reconnect {
                 host: row.host.clone(),
                 name: row.name.clone(),
+                install: self.install,
             }),
             RowKind::Host if same_daemon => Some(PickerOutcome::Cancel),
             RowKind::Host => Some(PickerOutcome::Reconnect {
                 host: row.host.clone(),
                 name: String::new(),
+                install: self.install,
             }),
         }
     }
@@ -545,7 +584,7 @@ impl PickerState {
 
         // ---- title / footer / prompt ----
         let title = " plexy-glass ";
-        let footer = footer_hint();
+        let footer = self.footer_hint();
         let prompt = match &self.mode {
             PickerMode::Prompting { host, buf } => {
                 format!("new session on {}: {buf}", host.as_deref().unwrap_or("local"))
@@ -678,11 +717,14 @@ impl PickerState {
         format!("{border}\u{2502}{RESET}{bg}{fg} {shown}{pad} {RESET}{border}\u{2502}{RESET}")
     }
 
-}
-
-/// The picker's footer key-hint string (Phase 1 set; Task 4 extends it).
-fn footer_hint() -> String {
-    " \u{2191}/\u{2193} move \u{00b7} \u{23ce} connect \u{00b7} n new \u{00b7} x forget \u{00b7} esc ".into()
+    /// The picker's footer key-hint string, including the live `i install:
+    /// on/off` toggle state.
+    fn footer_hint(&self) -> String {
+        let ins = if self.install { "on" } else { "off" };
+        format!(
+            " \u{2191}/\u{2193} move \u{00b7} \u{23ce} connect \u{00b7} n new \u{00b7} i install: {ins} \u{00b7} x forget \u{00b7} esc "
+        )
+    }
 }
 
 const RESET: &str = "\x1b[0m";
@@ -921,8 +963,9 @@ mod tests {
         assert!(text.contains("plexy-glass"), "title present");
         assert!(text.contains('\u{2502}'), "box has a vertical border │");
         assert!(text.contains('\u{250c}'), "box has a top-left corner ┌");
-        // Footer key hints (Phase 1 set: no `i install` yet).
+        // Footer key hints, including the `i install:` toggle state.
         assert!(text.contains("connect"), "footer hint");
+        assert!(text.contains("install: off"), "install toggle in footer");
         // No box row exceeds the terminal width. `display_width` returns u16.
         for line in box_lines(&out) {
             assert!(
@@ -1055,7 +1098,7 @@ mod tests {
             assert_eq!(s.handle_key(c as u8), None);
         }
         match s.handle_key(b'\r') {
-            Some(PickerOutcome::New { host, name }) => {
+            Some(PickerOutcome::New { host, name, .. }) => {
                 assert_eq!(host, Some("prod".into()));
                 assert_eq!(name, "newx1");
             }
@@ -1081,7 +1124,7 @@ mod tests {
             assert_eq!(s.handle_key(c as u8), None);
         }
         match s.handle_key(b'\r') {
-            Some(PickerOutcome::New { host, name }) => {
+            Some(PickerOutcome::New { host, name, .. }) => {
                 assert_eq!(host, None, "the local anchor's host is None");
                 assert_eq!(name, "fresh");
             }
@@ -1306,7 +1349,8 @@ mod tests {
             s.handle_key(b'\r'),
             Some(PickerOutcome::Reconnect {
                 host: Some("prod".into()),
-                name: "api".into()
+                name: "api".into(),
+                install: false,
             })
         );
     }
@@ -1350,6 +1394,7 @@ mod tests {
             Some(PickerOutcome::Reconnect {
                 host: Some("prod".into()),
                 name: String::new(),
+                install: false,
             })
         );
     }
@@ -1386,8 +1431,52 @@ mod tests {
             Some(PickerOutcome::Reconnect {
                 host: Some("other".into()),
                 name: "b".into(),
+                install: false,
             }),
             "a session on a different daemon reconnects"
+        );
+    }
+
+    #[test]
+    fn i_toggles_install_gated_like_n_and_x() {
+        // A host-anchored fixture so the cursor sits on a Host row at row 0
+        // (roster_state parks on `main`, a Session row — so it can't be used here).
+        let mut s = PickerState::new(vec![host_row("prod", RowStatus::Live)]);
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
+        assert!(!s.install_enabled());
+        assert_eq!(s.handle_key(b'i'), None);
+        assert!(s.install_enabled(), "i on a host row toggles install");
+        assert_eq!(s.filter(), "", "i did not leak into the filter");
+        assert_eq!(s.handle_key(b'i'), None);
+        assert!(!s.install_enabled(), "i toggles back off");
+    }
+
+    #[test]
+    fn i_on_a_session_row_filters() {
+        // roster_state parks the cursor on `main`, a Session row.
+        let mut s = roster_state();
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Session));
+        assert_eq!(s.handle_key(b'i'), None);
+        assert!(!s.install_enabled(), "i on a session row does not toggle");
+        assert_eq!(s.filter(), "i", "i began a filter");
+    }
+
+    #[test]
+    fn reconnect_carries_the_install_toggle() {
+        let mut s = PickerState::new_with_current(
+            vec![host_row("prod", RowStatus::Pending)],
+            &None,
+            "main",
+        );
+        assert_eq!(s.selected().map(|r| r.name.clone()), Some("prod".into()));
+        s.handle_key(b'i'); // install on
+        assert_eq!(
+            s.handle_key(b'\r'),
+            Some(PickerOutcome::Reconnect {
+                host: Some("prod".into()),
+                name: String::new(),
+                install: true,
+            })
         );
     }
 
@@ -1409,7 +1498,7 @@ mod tests {
             assert_eq!(s.handle_key(c as u8), None);
         }
         match s.handle_key(b'\r') {
-            Some(PickerOutcome::New { host, name }) => {
+            Some(PickerOutcome::New { host, name, .. }) => {
                 assert_eq!(host, None);
                 assert_eq!(name, "fresh");
             }

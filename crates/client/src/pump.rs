@@ -278,8 +278,8 @@ where
                             picker_rx = None;
                         }
                         Some(
-                            PickerOutcome::Reconnect { host, name }
-                            | PickerOutcome::New { host, name },
+                            PickerOutcome::Reconnect { host, name, install }
+                            | PickerOutcome::New { host, name, install },
                         ) => {
                             // Cross-daemon jump (Reconnect) or a brand-new
                             // session on a host (New): hand it back to the outer
@@ -312,7 +312,7 @@ where
                                 target: Target {
                                     host,
                                     remote_bin: None,
-                                    install: false,
+                                    install,
                                 },
                                 name,
                             });
