@@ -2340,7 +2340,7 @@ fn multi_daemon_picker_spans_two_daemons_and_reconnects() {
     // Open the multi-daemon picker.
     sess.send_prefix(b'w');
     assert!(
-        sess.wait_for(b"switch session", Duration::from_secs(15)),
+        sess.wait_for(b"plexy-glass", Duration::from_secs(15)),
         "picker never opened: {}",
         sess.snapshot_str()
     );
@@ -4900,7 +4900,7 @@ fn session_picker_filters_and_switches_through_real_client() {
     // picker rather than the old daemon overlay.
     sess.send_prefix(b'w');
     assert!(
-        sess.wait_for(b"switch session", Duration::from_secs(10)),
+        sess.wait_for(b"plexy-glass", Duration::from_secs(10)),
         "picker title never painted: {}",
         sess.snapshot_str()
     );
@@ -4950,7 +4950,7 @@ fn session_picker_esc_cancels_and_redraws_original_session() {
 
     sess.send_prefix(b'w');
     assert!(
-        sess.wait_for(b"switch session", Duration::from_secs(10)),
+        sess.wait_for(b"plexy-glass", Duration::from_secs(10)),
         "picker title never painted: {}",
         sess.snapshot_str()
     );

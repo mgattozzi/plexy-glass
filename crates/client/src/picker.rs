@@ -16,8 +16,11 @@
 //! hosts get a real, selectable `Host` row (the anchor for `n`/`x`) that doubles
 //! as that host's visible header.
 
+use std::fmt::Write as _;
+
 use plexy_glass_config::PaletteConfig;
-use plexy_glass_emulator::truncate_to_width;
+use plexy_glass_emulator::{display_width, truncate_to_width};
+use plexy_glass_protocol::PtySize;
 use plexy_glass_status::{Rgb, resolve_color};
 
 /// The picker's resolved colors, mapped to the same palette roles the daemon's
@@ -157,10 +160,16 @@ pub struct PickerState {
     filter: String,
     cursor: usize,
     mode: PickerMode,
+    /// The client's terminal size, seeded at build and updated on SIGWINCH, so
+    /// `render` can center + size the box. Defaults to 24x80 for unit tests.
+    size: PtySize,
+    /// Resolved palette colors for the box (Task 1). Defaults to the fixed
+    /// fallback theme; the pump seeds the real one via `set_theme`.
+    theme: PickerTheme,
 }
 
 impl PickerState {
-    pub const fn new(rows: Vec<PickerRow>) -> Self {
+    pub fn new(rows: Vec<PickerRow>) -> Self {
         Self {
             rows,
             adhoc: Vec::new(),
@@ -168,6 +177,13 @@ impl PickerState {
             filter: String::new(),
             cursor: 0,
             mode: PickerMode::Navigate,
+            size: PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            theme: PickerTheme::default(),
         }
     }
 
@@ -194,6 +210,13 @@ impl PickerState {
             filter: String::new(),
             cursor,
             mode: PickerMode::Navigate,
+            size: PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            theme: PickerTheme::default(),
         }
     }
 
@@ -229,6 +252,16 @@ impl PickerState {
     /// assembled (Task 5).
     pub fn set_adhoc_hosts(&mut self, hosts: Vec<String>) {
         self.adhoc = hosts;
+    }
+
+    /// Seed the terminal size (pump, at build) and update it on resize.
+    pub const fn set_size(&mut self, size: PtySize) {
+        self.size = size;
+    }
+
+    /// Seed the resolved palette theme (pump, at build).
+    pub const fn set_theme(&mut self, theme: PickerTheme) {
+        self.theme = theme;
     }
 
     /// Replace every OTHER-daemon row (anything not the current daemon's own
@@ -444,96 +477,271 @@ impl PickerState {
         }
     }
 
-    /// Bytes to draw the picker on the client's own terminal: clear-and-home, a
+    /// Bytes to draw the picker as a centered, palette-themed box on the client's
+    /// own terminal: a clear-and-home, a bordered box sized to `self.size`, a bold
     /// title, the visible rows grouped into sections (a synthesized `local`
-    /// header, remote host rows as their own section anchors, a divider before
-    /// the ad-hoc block), and a filter or new-session prompt line. Headers and
-    /// the divider are synthesized here from the visible rows, never stored.
+    /// header, remote host rows as their own anchors, a full-width `─` divider row
+    /// before the ad-hoc block), a filter/new-session prompt line, and a footer of
+    /// key hints. The cursor is hidden every frame (`\x1b[?25l`); the pump restores
+    /// it on every picker-exit path. Each box row is positioned with one
+    /// `\x1b[{r};{c}H` and carries NO `\r`/`\n`. All width math is saturating so a
+    /// tiny terminal squishes rather than panics.
     pub fn render(&self) -> Vec<u8> {
-        // ponytail: no real terminal-width plumbing into the picker yet (it
-        // renders straight to the client's own tty outside the compositor);
-        // 100 cols covers any realistic session/host label. Revisit if rows
-        // routinely wrap.
-        const MAX_ROW_WIDTH: u16 = 100;
-        let mut out = String::new();
-        out.push_str("\x1b[2J\x1b[H");
-        out.push_str("plexy-glass \u{2014} switch session\r\n\r\n");
+        let cols = self.size.cols.max(1) as usize;
+        let rows = self.size.rows.max(1) as usize;
+        let t = self.theme;
 
+        // Box geometry: near-full-width with a 2-col side margin, centered,
+        // saturating so a tiny terminal squishes rather than panics.
+        let box_w = cols.saturating_sub(4).clamp(1, cols);
+        let box_left = cols.saturating_sub(box_w) / 2;
+        let inner_w = box_w.saturating_sub(2); // minus the two │ borders
+        let text_w = inner_w.saturating_sub(2); // minus one pad each side
+
+        // ---- content interior lines ----
+        let mut lines: Vec<Line> = Vec::new();
         let mut emitted_local = false;
         let mut emitted_divider = false;
         let mut emitted_any = false;
-        for (i, row) in self.visible().into_iter().enumerate() {
+        let visible: Vec<&PickerRow> = self.visible();
+        for (i, row) in visible.iter().enumerate() {
             let is_local = row.host.is_none();
             let is_adhoc = row.host.as_deref().is_some_and(|h| self.is_adhoc(h));
             if is_local && !emitted_local {
-                // A local Host ANCHOR (the current daemon, Task 5) is its own
-                // selectable header, so it needs no synthesized text line; only
-                // a bare local Session block with no anchor (the Milestone A
-                // local-only path) gets the synthesized "local".
                 if row.kind == RowKind::Session {
-                    out.push_str("local\r\n");
+                    lines.push(Line {
+                        glyph: String::new(),
+                        glyph_color: None,
+                        text: "local".into(),
+                        dim: true,
+                        selected: false,
+                        divider: false,
+                    });
                 }
                 emitted_local = true;
             }
             if is_adhoc && emitted_any && !emitted_divider {
-                out.push_str(&"\u{2500}".repeat(28));
-                out.push_str("\r\n");
+                lines.push(Line {
+                    glyph: String::new(),
+                    glyph_color: None,
+                    text: String::new(),
+                    dim: true,
+                    selected: false,
+                    divider: true,
+                });
                 emitted_divider = true;
             }
-
-            let full = self.row_line(row);
-            let line = truncate_to_width(&full, MAX_ROW_WIDTH);
-            if i == self.cursor {
-                out.push_str("\x1b[7m");
-                out.push_str(line);
-                out.push_str("\x1b[0m\r\n");
-            } else {
-                out.push_str(line);
-                out.push_str("\r\n");
-            }
+            let (glyph, gcolor, text) = self.row_parts(row);
+            lines.push(Line {
+                glyph,
+                glyph_color: Some(gcolor),
+                text,
+                dim: false,
+                selected: i == self.cursor,
+                divider: false,
+            });
             emitted_any = true;
         }
 
-        match &self.mode {
+        // ---- title / footer / prompt ----
+        let title = " plexy-glass ";
+        let footer = footer_hint();
+        let prompt = match &self.mode {
             PickerMode::Prompting { host, buf } => {
-                out.push_str("\r\nnew session on ");
-                out.push_str(host.as_deref().unwrap_or("local"));
-                out.push_str(": ");
-                out.push_str(buf);
-                out.push_str("\r\n");
+                format!("new session on {}: {buf}", host.as_deref().unwrap_or("local"))
             }
-            PickerMode::Navigate => {
-                out.push_str("\r\nfilter: ");
-                out.push_str(&self.filter);
-                out.push_str("\r\n");
+            PickerMode::Navigate => format!("filter: {}", self.filter),
+        };
+
+        // Interior rows = content lines + a blank + the prompt line.
+        let mut interior: Vec<Line> = lines;
+        interior.push(Line {
+            glyph: String::new(),
+            glyph_color: None,
+            text: String::new(),
+            dim: false,
+            selected: false,
+            divider: false,
+        });
+        interior.push(Line {
+            glyph: String::new(),
+            glyph_color: None,
+            text: prompt,
+            dim: true,
+            selected: false,
+            divider: false,
+        });
+
+        // Box height clamps to the terminal; content beyond is clipped top-anchored
+        // (no scroll — same unbounded-list limitation as before; realistically few
+        // daemons/sessions). ponytail: scroll-to-follow is future work.
+        let box_h = (interior.len() + 2).min(rows);
+        let content_rows = box_h.saturating_sub(2);
+        interior.truncate(content_rows);
+        let box_top = rows.saturating_sub(box_h) / 2;
+
+        // ---- emit ----
+        let mut out = String::new();
+        out.push_str("\x1b[2J\x1b[H\x1b[?25l"); // clear, home, hide cursor
+        let border = sgr_fg(t.border);
+        for r in 0..box_h {
+            // 1-based absolute position of this box row. Writing to a `String`
+            // is infallible, so the `fmt::Result` is discarded.
+            let _ = write!(out, "\x1b[{};{}H", box_top + r + 1, box_left + 1);
+            if r == 0 {
+                out.push_str(&border);
+                out.push_str(&edge_row(
+                    '\u{250c}',
+                    '\u{2510}',
+                    inner_w,
+                    Some((title, t.title)),
+                    t.border,
+                ));
+                out.push_str(RESET);
+            } else if r == box_h - 1 {
+                out.push_str(&border);
+                out.push_str(&edge_row(
+                    '\u{2514}',
+                    '\u{2518}',
+                    inner_w,
+                    Some((&footer, t.footer)),
+                    t.border,
+                ));
+                out.push_str(RESET);
+            } else {
+                let line = &interior[r - 1];
+                out.push_str(&self.frame_interior(line, inner_w, text_w));
             }
         }
+        out.push_str(RESET);
         out.into_bytes()
     }
 
-    fn row_line(&self, row: &PickerRow) -> String {
+    /// The glyph, its status color, and the label text of a content row — the
+    /// coloring split out of the old `row_line`. Session rows get a 2-space row
+    /// indent baked into the glyph (so `frame_interior`, which renders
+    /// `glyph + " " + text`, indents the whole row without a separate field).
+    fn row_parts(&self, row: &PickerRow) -> (String, Rgb, String) {
+        let color = status_color(&row.status, &self.theme);
         let glyph = status_glyph(&row.status);
         match row.kind {
             RowKind::Host => {
-                let name = &row.name;
-                if row.host.is_none() {
-                    // The current/local daemon anchor: not a configured or
-                    // ad-hoc remote, so no `(tag)`.
-                    format!("{glyph} {name}")
+                let text = if row.host.is_none() {
+                    row.name.clone()
                 } else {
                     let tag = if row.host.as_deref().is_some_and(|h| self.is_adhoc(h)) {
                         "ad-hoc"
                     } else {
                         "configured"
                     };
-                    format!("{glyph} {name}  ({tag})")
-                }
+                    format!("{}  ({tag})", row.name)
+                };
+                (glyph, color, text)
             }
-            RowKind::Session => {
-                let label = &row.label;
-                format!("  {glyph} {label}")
-            }
+            RowKind::Session => (format!("  {glyph}"), color, row.label.clone()),
         }
+    }
+
+    /// Frame one interior line inside `│ … │`, padding to `text_w` on the
+    /// theme's interior bg; the selected row fills its whole width with the
+    /// selection bg. Divider rows draw a full-width `─` run in the border color.
+    fn frame_interior(&self, line: &Line, inner_w: usize, text_w: usize) -> String {
+        let t = self.theme;
+        let border = sgr_fg(t.border);
+        if line.divider {
+            return format!(
+                "{border}\u{2502}{}\u{2502}{RESET}",
+                "\u{2500}".repeat(inner_w)
+            );
+        }
+        // PLAIN content (no SGR) first, so the width math is exact.
+        let plain = if line.glyph.is_empty() {
+            line.text.clone()
+        } else {
+            format!("{} {}", line.glyph, line.text)
+        };
+        let shown = truncate_to_width(&plain, text_w as u16).to_string();
+        let pad = " ".repeat(text_w.saturating_sub(display_width(&shown) as usize));
+        // Style: selection bar, dim (headers/prompt text), or a glyph-colored row
+        // on the interior bg.
+        let (bg, fg) = if line.selected {
+            (sgr_bg(t.selected_bg), sgr_fg(t.interior))
+        } else if line.dim {
+            (sgr_bg(t.interior), sgr_fg(t.footer))
+        } else {
+            (
+                sgr_bg(t.interior),
+                line.glyph_color.map(sgr_fg).unwrap_or_default(),
+            )
+        };
+        // `│` + pad-space + content + pad + `│`, content styled on `bg`.
+        format!("{border}\u{2502}{RESET}{bg}{fg} {shown}{pad} {RESET}{border}\u{2502}{RESET}")
+    }
+
+}
+
+/// The picker's footer key-hint string (Phase 1 set; Task 4 extends it).
+fn footer_hint() -> String {
+    " \u{2191}/\u{2193} move \u{00b7} \u{23ce} connect \u{00b7} n new \u{00b7} x forget \u{00b7} esc ".into()
+}
+
+const RESET: &str = "\x1b[0m";
+
+fn sgr_fg(c: Rgb) -> String {
+    format!("\x1b[38;2;{};{};{}m", c.r, c.g, c.b)
+}
+
+fn sgr_bg(c: Rgb) -> String {
+    format!("\x1b[48;2;{};{};{}m", c.r, c.g, c.b)
+}
+
+/// One interior content line, pre-resolved to (glyph, glyph color, text).
+/// `divider` marks the full-width dashed row; `selected` the cursor bar.
+struct Line {
+    glyph: String,
+    glyph_color: Option<Rgb>,
+    text: String,
+    dim: bool,
+    selected: bool,
+    divider: bool,
+}
+
+/// A top/bottom border row: `corner_l` + a centered label in `─` + `corner_r`.
+/// The label is dropped for a full-width `─` run when it can't fit (a tiny box).
+fn edge_row(
+    corner_l: char,
+    corner_r: char,
+    inner_w: usize,
+    label: Option<(&str, Rgb)>,
+    border: Rgb,
+) -> String {
+    let mut mid = String::new();
+    match label {
+        Some((text, color)) if display_width(text) as usize + 2 <= inner_w => {
+            let text = truncate_to_width(text, inner_w as u16);
+            let pad = inner_w - display_width(text) as usize;
+            let left = pad / 2;
+            let right = pad - left;
+            mid.push_str(&"\u{2500}".repeat(left));
+            mid.push_str(&sgr_fg(color));
+            mid.push_str("\x1b[1m");
+            mid.push_str(text);
+            mid.push_str(RESET);
+            mid.push_str(&sgr_fg(border));
+            mid.push_str(&"\u{2500}".repeat(right));
+        }
+        _ => mid.push_str(&"\u{2500}".repeat(inner_w)),
+    }
+    format!("{corner_l}{mid}{corner_r}")
+}
+
+const fn status_color(status: &RowStatus, t: &PickerTheme) -> Rgb {
+    match status {
+        RowStatus::Live => t.live,
+        RowStatus::Empty => t.empty,
+        RowStatus::Unreachable => t.unreachable,
+        RowStatus::Pending => t.pending,
+        RowStatus::VersionMismatch(_) => t.warn,
     }
 }
 
@@ -553,6 +761,56 @@ mod tests {
     use plexy_glass_config::PaletteConfig;
     use plexy_glass_status::Rgb;
     use std::collections::HashMap;
+    use std::mem::take;
+
+    /// Split the themed render into its visible box rows. **The renderer positions
+    /// each row with `\x1b[{r};{c}H` and emits NO `\r`/`\n`** (Step 3), so ROWS ARE
+    /// DELIMITED BY THE CURSOR-POSITION ESCAPES, not newlines — do not split on
+    /// `\r`/`\n`. This consumes each CSI escape up to its terminating letter: a
+    /// `…H` (cursor position) starts a new row; every other escape (SGR `…m`, erase
+    /// `…J`, hide `…l`) is dropped. The result is the plain visible text per row.
+    fn box_lines(bytes: &[u8]) -> Vec<String> {
+        let s = String::from_utf8(bytes.to_vec()).expect("render output is valid UTF-8");
+        let mut lines = Vec::new();
+        let mut cur = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                let mut ended_h = false;
+                for e in chars.by_ref() {
+                    if e.is_ascii_alphabetic() {
+                        ended_h = e == 'H';
+                        break;
+                    }
+                }
+                if ended_h && !cur.is_empty() {
+                    lines.push(take(&mut cur));
+                }
+            } else if c != '\r' && c != '\n' {
+                cur.push(c);
+            }
+        }
+        if !cur.is_empty() {
+            lines.push(cur);
+        }
+        lines
+    }
+
+    /// The visible box rows joined for `contains(...)` content checks.
+    fn visible_text(bytes: &[u8]) -> String {
+        box_lines(bytes).join("\n")
+    }
+
+    /// Does any box row, once its `│` borders are trimmed, consist solely of `─`?
+    /// That's the configured/ad-hoc divider interior row. The top/bottom border
+    /// rows start with `┌`/`└` (not `│`) and contain corners/title text, so they
+    /// don't match.
+    fn has_divider_row(bytes: &[u8]) -> bool {
+        box_lines(bytes).iter().any(|l| {
+            let t = l.trim_matches('\u{2502}').trim();
+            !t.is_empty() && t.chars().all(|c| c == '\u{2500}')
+        })
+    }
 
     #[test]
     fn theme_resolves_roles_and_falls_back() {
@@ -654,10 +912,31 @@ mod tests {
     }
 
     #[test]
+    fn render_draws_a_bordered_box_with_title_and_footer() {
+        let s = roster_state();
+        let out = s.render();
+        // Cursor hidden every frame.
+        assert!(out.windows(6).any(|w| w == b"\x1b[?25l"), "hides the cursor");
+        let text = visible_text(&out);
+        assert!(text.contains("plexy-glass"), "title present");
+        assert!(text.contains('\u{2502}'), "box has a vertical border │");
+        assert!(text.contains('\u{250c}'), "box has a top-left corner ┌");
+        // Footer key hints (Phase 1 set: no `i install` yet).
+        assert!(text.contains("connect"), "footer hint");
+        // No box row exceeds the terminal width. `display_width` returns u16.
+        for line in box_lines(&out) {
+            assert!(
+                display_width(&line) as usize <= s.size.cols as usize,
+                "line {line:?} within cols"
+            );
+        }
+    }
+
+    #[test]
     fn render_contains_the_title_and_every_visible_row() {
         let s = PickerState::new(vec![session("main", None), session("build", None)]);
-        let text = String::from_utf8(s.render()).expect("render output is valid UTF-8");
-        assert!(text.contains("switch session"));
+        let text = visible_text(&s.render());
+        assert!(text.contains("plexy-glass"), "title");
         assert!(text.contains("main \u{2014} 1 win"));
         assert!(text.contains("build \u{2014} 1 win"));
     }
@@ -667,15 +946,15 @@ mod tests {
     #[test]
     fn render_synthesizes_headers_and_divider() {
         let s = roster_state();
-        let text = String::from_utf8(s.render()).expect("render output is valid UTF-8");
+        let text = visible_text(&s.render());
         assert!(text.contains("local"), "local section header");
         assert!(text.contains("prod"), "configured host row");
         assert!(text.contains("(configured)"), "configured tag");
         assert!(text.contains("scratch"), "ad-hoc host row");
         assert!(text.contains("(ad-hoc)"), "ad-hoc tag");
         assert!(
-            text.contains("\u{2500}\u{2500}\u{2500}\u{2500}"),
-            "divider between configured and ad-hoc"
+            has_divider_row(&s.render()),
+            "divider row between configured and ad-hoc"
         );
     }
 
@@ -688,7 +967,7 @@ mod tests {
         for c in "main".chars() {
             s.handle_key(c as u8);
         }
-        let text = String::from_utf8(s.render()).expect("render output is valid UTF-8");
+        let text = visible_text(&s.render());
         assert!(
             text.contains("local"),
             "local header survives a child-only filter"
@@ -696,7 +975,7 @@ mod tests {
         assert!(!text.contains("(configured)"), "prod filtered out");
         assert!(!text.contains("(ad-hoc)"), "scratch filtered out");
         assert!(
-            !text.contains("\u{2500}\u{2500}"),
+            !has_divider_row(&s.render()),
             "no divider without an ad-hoc block"
         );
     }

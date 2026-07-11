@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use crate::error::ClientError;
-use crate::picker::{PickerOutcome, PickerRow, PickerState, RowKind, RowStatus};
+use crate::picker::{PickerOutcome, PickerRow, PickerState, PickerTheme, RowKind, RowStatus};
 use crate::query::{self, HostStatus};
 use crate::roster::{self, RosterSource};
 use crate::transport::{Connect, Target};
@@ -122,6 +122,7 @@ pub async fn pump<R, W, In, Out>(
     daemon_write: &mut W,
     stdin: &mut In,
     stdout: &mut Out,
+    initial_size: PtySize,
     resize_rx: &mut mpsc::Receiver<PtySize>,
     current_target: &Target,
 ) -> Result<PumpExit, ClientError>
@@ -132,6 +133,9 @@ where
     Out: AsyncWrite + Unpin,
 {
     let mut stdin_buf = BytesMut::with_capacity(STDIN_CHUNK);
+    // The client's live terminal size: seeded at build, updated on SIGWINCH, and
+    // handed to the picker so it can center + size its box.
+    let mut size = initial_size;
     // Cancel-safety: `Codec::read_frame` is `read_exact`-based and NOT
     // cancel-safe. If `select!` drops it mid-frame (because a stdin byte or a
     // resize won the race while a daemon Output frame was still arriving) the
@@ -209,6 +213,8 @@ where
                             &current,
                         );
                         state.set_adhoc_hosts(assembly.adhoc);
+                        state.set_size(size);
+                        state.set_theme(PickerTheme::resolve(&roster::config_palette()));
                         stdout.write_all(&state.render()).await.map_err(ClientError::Io)?;
                         stdout.flush().await.map_err(ClientError::Io)?;
                         picker_rx =
@@ -240,6 +246,9 @@ where
                     let (mut state, current) = picker.take().expect("picker.is_some() checked above");
                     match feed_picker_bytes(&mut state, &chunk) {
                         Some(PickerOutcome::Switch(name)) => {
+                            // Leaving the picker: unhide the cursor it hid each frame.
+                            stdout.write_all(b"\x1b[?25h").await.map_err(ClientError::Io)?;
+                            stdout.flush().await.map_err(ClientError::Io)?;
                             if name == current {
                                 // Reselecting the already-attached session: no
                                 // SwitchSession needed, but the picker already
@@ -262,6 +271,9 @@ where
                             picker_rx = None;
                         }
                         Some(PickerOutcome::Cancel) => {
+                            // Leaving the picker: unhide the cursor it hid each frame.
+                            stdout.write_all(b"\x1b[?25h").await.map_err(ClientError::Io)?;
+                            stdout.flush().await.map_err(ClientError::Io)?;
                             send_client_msg(&mut *daemon_write, &ClientMsg::Redraw).await?;
                             picker_rx = None;
                         }
@@ -289,6 +301,13 @@ where
                             } else {
                                 name
                             };
+                            // Leaving the picker to re-attach: unhide the cursor.
+                            // Load-bearing on the reconnect path — the re-attach
+                            // runs SSH auth in cooked mode reading /dev/tty before
+                            // any daemon frame, so a still-hidden cursor means
+                            // typing an SSH password blind.
+                            stdout.write_all(b"\x1b[?25h").await.map_err(ClientError::Io)?;
+                            stdout.flush().await.map_err(ClientError::Io)?;
                             return Ok(PumpExit::ReconnectTo {
                                 target: Target {
                                     host,
@@ -344,8 +363,14 @@ where
                 }
             }
             // Client -> daemon (resize)
-            Some(size) = resize_rx.recv() => {
+            Some(new_size) = resize_rx.recv() => {
+                size = new_size;
                 send_client_msg(&mut *daemon_write, &ClientMsg::Resize(size)).await?;
+                if let Some((state, _current)) = picker.as_mut() {
+                    state.set_size(size);
+                    stdout.write_all(&state.render()).await.map_err(ClientError::Io)?;
+                    stdout.flush().await.map_err(ClientError::Io)?;
+                }
             }
             // Streaming per-daemon query results (only while the picker is up).
             // `next_status` pends forever when `picker_rx` is None, so this arm
@@ -661,6 +686,15 @@ mod tests {
 
     use super::*;
 
+    fn test_size() -> PtySize {
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
+    }
+
     #[tokio::test]
     async fn pump_writes_output_to_stdout_and_exits_on_exited() {
         let (mut server_w, mut client_r) = duplex(64 * 1024);
@@ -688,6 +722,7 @@ mod tests {
             &mut client_w,
             &mut stdin_r,
             &mut stdout_w,
+            test_size(),
             &mut resize_rx,
             &Target::default(),
         )
@@ -763,6 +798,7 @@ mod tests {
             &mut client_w,
             &mut stdin_r,
             &mut stdout_w,
+            test_size(),
             &mut resize_rx,
             &Target::default(),
         )
@@ -891,7 +927,7 @@ mod tests {
 
             let rendered = read_until_contains(&mut stdout_r, "main", Duration::from_secs(1)).await;
             assert!(
-                String::from_utf8_lossy(&rendered).contains("switch session"),
+                String::from_utf8_lossy(&rendered).contains("plexy-glass"),
                 "picker did not render"
             );
 
@@ -919,6 +955,7 @@ mod tests {
             &mut client_w,
             &mut stdin_r,
             &mut stdout_w,
+            test_size(),
             &mut resize_rx,
             &Target::default(),
         )
@@ -974,6 +1011,7 @@ mod tests {
             &mut client_w,
             &mut stdin_r,
             &mut stdout_w,
+            test_size(),
             &mut resize_rx,
             &Target::default(),
         )
@@ -1076,7 +1114,7 @@ mod tests {
             let rendered =
                 read_until_contains(&mut stdout_r, "\u{26a0}", Duration::from_secs(8)).await;
             let text = String::from_utf8_lossy(&rendered);
-            assert!(text.contains("switch session"), "picker rendered");
+            assert!(text.contains("plexy-glass"), "picker rendered");
             assert!(
                 text.contains("main"),
                 "current daemon's session, tagged local"
@@ -1108,6 +1146,7 @@ mod tests {
             &mut client_w,
             &mut stdin_r,
             &mut stdout_w,
+            test_size(),
             &mut resize_rx,
             &Target::default(),
         )
@@ -1173,6 +1212,7 @@ mod tests {
             &mut client_w,
             &mut stdin_r,
             &mut stdout_w,
+            test_size(),
             &mut resize_rx,
             &Target::default(),
         )
@@ -1231,6 +1271,7 @@ mod tests {
                 &mut client_w,
                 &mut stdin_r,
                 &mut stdout_w,
+                test_size(),
                 &mut resize_rx,
                 &local,
             ) => status.unwrap(),
@@ -1292,6 +1333,7 @@ mod tests {
                 &mut client_w,
                 &mut stdin_r,
                 &mut stdout_w,
+                test_size(),
                 &mut resize_rx,
                 &local,
             ) => status.unwrap(),
@@ -1366,6 +1408,7 @@ mod tests {
             &mut client_w,
             &mut stdin_r,
             &mut stdout_w,
+            test_size(),
             &mut resize_rx,
             &Target::default(),
         )

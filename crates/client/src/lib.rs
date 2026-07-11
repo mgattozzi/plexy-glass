@@ -268,6 +268,7 @@ pub async fn run(
             &mut t.writer,
             &mut stdin,
             &mut stdout,
+            initial_size,
             &mut resize_rx,
             target,
         )
