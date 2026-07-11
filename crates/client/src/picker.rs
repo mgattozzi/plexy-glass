@@ -16,7 +16,64 @@
 //! hosts get a real, selectable `Host` row (the anchor for `n`/`x`) that doubles
 //! as that host's visible header.
 
+use plexy_glass_config::PaletteConfig;
 use plexy_glass_emulator::truncate_to_width;
+use plexy_glass_status::{Rgb, resolve_color};
+
+/// The picker's resolved colors, mapped to the same palette roles the daemon's
+/// `chrome_colors` uses so the box matches every other overlay. Resolved once at
+/// picker build from the client's `cfg.palette`; a role absent from a custom
+/// palette falls back to the fixed kanagawa-dragon default (matching the config
+/// built-in default), so the look is stable across any config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PickerTheme {
+    pub border: Rgb,      // accent
+    pub title: Rgb,       // highlight
+    pub footer: Rgb,      // muted
+    pub interior: Rgb,    // bg_bar
+    pub selected_bg: Rgb, // highlight
+    pub live: Rgb,        // ok
+    pub empty: Rgb,       // muted
+    pub unreachable: Rgb, // alert
+    pub warn: Rgb,        // warn
+    pub pending: Rgb,     // muted
+}
+
+impl PickerTheme {
+    const ACCENT: Rgb = Rgb { r: 0x73, g: 0x7c, b: 0x73 };
+    const HIGHLIGHT: Rgb = Rgb { r: 0xb6, g: 0x92, b: 0x7b };
+    const MUTED: Rgb = Rgb { r: 0xb6, g: 0x92, b: 0x7b };
+    const BG_BAR: Rgb = Rgb { r: 0x28, g: 0x27, b: 0x27 };
+    const ALERT: Rgb = Rgb { r: 0xc4, g: 0x74, b: 0x6e };
+    const WARN: Rgb = Rgb { r: 0xc4, g: 0xb2, b: 0x8a };
+    const OK: Rgb = Rgb { r: 0x87, g: 0xa9, b: 0x87 };
+
+    fn role(palette: &PaletteConfig, name: &str, default: Rgb) -> Rgb {
+        resolve_color(name, palette).unwrap_or(default)
+    }
+
+    pub fn resolve(palette: &PaletteConfig) -> Self {
+        Self {
+            border: Self::role(palette, "accent", Self::ACCENT),
+            title: Self::role(palette, "highlight", Self::HIGHLIGHT),
+            footer: Self::role(palette, "muted", Self::MUTED),
+            interior: Self::role(palette, "bg_bar", Self::BG_BAR),
+            selected_bg: Self::role(palette, "highlight", Self::HIGHLIGHT),
+            live: Self::role(palette, "ok", Self::OK),
+            empty: Self::role(palette, "muted", Self::MUTED),
+            unreachable: Self::role(palette, "alert", Self::ALERT),
+            warn: Self::role(palette, "warn", Self::WARN),
+            pending: Self::role(palette, "muted", Self::MUTED),
+        }
+    }
+}
+
+impl Default for PickerTheme {
+    fn default() -> Self {
+        // An empty palette resolves nothing → all fixed defaults.
+        Self::resolve(&PaletteConfig::default())
+    }
+}
 
 /// Whether a row is a session (attach/switch target) or a remote host (the
 /// `n`/`x` target + the section header for that host's sessions).
@@ -493,6 +550,24 @@ fn status_glyph(status: &RowStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plexy_glass_config::PaletteConfig;
+    use plexy_glass_status::Rgb;
+    use std::collections::HashMap;
+
+    #[test]
+    fn theme_resolves_roles_and_falls_back() {
+        // Empty palette → every role is the fixed default.
+        let d = PickerTheme::resolve(&PaletteConfig::default());
+        assert_eq!(d, PickerTheme::default());
+        assert_eq!(d.border, Rgb { r: 0x73, g: 0x7c, b: 0x73 }); // accent default
+
+        // A palette that overrides `accent` moves only the border.
+        let mut e = HashMap::new();
+        e.insert("accent".to_string(), "#010203".to_string());
+        let t = PickerTheme::resolve(&PaletteConfig { entries: e });
+        assert_eq!(t.border, Rgb { r: 1, g: 2, b: 3 });
+        assert_eq!(t.title, d.title, "unset roles keep their default");
+    }
 
     fn session(name: &str, host: Option<&str>) -> PickerRow {
         PickerRow {

@@ -1135,6 +1135,7 @@ dependencies = [
  "plexy-glass-daemon",
  "plexy-glass-emulator",
  "plexy-glass-protocol",
+ "plexy-glass-status",
  "portable-pty",
  "postcard",
  "serde_json",

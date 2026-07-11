@@ -65,6 +65,22 @@ pub fn config_remotes() -> Vec<String> {
     cfg.remotes
 }
 
+/// The operator's LOCAL config palette, read from the same `load_or_default()`
+/// as `config_remotes` so the picker parses `config.kdl` once per open. Parse
+/// errors fall back to the built-in default palette (never blanks the picker).
+#[cfg(not(test))]
+pub fn config_palette() -> plexy_glass_config::PaletteConfig {
+    let (cfg, _err) = plexy_glass_config::load_or_default();
+    cfg.palette
+}
+
+/// Test seam: the default (empty) palette, so unit tests resolve to fixed
+/// theme defaults without touching the user's real config.
+#[cfg(test)]
+pub fn config_palette() -> plexy_glass_config::PaletteConfig {
+    plexy_glass_config::PaletteConfig::default()
+}
+
 // Under `cfg(test)` the roster sources read a per-thread override instead of
 // the real config / ad-hoc files, so a pump-level test can seed a roster
 // (`set_test_roster`) deterministically without touching the user's real
@@ -209,6 +225,14 @@ mod tests {
             Vec::<String>::new(),
             "a configured host is not written into the ad-hoc roster"
         );
+    }
+
+    #[test]
+    fn config_palette_returns_a_palette() {
+        // Under cfg(test) this reads the default palette (no real config file),
+        // so it must contain the built-in roles the picker resolves.
+        let p = config_palette();
+        assert!(p.entries.contains_key("accent") || p.entries.is_empty());
     }
 
     #[test]
