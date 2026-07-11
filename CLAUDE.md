@@ -53,6 +53,19 @@ scope. If a step is wrong, fix the plan first, then proceed.
 ## Code conventions
 
 - Rust 2024 edition.
+- **Correctness over convenience; make illegal states unrepresentable.** Reach
+  for the type system to encode invariants instead of runtime-checking-and-hoping:
+  newtypes over meaningful primitives (ids, names, dimensions, ratios),
+  `NonZero*` / enums instead of sentinel values, typestate and data-carrying enum
+  variants so a mode only holds the fields it can actually use, and
+  **parse-don't-validate** at every trust boundary (config decode, the wire) so a
+  value is checked once at construction and every downstream consumer receives it
+  by type, never by re-checking. Model the full error space with a structured
+  `Result`, not a stringly one. The recurring bug class in this repo is a
+  *reference stored apart from what it points into* (an index or id kept valid by
+  hand at each mutation site) — encapsulate the reference with its target so the
+  only mutators re-establish the invariant and the accessor returns `&T`, not
+  `Option<&T>`. (Type-design principles adapted from cargo-nextest's `AGENTS.md`.)
 - `cargo clippy --workspace --all-targets -- -D warnings` must pass before
   any task is considered done.
 - The test runner is **cargo-nextest**, not `cargo test`. The **full workspace
@@ -110,7 +123,26 @@ scope. If a step is wrong, fix the plan first, then proceed.
   exact filtersets).
 - No `unwrap`/`expect` in non-test code except for invariants that cannot
   fail (each documented with a one-line `// invariant:` comment).
-- No `#[allow]` annotations without a one-line justification comment.
+- Prefer **`#[expect(lint, reason = "…")]` over `#[allow(lint)]`** — `expect`
+  fails the build if the lint stops firing, so a stale suppression can't rot.
+  Either form still needs a one-line reason; never suppress a lint silently.
+- **Errors are typed and grouped.** Use `thiserror` `#[derive(Error)]`, group
+  variants by category, and carry structured context in fields, not baked into a
+  formatted string — the error's *data* is the API, its `Display` is for humans.
+- **Minimize public surface.** Use `pub(crate)` / `pub(super)` liberally; export
+  from a crate only what another crate genuinely needs.
+- **Wire and on-disk structs are versioned contracts.** For the postcard
+  protocol and any `serde` type: no `#[serde(flatten)]` / `#[serde(untagged)]`
+  (they defeat postcard and make evolution fragile); when you change a wire or
+  persisted struct, bump `PROTOCOL_VERSION` and trace the full compatibility
+  matrix (old client ↔ new daemon and the reverse) before shipping.
+- Build strings with `write!` / `writeln!` into a `String` (via
+  `std::fmt::Write`), not `push_str(&format!(…))` (clippy `format_push_string`).
+- **Hold LLM-authored changes to a higher bar** (from cargo-nextest's `AGENTS.md`:
+  aim higher than humans-alone, ~3x review-to-write). A change isn't done because
+  it compiles and the suite is green — it's done after it's been *adversarially*
+  reviewed; that's what the spec / plan / implementation review fan-outs
+  (Workflows) are for.
 - **Imports, not fully-qualified paths.** Add a `use` at the top of the file and
   refer to the short name — do **not** write fully-qualified paths inline
   (`std::cmp::Ordering::Equal`, `tokio::signal::unix::signal`,
