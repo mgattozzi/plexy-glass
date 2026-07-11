@@ -1405,11 +1405,16 @@ mod tests {
             assert!(String::from_utf8_lossy(&first).contains("(ad-hoc)"));
 
             // Cursor starts on "main"; one down-move lands on the host anchor.
+            // `x` on the ad-hoc host is a Navigate action now (no filter gate).
             stdin_w.write_all(b"\x0e").await.unwrap();
             stdin_w.write_all(b"x").await.unwrap();
 
+            // Wait for a repaint after the forget. The Navigate footer always
+            // carries `install:` (the prompt line no longer says `filter:` when
+            // the filter is empty under the explicit-filter model), so it's the
+            // stable per-render marker to read up to.
             let second =
-                read_until_contains(&mut stdout_r, "filter:", Duration::from_secs(1)).await;
+                read_until_contains(&mut stdout_r, "install:", Duration::from_secs(1)).await;
             assert!(
                 !String::from_utf8_lossy(&second).contains("nonexistent.invalid"),
                 "forgotten host's row is gone from the rebuilt rows"

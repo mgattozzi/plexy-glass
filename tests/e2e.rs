@@ -2405,17 +2405,19 @@ fn multi_daemon_picker_spans_two_daemons_and_reconnects() {
         sess.snapshot_str()
     );
 
-    // Filter to the remote session and reconnect (Enter). Filtering to
-    // "remote-sess" collapses the view to the remote session row(s) regardless of
-    // which host's query resolved first, so the cursor lands on a remote session
-    // deterministically; either remote row reconnects to the same second daemon.
-    sess.send_str("remote-sess");
+    // Filter to the remote session and reconnect. `/` enters the explicit
+    // filter mode; typing "remote-sess" collapses the view to the remote session
+    // row(s) regardless of which host's query resolved first, so the cursor lands
+    // on a remote session deterministically; either remote row reconnects to the
+    // same second daemon. The first Enter ends filter mode; the second reconnects.
+    sess.send_str("/remote-sess");
     assert!(
         sess.wait_for(b"filter: remote-sess", Duration::from_secs(10)),
         "filter did not narrow to the remote session: {}",
         sess.snapshot_str()
     );
-    sess.send(b"\r");
+    sess.send(b"\r"); // end filter mode
+    sess.send(b"\r"); // reconnect to the narrowed selection
 
     // The reconnect re-attached the live client to the SECOND daemon's session,
     // which paints its distinctive pane content — only reachable by actually
@@ -4915,14 +4917,126 @@ fn session_picker_filters_and_switches_through_real_client() {
         sess.snapshot_str()
     );
 
-    // Filter to "beta" (case-insensitive substring on the row label, so this
-    // also excludes "alpha") and commit with Enter.
-    sess.send_str("beta");
-    sess.send(b"\r");
+    // Under the explicit-filter model, `/` enters filter mode; type "beta"
+    // (case-insensitive substring on the row label, so this also excludes
+    // "alpha"). The first Enter ends filter mode (keeping the filter); the
+    // second Enter connects to the narrowed selection.
+    sess.send_str("/beta");
+    assert!(
+        sess.wait_for(b"filter: beta", Duration::from_secs(10)),
+        "filter did not narrow to beta: {}",
+        sess.snapshot_str()
+    );
+    sess.send(b"\r"); // end filter mode
+    sess.send(b"\r"); // switch to the narrowed selection
 
     // The daemon switches this connection in place (same-daemon fast path,
     // `ClientMsg::SwitchSession`) and re-renders beta's own scrollback,
     // including the marker planted before detach.
+    assert!(
+        sess.wait_for(b"BETA_MARKER", Duration::from_secs(10)),
+        "switch never landed on beta's content: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// The regression this whole redesign exists to prevent: in the picker's
+/// Navigate mode `i` is an ACTION (toggle connect-with-install), never typed
+/// into a filter. Drive it over a real daemon: open the picker, press `i`, and
+/// watch the footer flip `install: off` → `install: on` → `off`. Then exercise
+/// the explicit filter mode end to end (`/` → type → Enter ends filtering →
+/// Enter switches). The old model would have typed `i` into a filter here, so
+/// the footer would never flip and a `filter: i` prompt would appear instead —
+/// exactly the bug the per-branch unit tests missed.
+#[test]
+fn session_picker_i_toggles_install_not_filter_over_real_client() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // A second session ("beta") with a distinctive marker, detached but kept
+    // alive in the memory-only daemon, so the filter+switch half has a real
+    // target to land on.
+    {
+        let mut beta = TestSession::builder(&env)
+            .args(&["attach", "-n", "beta"])
+            .start();
+        assert!(
+            beta.wait_ready("beta", Duration::from_secs(20)),
+            "beta session never rendered: {}",
+            beta.snapshot_str()
+        );
+        beta.send_str("echo BETA_MARKER\n");
+        assert!(
+            beta.wait_for(b"BETA_MARKER", Duration::from_secs(10)),
+            "beta session never echoed its marker: {}",
+            beta.snapshot_str()
+        );
+        beta.send_prefix(b'd'); // detach; session persists in the daemon
+        assert!(
+            beta.wait_exit(Duration::from_secs(10)),
+            "beta client did not exit on detach"
+        );
+    }
+
+    // Attach "alpha" — the session we drive the picker from.
+    let mut sess = TestSession::builder(&env)
+        .args(&["attach", "-n", "alpha"])
+        .start();
+    assert!(
+        sess.wait_ready("alpha", Duration::from_secs(20)),
+        "alpha session never rendered: {}",
+        sess.snapshot_str()
+    );
+
+    // Open the picker; the first paint's Navigate footer shows install OFF.
+    sess.send_prefix(b'w');
+    assert!(
+        sess.wait_for(b"plexy-glass", Duration::from_secs(10)),
+        "picker title never painted: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for(b"install: off", Duration::from_secs(10)),
+        "picker footer never painted install: off: {}",
+        sess.snapshot_str()
+    );
+
+    // Press `i`: it must TOGGLE (footer → install: on), NOT type `i` into a
+    // filter. "install: on" is not a substring of "install: off", so this only
+    // matches once the toggle actually flipped.
+    sess.send(b"i");
+    assert!(
+        sess.wait_for(b"install: on", Duration::from_secs(10)),
+        "i did not toggle install on (footer never flipped): {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        !sess.snapshot_str().contains("filter: i"),
+        "i leaked into the filter instead of toggling: {}",
+        sess.snapshot_str()
+    );
+
+    // Press `i` again: back to off (from-offset so we don't match the first
+    // paint's install: off).
+    let before_off = sess.buffer_len();
+    sess.send(b"i");
+    assert!(
+        sess.wait_for_from(before_off, b"install: off", Duration::from_secs(10)),
+        "second i did not toggle install back off: {}",
+        sess.snapshot_str()
+    );
+
+    // Now the explicit filter mode: `/` enters it, type "beta", first Enter ends
+    // filter mode (keeps the filter), second Enter switches to the narrowed row.
+    sess.send(b"/");
+    sess.send_str("beta");
+    assert!(
+        sess.wait_for(b"filter: beta", Duration::from_secs(10)),
+        "/ did not enter filter mode and narrow to beta: {}",
+        sess.snapshot_str()
+    );
+    sess.send(b"\r"); // end filter mode
+    sess.send(b"\r"); // switch to the narrowed selection
     assert!(
         sess.wait_for(b"BETA_MARKER", Duration::from_secs(10)),
         "switch never landed on beta's content: {}",

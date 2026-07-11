@@ -146,13 +146,13 @@ connects. Once the attach lands the host joins your ad-hoc roster, exactly
 like a `-H` attach does, so it's its own anchor the next time you open the
 picker; a host that fails to connect isn't remembered.
 
-The picker's `i` key is the inline alternative to `--install`: with an empty
-filter and the cursor on a host row (an existing anchor or the `＋` row), `i`
-toggles connect-with-install for the *next* host you connect to, shown in the
-footer as `i install: on`/`off`. It runs the same provision-or-update-then-
-attach flow described above, so a host with nothing installed, or one that's
-behind on protocol version, can be reached without dropping to a shell for a
-separate `--install` run first.
+The picker's `i` key is the inline alternative to `--install`: in the picker's
+Navigate mode `i` toggles connect-with-install for the *next* host you connect
+to, shown in the footer as `i install: on`/`off`. The toggle is unconditional —
+it fires regardless of which row the cursor is on or whether a filter is
+applied. It runs the same provision-or-update-then-attach flow described above,
+so a host with nothing installed, or one that's behind on protocol version, can
+be reached without dropping to a shell for a separate `--install` run first.
 
 ## Auth prompts
 

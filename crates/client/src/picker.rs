@@ -144,13 +144,21 @@ pub enum PickerOutcome {
     Forget { host: String },
 }
 
-/// The picker's input sub-mode. In `Navigate`, printables filter and the
-/// cursor moves; `n`/`x` are gated actions (see `handle_navigate`). In
-/// `Prompting`, every printable (including `n`/`x`) types the new session's
+/// The picker's input sub-mode. `Navigate` is **action-first**: letters are
+/// actions (`i` install toggle, `n` new, `x` forget), arrows move, `Enter`
+/// connects, and `/` enters `Filtering` — no key types into the filter here.
+/// `Filtering` is the explicit filter mode: printables edit `self.filter`,
+/// `Enter`/an arrow return to `Navigate` (keeping the filter), `Esc` clears it.
+/// In `Prompting`, every printable (including `n`/`x`) types the new session's
 /// name, `Enter` commits `New`, `Esc` returns to `Navigate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerMode {
     Navigate,
+    /// Explicit filter mode, entered with `/` from `Navigate`. Printables edit
+    /// `self.filter` live; `Enter` returns to `Navigate` keeping the filter; an
+    /// arrow returns to `Navigate` and moves the cursor; `Esc` clears the filter
+    /// and returns to `Navigate`.
+    Filtering,
     Prompting { host: Option<String>, buf: String },
     /// Typing a brand-new ad-hoc ssh target (from the `＋` sentinel row). Enter
     /// with a non-empty `buf` commits `Reconnect`; empty is refused; Esc returns
@@ -179,9 +187,11 @@ pub struct PickerState {
     filter: String,
     cursor: usize,
     mode: PickerMode,
-    /// Persistent connect-with-install toggle (`i`), gated like `n`/`x`: empty
-    /// filter + a host row. Carried into `PickerOutcome::{Reconnect,New}` at
-    /// commit and read by the pump into the reconnect `Target`.
+    /// Persistent connect-with-install toggle, flipped by `i` in `Navigate`
+    /// **unconditionally** (it's a global flag applied to the next host connect,
+    /// not tied to any row or the filter). Carried into
+    /// `PickerOutcome::{Reconnect,New}` at commit and read by the pump into the
+    /// reconnect `Target`.
     install: bool,
     /// The client's terminal size, seeded at build and updated on SIGWINCH, so
     /// `render` can center + size the box. Defaults to 24x80 for unit tests.
@@ -351,10 +361,14 @@ impl PickerState {
         match self.mode {
             PickerMode::Prompting { .. } => self.handle_prompting(byte),
             PickerMode::PromptingHost { .. } => self.handle_prompting_host(byte),
+            PickerMode::Filtering => self.handle_filtering(byte),
             PickerMode::Navigate => self.handle_navigate(byte),
         }
     }
 
+    /// Action-first navigation: letters are ACTIONS, never filter input. `/`
+    /// switches to `Filtering` (the only way to type into the filter). Any key
+    /// that isn't a bound action is a no-op — no implicit filtering.
     fn handle_navigate(&mut self, byte: u8) -> Option<PickerOutcome> {
         match byte {
             0x1b => Some(PickerOutcome::Cancel), // Esc
@@ -375,60 +389,84 @@ impl PickerState {
                 self.move_cursor(-1);
                 None
             } // Ctrl-P / Ctrl-K (up)
+            b'/' => {
+                self.mode = PickerMode::Filtering;
+                None
+            }
+            // `i` toggles the persistent connect-with-install flag
+            // UNCONDITIONALLY — it's a global flag applied to the next host
+            // connect, not tied to the cursor row or the filter. It never
+            // produces an outcome; the toggle is read at `accept`/`New`-commit
+            // time and shown in the footer.
+            b'i' => {
+                self.install = !self.install;
+                None
+            }
+            // `n` opens the new-session prompt only on a host row (the LOCAL
+            // anchor is a `Host` row with `host: None`, so `n` works on the
+            // current daemon too, not just remotes). Anywhere else it's a no-op.
+            b'n' => {
+                if let Some(row) = self.selected()
+                    && row.kind == RowKind::Host
+                {
+                    self.mode = PickerMode::Prompting {
+                        host: row.host.clone(),
+                        buf: String::new(),
+                    };
+                }
+                None
+            }
+            // `x` forgets only an ad-hoc host row; it's a no-op on the local
+            // anchor, on configured hosts, and on session/NewHost rows — there's
+            // nothing to forget on any of those.
+            b'x' => match self.selected() {
+                Some(row) if row.kind == RowKind::Host => match &row.host {
+                    Some(h) if self.is_adhoc(h) => Some(PickerOutcome::Forget { host: h.clone() }),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None, // no implicit filtering: unbound keys do nothing
+        }
+    }
+
+    /// Explicit filter mode (entered with `/`): printables narrow the list live.
+    /// `Enter` returns to `Navigate` keeping the filter; an arrow returns to
+    /// `Navigate` and moves; `Esc` clears the filter and returns to `Navigate`.
+    fn handle_filtering(&mut self, byte: u8) -> Option<PickerOutcome> {
+        match byte {
+            b'\r' => {
+                // Done editing: keep the filter applied and go navigate the
+                // narrowed list.
+                self.mode = PickerMode::Navigate;
+                None
+            }
+            0x0e | 0x0a => {
+                // An arrow ends filter mode AND applies the move (per the model).
+                self.mode = PickerMode::Navigate;
+                self.move_cursor(1);
+                None
+            } // Ctrl-N / Ctrl-J (down)
+            0x10 | 0x0b => {
+                self.mode = PickerMode::Navigate;
+                self.move_cursor(-1);
+                None
+            } // Ctrl-P / Ctrl-K (up)
+            0x1b => {
+                // Esc clears the filter and returns to Navigate (the way to
+                // undo a narrow).
+                self.filter.clear();
+                self.cursor = 0;
+                self.clamp();
+                self.mode = PickerMode::Navigate;
+                None
+            }
             0x7f => {
                 self.filter.pop();
                 self.cursor = 0; // fzf model: editing the filter resets to the top
                 self.clamp();
                 None
             } // Backspace
-            // `n`/`x` are ACTIONS only when the filter is EMPTY and the cursor is
-            // on a host row (matched against `self.selected()` directly, not by
-            // `host` — the LOCAL anchor is a `Host` row with `host: None` and
-            // must be reachable the same as a remote's); otherwise they are
-            // ordinary filter input, so `nginx` / `main` / `prod-x` filter
-            // correctly. `n` opens the new-session prompt for that host —
-            // including the LOCAL anchor, so `n` works on the current daemon too,
-            // not just remotes. `x` forgets the host if it's ad-hoc; it's a
-            // no-op (swallowed, not filtered) on the local anchor and on
-            // configured hosts — there's nothing to forget on either. On a
-            // session row they fall through to filter input (a session row is
-            // not a host row).
-            b'n' if self.filter.is_empty() => {
-                match self.selected() {
-                    Some(row) if row.kind == RowKind::Host => {
-                        self.mode = PickerMode::Prompting {
-                            host: row.host.clone(),
-                            buf: String::new(),
-                        };
-                    }
-                    _ => self.push_filter(b'n'),
-                }
-                None
-            }
-            // `i` toggles the persistent connect-with-install flag, gated
-            // exactly like `n`/`x`: empty filter AND a host row, else it's
-            // ordinary filter input (so `i-0abc` still searches). Unlike `n`/`x`
-            // it never produces an outcome — it flips `self.install` and stays
-            // in Navigate; the toggle is read at `accept`/`New`-commit time.
-            b'i' if self.filter.is_empty() => {
-                match self.selected() {
-                    Some(row) if matches!(row.kind, RowKind::Host | RowKind::NewHost) => {
-                        self.install = !self.install;
-                    }
-                    _ => self.push_filter(b'i'),
-                }
-                None
-            }
-            b'x' if self.filter.is_empty() => match self.selected() {
-                Some(row) if row.kind == RowKind::Host => match &row.host {
-                    Some(h) if self.is_adhoc(h) => Some(PickerOutcome::Forget { host: h.clone() }),
-                    _ => None, // local anchor or configured host: forget is a no-op
-                },
-                _ => {
-                    self.push_filter(b'x');
-                    None
-                }
-            },
             b if b.is_ascii_graphic() || b == b' ' => {
                 self.push_filter(b);
                 None
@@ -663,7 +701,17 @@ impl PickerState {
                 format!("new session on {}: {buf}", host.as_deref().unwrap_or("local"))
             }
             PickerMode::PromptingHost { buf } => format!("connect to host: {buf}"),
-            PickerMode::Navigate => format!("filter: {}", self.filter),
+            PickerMode::Filtering => format!("filter: {}", self.filter),
+            // In Navigate a non-empty filter stays visible (the list is still
+            // narrowed) with a hint that `/` re-enters editing; an empty filter
+            // shows nothing.
+            PickerMode::Navigate => {
+                if self.filter.is_empty() {
+                    String::new()
+                } else {
+                    format!("filter: {}  (/ to edit)", self.filter)
+                }
+            }
         };
 
         // Interior rows = content lines + a blank + the prompt line.
@@ -794,13 +842,24 @@ impl PickerState {
         format!("{border}\u{2502}{RESET}{bg}{fg} {shown}{pad} {RESET}{border}\u{2502}{RESET}")
     }
 
-    /// The picker's footer key-hint string, including the live `i install:
-    /// on/off` toggle state.
+    /// The picker's footer key-hint string, mode-aware: `Navigate` lists the
+    /// action keys (with the live `i install: on/off` toggle state), `Filtering`
+    /// the type-to-narrow hints, and the prompts a confirm/cancel pair.
     fn footer_hint(&self) -> String {
-        let ins = if self.install { "on" } else { "off" };
-        format!(
-            " \u{2191}/\u{2193} move \u{00b7} \u{23ce} connect \u{00b7} n new \u{00b7} i install: {ins} \u{00b7} x forget \u{00b7} esc "
-        )
+        match &self.mode {
+            PickerMode::Filtering => {
+                " type to filter \u{00b7} \u{23ce}/\u{2191}\u{2193} done \u{00b7} esc clear ".into()
+            }
+            PickerMode::Prompting { .. } | PickerMode::PromptingHost { .. } => {
+                " \u{23ce} confirm \u{00b7} esc cancel ".into()
+            }
+            PickerMode::Navigate => {
+                let ins = if self.install { "on" } else { "off" };
+                format!(
+                    " \u{2191}/\u{2193} move \u{00b7} \u{23ce} connect \u{00b7} / filter \u{00b7} n new \u{00b7} i install: {ins} \u{00b7} x forget \u{00b7} esc "
+                )
+            }
+        }
     }
 }
 
@@ -826,7 +885,10 @@ struct Line {
 }
 
 /// A top/bottom border row: `corner_l` + a centered label in `─` + `corner_r`.
-/// The label is dropped for a full-width `─` run when it can't fit (a tiny box).
+/// An over-wide label is **truncated to the interior**, not dropped — a title or
+/// footer must never silently vanish on a narrow box (an 80-col terminal is the
+/// baseline). When the label exactly fills the interior it touches the corners
+/// (no `─` padding); a `None` label is a full-width `─` run.
 fn edge_row(
     corner_l: char,
     corner_r: char,
@@ -836,9 +898,9 @@ fn edge_row(
 ) -> String {
     let mut mid = String::new();
     match label {
-        Some((text, color)) if display_width(text) as usize + 2 <= inner_w => {
+        Some((text, color)) => {
             let text = truncate_to_width(text, inner_w as u16);
-            let pad = inner_w - display_width(text) as usize;
+            let pad = inner_w.saturating_sub(display_width(text) as usize);
             let left = pad / 2;
             let right = pad - left;
             mid.push_str(&"\u{2500}".repeat(left));
@@ -849,7 +911,7 @@ fn edge_row(
             mid.push_str(&sgr_fg(border));
             mid.push_str(&"\u{2500}".repeat(right));
         }
-        _ => mid.push_str(&"\u{2500}".repeat(inner_w)),
+        None => mid.push_str(&"\u{2500}".repeat(inner_w)),
     }
     format!("{corner_l}{mid}{corner_r}")
 }
@@ -1044,8 +1106,12 @@ mod tests {
     #[test]
     fn filter_narrows_rows() {
         let mut s = PickerState::new(vec![session("main", None), session("build", None)]);
+        s.handle_key(b'/'); // enter Filtering — typing is filter input now
         s.handle_key(b'b'); // filter "b" → only "build"
         assert_eq!(s.visible().len(), 1);
+        assert_eq!(s.handle_key(b'\r'), None, "Enter ends filter mode, keeps filter");
+        assert_eq!(s.mode, PickerMode::Navigate);
+        assert_eq!(s.visible().len(), 1, "filter is still applied");
         assert_eq!(
             s.handle_key(b'\r'),
             Some(PickerOutcome::Switch("build".into()))
@@ -1106,6 +1172,7 @@ mod tests {
         // (synthesized from the visible child, not filtered — "main" is not the
         // word "local"), but nothing configured/ad-hoc and no divider.
         let mut s = roster_state();
+        s.handle_key(b'/'); // enter Filtering before typing the query
         for c in "main".chars() {
             s.handle_key(c as u8);
         }
@@ -1140,11 +1207,16 @@ mod tests {
     #[test]
     fn filter_matching_nothing_parks_cursor_and_enter_is_none() {
         let mut s = roster_state();
+        s.handle_key(b'/'); // enter Filtering
         for c in "zzzz".chars() {
             s.handle_key(c as u8);
         }
         assert!(s.visible().is_empty());
         assert_eq!(s.selected(), None);
+        // Enter ends filter mode (empty view kept); back in Navigate, move and
+        // Enter are bounded no-ops over the empty view.
+        s.handle_key(b'\r');
+        assert_eq!(s.mode, PickerMode::Navigate);
         assert_eq!(
             s.handle_key(0x0e),
             None,
@@ -1153,13 +1225,12 @@ mod tests {
         assert_eq!(s.handle_key(b'\r'), None, "Enter parks: no outcome");
     }
 
-    // --- (c) `n`/`x` are NOT stolen while typing a filter ---
+    // --- (c) inside `Filtering`, `n`/`x` are ordinary filter input ---
 
     #[test]
     fn filtering_with_n_narrows_to_nginx() {
         let mut s = PickerState::new(vec![plain("nginx"), plain("build"), plain("prod-x")]);
-        // First `n`: filter empty but the cursor is on a SESSION row, so `n` is
-        // ordinary filter input, not a New action.
+        s.handle_key(b'/'); // enter Filtering; now n is filter input, not an action
         for c in "nginx".chars() {
             assert_eq!(s.handle_key(c as u8), None);
         }
@@ -1171,6 +1242,7 @@ mod tests {
     #[test]
     fn filtering_with_trailing_x_lands_on_prod_x() {
         let mut s = PickerState::new(vec![plain("prod-x"), plain("build")]);
+        s.handle_key(b'/'); // enter Filtering; now x is filter input, not Forget
         for c in "prod-x".chars() {
             assert_eq!(s.handle_key(c as u8), None);
         }
@@ -1537,27 +1609,28 @@ mod tests {
     }
 
     #[test]
-    fn i_toggles_install_gated_like_n_and_x() {
-        // A host-anchored fixture so the cursor sits on a Host row at row 0
-        // (roster_state parks on `main`, a Session row — so it can't be used here).
+    fn i_toggles_install_unconditionally() {
+        // `i` toggles install regardless of the row under the cursor or the
+        // filter — no gate. Prove it flips on and back off.
         let mut s = PickerState::new(vec![host_row("prod", RowStatus::Live)]);
         assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
         assert!(!s.install_enabled());
         assert_eq!(s.handle_key(b'i'), None);
-        assert!(s.install_enabled(), "i on a host row toggles install");
-        assert_eq!(s.filter(), "", "i did not leak into the filter");
+        assert!(s.install_enabled(), "i toggles install on");
+        assert_eq!(s.filter(), "", "i is an action, not filter input");
         assert_eq!(s.handle_key(b'i'), None);
         assert!(!s.install_enabled(), "i toggles back off");
     }
 
     #[test]
-    fn i_on_a_session_row_filters() {
-        // roster_state parks the cursor on `main`, a Session row.
+    fn i_on_a_session_row_toggles_and_does_not_filter() {
+        // roster_state parks the cursor on `main`, a Session row. `i` is an
+        // action in Navigate now, not filter input.
         let mut s = roster_state();
         assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Session));
         assert_eq!(s.handle_key(b'i'), None);
-        assert!(!s.install_enabled(), "i on a session row does not toggle");
-        assert_eq!(s.filter(), "i", "i began a filter");
+        assert!(s.install_enabled(), "i toggles even on a session row");
+        assert_eq!(s.filter(), "", "i did not begin a filter");
     }
 
     #[test]
@@ -1618,6 +1691,7 @@ mod tests {
         assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::NewHost));
         // A filter matching no host still shows the NewHost row.
         let mut s2 = roster_with_newhost();
+        s2.handle_key(b'/'); // enter Filtering before typing the query
         for c in "zzzznomatch".chars() {
             s2.handle_key(c as u8);
         }
@@ -1661,5 +1735,238 @@ mod tests {
             s.handle_key(c as u8);
         }
         assert!(matches!(s.handle_key(b'\r'), Some(PickerOutcome::Reconnect { .. })));
+    }
+
+    // --- (j) explicit-filter input model: Navigate is action-first, `/` enters
+    // an explicit Filtering mode ---
+
+    #[test]
+    fn slash_enters_filtering_and_typing_narrows() {
+        let mut s = PickerState::new(vec![plain("main"), plain("build")]);
+        assert_eq!(s.mode, PickerMode::Navigate);
+        assert_eq!(s.handle_key(b'/'), None);
+        assert_eq!(s.mode, PickerMode::Filtering, "/ enters Filtering");
+        s.handle_key(b'b');
+        assert_eq!(s.filter(), "b");
+        let names: Vec<_> = s.visible().iter().map(|r| r.name.clone()).collect();
+        assert_eq!(names, vec!["build".to_string()], "visible() narrowed");
+    }
+
+    #[test]
+    fn filtering_enter_returns_to_navigate_keeping_filter() {
+        let mut s = PickerState::new(vec![plain("main"), plain("build")]);
+        s.handle_key(b'/');
+        s.handle_key(b'b');
+        assert_eq!(s.handle_key(b'\r'), None);
+        assert_eq!(s.mode, PickerMode::Navigate);
+        assert_eq!(s.filter(), "b", "filter kept after leaving Filtering");
+        assert_eq!(s.visible().len(), 1, "list stays narrowed");
+    }
+
+    #[test]
+    fn filtering_arrow_exits_to_navigate_and_moves() {
+        let mut s = PickerState::new(vec![plain("alpha"), plain("alberta"), plain("beta")]);
+        s.handle_key(b'/');
+        for c in "al".chars() {
+            s.handle_key(c as u8);
+        }
+        assert_eq!(s.visible().len(), 2, "two rows match 'al'");
+        assert_eq!(s.selected().map(|r| r.name.clone()), Some("alpha".into()));
+        assert_eq!(s.handle_key(0x0e), None); // arrow down
+        assert_eq!(s.mode, PickerMode::Navigate, "an arrow ends filter mode");
+        assert_eq!(
+            s.selected().map(|r| r.name.clone()),
+            Some("alberta".into()),
+            "and the cursor moved"
+        );
+    }
+
+    #[test]
+    fn filtering_esc_clears_filter_and_returns_to_navigate() {
+        let mut s = PickerState::new(vec![plain("main"), plain("build")]);
+        s.handle_key(b'/');
+        s.handle_key(b'b');
+        assert_eq!(s.visible().len(), 1);
+        assert_eq!(s.handle_key(0x1b), None);
+        assert_eq!(s.mode, PickerMode::Navigate);
+        assert_eq!(s.filter(), "", "Esc cleared the filter");
+        assert_eq!(s.visible().len(), 2, "list is full again");
+    }
+
+    #[test]
+    fn i_toggles_on_host_session_and_newhost_rows() {
+        // On a host row.
+        let mut s = PickerState::new(vec![host_row("prod", RowStatus::Live)]);
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
+        s.handle_key(b'i');
+        assert!(s.install_enabled(), "i toggles on a host row");
+        assert_eq!(s.filter(), "");
+        // On a session row (roster_state parks on `main`).
+        let mut s = roster_state();
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Session));
+        s.handle_key(b'i');
+        assert!(s.install_enabled(), "i toggles on a session row");
+        assert_eq!(s.filter(), "");
+        // On the `＋` NewHost row.
+        let mut s = roster_with_newhost();
+        let last = s.visible().len() - 1;
+        for _ in 0..last {
+            s.handle_key(0x0e);
+        }
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::NewHost));
+        s.handle_key(b'i');
+        assert!(s.install_enabled(), "i toggles on the ＋ row");
+        assert_eq!(s.filter(), "");
+    }
+
+    #[test]
+    fn bare_unbound_letter_is_a_no_op() {
+        let mut s = roster_state();
+        let before = s.selected().map(|r| r.name.clone());
+        assert_eq!(s.handle_key(b'z'), None, "an unbound letter produces no outcome");
+        assert_eq!(s.filter(), "", "and does not filter");
+        assert_eq!(s.mode, PickerMode::Navigate);
+        assert_eq!(
+            s.selected().map(|r| r.name.clone()),
+            before,
+            "the cursor did not move"
+        );
+        assert!(!s.install_enabled());
+    }
+
+    #[test]
+    fn n_is_action_on_host_and_no_op_elsewhere() {
+        // Session row: no-op.
+        let mut s = roster_state();
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Session));
+        assert_eq!(s.handle_key(b'n'), None);
+        assert_eq!(s.mode, PickerMode::Navigate, "n on a session row is a no-op");
+        assert_eq!(s.filter(), "");
+        // Host row: opens the new-session prompt.
+        s.handle_key(0x0e); // build
+        s.handle_key(0x0e); // prod (host)
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
+        assert_eq!(s.handle_key(b'n'), None);
+        assert!(
+            matches!(s.mode, PickerMode::Prompting { .. }),
+            "n on a host row opens the prompt"
+        );
+        // NewHost row: no-op.
+        let mut s = roster_with_newhost();
+        let last = s.visible().len() - 1;
+        for _ in 0..last {
+            s.handle_key(0x0e);
+        }
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::NewHost));
+        assert_eq!(s.handle_key(b'n'), None);
+        assert_eq!(s.mode, PickerMode::Navigate, "n on the ＋ row is a no-op");
+    }
+
+    #[test]
+    fn x_is_a_no_op_on_session_and_newhost_rows() {
+        // Session row.
+        let mut s = roster_state();
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Session));
+        assert_eq!(s.handle_key(b'x'), None);
+        assert_eq!(s.filter(), "");
+        // NewHost row.
+        let mut s = roster_with_newhost();
+        let last = s.visible().len() - 1;
+        for _ in 0..last {
+            s.handle_key(0x0e);
+        }
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::NewHost));
+        assert_eq!(s.handle_key(b'x'), None);
+        assert_eq!(s.filter(), "");
+    }
+
+    // --- (k) cross-feature combinations: the sequences the old per-branch tests
+    // never drove ---
+
+    #[test]
+    fn filter_then_enter_then_i_toggles_with_filter_intact() {
+        let mut s = PickerState::new(vec![plain("alpha"), plain("beta")]);
+        s.handle_key(b'/');
+        for c in "beta".chars() {
+            s.handle_key(c as u8);
+        }
+        s.handle_key(b'\r'); // end filter mode, filter kept
+        assert_eq!(s.mode, PickerMode::Navigate);
+        assert_eq!(s.visible().len(), 1);
+        s.handle_key(b'i');
+        assert!(s.install_enabled(), "i toggles after leaving Filtering");
+        assert_eq!(s.filter(), "beta", "the filter is intact");
+        assert_eq!(s.visible().len(), 1, "still narrowed");
+    }
+
+    #[test]
+    fn filter_then_arrow_then_x_forgets() {
+        let mut s = PickerState::new(vec![
+            host_row("aardvark", RowStatus::Live),
+            host_row("aarhus", RowStatus::Live),
+        ]);
+        s.set_adhoc_hosts(vec!["aardvark".into(), "aarhus".into()]);
+        s.handle_key(b'/');
+        for c in "aar".chars() {
+            s.handle_key(c as u8);
+        }
+        assert_eq!(s.visible().len(), 2, "both ad-hoc hosts match");
+        s.handle_key(0x0e); // arrow: ends Filtering AND moves to the second row
+        assert_eq!(s.mode, PickerMode::Navigate);
+        assert_eq!(s.selected().map(|r| r.name.clone()), Some("aarhus".into()));
+        assert_eq!(
+            s.handle_key(b'x'),
+            Some(PickerOutcome::Forget {
+                host: "aarhus".into()
+            }),
+            "x is an action in Navigate, forgetting the ad-hoc host under the cursor"
+        );
+    }
+
+    #[test]
+    fn install_on_then_filter_then_connect_carries_install() {
+        let mut s = PickerState::new_with_current(
+            vec![host_row("prod", RowStatus::Live), session("api", Some("prod"))],
+            &None,
+            "main",
+        );
+        s.handle_key(b'i'); // install on, in Navigate
+        assert!(s.install_enabled());
+        s.handle_key(b'/'); // Filtering
+        for c in "api".chars() {
+            s.handle_key(c as u8);
+        }
+        s.handle_key(b'\r'); // end filter mode, filter kept
+        assert_eq!(s.mode, PickerMode::Navigate);
+        assert_eq!(s.selected().map(|r| r.name.clone()), Some("api".into()));
+        assert_eq!(
+            s.handle_key(b'\r'),
+            Some(PickerOutcome::Reconnect {
+                host: Some("prod".into()),
+                name: "api".into(),
+                install: true,
+            }),
+            "connect carries the install toggle set before filtering"
+        );
+    }
+
+    #[test]
+    fn filter_nonmatch_leaves_newhost_selectable() {
+        let mut s = roster_with_newhost();
+        s.handle_key(b'/');
+        for c in "zzznomatch".chars() {
+            s.handle_key(c as u8);
+        }
+        assert_eq!(s.visible().len(), 1, "only the ＋ sentinel survives");
+        assert_eq!(s.visible()[0].kind, RowKind::NewHost);
+        s.handle_key(b'\r'); // end filter mode
+        assert_eq!(s.mode, PickerMode::Navigate);
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::NewHost));
+        assert_eq!(s.handle_key(b'\r'), None, "Enter on ＋ opens the host prompt");
+        assert_eq!(
+            s.mode,
+            PickerMode::PromptingHost { buf: String::new() },
+            "and it is the host prompt"
+        );
     }
 }

@@ -1139,21 +1139,37 @@ pending host just shows `…` until it resolves, and that polish is deferred.
 
 ### Keys
 
+The picker is **action-first**: in the default Navigate mode letters are
+actions, not filter input. Press `/` to enter an explicit filter mode where
+typing narrows the list.
+
+#### Navigate (default)
+
 | Key | Action |
 |---|---|
-| Any printable | Narrow the list (case-insensitive substring on the row) |
-| Backspace | Remove the last filter character |
 | `↓` / `Ctrl+n` / `Ctrl+j` | Move selection down |
 | `↑` / `Ctrl+p` / `Ctrl+k` | Move selection up |
+| `/` | Enter filter mode (type to narrow) |
 | `Enter` on a session on the daemon you're attached to | Switch to it in place (fast, same connection, no reconnect) |
 | `Enter` on a session on another daemon | Reconnect: re-attach this client to that daemon and session |
 | `Enter` on the current daemon's own anchor | No-op; just closes the picker (you're already here) |
 | `Enter` on another daemon's anchor | Reconnect to that daemon's default session |
 | `Enter` on `＋ Connect to a host…` (last row) | Opens a prompt; type an ssh target and `Enter` to connect (remembered as ad-hoc on success) |
-| `n` | New session on the host under the cursor (prompts for a name) |
-| `i` | Toggle connect-with-install for the next host connect (gated on empty filter + a host row, like `n`/`x`) |
-| `x` | Forget the ad-hoc host under the cursor |
+| `n` | New session on the host under the cursor (prompts for a name); no-op off a host row |
+| `i` | Toggle connect-with-install for the next host connect (always, regardless of the cursor row or the filter) |
+| `x` | Forget the ad-hoc host under the cursor; no-op elsewhere |
 | `Esc` | Cancel and return to the current session |
+| Any other key | No-op — letters don't filter here; press `/` first |
+
+#### Filter mode (press `/`)
+
+| Key | Action |
+|---|---|
+| Any printable | Narrow the list (case-insensitive substring on the row) |
+| Backspace | Remove the last filter character |
+| `Enter` | Done: return to Navigate with the filter still applied |
+| `↑` / `↓` / `Ctrl+p` / `Ctrl+n` | Return to Navigate and move the selection |
+| `Esc` | Clear the filter and return to Navigate |
 
 `Enter` routes by whether the row lives on the daemon you're currently attached
 to. A session on that daemon is a fast in-place switch over the live connection;
@@ -1167,15 +1183,18 @@ up a fresh named session right where you are; the new session is created when
 the reconnect lands (an empty name is refused, so a bare `n` then `Enter` stays
 in the prompt).
 
-`n` and `x` are actions **only when the filter is empty** and the cursor is on a
-host anchor, otherwise they're ordinary filter input, so typing `nginx`,
-`prod-x`, or any name that contains them filters normally. `x` only forgets
+`n` and `x` are always actions in Navigate. `n` opens the new-session prompt on
+the host anchor under the cursor and is a no-op anywhere else. `x` only forgets
 **ad-hoc** hosts (removing them from the client-side roster file); it's a no-op
-on configured or local anchors, since those come from `config.kdl` and the live
-connection. Typing narrows the list fzf-style: every keystroke (and every
-backspace) that changes the filter snaps the cursor back to the top match,
-rather than trying to preserve your row position in a list that just got
-shorter or longer.
+on configured or local anchors and on session rows, since those come from
+`config.kdl` and the live connection. To type a name that happens to contain
+`n`, `x`, or `i`, press `/` first: inside filter mode every printable is filter
+input. Filter mode narrows the list fzf-style: every keystroke (and every
+backspace) snaps the cursor back to the top match, rather than trying to
+preserve your row position in a list that just got shorter or longer. The filter
+you type persists after you leave filter mode (the list stays narrowed), so you
+can `/` to narrow, `Enter` to stop typing, then arrow through the matches; `Esc`
+while filtering clears it.
 
 The last row is always `＋ Connect to a host…`, pinned past every section and
 exempt from the filter, so it's reachable even when a search matches nothing
@@ -1187,16 +1206,14 @@ roster exactly like a `-H` attach does, so it shows up as its own anchor the
 next time you open the picker; a host that fails to connect is not
 remembered.
 
-`i` toggles a persistent connect-with-install flag, gated like `n`/`x`: an
-empty filter and the cursor on a host row, otherwise it's ordinary filter
-input. Unlike `n`/`x` it also fires on the `＋` row (where `n`/`x` just filter).
-It applies to the *next* host connect, whether that's
-`Enter` on an existing remote anchor or the target you type into the `＋`
-prompt, and provisions or updates the remote `plexy-glass` binary over SSH
-before attaching, the same effect as `plexy-glass -H host --install` on the
-CLI (see [docs/ssh.md](ssh.md)). The footer shows its current state (`i
-install: on`/`off`) so it's never silently on for a host you didn't mean to
-install to.
+`i` toggles a persistent connect-with-install flag **unconditionally** — it's a
+global toggle, so it fires no matter which row the cursor is on or whether a
+filter is applied. It applies to the *next* host connect, whether that's `Enter`
+on an existing remote anchor or the target you type into the `＋` prompt, and
+provisions or updates the remote `plexy-glass` binary over SSH before attaching,
+the same effect as `plexy-glass -H host --install` on the CLI (see
+[docs/ssh.md](ssh.md)). The footer shows its current state (`i install: on`/`off`)
+so it's never silently on for a host you didn't mean to install to.
 
 ## Choose-tree (`Ctrl+a W`)
 
