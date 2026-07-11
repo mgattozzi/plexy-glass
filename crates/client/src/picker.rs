@@ -84,6 +84,10 @@ impl Default for PickerTheme {
 pub enum RowKind {
     Session,
     Host,
+    /// The `＋ Connect to a host…` sentinel: a selectable row (last, exempt from
+    /// the filter) that opens a prompt for a brand-new ad-hoc ssh target. Only
+    /// present when the pump appends it in `build_roster_rows`.
+    NewHost,
 }
 
 /// Reachability of a host row (session rows are always `Live`). Filled in
@@ -148,6 +152,10 @@ pub enum PickerOutcome {
 pub enum PickerMode {
     Navigate,
     Prompting { host: Option<String>, buf: String },
+    /// Typing a brand-new ad-hoc ssh target (from the `＋` sentinel row). Enter
+    /// with a non-empty `buf` commits `Reconnect`; empty is refused; Esc returns
+    /// to `Navigate`. Distinct from `Prompting`, which names a new session.
+    PromptingHost { buf: String },
 }
 
 /// Filter + cursor over a fixed row list, plus the input sub-mode and the set of
@@ -295,7 +303,12 @@ impl PickerState {
         rows: Vec<PickerRow>,
         adhoc: Vec<String>,
     ) {
-        self.rows.retain(|r| &r.host == current_host);
+        // Drop the stale NewHost sentinel by KIND (not host) before extending:
+        // the fresh `rows` carry their own single sentinel last, and dropping the
+        // old one by host would keep it mid-list on the attached-local path (its
+        // `host: None` matches `current_host == None`).
+        self.rows
+            .retain(|r| r.kind != RowKind::NewHost && &r.host == current_host);
         self.rows.extend(rows);
         self.adhoc = adhoc;
         self.clamp();
@@ -308,7 +321,7 @@ impl PickerState {
         let f = self.filter.to_lowercase();
         self.rows
             .iter()
-            .filter(|r| r.label.to_lowercase().contains(&f))
+            .filter(|r| r.kind == RowKind::NewHost || r.label.to_lowercase().contains(&f))
             .collect()
     }
 
@@ -335,17 +348,25 @@ impl PickerState {
     /// is `\r` (raw mode sends `\r`); `\n` is Ctrl-J (down), pairing with Ctrl-K
     /// (up) as elsewhere in the codebase.
     pub fn handle_key(&mut self, byte: u8) -> Option<PickerOutcome> {
-        if matches!(self.mode, PickerMode::Prompting { .. }) {
-            self.handle_prompting(byte)
-        } else {
-            self.handle_navigate(byte)
+        match self.mode {
+            PickerMode::Prompting { .. } => self.handle_prompting(byte),
+            PickerMode::PromptingHost { .. } => self.handle_prompting_host(byte),
+            PickerMode::Navigate => self.handle_navigate(byte),
         }
     }
 
     fn handle_navigate(&mut self, byte: u8) -> Option<PickerOutcome> {
         match byte {
             0x1b => Some(PickerOutcome::Cancel), // Esc
-            b'\r' => self.accept(),
+            b'\r' => {
+                // The `＋` sentinel opens the host prompt instead of committing;
+                // intercept it here so `accept()` never sees a NewHost row.
+                if matches!(self.selected().map(|r| r.kind), Some(RowKind::NewHost)) {
+                    self.mode = PickerMode::PromptingHost { buf: String::new() };
+                    return None;
+                }
+                self.accept()
+            }
             0x0e | 0x0a => {
                 self.move_cursor(1);
                 None
@@ -356,6 +377,7 @@ impl PickerState {
             } // Ctrl-P / Ctrl-K (up)
             0x7f => {
                 self.filter.pop();
+                self.cursor = 0; // fzf model: editing the filter resets to the top
                 self.clamp();
                 None
             } // Backspace
@@ -390,7 +412,7 @@ impl PickerState {
             // in Navigate; the toggle is read at `accept`/`New`-commit time.
             b'i' if self.filter.is_empty() => {
                 match self.selected() {
-                    Some(row) if row.kind == RowKind::Host => {
+                    Some(row) if matches!(row.kind, RowKind::Host | RowKind::NewHost) => {
                         self.install = !self.install;
                     }
                     _ => self.push_filter(b'i'),
@@ -457,6 +479,48 @@ impl PickerState {
         }
     }
 
+    /// Typing a brand-new ad-hoc ssh target after Enter on the `＋` sentinel.
+    /// Mirrors `handle_prompting`, but a non-empty buf commits `Reconnect` (the
+    /// same outcome the rest of the picker uses to re-attach over SSH), carrying
+    /// the persistent `i` install toggle. An empty buf is refused (stays
+    /// prompting); Esc returns to Navigate.
+    fn handle_prompting_host(&mut self, byte: u8) -> Option<PickerOutcome> {
+        match byte {
+            0x1b => {
+                self.mode = PickerMode::Navigate;
+                None
+            }
+            b'\r' => {
+                let PickerMode::PromptingHost { buf } = &self.mode else {
+                    return None; // invariant: only reached while PromptingHost
+                };
+                if buf.is_empty() {
+                    return None; // refuse an empty host; stay prompting
+                }
+                let outcome = PickerOutcome::Reconnect {
+                    host: Some(buf.clone()),
+                    name: String::new(),
+                    install: self.install,
+                };
+                self.mode = PickerMode::Navigate;
+                Some(outcome)
+            }
+            0x7f => {
+                if let PickerMode::PromptingHost { buf } = &mut self.mode {
+                    buf.pop();
+                }
+                None
+            } // Backspace
+            b if b.is_ascii_graphic() || b == b' ' => {
+                if let PickerMode::PromptingHost { buf } = &mut self.mode {
+                    buf.push(b as char);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// Enter on the cursor row, routed by whether the row belongs to the daemon
     /// we're already attached to (`row.host == self.current_host`):
     /// - **Session on the current daemon** → `Switch` (a fast `SwitchSession`
@@ -486,6 +550,8 @@ impl PickerState {
                 name: String::new(),
                 install: self.install,
             }),
+            // invariant: Enter intercepts NewHost before accept()
+            RowKind::NewHost => None,
         }
     }
 
@@ -495,6 +561,13 @@ impl PickerState {
 
     fn push_filter(&mut self, byte: u8) {
         self.filter.push(byte as char);
+        // fzf model (matching `mux::finder`): editing the filter resets the
+        // cursor to the top of the narrowed view. Without this, a cursor parked
+        // on the current session (or anywhere below row 0) survives the narrow
+        // and can land on the always-visible `＋ Connect to a host…` sentinel —
+        // so filtering to a session and pressing Enter would open the host
+        // prompt instead of switching.
+        self.cursor = 0;
         self.clamp();
     }
 
@@ -589,6 +662,7 @@ impl PickerState {
             PickerMode::Prompting { host, buf } => {
                 format!("new session on {}: {buf}", host.as_deref().unwrap_or("local"))
             }
+            PickerMode::PromptingHost { buf } => format!("connect to host: {buf}"),
             PickerMode::Navigate => format!("filter: {}", self.filter),
         };
 
@@ -678,6 +752,9 @@ impl PickerState {
                 (glyph, color, text)
             }
             RowKind::Session => (format!("  {glyph}"), color, row.label.clone()),
+            // No status glyph — the empty glyph is dropped by `frame_interior`;
+            // the footer color is arbitrary (it won't be drawn).
+            RowKind::NewHost => (String::new(), self.theme.footer, "\u{ff0b} Connect to a host\u{2026}".into()),
         }
     }
 
@@ -911,15 +988,37 @@ mod tests {
         }
     }
 
-    // Two local sessions, a configured host + its session, and an ad-hoc host.
-    fn roster_state() -> PickerState {
-        let mut s = PickerState::new(vec![
+    /// The rows `roster_state` builds on, extracted so the NewHost fixture reuses
+    /// them.
+    fn roster_rows_for_test() -> Vec<PickerRow> {
+        vec![
             session("main", None),
             session("build", None),
             host_row("prod", RowStatus::Live),
             session("api", Some("prod")),
             host_row("scratch", RowStatus::Unreachable),
-        ]);
+        ]
+    }
+
+    // Two local sessions, a configured host + its session, and an ad-hoc host.
+    fn roster_state() -> PickerState {
+        let mut s = PickerState::new(roster_rows_for_test());
+        s.set_adhoc_hosts(vec!["scratch".into()]);
+        s
+    }
+
+    /// `roster_state`'s rows plus a trailing NewHost sentinel — the shape the
+    /// pump assembles (the sentinel appended last in `build_roster_rows`).
+    fn roster_with_newhost() -> PickerState {
+        let mut rows = roster_rows_for_test();
+        rows.push(PickerRow {
+            name: String::new(),
+            label: String::new(),
+            host: None,
+            kind: RowKind::NewHost,
+            status: RowStatus::Live,
+        });
+        let mut s = PickerState::new(rows);
         s.set_adhoc_hosts(vec!["scratch".into()]);
         s
     }
@@ -1504,5 +1603,63 @@ mod tests {
             }
             other => panic!("expected New after typing a name, got {other:?}"),
         }
+    }
+
+    // --- (i) Task 4: the `＋ Connect to a host…` sentinel row ---
+
+    #[test]
+    fn newhost_row_is_selectable_and_survives_filter() {
+        let mut s = roster_with_newhost();
+        // It's the last selectable row.
+        let last = s.visible().len() - 1;
+        for _ in 0..last {
+            s.handle_key(0x0e);
+        }
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::NewHost));
+        // A filter matching no host still shows the NewHost row.
+        let mut s2 = roster_with_newhost();
+        for c in "zzzznomatch".chars() {
+            s2.handle_key(c as u8);
+        }
+        assert_eq!(s2.visible().len(), 1);
+        assert_eq!(s2.visible()[0].kind, RowKind::NewHost);
+    }
+
+    #[test]
+    fn enter_on_newhost_prompts_then_connects_with_install() {
+        let mut s = roster_with_newhost();
+        let last = s.visible().len() - 1;
+        for _ in 0..last {
+            s.handle_key(0x0e);
+        }
+        s.handle_key(b'i'); // install on (NewHost is a host-kind row)
+        assert!(s.install_enabled());
+        assert_eq!(s.handle_key(b'\r'), None, "Enter opens the host prompt");
+        for c in "wsl2".chars() {
+            assert_eq!(s.handle_key(c as u8), None);
+        }
+        assert_eq!(
+            s.handle_key(b'\r'),
+            Some(PickerOutcome::Reconnect {
+                host: Some("wsl2".into()),
+                name: String::new(),
+                install: true,
+            })
+        );
+    }
+
+    #[test]
+    fn empty_host_prompt_is_refused() {
+        let mut s = roster_with_newhost();
+        let last = s.visible().len() - 1;
+        for _ in 0..last {
+            s.handle_key(0x0e);
+        }
+        s.handle_key(b'\r'); // into PromptingHost
+        assert_eq!(s.handle_key(b'\r'), None, "empty host refused, stays prompting");
+        for c in "box".chars() {
+            s.handle_key(c as u8);
+        }
+        assert!(matches!(s.handle_key(b'\r'), Some(PickerOutcome::Reconnect { .. })));
     }
 }

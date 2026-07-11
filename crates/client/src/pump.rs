@@ -507,6 +507,19 @@ fn build_roster_rows(current_host: Option<&str>) -> RosterRows {
         remote_hosts.push(h.host);
     }
 
+    // The `＋ Connect to a host…` sentinel: appended exactly once, last, so it
+    // rides along in both the initial open (`build_picker_rows` appends these
+    // rows) and the Forget rebuild (`replace_other_rows` drops the stale one by
+    // kind first). Exempt from the picker's filter, so it stays reachable when a
+    // search matches nothing.
+    rows.push(PickerRow {
+        name: String::new(),
+        label: String::new(),
+        host: None,
+        kind: RowKind::NewHost,
+        status: RowStatus::Live,
+    });
+
     RosterRows {
         rows,
         adhoc,
@@ -1080,10 +1093,26 @@ mod tests {
             vec!["dev".to_string()],
             "prod (current) excluded"
         );
-        let locals: Vec<_> = a.rows.iter().filter(|r| r.host.is_none()).collect();
+        let locals: Vec<_> = a
+            .rows
+            .iter()
+            .filter(|r| r.host.is_none() && r.kind != RowKind::NewHost)
+            .collect();
         assert_eq!(locals.len(), 1, "one local-other anchor");
         assert_eq!(locals[0].kind, RowKind::Host);
         assert_eq!(locals[0].status, RowStatus::Pending);
+    }
+
+    #[test]
+    fn build_roster_rows_appends_one_newhost_last() {
+        roster::set_test_roster(vec!["prod".into()], vec![]);
+        let a = build_picker_rows(vec![], None);
+        assert_eq!(a.rows.last().map(|r| r.kind), Some(RowKind::NewHost));
+        assert_eq!(
+            a.rows.iter().filter(|r| r.kind == RowKind::NewHost).count(),
+            1,
+            "exactly one sentinel"
+        );
     }
 
     #[tokio::test]
