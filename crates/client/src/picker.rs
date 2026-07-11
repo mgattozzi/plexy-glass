@@ -1706,7 +1706,7 @@ mod tests {
         for _ in 0..last {
             s.handle_key(0x0e);
         }
-        s.handle_key(b'i'); // install on (NewHost is a host-kind row)
+        s.handle_key(b'i'); // install on (i toggles unconditionally in Navigate)
         assert!(s.install_enabled());
         assert_eq!(s.handle_key(b'\r'), None, "Enter opens the host prompt");
         for c in "wsl2".chars() {

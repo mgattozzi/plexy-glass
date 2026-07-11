@@ -115,12 +115,14 @@ the whole UI moves together when you retheme (override these):
 
 - **Pane border rings**: the focused pane uses `highlight`, a marked pane uses
   `warn`, and a pane-swap drag uses `info` (source) / `ok` (target).
-- **Overlay boxes** (help, choose-tree, history, buffers): the border is
-  `accent`, the title `highlight`, the footer `muted`, and the interior
-  `bg_bar`. (The [session picker](#session-picker-ctrla-w) is the one
-  exception: as of protocol v12 it's client-rendered — a flat unstyled list
-  outside the compositor, so it doesn't take the palette. A v11 client still
-  gets the old palette-driven overlay.)
+- **Overlay boxes** (help, choose-tree, history, buffers, and the
+  [session picker](#session-picker-ctrla-w)): the border is `accent`, the title
+  `highlight`, the footer `muted`, and the interior `bg_bar`. The session picker
+  is client-rendered (as of protocol v12, so it renders outside the daemon
+  compositor), but it reads the same roles from the client's own `config.kdl` and
+  draws the same box, so it matches; its status glyphs take `ok` (live) / `warn`
+  (version mismatch) / `alert` (unreachable). A v11 client falls back to the old
+  daemon-rendered overlay.
 - The default status bar puts the **active window tab** on `highlight` so it
   stands apart from the `accent` session pill and the `bg_bar` inactive tabs.
 
