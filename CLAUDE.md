@@ -61,6 +61,19 @@ scope. If a step is wrong, fix the plan first, then proceed.
   `nextest run <name>`) are fine for fast iteration, but they are **not** the
   completion gate; always finish with the full run. nextest does **not** run
   doc-tests; if you add any, also run `cargo test --workspace --doc`.
+- **Test the whole feature, not just its pieces.** When you add or change a
+  feature, cover **all** of its behaviors **and their combinations**, not each
+  branch in isolation. Unit tests that check one key / mode / path at a time can
+  every one pass while the *composed* behavior is wrong — a real miss: every
+  branch of the session picker's key handling was unit-tested green, but no test
+  drove the actual key *sequences* a user types, so a broken input model
+  (letters doubling as both filter input and single-key actions) shipped anyway.
+  Interactive or stateful surfaces (input models, modes, overlays, key/command
+  dispatch) need an **end-to-end test that drives the real sequences through a
+  live daemon** (the `tests/e2e.rs` harness) — exercising mode transitions and
+  cross-feature combinations — on top of the pure-core unit/property tests. If a
+  feature adds a key, verb, or mode, a test must actually **press it in context**
+  and assert the observable result, not just the state-struct branch in isolation.
 - **Property-based testing.** Invariant-rich, pure logic — width/layout math,
   coordinate transforms, encoders/decoders, parsers, projections — gets
   **property tests** alongside example-based ones, using the **hegel** crate
