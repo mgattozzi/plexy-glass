@@ -1647,9 +1647,12 @@ async fn run_connection_verb(ctx: &mut ClientCtx<'_>, keymap: &mut Keymap, verb:
                 // v12+ client renders its own picker; hand it our session list.
                 let sessions = ctx.registry.list().await;
                 let current = ctx.session.name();
-                let _ = ctx.inject_tx.send(RenderInject::Msg(
-                    ServerMsg::OpenSessionPicker { sessions, current },
-                ));
+                let _ = ctx
+                    .inject_tx
+                    .send(RenderInject::Msg(ServerMsg::OpenSessionPicker {
+                        sessions,
+                        current,
+                    }));
             } else {
                 open_session_picker_overlay(ctx.session, ctx.registry).await;
             }

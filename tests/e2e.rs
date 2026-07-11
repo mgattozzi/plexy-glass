@@ -2081,6 +2081,77 @@ fn write_ssh_stub(dir: &Path) {
     }
 }
 
+/// A stub `ssh` for the multi-daemon session picker (`multi_daemon_picker_*`).
+/// It differs from [`write_ssh_stub`] in two ways the picker's roster path needs:
+///
+///  1. It `export`s `PLEXY_GLASS_DIR=<second_root>` before running the remote
+///     command, so the tunneled `plexy-glass bridge` resolves the SECOND daemon
+///     (its runtime + log dirs reroute to `<second_root>`, `paths.rs`) — that is
+///     the whole "two distinct daemons over one loopback stub" trick.
+///  2. It runs the remaining args through `sh -c "$*"` instead of `exec "$@"`.
+///     The picker's roster query builds `Target { remote_bin: None }`, which
+///     takes the `command -v plexy-glass … || exec <cache>` fallback in
+///     `ssh_remote_args`; that fallback is a single `sh -c '…'` argv (not a bare
+///     `<bin> bridge`), so it must be re-parsed by a shell the way real `ssh`
+///     hands its joined command to the remote login shell. `command -v
+///     plexy-glass` then resolves the `plexy-glass` symlink the caller drops on
+///     the stub's `PATH`.
+fn write_multi_daemon_ssh_stub(dir: &Path, second_root: &Path) {
+    fs::create_dir_all(dir).unwrap();
+    let ssh = dir.join("ssh");
+    fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\n\
+             export PLEXY_GLASS_DIR=\"{root}\"\n\
+             while [ \"$1\" = \"-T\" ]; do shift; done\n\
+             shift\n\
+             [ -n \"$PLEXY_SSH_STUB_MARKER\" ] && : > \"$PLEXY_SSH_STUB_MARKER\"\n\
+             exec sh -c \"$*\"\n",
+            root = second_root.display(),
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&ssh, Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// Clone a `TestEnv` and point `PLEXY_GLASS_DIR` at `root`, so a client (and the
+/// daemon it auto-spawns) live in a fully isolated second instance. The returned
+/// guard's `Drop` runs `plexy-glass kill` in *this* env, so it reaps the second
+/// daemon (the base env's guard only reaps the first).
+fn with_instance_dir(base: &TestEnv, root: &Path) -> TestEnv {
+    let mut vars = base.vars.clone();
+    vars.push((
+        "PLEXY_GLASS_DIR".into(),
+        root.to_string_lossy().into_owned(),
+    ));
+    TestEnv { vars }
+}
+
+/// Seed the client-side ad-hoc roster file (`<log_dir>/remotes`) with `hosts`,
+/// at BOTH platform candidate log dirs (macOS `$HOME/Library/Logs/plexy-glass`,
+/// Linux `$XDG_STATE_HOME/plexy-glass`), mirroring [`write_config`]. `isolate_dirs`
+/// overrides both env vars, so this never touches a real roster.
+fn write_adhoc_roster(env: &TestEnv, hosts: &[&str]) {
+    let mut body = hosts.join("\n");
+    body.push('\n');
+    if let Some((_, home)) = env.iter().find(|(k, _)| k == "HOME") {
+        let dir = PathBuf::from(home).join("Library/Logs/plexy-glass");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("remotes"), &body).unwrap();
+    }
+    if let Some((_, state)) = env.iter().find(|(k, _)| k == "XDG_STATE_HOME") {
+        let dir = PathBuf::from(state).join("plexy-glass");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("remotes"), &body).unwrap();
+    }
+}
+
 /// `-H <host> list` over a stubbed `ssh` that execs `plexy-glass bridge`
 /// locally: the client tunnels through the bridge to the daemon and lists it.
 /// Proves the SSH transport + bridge are protocol-transparent, no network.
@@ -2182,6 +2253,188 @@ fn ssh_transport_attach_over_stubbed_ssh() {
     assert!(
         ssh_marker.exists(),
         "ssh stub was never invoked — the -H attach did not use the SSH transport"
+    );
+}
+
+/// The multi-daemon session picker (Milestone B) end to end against TWO real
+/// daemons over the stubbed SSH transport. The stub `export`s
+/// `PLEXY_GLASS_DIR=<second_root>` before running the tunneled command, so every
+/// `-H`/roster connection reaches a SECOND daemon while the local attach reaches
+/// the first — two genuinely distinct daemons on one machine, no network.
+///
+/// It proves the whole feature: the client reads its own `config.kdl` `remotes`
+/// (plus the ad-hoc roster file), assembles a sectioned picker (current daemon +
+/// configured + ad-hoc host anchors with the divider), streams each remote
+/// daemon's session list in over the SSH `bridge`, and `Enter` reconnects the
+/// live attach to the chosen remote session — which paints that daemon's own
+/// distinctive pane content.
+///
+/// Note that BOTH roster hosts (`fakehost`, configured; `wsl2-adhoc`, ad-hoc)
+/// tunnel to the same second daemon here — the stub reroutes every host to
+/// `<second_root>`. That's fine: the test asserts the section/divider structure
+/// and that the remote session streams in and reconnects, not that two remotes
+/// are physically distinct. `wsl2-adhoc` exists so the configured/ad-hoc divider
+/// actually renders (the pure divider logic is unit-tested in `picker.rs`).
+#[test]
+fn multi_daemon_picker_spans_two_daemons_and_reconnects() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // The second daemon's instance root: PLEXY_GLASS_DIR reroutes its runtime +
+    // log dirs here, giving a daemon fully distinct from the base-env one.
+    let second_root = tmp.path().join("second");
+    fs::create_dir_all(&second_root).unwrap();
+    let env2 = with_instance_dir(&env, &second_root);
+
+    // One dir on the picker client's PATH holds BOTH the stub `ssh` and a
+    // `plexy-glass` symlink, so the roster query's `command -v plexy-glass`
+    // fallback (Target { remote_bin: None }) resolves the real test binary.
+    let stub_dir = tmp.path().join("stub");
+    fs::create_dir_all(&stub_dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_plexy-glass");
+    symlink(bin, stub_dir.join("plexy-glass")).unwrap();
+    write_multi_daemon_ssh_stub(&stub_dir, &second_root);
+
+    // The picker client reads its OWN config: one configured remote + one ad-hoc
+    // host (so the configured/ad-hoc divider renders). `isolate_dirs` isolates
+    // both the config dir and the log dir these land in.
+    write_config(&env, "remotes {\n    host \"fakehost\"\n}\n");
+    write_adhoc_roster(&env, &["wsl2-adhoc"]);
+
+    // Stand the SECOND daemon up first (the roster query uses `--no-spawn`, so it
+    // must already exist) with a distinctive session name AND distinctive pane
+    // content — the reconnect discriminator, which the session LIST alone can't
+    // carry.
+    let mut remote = TestSession::builder(&env2)
+        .args(&["attach", "-n", "remote-sess"])
+        .start();
+    assert!(
+        remote.wait_ready("remote-sess", Duration::from_secs(20)),
+        "second daemon never rendered: {}",
+        remote.snapshot_str()
+    );
+    // Quote-concatenation: the unbroken marker only exists in the shell's
+    // executed output, never in the typed line's PTY echo.
+    remote.send_str("printf 'REMOTE_''DAEMON_MARK\\n'\n");
+    assert!(
+        remote.wait_for(b"REMOTE_DAEMON_MARK", Duration::from_secs(10)),
+        "second daemon never ran the marker command: {}",
+        remote.snapshot_str()
+    );
+
+    // The LOCAL picker client. The stub `ssh` is on its PATH (so the roster query
+    // and the reconnect tunnel through it); the marker file proves SSH was used.
+    let ssh_marker = tmp.path().join("ssh_stub_ran");
+    let mut sess = TestSession::builder(&env)
+        .path_prepend(&stub_dir)
+        .env("PLEXY_SSH_STUB_MARKER", ssh_marker.to_str().unwrap())
+        .start();
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "first daemon never rendered: {}",
+        sess.snapshot_str()
+    );
+
+    // Open the multi-daemon picker.
+    sess.send_prefix(b'w');
+    assert!(
+        sess.wait_for(b"switch session", Duration::from_secs(15)),
+        "picker never opened: {}",
+        sess.snapshot_str()
+    );
+
+    // The LOCAL daemon's own session ("main") renders under the local anchor on
+    // the FIRST paint — the current daemon's sessions come straight off
+    // `OpenSessionPicker` (no query round-trip needed), so this doesn't race the
+    // streaming remote resolve below. Matches the exact row label
+    // (`session_row` in `crates/client/src/pump.rs`), not just the bare name, so
+    // this can't be satisfied by "main" leaking in from the pre-picker status bar.
+    assert!(
+        sess.wait_for(
+            "main \u{2014} 1 win, 1 panes, 1 clients".as_bytes(),
+            Duration::from_secs(10)
+        ),
+        "local daemon's session row missing from the picker: {}",
+        sess.snapshot_str()
+    );
+
+    // Both host sections + the divider render on the FIRST paint (the anchors are
+    // Pending until the query resolves; the sectioning is immediate).
+    assert!(
+        sess.wait_for(b"fakehost", Duration::from_secs(10)),
+        "configured host anchor missing: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for(b"(configured)", Duration::from_secs(10)),
+        "configured tag missing: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for(b"wsl2-adhoc", Duration::from_secs(10)),
+        "ad-hoc host anchor missing: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for(b"(ad-hoc)", Duration::from_secs(10)),
+        "ad-hoc tag missing: {}",
+        sess.snapshot_str()
+    );
+    let divider = "\u{2500}".repeat(28);
+    assert!(
+        sess.wait_for(divider.as_bytes(), Duration::from_secs(10)),
+        "configured/ad-hoc divider missing: {}",
+        sess.snapshot_str()
+    );
+
+    // The streaming per-host query reaches the SECOND daemon over the SSH bridge
+    // and splices its session in — proof the cross-daemon query round-trips.
+    assert!(
+        sess.wait_for(b"remote-sess", Duration::from_secs(15)),
+        "remote daemon's session never streamed into the picker: {}",
+        sess.snapshot_str()
+    );
+
+    // The query carried the session LIST, not pane content: the reconnect
+    // discriminator must NOT be present yet.
+    assert!(
+        !sess.snapshot_str().contains("REMOTE_DAEMON_MARK"),
+        "pane content leaked into the picker before any reconnect: {}",
+        sess.snapshot_str()
+    );
+
+    // Filter to the remote session and reconnect (Enter). Filtering to
+    // "remote-sess" collapses the view to the remote session row(s) regardless of
+    // which host's query resolved first, so the cursor lands on a remote session
+    // deterministically; either remote row reconnects to the same second daemon.
+    sess.send_str("remote-sess");
+    assert!(
+        sess.wait_for(b"filter: remote-sess", Duration::from_secs(10)),
+        "filter did not narrow to the remote session: {}",
+        sess.snapshot_str()
+    );
+    sess.send(b"\r");
+
+    // The reconnect re-attached the live client to the SECOND daemon's session,
+    // which paints its distinctive pane content — only reachable by actually
+    // reconnecting, not from the picker's session-list query.
+    assert!(
+        sess.wait_for(b"REMOTE_DAEMON_MARK", Duration::from_secs(20)),
+        "reconnect never painted the remote daemon's pane: {}",
+        sess.snapshot_str()
+    );
+
+    // The stub `ssh` was exec'd at least once (the marker is touched by every
+    // invocation, including the earlier roster query, so this alone doesn't
+    // isolate the reconnect step — the `REMOTE_DAEMON_MARK` assertion above is
+    // the real proof the reconnect itself went over the stubbed transport).
+    // This is a cheap sanity check that the SSH transport was exercised at all,
+    // not a silent local fallthrough for the whole test.
+    assert!(
+        ssh_marker.exists(),
+        "ssh stub was never invoked — the picker query/reconnect did not use the SSH transport"
     );
 }
 

@@ -118,9 +118,7 @@ impl PickerState {
         let cursor = rows
             .iter()
             .position(|r| {
-                r.kind == RowKind::Session
-                    && r.host == *current_host
-                    && r.name == current_session
+                r.kind == RowKind::Session && r.host == *current_host && r.name == current_session
             })
             .unwrap_or(0);
         Self {
@@ -240,26 +238,35 @@ impl PickerState {
                 None
             } // Backspace
             // `n`/`x` are ACTIONS only when the filter is EMPTY and the cursor is
-            // on a host row; otherwise they are ordinary filter input, so
-            // `nginx` / `main` / `prod-x` filter correctly. `n` opens the
-            // new-session prompt for that host; `x` forgets it if it's ad-hoc
-            // (a no-op on local/configured). On a session row they fall through
-            // to filter input (a session row is not a host row).
+            // on a host row (matched against `self.selected()` directly, not by
+            // `host` — the LOCAL anchor is a `Host` row with `host: None` and
+            // must be reachable the same as a remote's); otherwise they are
+            // ordinary filter input, so `nginx` / `main` / `prod-x` filter
+            // correctly. `n` opens the new-session prompt for that host —
+            // including the LOCAL anchor, so `n` works on the current daemon too,
+            // not just remotes. `x` forgets the host if it's ad-hoc; it's a
+            // no-op (swallowed, not filtered) on the local anchor and on
+            // configured hosts — there's nothing to forget on either. On a
+            // session row they fall through to filter input (a session row is
+            // not a host row).
             b'n' if self.filter.is_empty() => {
-                if let Some(host) = self.cursor_host() {
-                    self.mode = PickerMode::Prompting {
-                        host: Some(host),
-                        buf: String::new(),
-                    };
-                } else {
-                    self.push_filter(b'n');
+                match self.selected() {
+                    Some(row) if row.kind == RowKind::Host => {
+                        self.mode = PickerMode::Prompting {
+                            host: row.host.clone(),
+                            buf: String::new(),
+                        };
+                    }
+                    _ => self.push_filter(b'n'),
                 }
                 None
             }
-            b'x' if self.filter.is_empty() => match self.cursor_host() {
-                Some(host) if self.is_adhoc(&host) => Some(PickerOutcome::Forget { host }),
-                Some(_) => None, // local/configured host: forget is a no-op
-                None => {
+            b'x' if self.filter.is_empty() => match self.selected() {
+                Some(row) if row.kind == RowKind::Host => match &row.host {
+                    Some(h) if self.is_adhoc(h) => Some(PickerOutcome::Forget { host: h.clone() }),
+                    _ => None, // local anchor or configured host: forget is a no-op
+                },
+                _ => {
                     self.push_filter(b'x');
                     None
                 }
@@ -323,15 +330,6 @@ impl PickerState {
                 host: row.host.clone(),
                 name: String::new(),
             }),
-        }
-    }
-
-    /// The host name if the cursor is on a `Host` row, else `None`.
-    fn cursor_host(&self) -> Option<String> {
-        let row = self.selected()?;
-        match (row.kind, &row.host) {
-            (RowKind::Host, Some(h)) => Some(h.clone()),
-            _ => None,
         }
     }
 
@@ -589,10 +587,16 @@ mod tests {
             s.handle_key(c as u8);
         }
         let text = String::from_utf8(s.render()).expect("render output is valid UTF-8");
-        assert!(text.contains("local"), "local header survives a child-only filter");
+        assert!(
+            text.contains("local"),
+            "local header survives a child-only filter"
+        );
         assert!(!text.contains("(configured)"), "prod filtered out");
         assert!(!text.contains("(ad-hoc)"), "scratch filtered out");
-        assert!(!text.contains("\u{2500}\u{2500}"), "no divider without an ad-hoc block");
+        assert!(
+            !text.contains("\u{2500}\u{2500}"),
+            "no divider without an ad-hoc block"
+        );
     }
 
     // --- (b) bounded cursor over the selectable set; empty view parks + no-ops ---
@@ -618,7 +622,11 @@ mod tests {
         }
         assert!(s.visible().is_empty());
         assert_eq!(s.selected(), None);
-        assert_eq!(s.handle_key(0x0e), None, "move is a bounded no-op when empty");
+        assert_eq!(
+            s.handle_key(0x0e),
+            None,
+            "move is a bounded no-op when empty"
+        );
         assert_eq!(s.handle_key(b'\r'), None, "Enter parks: no outcome");
     }
 
@@ -656,7 +664,11 @@ mod tests {
         s.handle_key(0x0e); // → build
         s.handle_key(0x0e); // → prod (host row, index 2)
         assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
-        assert_eq!(s.handle_key(b'n'), None, "n opens the prompt (no outcome yet)");
+        assert_eq!(
+            s.handle_key(b'n'),
+            None,
+            "n opens the prompt (no outcome yet)"
+        );
         // Every printable — including n and x — types into the name buffer.
         for c in "newx1".chars() {
             assert_eq!(s.handle_key(c as u8), None);
@@ -670,12 +682,42 @@ mod tests {
         }
     }
 
+    /// Regression: `n` must fire on the LOCAL anchor (`RowKind::Host`,
+    /// `host: None`) too, not just remote host rows — before the fix,
+    /// `cursor_host` only matched `Some(h)` and `n` fell through to filter
+    /// input, so you could create a new session on a remote daemon but not on
+    /// the current one.
+    #[test]
+    fn n_on_local_anchor_prompts_and_enter_commits_new_with_host_none() {
+        let mut s = PickerState::new(vec![host_row_local(), session("main", None)]);
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
+        assert_eq!(
+            s.handle_key(b'n'),
+            None,
+            "n opens the prompt on the local anchor too (no outcome yet)"
+        );
+        for c in "fresh".chars() {
+            assert_eq!(s.handle_key(c as u8), None);
+        }
+        match s.handle_key(b'\r') {
+            Some(PickerOutcome::New { host, name }) => {
+                assert_eq!(host, None, "the local anchor's host is None");
+                assert_eq!(name, "fresh");
+            }
+            other => panic!("expected New, got {other:?}"),
+        }
+    }
+
     #[test]
     fn x_forgets_adhoc_host_but_not_configured() {
         let mut s = roster_state();
         s.handle_key(0x0e); // build
         s.handle_key(0x0e); // prod (configured host, index 2)
-        assert_eq!(s.handle_key(b'x'), None, "x on a configured host is a no-op");
+        assert_eq!(
+            s.handle_key(b'x'),
+            None,
+            "x on a configured host is a no-op"
+        );
         assert_eq!(s.filter(), "", "the no-op does not leak into the filter");
         s.handle_key(0x0e); // api
         s.handle_key(0x0e); // scratch (ad-hoc host, index 4)
@@ -688,6 +730,23 @@ mod tests {
         );
     }
 
+    /// Regression: `x` must be a true no-op on the LOCAL anchor (`RowKind::Host`,
+    /// `host: None`) too, not just configured remotes — before the fix, `x`
+    /// relied on `cursor_host`, which returned `None` for a `host: None` Host
+    /// row indistinguishably from "not a host row", so it fell through to
+    /// `push_filter` and blanked the visible list instead of no-opping.
+    #[test]
+    fn x_on_local_anchor_is_a_true_no_op() {
+        let mut s = PickerState::new(vec![host_row_local(), session("main", None)]);
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
+        assert_eq!(
+            s.handle_key(b'x'),
+            None,
+            "x on the local anchor is a no-op"
+        );
+        assert_eq!(s.filter(), "", "the no-op does not leak into the filter");
+    }
+
     #[test]
     fn prompting_esc_returns_to_navigate() {
         let mut s = roster_state();
@@ -695,7 +754,11 @@ mod tests {
         s.handle_key(0x0e); // prod host row
         s.handle_key(b'n'); // → Prompting
         s.handle_key(b'a'); // buf "a"
-        assert_eq!(s.handle_key(0x1b), None, "Esc leaves Prompting without an outcome");
+        assert_eq!(
+            s.handle_key(0x1b),
+            None,
+            "Esc leaves Prompting without an outcome"
+        );
         // Back in Navigate, Esc cancels the picker.
         assert_eq!(s.handle_key(0x1b), Some(PickerOutcome::Cancel));
     }
@@ -748,9 +811,16 @@ mod tests {
             vec![session("api", Some("prod"))],
         );
         let rows: Vec<_> = s.visible().into_iter().cloned().collect();
-        let prod = rows.iter().position(|r| r.name == "prod").expect("prod row");
+        let prod = rows
+            .iter()
+            .position(|r| r.name == "prod")
+            .expect("prod row");
         assert_eq!(rows[prod].status, RowStatus::Live, "anchor now Live");
-        assert_eq!(rows[prod + 1].name, "api", "session spliced after its anchor");
+        assert_eq!(
+            rows[prod + 1].name,
+            "api",
+            "session spliced after its anchor"
+        );
         assert_eq!(rows[prod + 1].kind, RowKind::Session);
         assert_eq!(rows[prod + 1].host.as_deref(), Some("prod"));
     }
@@ -770,7 +840,11 @@ mod tests {
     fn resolve_host_is_idempotent_on_reresolve() {
         let mut s = PickerState::new(vec![host_row("prod", RowStatus::Pending)]);
         let live = |name: &str| session(name, Some("prod"));
-        s.resolve_host(&Some("prod".into()), RowStatus::Live, vec![live("a"), live("b")]);
+        s.resolve_host(
+            &Some("prod".into()),
+            RowStatus::Live,
+            vec![live("a"), live("b")],
+        );
         // A second Live result replaces (does not duplicate) the child rows.
         s.resolve_host(&Some("prod".into()), RowStatus::Live, vec![live("c")]);
         let names: Vec<_> = s.visible().iter().map(|r| r.name.clone()).collect();
@@ -799,8 +873,18 @@ mod tests {
             vec!["scratch".into()],
         );
         let names: Vec<_> = s.visible().iter().map(|r| r.name.clone()).collect();
-        assert_eq!(names, vec!["local".to_string(), "main".to_string(), "scratch".to_string()]);
-        assert!(!names.contains(&"prod".to_string()), "forgotten host's row is gone");
+        assert_eq!(
+            names,
+            vec![
+                "local".to_string(),
+                "main".to_string(),
+                "scratch".to_string()
+            ]
+        );
+        assert!(
+            !names.contains(&"prod".to_string()),
+            "forgotten host's row is gone"
+        );
     }
 
     #[test]
@@ -809,8 +893,15 @@ mod tests {
         s.handle_key(0x0e); // cursor -> "prod" (index 1)
         assert_eq!(s.selected().map(|r| r.name.clone()), Some("prod".into()));
         s.replace_other_rows(&None, vec![], vec![]);
-        assert_eq!(s.visible().len(), 1, "prod's row was dropped, none replaced it");
-        assert!(s.selected().is_some(), "cursor re-clamped instead of dangling");
+        assert_eq!(
+            s.visible().len(),
+            1,
+            "prod's row was dropped, none replaced it"
+        );
+        assert!(
+            s.selected().is_some(),
+            "cursor re-clamped instead of dangling"
+        );
     }
 
     #[test]

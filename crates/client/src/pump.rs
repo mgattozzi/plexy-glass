@@ -877,8 +877,7 @@ mod tests {
             let bytes = postcard::to_allocvec(&open).unwrap();
             Codec::write_frame(&mut server_w, &bytes).await.unwrap();
 
-            let rendered =
-                read_until_contains(&mut stdout_r, "main", Duration::from_secs(1)).await;
+            let rendered = read_until_contains(&mut stdout_r, "main", Duration::from_secs(1)).await;
             assert!(
                 String::from_utf8_lossy(&rendered).contains("switch session"),
                 "picker did not render"
@@ -984,7 +983,10 @@ mod tests {
         // sessions ride under it tagged local (host None), and the roster's
         // remotes become Pending anchors to query. Local is NOT queried.
         roster::set_test_roster(vec!["prod".into()], vec!["scratch".into()]);
-        let a = build_picker_rows(vec![picker_entry("main", 1), picker_entry("build", 0)], None);
+        let a = build_picker_rows(
+            vec![picker_entry("main", 1), picker_entry("build", 0)],
+            None,
+        );
 
         assert_eq!(a.rows[0].kind, RowKind::Host, "current-daemon anchor first");
         assert_eq!(a.rows[0].host, None, "local anchor");
@@ -994,9 +996,16 @@ mod tests {
         assert_eq!(a.rows[1].host, None, "current session tagged local");
 
         assert!(!a.query_local, "attached-local does not query local again");
-        assert_eq!(a.remote_hosts, vec!["prod".to_string(), "scratch".to_string()]);
+        assert_eq!(
+            a.remote_hosts,
+            vec!["prod".to_string(), "scratch".to_string()]
+        );
         assert_eq!(a.adhoc, vec!["scratch".to_string()]);
-        let prod = a.rows.iter().find(|r| r.name == "prod").expect("prod anchor");
+        let prod = a
+            .rows
+            .iter()
+            .find(|r| r.name == "prod")
+            .expect("prod anchor");
         assert_eq!(prod.kind, RowKind::Host);
         assert_eq!(prod.status, RowStatus::Pending);
     }
@@ -1009,10 +1018,18 @@ mod tests {
         roster::set_test_roster(vec!["prod".into(), "dev".into()], vec![]);
         let a = build_picker_rows(vec![picker_entry("api", 1)], Some("prod"));
 
-        assert_eq!(a.rows[0].host.as_deref(), Some("prod"), "remote current anchor");
+        assert_eq!(
+            a.rows[0].host.as_deref(),
+            Some("prod"),
+            "remote current anchor"
+        );
         assert_eq!(a.rows[0].kind, RowKind::Host);
         assert!(a.query_local, "attached-remote queries the local daemon");
-        assert_eq!(a.remote_hosts, vec!["dev".to_string()], "prod (current) excluded");
+        assert_eq!(
+            a.remote_hosts,
+            vec!["dev".to_string()],
+            "prod (current) excluded"
+        );
         let locals: Vec<_> = a.rows.iter().filter(|r| r.host.is_none()).collect();
         assert_eq!(locals.len(), 1, "one local-other anchor");
         assert_eq!(locals[0].kind, RowKind::Host);
@@ -1048,7 +1065,10 @@ mod tests {
                 read_until_contains(&mut stdout_r, "\u{26a0}", Duration::from_secs(8)).await;
             let text = String::from_utf8_lossy(&rendered);
             assert!(text.contains("switch session"), "picker rendered");
-            assert!(text.contains("main"), "current daemon's session, tagged local");
+            assert!(
+                text.contains("main"),
+                "current daemon's session, tagged local"
+            );
             assert!(
                 text.contains("nonexistent.invalid"),
                 "the configured host anchor appears"
@@ -1122,7 +1142,12 @@ mod tests {
                 .unwrap()
                 .expect("daemon channel closed before a ClientMsg arrived");
             let msg: ClientMsg = postcard::from_bytes(&frame).unwrap();
-            assert_eq!(msg, ClientMsg::SwitchSession { name: "build".into() });
+            assert_eq!(
+                msg,
+                ClientMsg::SwitchSession {
+                    name: "build".into()
+                }
+            );
 
             let done = ServerMsg::Exited {
                 status: ExitStatus::Code(0),
@@ -1241,8 +1266,7 @@ mod tests {
             let bytes = postcard::to_allocvec(&open).unwrap();
             Codec::write_frame(&mut server_w, &bytes).await.unwrap();
 
-            read_until_contains(&mut stdout_r, "nonexistent.invalid", Duration::from_secs(1))
-                .await;
+            read_until_contains(&mut stdout_r, "nonexistent.invalid", Duration::from_secs(1)).await;
 
             // Cursor starts on "main"; one down-move lands on the host anchor.
             stdin_w.write_all(b"\x0e").await.unwrap();
@@ -1304,7 +1328,8 @@ mod tests {
             stdin_w.write_all(b"\x0e").await.unwrap();
             stdin_w.write_all(b"x").await.unwrap();
 
-            let second = read_until_contains(&mut stdout_r, "filter:", Duration::from_secs(1)).await;
+            let second =
+                read_until_contains(&mut stdout_r, "filter:", Duration::from_secs(1)).await;
             assert!(
                 !String::from_utf8_lossy(&second).contains("nonexistent.invalid"),
                 "forgotten host's row is gone from the rebuilt rows"

@@ -1076,16 +1076,68 @@ sessions are built fresh at boot and on first attach. (The only thing the
 daemon keeps on disk is its log and the one-time [`welcome`](#welcome)
 marker.)
 
+## `remotes`
+
+The `remotes` node is the **roster of remote hosts the session picker spans**:
+
+```kdl
+remotes {
+    host "prod"
+    host "user@build.internal"
+}
+```
+
+Each `host` is an ssh target, the same string you would pass to `plexy-glass -H
+<host>` (see [ssh.md](ssh.md)) or to `ssh` itself, so `user@host`,
+`host.internal`, and `~/.ssh/config` aliases all work. It's read by the
+**client** (not the daemon) when you open the picker with `Ctrl+a w`, and each
+listed host becomes a section the picker queries for its running sessions. A
+host you don't list here still shows up **ad-hoc** the moment you `-H` attach to
+it once (see the picker section below). Config `remotes` are the stable,
+always-listed hosts; ad-hoc hosts are the ones you've visited.
+
+A parse error in `config.kdl` doesn't disable the picker. The roster falls back
+to just the ad-hoc file and the local daemon, and the error surfaces on the next
+attach like any other config error.
+
 ## Session picker (`Ctrl+a w`)
 
-`Ctrl+a w` (or `:sessions`) opens a full-screen list of the sessions on the
-current daemon, one row per session (`name — N win, M panes, K clients`, the
-current session marked `*`). As of protocol v12 the picker is
-**client-rendered**: the daemon sends the session list once and the client
-draws and drives the list itself, so filtering and moving the cursor are
-local and don't round-trip to the daemon on every keystroke. (An older v11
-client falls back to the daemon-rendered overlay this replaced; the keys
-below behave the same either way.)
+`Ctrl+a w` (or `:sessions`) opens a full-screen picker that spans **every daemon
+in your roster at once**: the daemon you're attached to, every host in
+[`remotes`](#remotes), and every host you've `-H` attached to before. As of
+protocol v12 the picker is **client-rendered**: the client reads its own
+roster, queries each remote daemon over SSH in parallel, and draws and drives
+the list itself, so filtering and moving the cursor are local and never
+round-trip to a daemon. (An older v11 client falls back to the daemon-rendered,
+local-only overlay this replaced.)
+
+### Sections
+
+Rows are grouped by daemon, each under a selectable **host anchor**:
+
+- The **current daemon** first, with its anchor (`local`, or the ssh target when
+  you're attached remotely) followed by its sessions, one row per session
+  (`name — N win, M panes, K clients`).
+- Each **configured** host from `remotes`, then a horizontal **divider**, then
+  each **ad-hoc** host, the hosts you've `-H` attached to that aren't in
+  `remotes`. (When you're attached to a remote, the `local` daemon appears here
+  as just another host to jump back to.)
+
+A host anchor carries a status glyph, filled in as its query resolves:
+
+| Glyph | Meaning |
+|---|---|
+| `…` | Pending, the query is still in flight |
+| `●` | Live: the daemon answered, and its sessions are listed under the anchor |
+| `○` | Empty: the daemon answered but has no sessions |
+| `⚠` | Unreachable: connect failed or timed out |
+| `⚠ vN` | Version mismatch: the remote runs protocol `vN`, run with `--install` to upgrade it |
+
+Remote queries stream in independently, so a slow or unreachable host never
+blocks the rest of the list. There's no animated connect spinner yet; a
+pending host just shows `…` until it resolves, and that polish is deferred.
+
+### Keys
 
 | Key | Action |
 |---|---|
@@ -1093,12 +1145,25 @@ below behave the same either way.)
 | Backspace | Remove the last filter character |
 | `↓` / `Ctrl+n` / `Ctrl+j` | Move selection down |
 | `↑` / `Ctrl+p` / `Ctrl+k` | Move selection up |
-| `Enter` | Switch to the selected session (in place, same connection) |
+| `Enter` on a local session | Switch to it in place (same connection) |
+| `Enter` on a remote session | Reconnect: re-attach this client to that daemon and session |
+| `Enter` on a host anchor | Reconnect to that daemon's default session |
+| `n` | New session on the host under the cursor (prompts for a name) |
+| `x` | Forget the ad-hoc host under the cursor |
 | `Esc` | Cancel and return to the current session |
 
-The picker currently lists only the **local daemon's** sessions. Attaching to
-another host over SSH gives that host's own picker; a single picker spanning
-multiple daemons/hosts at once is planned for a later milestone.
+`Enter` on a session on a **different** daemon does a brief reconnect: the live
+attach tears down and re-attaches to that host over SSH, so the picker doubles
+as a cross-host jump. `n` works on any host anchor, **including the current
+daemon's**, so it's also the fastest way to spin up a fresh named session right
+where you are; the new session is created when the reconnect lands.
+
+`n` and `x` are actions **only when the filter is empty** and the cursor is on a
+host anchor, otherwise they're ordinary filter input, so typing `nginx`,
+`prod-x`, or any name that contains them filters normally. `x` only forgets
+**ad-hoc** hosts (removing them from the client-side roster file); it's a no-op
+on configured or local anchors, since those come from `config.kdl` and the live
+connection.
 
 ## Choose-tree (`Ctrl+a W`)
 

@@ -182,7 +182,10 @@ mod tests {
         // safe to call from a test without touching the operator's disk.
         set_test_roster(vec![], vec!["existing".into()]);
         add_adhoc("new-host");
-        assert_eq!(load_adhoc(), vec!["existing".to_string(), "new-host".to_string()]);
+        assert_eq!(
+            load_adhoc(),
+            vec!["existing".to_string(), "new-host".to_string()]
+        );
         forget_adhoc("existing");
         assert_eq!(load_adhoc(), vec!["new-host".to_string()]);
     }

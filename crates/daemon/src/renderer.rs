@@ -264,7 +264,7 @@ mod tests {
         // A full repaint of the (unchanged) frame must arrive promptly.
         let out = timeout(Duration::from_secs(2), next_output(&mut client_sock))
             .await
-        .expect("Invalidate must emit a frame without waiting for a coordinator tick");
+            .expect("Invalidate must emit a frame without waiting for a coordinator tick");
         assert!(out.contains('A'), "invalidate repaint contains the frame");
 
         task.abort();
