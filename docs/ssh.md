@@ -136,6 +136,24 @@ invocations against `<ssh-target>`.
 Only the `nightly` release channel is supported for now; there's no
 `--install-version` or stable-channel pin yet.
 
+## Connecting from the picker
+
+You don't need the CLI to reach a new host at all. From an attached client,
+`Ctrl+a w` opens the [session picker](configuration.md#session-picker-ctrla-w),
+and its last row is always `＋ Connect to a host…`: `Enter` on it opens a
+one-line prompt, type any ssh target (same syntax as `-H`) and `Enter`
+connects. Once the attach lands the host joins your ad-hoc roster, exactly
+like a `-H` attach does, so it's its own anchor the next time you open the
+picker; a host that fails to connect isn't remembered.
+
+The picker's `i` key is the inline alternative to `--install`: with an empty
+filter and the cursor on a host row (an existing anchor or the `＋` row), `i`
+toggles connect-with-install for the *next* host you connect to, shown in the
+footer as `i install: on`/`off`. It runs the same provision-or-update-then-
+attach flow described above, so a host with nothing installed, or one that's
+behind on protocol version, can be reached without dropping to a shell for a
+separate `--install` run first.
+
 ## Auth prompts
 
 SSH may need to prompt for a password, a key passphrase, or host-key
