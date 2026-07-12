@@ -1168,6 +1168,7 @@ dependencies = [
  "chrono",
  "clap",
  "directories",
+ "libc",
  "nix 0.31.3",
  "plexy-glass-config",
  "plexy-glass-emulator",

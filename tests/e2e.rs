@@ -84,6 +84,7 @@ fn isolate_dirs(tmp: &tempfile::TempDir) -> TestEnv {
     fs::create_dir_all(&home).unwrap();
     let xdg_config = tmp.path().join("xdg-config");
     fs::create_dir_all(&xdg_config).unwrap();
+    let instance = tmp.path().join("instance");
     TestEnv {
         vars: vec![
             ("XDG_RUNTIME_DIR".into(), xdg.to_string_lossy().into_owned()),
@@ -93,6 +94,18 @@ fn isolate_dirs(tmp: &tempfile::TempDir) -> TestEnv {
             ),
             ("HOME".into(), home.to_string_lossy().into_owned()),
             ("TMPDIR".into(), tmp.path().to_string_lossy().into_owned()),
+            // The authoritative isolation knob (see paths.rs `resolve_runtime_dir`
+            // / `resolve_log_dir`): it wins over every platform-specific
+            // resolution, including macOS's `confstr(_CS_DARWIN_USER_TEMP_DIR)`
+            // lookup, which otherwise ignores $TMPDIR entirely (that's the
+            // whole point of that lookup: the daemon and CLI agree on one
+            // socket dir regardless of the caller's own $TMPDIR). Without this,
+            // every macOS e2e test's daemon would collide on the same real
+            // per-uid temp dir instead of getting its own.
+            (
+                "PLEXY_GLASS_DIR".into(),
+                instance.to_string_lossy().into_owned(),
+            ),
             // Keep the child shell deterministic AND consistent across platforms.
             // `/bin/sh` is bash-in-posix-mode on macOS but dash on Linux, and some
             // e2e snippets use bash builtins (`read -d`/`-t`), so pin bash itself —
@@ -2140,12 +2153,21 @@ fn with_instance_dir(base: &TestEnv, root: &Path) -> TestEnv {
 }
 
 /// Seed the client-side ad-hoc roster file (`<log_dir>/remotes`) with `hosts`,
-/// at BOTH platform candidate log dirs (macOS `$HOME/Library/Logs/plexy-glass`,
-/// Linux `$XDG_STATE_HOME/plexy-glass`), mirroring [`write_config`]. `isolate_dirs`
-/// overrides both env vars, so this never touches a real roster.
+/// at every candidate log dir the resolver might land on: the
+/// `PLEXY_GLASS_DIR`-rooted one `isolate_dirs` sets (which wins, see
+/// `paths.rs` `resolve_log_dir`), and the two platform fallbacks (macOS
+/// `$HOME/Library/Logs/plexy-glass`, Linux `$XDG_STATE_HOME/plexy-glass`) in
+/// case a caller passes a bare env without the override, mirroring
+/// [`write_config`]. `isolate_dirs` overrides all three vars, so this never
+/// touches a real roster.
 fn write_adhoc_roster(env: &TestEnv, hosts: &[&str]) {
     let mut body = hosts.join("\n");
     body.push('\n');
+    if let Some((_, root)) = env.iter().find(|(k, _)| k == "PLEXY_GLASS_DIR") {
+        let dir = PathBuf::from(root).join("logs");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("remotes"), &body).unwrap();
+    }
     if let Some((_, home)) = env.iter().find(|(k, _)| k == "HOME") {
         let dir = PathBuf::from(home).join("Library/Logs/plexy-glass");
         fs::create_dir_all(&dir).unwrap();

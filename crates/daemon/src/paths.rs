@@ -3,6 +3,51 @@ use std::{env, fs, io};
 
 use nix::unistd;
 
+/// Query launchd's canonical per-uid temp dir via
+/// `confstr(_CS_DARWIN_USER_TEMP_DIR)` — the same directory `getconf
+/// DARWIN_USER_TEMP_DIR` resolves to, and (normally) what `$TMPDIR` is seeded
+/// from at login. Going straight to `confstr` instead of `$TMPDIR` makes the
+/// runtime dir independent of the CALLER's environment: a shell with a stale
+/// or overridden `$TMPDIR` (the `capture -n dev` "socket missing" report)
+/// would otherwise compute a different runtime dir than the daemon and never
+/// find its socket. Returns `None` on any confstr failure so the caller can
+/// fall back to `$TMPDIR`/`/tmp`.
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::ptr;
+
+    // SAFETY: a null buffer with len 0 is the documented confstr idiom for
+    // querying the required buffer size (including the trailing nul); with
+    // len 0, confstr performs no write through `buf`, so a null pointer here
+    // is sound.
+    let needed = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, ptr::null_mut(), 0) };
+    if needed == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; needed];
+    // SAFETY: `buf` was just allocated with exactly `needed` bytes, the size
+    // confstr itself reported as sufficient (including the trailing nul), so
+    // confstr cannot write past the end of `buf`.
+    let written = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    if written == 0 || written > buf.len() {
+        return None;
+    }
+    // `written` includes the trailing nul confstr wrote; strip it.
+    buf.truncate(written.saturating_sub(1));
+    if buf.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(OsString::from_vec(buf)))
+}
+
 /// Filesystem layout for one running daemon.
 #[derive(Debug, Clone)]
 pub struct RuntimePaths {
@@ -60,6 +105,13 @@ impl RuntimePaths {
         #[cfg(target_os = "linux")]
         if let Some(dir) = env::var_os("XDG_RUNTIME_DIR") {
             return PathBuf::from(dir).join("plexy-glass");
+        }
+        // macOS: ask launchd directly instead of trusting the caller's
+        // $TMPDIR, so every invocation (daemon or CLI, whatever shell/env it
+        // was started from) agrees on the same socket path.
+        #[cfg(target_os = "macos")]
+        if let Some(dir) = darwin_user_temp_dir() {
+            return dir.join(format!("plexy-glass-{uid}"));
         }
         let tmp = env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
         tmp.join(format!("plexy-glass-{uid}"))
@@ -164,5 +216,47 @@ mod tests {
             let mode = fs::metadata(dir).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o700, "expected 0o700 on {}", dir.display());
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_user_temp_dir_resolves_independent_of_tmpdir() {
+        let dir = darwin_user_temp_dir().expect("confstr(_CS_DARWIN_USER_TEMP_DIR) should resolve");
+        assert!(
+            dir.exists(),
+            "resolved darwin temp dir should exist: {}",
+            dir.display()
+        );
+        let s = dir.to_string_lossy();
+        assert!(
+            s.starts_with("/var/folders/") || s.starts_with("/tmp"),
+            "unexpected darwin temp dir: {s}"
+        );
+
+        // The resolved runtime dir must not depend on the caller's own
+        // $TMPDIR: a stale/bogus TMPDIR is exactly the `capture -n dev`
+        // failure mode this fixes (the CLI and the daemon computing two
+        // different socket paths because they inherited different TMPDIRs).
+        let _lock = crate::STATE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let prev = env::var_os("TMPDIR");
+        // SAFETY: STATE_ENV_LOCK held for the test body; restored below.
+        unsafe { env::remove_var("TMPDIR") };
+        let unset = RuntimePaths::resolve_runtime_dir(501);
+        // SAFETY: STATE_ENV_LOCK held for the test body; restored below.
+        unsafe { env::set_var("TMPDIR", "/tmp/totally-bogus-tmpdir-that-does-not-exist") };
+        let bogus = RuntimePaths::resolve_runtime_dir(501);
+        // SAFETY: STATE_ENV_LOCK held for the test body.
+        unsafe {
+            match &prev {
+                Some(v) => env::set_var("TMPDIR", v),
+                None => env::remove_var("TMPDIR"),
+            }
+        }
+        assert_eq!(
+            unset, bogus,
+            "runtime dir must not depend on $TMPDIR on macOS"
+        );
     }
 }
