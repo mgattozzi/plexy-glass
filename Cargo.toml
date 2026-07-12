@@ -13,6 +13,10 @@ members = ["crates/protocol", "crates/daemon", "crates/client", "crates/config",
 warnings = "deny"
 
 [workspace.lints.clippy]
+# The "no unwrap in non-test code" rule (CLAUDE.md) as a gate. `expect` stays
+# ungated — it's the sanctioned `// invariant:` escape hatch. Tests are exempt
+# via `allow-unwrap-in-tests` in clippy.toml.
+unwrap_used = "deny"
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }

@@ -9,6 +9,14 @@
 //! $HOME so the daemon writes its socket, lockfile, and logs in isolation
 //! and never collides between tests.
 
+// This whole file is integration-test code. `allow-unwrap-in-tests` exempts
+// `#[test]` fns but not the free helper fns an integration test needs, so allow
+// `unwrap` file-wide here (product code stays gated by the workspace deny).
+#![allow(
+    clippy::unwrap_used,
+    reason = "integration-test file; allow-unwrap-in-tests misses free helper fns"
+)]
+
 use std::env;
 use std::fs;
 #[cfg(target_os = "macos")]

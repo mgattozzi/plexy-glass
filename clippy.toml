@@ -1,1 +1,4 @@
 absolute-paths-max-segments = 2
+# `unwrap_used` (denied in Cargo.toml) applies only to non-test code; colocated
+# `#[cfg(test)]` modules and `#[test]` fns keep using `.unwrap()` freely.
+allow-unwrap-in-tests = true
