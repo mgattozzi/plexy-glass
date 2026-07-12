@@ -2222,9 +2222,13 @@ fn parse_extended_color(rest: &[u16]) -> (Option<Color>, usize) {
         return (None, 0);
     }
     match rest[0] {
-        5 if rest.len() >= 2 => (Some(Color::Indexed(rest[1] as u8)), 2),
+        5 if rest.len() >= 2 => (Some(Color::Indexed(rest[1].min(255) as u8)), 2),
         2 if rest.len() >= 4 => (
-            Some(Color::Rgb(rest[1] as u8, rest[2] as u8, rest[3] as u8)),
+            Some(Color::Rgb(
+                rest[1].min(255) as u8,
+                rest[2].min(255) as u8,
+                rest[3].min(255) as u8,
+            )),
             4,
         ),
         _ => (None, 0),
@@ -4421,6 +4425,19 @@ mod tests {
             y.attrs.contains(Attrs::UNDERLINE),
             "Y SHOULD be underlined (the \\e[4m)"
         );
+    }
+    #[test]
+    fn sgr_truecolor_channels_clamp_not_wrap() {
+        // CSI 38;2;256;300;0 m — out-of-range channels must clamp to 255, not wrap.
+        let (color, consumed) = super::parse_extended_color(&[2, 256, 300, 0]);
+        assert_eq!(consumed, 4);
+        assert_eq!(color, Some(Color::Rgb(255, 255, 0)));
+    }
+    #[test]
+    fn sgr_indexed_out_of_range_is_clamped() {
+        // CSI 38;5;300 m — an index > 255 must not wrap to 44.
+        let (color, _) = super::parse_extended_color(&[5, 300]);
+        assert_eq!(color, Some(Color::Indexed(255)));
     }
     #[test]
     fn sgr_combined_semicolon_truecolor_fg_and_bg() {
