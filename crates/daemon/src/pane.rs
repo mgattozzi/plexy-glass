@@ -224,6 +224,7 @@ impl Pane {
 
         let (clip_tx, mut clip_rx) = mpsc::channel::<Vec<u8>>(16);
         tokio::spawn(async move {
+            // panic-free by construction: subprocess spawn + 2s timeout + .ok() on every step
             while let Some(payload) = clip_rx.recv().await {
                 let _ = osc_actions::write_clipboard(&payload).await;
             }

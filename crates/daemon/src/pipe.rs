@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 use bytes::Bytes;
+use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, Command};
@@ -153,13 +154,13 @@ pub(crate) fn install_and_drain(
 ) {
     let id = NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed);
     let (cancel_tx, cancel_rx) = watch::channel(None);
-    let handle = PipeHandle {
-        id,
-        cancel_tx,
-        // child.id() is the raw OS pid; wrap it at the boundary so the pid
-        // flows as a Pid, not a bare int, everywhere downstream.
-        pid: child.id().map(|p| Pid::from_raw(p as i32)),
-    };
+    // child.id() is the raw OS pid; wrap it at the boundary so the pid
+    // flows as a Pid, not a bare int, everywhere downstream. Captured before
+    // `child` moves into `drain` below so the panic-supervisor task can
+    // still kill the consumer by pid even after `drain`'s own `Child` handle
+    // is gone.
+    let pid = child.id().map(|p| Pid::from_raw(p as i32));
+    let handle = PipeHandle { id, cancel_tx, pid };
     let prev = {
         // invariant: pipe slot mutex held briefly; no await, no nested locks.
         slot.lock_recover().replace(handle)
@@ -167,7 +168,58 @@ pub(crate) fn install_and_drain(
     if let Some(prev) = prev {
         prev.cancel(PipeCloseReason::Replaced);
     }
-    tokio::spawn(drain(slot, id, rx, child, stdin, cancel_rx, session));
+    let drain_handle = tokio::spawn(drain(
+        Arc::clone(&slot),
+        id,
+        rx,
+        child,
+        stdin,
+        cancel_rx,
+        session,
+    ));
+    // `drain` has cleanup on every one of its normal exit paths (kill the
+    // consumer, reap it, clear the slot, report), but that cleanup can't run
+    // if `drain` itself panics: a real `std::panic::catch_unwind` can't span
+    // its `.await`s, and moving `child`/`stdin` into a nested per-iteration
+    // task would just drop them (and the still-running consumer along with
+    // them) the moment that task panicked instead of preserving them for a
+    // kill. So the fallback lives in a sibling task that supervises the
+    // drain's JoinHandle the same way `supervise_core` watches the session's
+    // core tasks (session/mod.rs): a panic there kills the consumer by pid
+    // directly (independent of the now-gone `Child` handle; tokio reaps an
+    // abandoned `Child` in the background on a best-effort basis, so we don't
+    // need to `.wait()` it here) and clears the slot so a stuck pipe can't
+    // wedge a future `:pipe-pane` start on this pane.
+    tokio::spawn(async move {
+        let Err(e) = drain_handle.await else {
+            return;
+        };
+        if !e.is_panic() {
+            return;
+        }
+        tracing::error!(
+            error = %e,
+            pipe_id = id,
+            "pipe drain task panicked; force-closing the consumer"
+        );
+        force_close_after_drain_panic(&slot, id, pid);
+    });
+}
+
+/// Fallback cleanup run by `install_and_drain`'s supervisor when the drain
+/// task itself panics: kill the consumer by pid directly (independent of
+/// `drain`'s own, now-gone `Child` handle) and clear the slot if it still
+/// holds this pipe. Split out so the panic path is unit-testable without
+/// needing to actually panic inside `drain`.
+fn force_close_after_drain_panic(slot: &PipeSlot, id: u64, pid: Option<Pid>) {
+    if let Some(pid) = pid {
+        let _ = signal::kill(pid, Signal::SIGKILL);
+    }
+    // invariant: pipe slot mutex held briefly; no await, no nested locks.
+    let mut guard = slot.lock_recover();
+    if guard.as_ref().is_some_and(|h| h.id == id) {
+        *guard = None;
+    }
 }
 
 /// Read the reason out of a completed cancel-watch wait. A closed channel
@@ -390,5 +442,45 @@ mod tests {
         // Second stop is a no-op.
         assert!(!cancel_slot(&slot, PipeCloseReason::Stopped));
         drop(tx);
+    }
+
+    // install_and_drain's supervisor: if the drain task panics, the consumer
+    // must still be force-closed and the slot cleared. `drain` itself has no
+    // seam to inject a panic without adding test-only hooks to production
+    // code, so this drives the supervisor's actual shape directly (spawn a
+    // task that panics, await its JoinHandle, check is_panic(), then run the
+    // same force_close_after_drain_panic install_and_drain calls) against a
+    // real consumer process and a real slot, rather than asserting on the
+    // helper's implementation in isolation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panicking_drain_task_is_force_closed_by_its_supervisor() {
+        let (child, _stdin) = spawn_consumer("exec sleep 30");
+        let pid = Pid::from_raw(child.id().expect("consumer pid") as i32);
+        let slot: PipeSlot = Arc::new(StdMutex::new(None));
+        let id = 7;
+        let (cancel_tx, _cancel_rx) = watch::channel(None);
+        slot.lock().unwrap().replace(PipeHandle {
+            id,
+            cancel_tx,
+            pid: Some(pid),
+        });
+        // Stand in for `drain`'s own `Child` handle being dropped when its
+        // task panics and unwinds: the supervisor must recover using only
+        // the pid captured up front, exactly as install_and_drain does.
+        drop(child);
+
+        let fake_drain = tokio::spawn(async { panic!("simulated drain panic") });
+        let e = fake_drain.await.unwrap_err();
+        assert!(e.is_panic(), "join error must report as a panic");
+        force_close_after_drain_panic(&slot, id, Some(pid));
+
+        assert!(
+            slot_empty(&slot),
+            "slot must be cleared after a supervised panic"
+        );
+        assert!(
+            test_env::poll_until(Duration::from_secs(5), || !pid_alive(pid)).await,
+            "consumer must be killed (and eventually reaped) after a supervised drain panic"
+        );
     }
 }
