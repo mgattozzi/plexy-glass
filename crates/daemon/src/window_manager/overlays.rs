@@ -360,7 +360,8 @@ impl WindowManager {
                 if !text.is_empty() {
                     match target {
                         Some(RenameTarget::Window) => {
-                            self.set_window_name(self.active, text);
+                            let idx = self.active_index();
+                            self.set_window_name(idx, text);
                             changed = true;
                         }
                         Some(RenameTarget::Pane) => {

@@ -2322,7 +2322,7 @@ async fn break_pane_moves_active_into_new_window() {
     assert_eq!(m.windows()[0].layout().panes(), vec![PaneId(0)]);
     assert_eq!(m.active_idx(), 1);
     assert_eq!(m.active_window().active(), PaneId(1));
-    assert_eq!(m.last_active_window, Some(0));
+    assert_eq!(m.last_active_window, Some(WindowId(0)));
 }
 
 #[tokio::test]

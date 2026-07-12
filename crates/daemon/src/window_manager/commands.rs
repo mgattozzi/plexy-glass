@@ -77,20 +77,21 @@ impl WindowManager {
                 window.home_cwd = home;
                 self.windows.push(window);
                 self.last_active_window = Some(self.active);
-                self.active = self.windows.len() - 1;
+                self.active = id;
             }
             Command::NextWindow => {
                 if !self.windows.is_empty() {
-                    let idx = (self.active + 1) % self.windows.len();
+                    let idx = (self.active_index() + 1) % self.windows.len();
                     self.switch_to_window(idx);
                 }
             }
             Command::PrevWindow => {
                 if !self.windows.is_empty() {
-                    let idx = if self.active == 0 {
+                    let cur = self.active_index();
+                    let idx = if cur == 0 {
                         self.windows.len() - 1
                     } else {
-                        self.active - 1
+                        cur - 1
                     };
                     self.switch_to_window(idx);
                 }
@@ -99,8 +100,10 @@ impl WindowManager {
                 self.switch_to_window(usize::from(n));
             }
             Command::SelectLastWindow => {
-                if let Some(prev) = self.last_active_window {
-                    self.switch_to_window(prev);
+                if let Some(prev) = self.last_active_window
+                    && let Some(idx) = self.windows.iter().position(|w| w.id == prev)
+                {
+                    self.switch_to_window(idx);
                 }
             }
             Command::SelectLastPane => {
@@ -139,7 +142,7 @@ impl WindowManager {
                     w.resize(viewport)?;
                     self.windows.push(w);
                     self.last_active_window = Some(self.active);
-                    self.active = self.windows.len() - 1;
+                    self.active = id;
                 }
             }
             Command::SwapPane(target) => {
@@ -153,7 +156,7 @@ impl WindowManager {
             }
             Command::JoinPane(dir) => {
                 if let Some(marked) = self.marked_pane {
-                    let act_idx = self.active;
+                    let act_idx = self.active_index();
                     let act_pane = self.windows[act_idx].active();
                     if marked == act_pane {
                         self.set_status_message(
@@ -163,24 +166,22 @@ impl WindowManager {
                     } else if let Some(src_idx) =
                         self.windows.iter().position(|w| w.pane(marked).is_some())
                     {
-                        let act_wid = self.windows[act_idx].id;
                         if let Some(pane) = self.windows[src_idx].detach_pane(marked) {
                             if self.windows[src_idx].is_layout_empty() {
-                                self.windows.remove(src_idx);
                                 // invariant: the active window is never the emptied
                                 // source, `marked != act_pane` (guarded above) means
                                 // the active window keeps act_pane and stays alive.
-                                self.active = self
-                                    .windows
-                                    .iter()
-                                    .position(|w| w.id == act_wid)
-                                    .expect("active window survives a join");
-                                self.fixup_last_active_after_removal(src_idx);
+                                // `active` is an id, so removing the source never
+                                // moves it — no repoint needed (this used to re-run
+                                // `position(...).expect(...)`).
+                                let src_id = self.windows[src_idx].id;
+                                self.windows.remove(src_idx);
+                                self.fixup_last_active_after_removal(src_id);
                             } else {
                                 // Source survives with a promoted layout, so resize it.
                                 self.windows[src_idx].resize(viewport)?;
                             }
-                            let act_idx = self.active;
+                            let act_idx = self.active_index();
                             let act_pane = self.windows[act_idx].active();
                             self.windows[act_idx].adopt_split(act_pane, dir, pane, viewport)?;
                             self.marked_pane = None;
@@ -210,7 +211,7 @@ impl WindowManager {
                             // take of A breaks the ownership cycle, then one
                             // slot-replace per window, so no `Pane` is dropped
                             // on any path.
-                            let act_idx = self.active;
+                            let act_idx = self.active_index();
                             // invariant: the active pane is always in its window.
                             let pane_a = self.windows[act_idx]
                                 .take_pane(a)
@@ -290,7 +291,7 @@ impl WindowManager {
                 // flash can name it (a fat-fingered `kill-window` is alarming
                 // without acknowledgement; this is the lightweight alternative to
                 // a blocking confirm).
-                let idx = self.active;
+                let idx = self.active_index();
                 let name = self.active_window().display_name(self.config.auto_rename);
                 self.close_active_window();
                 self.set_status_message(

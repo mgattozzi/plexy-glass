@@ -112,7 +112,11 @@ pub struct MonitorDrain {
 
 pub struct WindowManager {
     windows: Vec<Window>,
-    active: usize,
+    /// Id of the active window, NOT a `Vec` index. Storing the identity means
+    /// structural mutations (reorder, close) don't need to hand-fix an index at
+    /// every site; `active_index()` is the single id→slot lookup for the render
+    /// and layout paths.
+    active: WindowId,
     next_pane_id: u32,
     next_window_id: u32,
     host_size: PtySize,
@@ -166,9 +170,9 @@ pub struct WindowManager {
     /// serve_attach polls this each iteration of its input loop
     /// and exits when true.
     pub detach_requested: bool,
-    /// Previously-active window index, for `select_last_window`. Updated on
-    /// every window switch.
-    last_active_window: Option<usize>,
+    /// Previously-active window (by id), for `select_last_window`. Updated on
+    /// every window switch; an id so a reorder/close never dangles it.
+    last_active_window: Option<WindowId>,
     /// Active interactive overlay (rename prompt / help), or `None`. Session-
     /// shared, mirroring copy mode. While `Some`, the connection routes keys to
     /// `handle_overlay_key` instead of the keymap/shell.
@@ -217,7 +221,7 @@ impl WindowManager {
         )?;
         Ok(Self {
             windows: vec![first],
-            active: 0,
+            active: WindowId(0),
             next_pane_id: 1,
             next_window_id: 1,
             host_size,
@@ -420,20 +424,20 @@ impl WindowManager {
             }
         }
         if let Some(idx) = closed_idx {
+            // Capture the closed window's id before the Vec shuffles.
+            let removed_id = self.windows[idx].id;
             self.windows.remove(idx);
-            // Only a strictly-lower window shifts the active index down. When the
-            // ACTIVE window is the one removed (idx == active), leave the index
-            // put so focus lands on the NEXT window (clamped to last below),
-            // matching close_active_window's tmux-standard policy. The previous
-            // `idx <= active` decremented to the PREVIOUS window, so typing
-            // `exit` and pressing kill-window gave opposite focus.
-            if idx < self.active {
-                self.active -= 1;
+            // `active` is an id, so a window closing elsewhere never moves it —
+            // only a closed ACTIVE window needs a new focus target. Match the
+            // tmux-standard policy: focus lands on the window now at the removed
+            // slot (the NEXT window), clamped to the last. The old `idx <=
+            // active` decrement landed on the PREVIOUS window, so typing `exit`
+            // and pressing kill-window gave opposite focus.
+            if self.active == removed_id && !self.windows.is_empty() {
+                let slot = idx.min(self.windows.len() - 1);
+                self.active = self.windows[slot].id;
             }
-            if self.active >= self.windows.len() && !self.windows.is_empty() {
-                self.active = self.windows.len() - 1;
-            }
-            self.fixup_last_active_after_removal(idx);
+            self.fixup_last_active_after_removal(removed_id);
         }
         // The session ends when its last window closes; a floating popup must
         // not orphan its child (nothing else would reap it).
@@ -466,7 +470,7 @@ impl WindowManager {
     /// this drain, for the same policy to weigh.
     #[must_use = "schedule the TTL wake on alert_edge and apply the notification policy"]
     pub fn update_monitor_flags(&mut self) -> MonitorDrain {
-        let active = self.active;
+        let active = self.active_index();
         // Collect edge messages while iterating (the iterator borrows
         // `windows` mutably; `set_status_message` borrows `self`), then emit
         // after the loop. The status line is a single slot, so on simultaneous
@@ -569,7 +573,7 @@ impl WindowManager {
     /// otherwise flicker at 1 Hz (tick sets → render clears → tick re-fires).
     #[must_use = "schedule the status-message TTL wake when a silence edge fired"]
     pub fn check_silence_alerts(&mut self) -> bool {
-        let active = self.active;
+        let active = self.active_index();
         let now = Instant::now();
         let mut message: Option<String> = None;
         let auto_rename = self.config.auto_rename;
@@ -602,20 +606,21 @@ impl WindowManager {
     }
 
     pub fn active_window(&self) -> &Window {
-        &self.windows[self.active]
+        &self.windows[self.active_index()]
     }
 
     pub fn active_window_mut(&mut self) -> &mut Window {
-        &mut self.windows[self.active]
+        let idx = self.active_index();
+        &mut self.windows[idx]
     }
 
     pub fn windows_mut(&mut self) -> &mut [Window] {
         &mut self.windows
     }
 
-    pub const fn set_active_window(&mut self, idx: usize) {
+    pub fn set_active_window(&mut self, idx: usize) {
         if idx < self.windows.len() {
-            self.active = idx;
+            self.active = self.windows[idx].id;
         }
     }
 
@@ -649,7 +654,7 @@ impl WindowManager {
             Arc::clone(&self.config),
         )?;
         self.windows.push(window);
-        self.active = self.windows.len() - 1;
+        self.active = id;
         Ok(())
     }
 
@@ -855,7 +860,8 @@ impl WindowManager {
     /// Rename the active window (command-prompt `rename` path). Mirrors the
     /// rename-overlay commit, but the name comes straight from the prompt.
     pub fn rename_active_window(&mut self, name: String) {
-        self.set_window_name(self.active, name);
+        let idx = self.active_index();
+        self.set_window_name(idx, name);
     }
 
     /// Rename the active pane (command-prompt `rename-pane` path).
@@ -881,9 +887,8 @@ impl WindowManager {
     }
 
     /// Move the window at `from` to position `to` (drop-to-position): remove at
-    /// `from`, insert at `min(to, len-1)`. `active` and `last_active_window`
-    /// re-follow their windows by id across the shuffle. Returns `false`
-    /// (no mutation) for a single window, an out-of-range `from`, or a no-op.
+    /// `from`, insert at `min(to, len-1)`. Returns `false` (no mutation) for a
+    /// single window, an out-of-range `from`, or a no-op.
     pub fn move_window(&mut self, from: usize, to: usize) -> bool {
         let len = self.windows.len();
         if from >= len || len < 2 {
@@ -893,25 +898,11 @@ impl WindowManager {
         if from == to {
             return false;
         }
-        // invariant: `active` and any `last_active_window` index are < len.
-        let active_id = self.windows[self.active].id;
-        let last_active_id = self
-            .last_active_window
-            .and_then(|i| self.windows.get(i))
-            .map(|w| w.id);
-
         let w = self.windows.remove(from);
         self.windows.insert(to, w);
-
-        // invariant: `active_id` was present before the move and is only
-        // relocated, never removed, so `position` always finds it.
-        self.active = self
-            .windows
-            .iter()
-            .position(|x| x.id == active_id)
-            .expect("active window survives reorder");
-        self.last_active_window =
-            last_active_id.and_then(|id| self.windows.iter().position(|x| x.id == id));
+        // `active` and `last_active_window` are ids; the reorder relocates
+        // windows but never changes their ids, so both still point at the right
+        // window with no fixup.
         self.notify.notify_one();
         true
     }
@@ -991,8 +982,19 @@ impl WindowManager {
         &self.windows
     }
 
-    pub const fn active_idx(&self) -> usize {
-        self.active
+    pub fn active_idx(&self) -> usize {
+        self.active_index()
+    }
+
+    /// Slot of the active window in `self.windows`. The ONE place the active
+    /// id→index lookup lives; the render/layout slot-uses route through it.
+    fn active_index(&self) -> usize {
+        self.windows
+            .iter()
+            .position(|w| w.id == self.active)
+            // invariant: `active` is always a live window's id — every path that
+            // removes windows repoints it, and every add sets it to the new id.
+            .expect("active is always a live window's id")
     }
 
     /// The current index of the window being drag-reordered, if any.
@@ -1004,12 +1006,15 @@ impl WindowManager {
     /// Switch the active window to `idx`, recording the current window as the
     /// "last active" so `select_last_window` can toggle back. No-op for an
     /// out-of-range or same index.
-    const fn switch_to_window(&mut self, idx: usize) {
-        if idx >= self.windows.len() || idx == self.active {
+    fn switch_to_window(&mut self, idx: usize) {
+        let Some(target) = self.windows.get(idx).map(|w| w.id) else {
+            return;
+        };
+        if target == self.active {
             return;
         }
         self.last_active_window = Some(self.active);
-        self.active = idx;
+        self.active = target;
     }
 
     /// Clear a zoom overlay (if any) and restore pane sizes. Called before
@@ -1047,7 +1052,8 @@ impl WindowManager {
 
     fn close_active_window(&mut self) {
         if !self.windows.is_empty() {
-            let removed = self.active;
+            let removed = self.active_index();
+            let removed_id = self.active;
             // The marked pane can't survive its window's removal (KillWindow
             // drops every pane synchronously, so the death channel won't clear
             // it).
@@ -1070,10 +1076,12 @@ impl WindowManager {
             if self.windows.is_empty() {
                 self.last_active_window = None;
             } else {
-                if self.active >= self.windows.len() {
-                    self.active = self.windows.len() - 1;
-                }
-                self.fixup_last_active_after_removal(removed);
+                // The active window was just removed; focus follows the same
+                // tmux-standard policy as the death-channel path — the window
+                // now at the removed slot (the next window), clamped to last.
+                let slot = removed.min(self.windows.len() - 1);
+                self.active = self.windows[slot].id;
+                self.fixup_last_active_after_removal(removed_id);
             }
         }
         // The session ends when its last window closes; a floating popup must
@@ -1083,17 +1091,15 @@ impl WindowManager {
         }
     }
 
-    /// Repair `last_active_window` after the window at `removed` is dropped:
-    /// the toggle target is cleared if it *was* the removed window, shifted
-    /// down by one if it sat after the removed slot, and left alone otherwise.
-    /// Also clears it if it would now alias the active window (toggling to the
-    /// window you are already on is meaningless).
-    fn fixup_last_active_after_removal(&mut self, removed: usize) {
-        self.last_active_window = match self.last_active_window {
-            Some(i) if i == removed => None,
-            Some(i) if i > removed => Some(i - 1),
-            other => other,
-        };
+    /// Repair `last_active_window` after the window with id `removed` is
+    /// dropped: the toggle target is cleared if it *was* the removed window
+    /// (its id is gone), and otherwise left alone (an id doesn't shift when the
+    /// Vec does). Also clears it if it would now alias the active window
+    /// (toggling to the window you are already on is meaningless).
+    fn fixup_last_active_after_removal(&mut self, removed: WindowId) {
+        if self.last_active_window == Some(removed) {
+            self.last_active_window = None;
+        }
         if self.last_active_window == Some(self.active) {
             self.last_active_window = None;
         }
