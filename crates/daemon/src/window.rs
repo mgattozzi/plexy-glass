@@ -1006,9 +1006,10 @@ fn basename(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use plexy_glass_mux::{Point, Size};
+
     use super::*;
     use crate::test_env;
-    use plexy_glass_mux::{Point, Size};
 
     fn notify() -> Arc<Notify> {
         Arc::new(Notify::new())

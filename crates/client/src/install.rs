@@ -2,8 +2,7 @@
 //! local-download-then-push. Pure decision helpers here are unit-tested; the
 //! effectful flow shells `ssh`/`curl`/`sha256sum`|`shasum` (no crate deps).
 
-use std::process::Command as StdCommand;
-use std::process::Stdio;
+use std::process::{Command as StdCommand, Stdio};
 
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;

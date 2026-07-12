@@ -1,9 +1,8 @@
-use plexy_glass_config::{ColorSource, PaletteConfig, StyleConfig};
-use plexy_glass_emulator::Attrs;
-
 // `Rgb` moved down into `plexy-glass-config` (parsed from hex at decode); re-export
 // so every existing `plexy_glass_status::Rgb` user keeps compiling.
 pub use plexy_glass_config::Rgb;
+use plexy_glass_config::{ColorSource, PaletteConfig, StyleConfig};
+use plexy_glass_emulator::Attrs;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ResolvedStyle {

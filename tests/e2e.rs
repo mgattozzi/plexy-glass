@@ -17,8 +17,6 @@
     reason = "integration-test file; allow-unwrap-in-tests misses free helper fns"
 )]
 
-use std::env;
-use std::fs;
 #[cfg(target_os = "macos")]
 use std::fs::Permissions;
 use std::io::Write;
@@ -27,8 +25,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::slice::Iter;
 use std::sync::{Arc, Mutex, mpsc};
-use std::thread;
 use std::time::{Duration, Instant};
+use std::{env, fs, thread};
 
 use assert_cmd::cargo::CommandCargoExt;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};

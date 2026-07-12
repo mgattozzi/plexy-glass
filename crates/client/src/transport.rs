@@ -1,10 +1,9 @@
-use std::fmt;
 use std::fs::OpenOptions;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use std::{env, io};
+use std::{env, fmt, io};
 
 use nix::libc;
 use tokio::io::{AsyncRead, AsyncWrite, split};

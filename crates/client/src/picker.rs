@@ -994,11 +994,13 @@ fn status_glyph(status: &RowStatus) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use plexy_glass_config::PaletteConfig;
-    use plexy_glass_status::Rgb;
     use std::collections::HashMap;
     use std::mem::take;
+
+    use plexy_glass_config::PaletteConfig;
+    use plexy_glass_status::Rgb;
+
+    use super::*;
 
     /// Split the themed render into its visible box rows. **The renderer positions
     /// each row with `\x1b[{r};{c}H` and emits NO `\r`/`\n`** (Step 3), so ROWS ARE
