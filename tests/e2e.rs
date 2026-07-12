@@ -5387,3 +5387,120 @@ fn history_palette_filters_and_jumps_to_block() {
         sess.snapshot_str()
     );
 }
+
+/// Sync-panes (`prefix y` / `:sync`) fans `plexy-glass send` input to every
+/// pane in the active window; `plexy-glass run` deliberately bypasses it
+/// (writes only to the input-target pane — a synchronized multi-pane run has
+/// no single answer, per the CLI's design).
+#[test]
+fn sync_panes_fans_out_send_but_not_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+
+    // Give the original (soon-to-be LEFT) pane a distinguishing env var so a
+    // later command whose OUTPUT depends on it proves which pane actually ran
+    // it, instead of fragile raw-text occurrence counting (both panes echo
+    // byte-identical fanned input either way).
+    sess.send_str("export MARK=LEFT && echo LEFT_SET\n");
+    assert!(
+        sess.wait_for(b"LEFT_SET", Duration::from_secs(10)),
+        "left pane never set up. raw: {}",
+        sess.snapshot_str()
+    );
+
+    sess.send_prefix(b'v'); // vertical split -> new RIGHT pane, active
+    assert!(
+        sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)),
+        "split never rendered"
+    );
+    sess.send_str("export MARK=RIGHT && echo RIGHT_SET\n");
+    assert!(
+        sess.wait_for(b"RIGHT_SET", Duration::from_secs(10)),
+        "right pane never set up. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // Baseline: sync is OFF, so `send` reaches only the focused (right) pane.
+    let mark1 = sess.buffer_len();
+    let (status, _, err) = run_cli(&env, &["send", "--enter", "echo PRESYNC_$MARK"]);
+    assert!(status.success(), "send failed: {err}");
+    assert!(
+        sess.wait_for_from(mark1, b"PRESYNC_RIGHT", Duration::from_secs(10)),
+        "PRESYNC_RIGHT never appeared (send should still reach the focused \
+         pane with sync off). raw: {}",
+        sess.snapshot_str()
+    );
+    thread::sleep(Duration::from_millis(400)); // margin for a (buggy) fan-out
+    assert!(
+        !sess.wait_for_from(mark1, b"PRESYNC_LEFT", Duration::from_millis(1)),
+        "send reached the LEFT pane with sync OFF — this false positive would \
+         make the sync-ON assertion below meaningless. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // Toggle sync on via the real wire chord (prefix y). The mode widget shows
+    // a SYNC indicator once it engages.
+    sess.send_prefix(b'y');
+    assert!(
+        sess.wait_for(b"SYNC", Duration::from_secs(10)),
+        "sync indicator never appeared after prefix y. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // With sync ON, `send` fans out: BOTH panes receive and independently
+    // execute the same bytes, each producing a DIFFERENT output (its own
+    // $MARK), proving genuine independent delivery rather than a single paint.
+    let mark2 = sess.buffer_len();
+    let (status, _, err) = run_cli(&env, &["send", "--enter", "echo FANOUT_$MARK"]);
+    assert!(status.success(), "send failed: {err}");
+    assert!(
+        sess.wait_for_from(mark2, b"FANOUT_RIGHT", Duration::from_secs(10)),
+        "FANOUT_RIGHT never appeared. raw: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for_from(mark2, b"FANOUT_LEFT", Duration::from_secs(10)),
+        "sync-panes did not fan `send` out to the LEFT pane. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // `run` must NOT fan out even while sync is on: it requires OSC 133 shell
+    // integration, so seed a prompt mark first (this itself goes through
+    // `send`, which DOES fan out under sync — harmless, both panes just gain
+    // an invisible mark). The injected command's OUTPUT depends on $MARK again
+    // (not a raw-occurrence count): `run` echoes the command it injects too, so
+    // a literal marker would appear twice from the RIGHT pane alone (once as
+    // typed-input echo, once as real output) with no fan-out involved at all —
+    // $MARK makes the echo (`$MARK`, unexpanded) and the real output
+    // (`RIGHT`/`LEFT`, expanded) textually distinct.
+    seed_prompt_mark(&env, &sess);
+    let mark3 = sess.buffer_len();
+    let (status, stdout, err) = run_cli(
+        &env,
+        &[
+            "run",
+            "printf '\\033]133;C\\007'; echo RUN_NOT_FANNED_$MARK; printf '\\033]133;D;0\\007\\033]133;A\\007'",
+        ],
+    );
+    assert!(
+        status.success(),
+        "run failed (status={status:?}): {stdout} {err}"
+    );
+    assert!(
+        sess.wait_for_from(mark3, b"RUN_NOT_FANNED_RIGHT", Duration::from_secs(10)),
+        "RUN_NOT_FANNED_RIGHT never appeared. raw: {}",
+        sess.snapshot_str()
+    );
+    thread::sleep(Duration::from_millis(400)); // margin for a (buggy) fan-out
+    assert!(
+        !sess.wait_for_from(mark3, b"RUN_NOT_FANNED_LEFT", Duration::from_millis(1)),
+        "`run` fanned out to the LEFT pane under sync-panes — it must reach \
+         only the input-target pane. raw: {}",
+        sess.snapshot_str()
+    );
+}
