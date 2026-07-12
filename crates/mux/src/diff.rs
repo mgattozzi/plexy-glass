@@ -192,7 +192,7 @@ impl DiffRenderer {
                         break;
                     };
                     // Equivalent note: spacer-skip (146:27) is dead code in this full-repaint
-                    // loop: wide chars advance `c` by `grapheme_advance()`=2, so the cursor
+                    // loop: wide chars advance `c` by `cell_advance()`=2, so the cursor
                     // always jumps over the spacer position and the `+= 1` branch (`-=` and
                     // `*=` mutations) is never reached.
                     if cell.is_wide_spacer() {
@@ -202,7 +202,7 @@ impl DiffRenderer {
                     apply_sgr_delta(&mut out, &current_attrs, cell);
                     current_attrs = CellAttrs::from_cell(cell);
                     out.push_str(cell.grapheme.as_str());
-                    let w = plexy_glass_emulator::grapheme_advance(cell.grapheme.as_str());
+                    let w = plexy_glass_emulator::cell_advance(cell.grapheme.as_str());
                     c += w;
                 }
             }
@@ -238,7 +238,7 @@ impl DiffRenderer {
                         }
                         // Equivalent note: spacer-skip (181:31) is dead code in this
                         // incremental-diff loop for the same reason as 146:27: wide chars advance
-                        // `c` by `grapheme_advance()`=2, so the cursor never lands on a spacer
+                        // `c` by `cell_advance()`=2, so the cursor never lands on a spacer
                         // position in mid-run traversal.
                         if cell.is_wide_spacer() {
                             c += 1;
@@ -247,7 +247,7 @@ impl DiffRenderer {
                         apply_sgr_delta(&mut out, &current_attrs, cell);
                         current_attrs = CellAttrs::from_cell(cell);
                         out.push_str(cell.grapheme.as_str());
-                        let w = plexy_glass_emulator::grapheme_advance(cell.grapheme.as_str());
+                        let w = plexy_glass_emulator::cell_advance(cell.grapheme.as_str());
                         c += w;
                     }
                 }
@@ -650,7 +650,7 @@ fn paint_cells_rect(
         // iteration calls `screen.cell(r, saturated_limit)` which returns `None`
         // and we break. Spacer-skip `+= 1` mutations (`-=`, `*=`) are dead code
         // for the same reason as the main render loops: wide chars advance `c` by
-        // `grapheme_advance()`=2, so the cursor never lands on a spacer position.
+        // `cell_advance()`=2, so the cursor never lands on a spacer position.
         while c < c0.saturating_add(cols).min(screen.cols) {
             let Some(cell) = screen.cell(r, c) else { break };
             if cell.is_wide_spacer() {
@@ -660,7 +660,7 @@ fn paint_cells_rect(
             apply_sgr_delta(out, &attrs, cell);
             attrs = CellAttrs::from_cell(cell);
             out.push_str(cell.grapheme.as_str());
-            c += plexy_glass_emulator::grapheme_advance(cell.grapheme.as_str());
+            c += plexy_glass_emulator::cell_advance(cell.grapheme.as_str());
         }
         out.push_str("\x1b[0m");
         attrs = CellAttrs::default();
@@ -1038,6 +1038,41 @@ mod tests {
             v.put(*r, *c, cell);
         }
         v
+    }
+
+    #[test]
+    fn fat_cluster_advances_two_cells_not_its_full_width() {
+        // A width-6 cluster (wave + 3 skin tones) is stored as ONE wide pair
+        // (grapheme + wide_spacer). The renderer must advance by cell_advance (2),
+        // not the raw grapheme width (6); at width 6 the cursor jumps past cols
+        // 1..5 and the `X` at col 2 is dropped.
+        let fat = "\u{1F44B}\u{1F3FB}\u{1F3FC}\u{1F3FD}";
+        let mut v = VirtualScreen::blank(1, 6);
+        v.put(
+            0,
+            0,
+            Cell {
+                grapheme: SmolStr::new(fat),
+                ..Cell::default()
+            },
+        );
+        v.put(0, 1, Cell::wide_spacer());
+        v.put(
+            0,
+            2,
+            Cell {
+                grapheme: SmolStr::new("X"),
+                ..Cell::default()
+            },
+        );
+        let mut d = DiffRenderer::new();
+        let bytes = d.render(&v);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(
+            s.contains('X'),
+            "X after a fat cluster must not be dropped: {s:?}"
+        );
+        assert!(s.contains(fat), "the cluster itself must render: {s:?}");
     }
 
     #[test]

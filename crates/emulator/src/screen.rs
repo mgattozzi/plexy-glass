@@ -859,8 +859,10 @@ impl Screen {
             self.cursor.pending_wrap = false;
         }
 
-        // If a wide char doesn't fit, pad the last column and wrap.
-        if w == 2 && self.cursor.col.get() + 1 >= self.cols() {
+        // If a wide char doesn't fit, pad the last column and wrap. A width-≥3
+        // cluster (stacked skin-tone modifiers) still occupies exactly one wide
+        // pair in the grid, so it takes the same 2-column path as `w == 2`.
+        if w >= 2 && self.cursor.col.get() + 1 >= self.cols() {
             if self.modes.contains(Modes::AUTOWRAP) {
                 if self.cursor.col.get() < self.cols() {
                     // The pad blank can land on a wide grapheme's spacer at the last
@@ -879,7 +881,7 @@ impl Screen {
 
         // Overwriting one half of an existing wide grapheme destroys the whole
         // char (xterm/VTE): blank the orphaned half so the row stays well-formed.
-        self.clear_wide_straddle(self.cursor.col, self.cursor.col.advance(u16::from(w == 2)));
+        self.clear_wide_straddle(self.cursor.col, self.cursor.col.advance(u16::from(w >= 2)));
 
         let cell = Cell {
             grapheme: cluster.into(),
@@ -892,7 +894,7 @@ impl Screen {
         };
         self.put_cell_at_cursor(cell);
 
-        if w == 2 {
+        if w >= 2 {
             self.cursor.col = self.cursor.col.advance(1);
             self.put_cell_at_cursor(Cell::wide_spacer());
         }
@@ -929,7 +931,7 @@ impl Screen {
         if self
             .active
             .get_cell(row, end)
-            .is_some_and(|c| display_width(c.grapheme.as_str()) == 2)
+            .is_some_and(|c| display_width(c.grapheme.as_str()) >= 2)
         {
             self.active.put_cell(row, end.advance(1), Cell::default());
         }
@@ -3106,6 +3108,23 @@ mod tests {
         assert_eq!(c0.grapheme.as_str(), "好");
         assert!(c1.is_wide_spacer());
         assert_eq!(s.cursor.col, Col::new(2));
+    }
+
+    #[test]
+    fn fat_cluster_stores_as_one_wide_pair() {
+        // A wave + three skin-tone modifiers is ONE grapheme of display width 6,
+        // but the grid holds at most a wide pair (grapheme cell + wide_spacer,
+        // cursor +2). A following `X` must land at col 2, not be swallowed by a
+        // cell that stored the cluster width-1 and advanced only one column.
+        let fat = "\u{1F44B}\u{1F3FB}\u{1F3FC}\u{1F3FD}";
+        let s = drive(format!("{fat}X").as_bytes());
+        let c0 = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
+        assert_eq!(c0.grapheme.as_str(), fat);
+        let c1 = s.active.get_cell(Row::new(0), Col::new(1)).unwrap();
+        assert!(c1.is_wide_spacer(), "col 1 must be the wide spacer");
+        let c2 = s.active.get_cell(Row::new(0), Col::new(2)).unwrap();
+        assert_eq!(c2.grapheme.as_str(), "X", "X must land at col 2");
+        assert_eq!(s.cursor.col, Col::new(3));
     }
 
     #[test]

@@ -29,6 +29,16 @@ pub fn grapheme_advance(g: &str) -> u16 {
     display_width(g).max(1)
 }
 
+/// Column span of a grapheme *already stored in a grid cell*, capped at the
+/// 2-column grid invariant. A cell holds at most one wide grapheme (grapheme
+/// cell + one `wide_spacer`), so a width-≥3 cluster (stacked skin-tone
+/// modifiers report width 6) still occupies exactly 2 columns. Use this ONLY to
+/// traverse stored cells; measuring an arbitrary string uses `grapheme_advance`
+/// / `truncate_to_width`, which must not clamp.
+pub fn cell_advance(g: &str) -> u16 {
+    display_width(g).clamp(1, 2)
+}
+
 /// Iterate `(grapheme, advance)` pairs, the building block for painting text
 /// into a grid: place the grapheme at the running column, then a wide spacer
 /// when `advance == 2`, then add `advance` to the column.
@@ -77,6 +87,26 @@ mod tests {
         // A lone combining mark is zero-width but still advances one cell.
         assert_eq!(char_width('\u{301}'), 0);
         assert_eq!(grapheme_advance("\u{301}"), 1);
+    }
+
+    #[test]
+    fn cell_advance_clamps_a_fat_cluster_to_two() {
+        // A wave + three skin-tone modifiers is ONE grapheme of display width 6,
+        // but a grid cell holds at most a wide pair (2 columns). cell_advance
+        // must clamp to 2 so the diff renderer doesn't over-advance and drop
+        // trailing cells. grapheme_advance keeps the true width (6) for string
+        // measurement.
+        let fat = "\u{1F44B}\u{1F3FB}\u{1F3FC}\u{1F3FD}";
+        assert_eq!(fat.graphemes(true).count(), 1, "one grapheme cluster");
+        assert!(display_width(fat) >= 3, "cluster is wider than a wide pair");
+        assert_eq!(cell_advance(fat), 2);
+        assert_eq!(cell_advance("好"), 2);
+        assert_eq!(cell_advance("a"), 1);
+        assert_eq!(
+            cell_advance("\u{301}"),
+            1,
+            "zero-width still spans one cell"
+        );
     }
 
     #[test]

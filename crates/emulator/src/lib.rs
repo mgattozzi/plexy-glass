@@ -46,5 +46,6 @@ pub use screen::{ColorQuery, ColorScheme, Notification, Screen};
 pub use scrollback::{DEFAULT_SCROLLBACK_LINES, Scrollback};
 pub use tabs::TabStops;
 pub use width::{
-    char_width, display_width, grapheme_advance, graphemes_with_width, truncate_to_width,
+    cell_advance, char_width, display_width, grapheme_advance, graphemes_with_width,
+    truncate_to_width,
 };

@@ -207,17 +207,18 @@ pub struct Grid {
 }
 
 /// After a cell splice (ICH/DCH) a wide grapheme can be split from its spacer.
-/// Blank any orphan so the row stays well-formed: a width-2 grapheme must be
-/// followed by a `wide_spacer`; a spacer must follow a width-2 grapheme.
+/// Blank any orphan so the row stays well-formed: a wide grapheme must be
+/// followed by a `wide_spacer`; a spacer must follow a wide grapheme. "Wide"
+/// is width ≥ 2 so a width-≥3 cluster (stored as one wide pair) counts too.
 fn normalize_wide_pairs(cells: &mut [Cell]) {
     let n = cells.len();
     for i in 0..n {
         if cells[i].is_wide_spacer() {
-            let paired = i > 0 && display_width(cells[i - 1].grapheme.as_str()) == 2;
+            let paired = i > 0 && display_width(cells[i - 1].grapheme.as_str()) >= 2;
             if !paired {
                 cells[i] = Cell::default();
             }
-        } else if display_width(cells[i].grapheme.as_str()) == 2 {
+        } else if display_width(cells[i].grapheme.as_str()) >= 2 {
             let paired = i + 1 < n && cells[i + 1].is_wide_spacer();
             if !paired {
                 cells[i] = Cell::default();

@@ -120,7 +120,13 @@ pub fn reflow(
                 // Already consumed by its wide partner; never standalone.
                 continue;
             }
-            let cw = cell.grapheme.as_str().width() as u16;
+            // Column span of the STORED cell, capped at the 2-column grid
+            // invariant: a width-≥3 cluster (stacked skin-tone modifiers) is held
+            // in one wide pair, so it re-wraps as 2 columns, not its raw width.
+            // The lower bound is left untouched so the `cw == 0` re-attach branch
+            // below (reflow's analog of `put_grapheme`'s zero-width handling)
+            // stays reachable.
+            let cw = (cell.grapheme.as_str().width() as u16).min(2);
 
             // Avoid splitting a wide char across the line edge.
             if cw == 2 && col_in_row + 2 > new_cols && col_in_row > 0 {
