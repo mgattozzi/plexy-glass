@@ -2473,6 +2473,34 @@ fn cli_send_reaches_attached_session() {
     );
 }
 
+/// A flag-bearing command (`ls -la`) must reach the pane VERBATIM instead of
+/// clap choking on the unrecognized `-la` short flag. `trailing_var_arg` +
+/// `allow_hyphen_values` on `text` fixed this; before that, `-la` wasn't a
+/// flag clap knew about, so the whole invocation failed to parse and nothing
+/// reached the pane at all. Flags precede the command now, so `--enter`
+/// comes before `ls -la`.
+#[test]
+fn cli_send_flag_bearing_command_reaches_pane_verbatim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+
+    let (status, _stdout, stderr) = run_cli(&env, &["send", "--enter", "ls", "-la"]);
+    assert!(
+        status.success(),
+        "send --enter ls -la failed (status={status:?}): {stderr}"
+    );
+    assert!(
+        sess.wait_for(b"-la", Duration::from_secs(10)),
+        "the flag-bearing command 'ls -la' never reached the pane verbatim. raw: {}",
+        sess.snapshot_str()
+    );
+}
+
 /// `plexy-glass capture` reads the pane's visible screen text and returns it on
 /// stdout; polling until the previously-sent marker is visible.
 #[test]
@@ -4142,6 +4170,40 @@ fn run_timeout_exits_124() {
     assert!(
         stderr.contains("timed out after 1s"),
         "expected the timeout message on stderr, got: {stderr:?}"
+    );
+}
+
+/// A flag-bearing command must not have a mid-string `-n` misparsed as the
+/// session `--name` flag. Before `trailing_var_arg` + `allow_hyphen_values`,
+/// `run grep -n foo` silently tried to resolve a session literally named
+/// "foo" (clap intercepted `-n foo` even though it belongs to the command
+/// text) and failed with `no session "foo"` instead of running `grep -n foo`
+/// in the sole session "main". `--timeout` now has to precede the command.
+#[test]
+fn run_flag_bearing_command_does_not_misparse_as_session_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let sess = TestSession::spawn(&env);
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+    seed_prompt_mark(&env, &sess);
+
+    // `grep -n foo` with no file operand reads stdin, which the pty never
+    // closes and no OSC 133 D mark follows, so a correctly-parsed run can
+    // only end via the --timeout (exit 124) -- proving the whole string
+    // landed in the pane as one command, not split into --name foo.
+    let (status, _stdout, stderr) = run_cli(&env, &["run", "--timeout", "2", "grep", "-n", "foo"]);
+    assert!(
+        !stderr.contains("no session \"foo\""),
+        "run misparsed '-n foo' as --name foo: {stderr}"
+    );
+    assert_eq!(
+        status.code(),
+        Some(124),
+        "expected a timeout exit (status={status:?}). stderr: {stderr:?} pane: {}",
+        sess.snapshot_str()
     );
 }
 

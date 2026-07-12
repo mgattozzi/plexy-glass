@@ -26,6 +26,26 @@ remote host over SSH instead of the local socket, e.g.
 | `plexy-glass capture --last-command [-n NAME]` | `--last-command`, `--json` | Print the last completed OSC 133 command block's output (scrollback-inclusive) to stdout. Add `--json` for `{"output", "exit_code", "command_line"}`. Exits 1 when no block exists. |
 | `plexy-glass run [-n NAME] [--timeout SECS] <COMMAND>...` | `--timeout SECS`, `--json` | Type COMMAND + Enter into the input-target pane, wait for the OSC 133 completion mark, print the block output to stdout (or JSON with `--json`), and exit with the command's exit code. Requires OSC 133 shell integration. |
 
+### Flags precede the command
+
+`cmd`'s `<LINE>...`, `send`'s `<TEXT>...`, and `run`'s `<COMMAND>...` capture
+everything after the last recognized flag **verbatim**, hyphens and all, so a
+command like `grep -n foo` or `ls -la` reaches the pane exactly as typed
+instead of clap trying to match `-n`/`-l`/`-a` against `plexy-glass`'s own
+flags. That means `-n NAME`, `--timeout SECS`, `--enter`, and `--json` must
+come *before* the command, not after:
+
+```sh
+# Right: plexy-glass's own flags first, then the exec-passthrough command.
+plexy-glass run -n work --timeout 30 grep -n foo access.log
+plexy-glass send -n work --enter ls -la
+
+# Wrong: -n here gets swallowed into the command text (grep's own -n),
+# so plexy-glass falls back to the sole/ambiguous-session rule instead of
+# targeting "work".
+plexy-glass run grep -n foo access.log -n work
+```
+
 ## Session resolution
 
 All three verbs share the same resolution rule: `-n NAME` selects that session,

@@ -59,7 +59,7 @@ enum Subcommands {
         #[arg(short = 'n', long = "name")]
         name: Option<String>,
         /// One or more prompt lines, e.g. "split v" "layout tiled".
-        #[arg(required = true)]
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         lines: Vec<String>,
     },
     /// Type text into a session's focused pane (popup-aware).
@@ -70,7 +70,11 @@ enum Subcommands {
         #[arg(long = "enter")]
         enter: bool,
         /// Text fragments, joined with single spaces.
-        #[arg(required_unless_present = "enter")]
+        #[arg(
+            required_unless_present = "enter",
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
         text: Vec<String>,
     },
     /// Print the focused pane's visible screen text (popup-aware).
@@ -103,7 +107,7 @@ enum Subcommands {
         #[arg(long = "json")]
         json: bool,
         /// Command text fragments, joined with single spaces.
-        #[arg(required = true)]
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         text: Vec<String>,
     },
     /// Print an OSC 133 shell-integration snippet for your shell, then exit.
