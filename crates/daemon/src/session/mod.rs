@@ -3,6 +3,7 @@
 pub(crate) mod coordinator;
 mod restore;
 
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, SystemTime};
@@ -12,7 +13,7 @@ use plexy_glass_mux::{PaneId, VirtualScreen, WindowId};
 use plexy_glass_protocol::{
     ClientId, NegotiatedKbd, ProtocolError, PtySize, SessionEntry, SpawnSpec,
 };
-use tokio::sync::{Mutex, Notify, mpsc, watch};
+use tokio::sync::{Mutex, MutexGuard, Notify, mpsc, watch};
 use tokio::task::{self, JoinHandle};
 use tokio::time;
 
@@ -68,6 +69,51 @@ impl ClientAttention {
     /// client HAS reported, a reported FocusOut makes it unfocused.
     pub const fn terminal_focused(&self) -> bool {
         !self.any_focus_reported || self.any_focused
+    }
+}
+
+/// A held guard over the session's [`WindowManager`], returned by
+/// [`Session::lock_wm`]. It exists to put the "no slow I/O and no re-entrant
+/// status under the lock" rule at the one place the lock is taken, so the
+/// footgun is visible in the type rather than only in scattered comments.
+///
+/// # Invariant (part by construction, part by convention)
+///
+/// The session-wide `WindowManager` mutex is held across the WHOLE compose pass
+/// for frame atomicity, and every input handler re-takes it. So while this guard
+/// is held you must NOT:
+///
+/// - **await slow subprocess I/O** — clipboard read/write, `open_url`, a widget
+///   subprocess. Awaiting it freezes the whole session's render AND input for as
+///   long as the helper takes. The WM's own input handlers enforce this half *by
+///   construction*: [`WindowManager::handle_mouse`] returns an [`OffLockAction`]
+///   describing the I/O and the caller performs it AFTER the guard drops (see
+///   [`Session::handle_mouse`]) — the handler holds only `&mut WindowManager`,
+///   so it cannot reach a `Session` method to do the I/O itself.
+/// - **call `Session::set_status_*`** — those async helpers re-lock this SAME
+///   mutex (see [`Session::set_status_message`]) and tokio's mutex is not
+///   reentrant, so it deadlocks. Emit a status either through the returned
+///   [`OffLockAction`] the caller applies off-lock, or through the synchronous
+///   [`WindowManager::set_status_message`] reached via this guard (which sets the
+///   field but cannot schedule the TTL wake — the coordinator/caller does that
+///   after unlock).
+///
+/// This is NOT full type-level prevention: Rust cannot make an arbitrary slow
+/// `.await` under a held guard a compile error, and this type does not pretend
+/// to. It centralizes and documents the rule; the [`OffLockAction`] return that
+/// the WM input handlers use is the genuinely enforced half.
+pub(crate) struct WmGuard<'a>(MutexGuard<'a, WindowManager>);
+
+impl Deref for WmGuard<'_> {
+    type Target = WindowManager;
+    fn deref(&self) -> &WindowManager {
+        &self.0
+    }
+}
+
+impl DerefMut for WmGuard<'_> {
+    fn deref_mut(&mut self) -> &mut WindowManager {
+        &mut self.0
     }
 }
 
@@ -1037,20 +1083,29 @@ impl Session {
         }
     }
 
+    /// Lock the session's [`WindowManager`], returning a [`WmGuard`] whose
+    /// docs carry the off-lock invariant. Prefer this over a raw
+    /// `self.window_manager.lock().await` on compose/input entry points that
+    /// resolve slow I/O: the guard is `Deref`-transparent, so callers use it
+    /// exactly like the `MutexGuard`, but the rule lives on the returned type.
+    pub(crate) async fn lock_wm(&self) -> WmGuard<'_> {
+        WmGuard(self.window_manager.lock().await)
+    }
+
     pub async fn handle_mouse(
         self: &Arc<Self>,
         event: plexy_glass_mux::MouseEvent,
     ) -> Result<(), DaemonError> {
         let (action, had_message) = {
-            let mut manager = self.window_manager.lock().await;
-            // Slow clipboard/URL I/O is bubbled up as an OffLockAction rather
-            // than awaited under the lock: a clipboard helper can block up to 2s
-            // on a wedged process, and the render coordinator composes every
-            // frame under this same lock, so awaiting here would freeze the
-            // session. Other mouse actions may set a WM message directly, which
-            // can't schedule the TTL wake, so note it.
-            let action = manager.handle_mouse(event).await?;
-            (action, manager.has_active_message())
+            // WmGuard, not a raw lock: slow clipboard/URL I/O is bubbled up as an
+            // OffLockAction rather than awaited under the lock (a clipboard helper
+            // can block up to 2s on a wedged process, and the render coordinator
+            // composes every frame under this same lock, so awaiting here would
+            // freeze the session). Other mouse actions may set a WM message
+            // directly, which can't schedule the TTL wake, so note it.
+            let mut guard = self.lock_wm().await;
+            let action = guard.handle_mouse(event).await?;
+            (action, guard.has_active_message())
         };
         self.notify.notify_one();
         // Auto-dismiss any message a mouse action set, on the same ~3s timer as
@@ -2514,6 +2569,43 @@ mod tests {
         assert_eq!(
             m.take_active_message(),
             Some("couldn't open (no system opener)")
+        );
+    }
+
+    // Task 3.4: a handler run under the WmGuard hands back an OffLockAction
+    // instead of performing the slow side effect under the lock. This is the
+    // enforced half of the guard's invariant: the WM handler holds only
+    // `&mut WindowManager`, so it CANNOT reach a Session method to read the
+    // clipboard — it returns the paste intent and Session::handle_mouse does the
+    // read after the guard drops.
+    #[tokio::test]
+    async fn wm_guard_handler_returns_off_lock_action_not_side_effect() {
+        use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
+        let _g = test_env::isolate();
+        let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
+        // Physical (1,1) → pane-local (0,0): a middle-click on the single pane.
+        let action = {
+            let mut guard = s.lock_wm().await;
+            guard
+                .handle_mouse(MouseEvent {
+                    kind: MouseKind::Press,
+                    button: MouseButton::Middle,
+                    modifiers: MouseModifiers::default(),
+                    row: 1,
+                    col: 1,
+                })
+                .await
+                .unwrap()
+        };
+        assert!(
+            matches!(
+                action,
+                OffLockAction::Paste {
+                    bracketed: false,
+                    ..
+                }
+            ),
+            "a middle-click under the WmGuard must bubble a Paste action off-lock, got {action:?}"
         );
     }
 
