@@ -13,6 +13,7 @@ pub mod shell_integration;
 pub mod transport;
 pub mod tty;
 
+use std::future::Future;
 use std::io::Write;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::time::Duration;
@@ -28,10 +29,10 @@ use plexy_glass_protocol::{
 };
 pub use pump::{PumpExit, handshake_spawn, pump};
 pub use shell_integration::shell_integration_snippet;
-use tokio::io as tokio_io;
 use tokio::process::Command;
 use tokio::signal::unix;
 use tokio::sync::mpsc;
+use tokio::{io as tokio_io, time};
 use tracing::info;
 pub use transport::{
     Connect, Host, InstallPolicy, Target, Transport, connect_only, connect_or_spawn,
@@ -329,6 +330,56 @@ pub(crate) async fn request_reply(
         .await?
         .ok_or_else(|| ClientError::Io(io::Error::other("daemon closed before reply")))?;
     postcard::from_bytes(&frame).map_err(|e| CodecError::Decode(e.to_string()).into())
+}
+
+/// How long `client_exec` waits, with no `--timeout`, before printing the
+/// stall hint below.
+const NO_TIMEOUT_HINT_SECS: u64 = 30;
+
+/// Race `fut` against `hint_after`; if `fut` hasn't resolved by then, call
+/// `on_stall` once and then await `fut` to completion (never abandons or
+/// re-sends the request, purely a diagnostic side effect). Factored out of
+/// `request_reply_with_stall_hint` so the timing logic is unit-testable
+/// without a real daemon or a real 30-second wait.
+async fn race_with_stall_hint<F: Future>(
+    fut: F,
+    hint_after: Duration,
+    on_stall: impl FnOnce(),
+) -> F::Output {
+    tokio::pin!(fut);
+    if let Ok(result) = time::timeout(hint_after, &mut fut).await {
+        result
+    } else {
+        on_stall();
+        fut.await
+    }
+}
+
+/// `request_reply`, but for `run` specifically: when `wire_timeout_ms` is
+/// `None` (no `--timeout`, or `--timeout 0` — see `exec_timeout_ms`), the
+/// daemon waits indefinitely for the OSC 133 completion mark, which silently
+/// hangs an unattended script on a stuck command. If the daemon hasn't
+/// answered after `NO_TIMEOUT_HINT_SECS`, print a one-line stderr nudge
+/// (once) toward `--timeout`, then keep waiting on the SAME request — this is
+/// purely diagnostic and changes neither the reply nor how long `run` waits.
+async fn request_reply_with_stall_hint(
+    target: &Target,
+    msg: ClientMsg,
+    wire_timeout_ms: Option<u64>,
+) -> Result<ServerMsg, ClientError> {
+    if wire_timeout_ms.is_some() {
+        return request_reply(target, Connect::Only, msg).await;
+    }
+    race_with_stall_hint(
+        request_reply(target, Connect::Only, msg),
+        Duration::from_secs(NO_TIMEOUT_HINT_SECS),
+        || {
+            eprintln!(
+                "plexy-glass: run is still waiting for a completion mark; pass --timeout in scripts"
+            );
+        },
+    )
+    .await
 }
 
 /// Send `ReloadConfig` to the daemon and print the result.
@@ -664,12 +715,13 @@ pub async fn client_exec(
     json: bool,
 ) -> Result<i32, ClientError> {
     let command_line = text.clone();
+    let timeout_ms = exec_timeout_ms(timeout_secs);
     let msg = ClientMsg::ExecCommand {
         session: name,
         text,
-        timeout_ms: exec_timeout_ms(timeout_secs),
+        timeout_ms,
     };
-    let reply = request_reply(target, Connect::Only, msg).await?;
+    let reply = request_reply_with_stall_hint(target, msg, timeout_ms).await?;
     match reply {
         ServerMsg::ExecDone {
             exit,
@@ -769,7 +821,45 @@ fn spawn_sigwinch_task(tx: mpsc::Sender<plexy_glass_protocol::PtySize>, fd: Owne
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
+
+    #[tokio::test]
+    async fn race_with_stall_hint_fires_once_then_resolves_the_real_future() {
+        let fired = AtomicBool::new(false);
+        let result = race_with_stall_hint(
+            async {
+                time::sleep(Duration::from_millis(30)).await;
+                42
+            },
+            Duration::from_millis(5),
+            || fired.store(true, Ordering::SeqCst),
+        )
+        .await;
+        assert_eq!(
+            result, 42,
+            "the real future's result must still come through"
+        );
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "the hint should fire once the future outlasts hint_after"
+        );
+    }
+
+    #[tokio::test]
+    async fn race_with_stall_hint_does_not_fire_when_future_is_fast() {
+        let fired = AtomicBool::new(false);
+        let result = race_with_stall_hint(async { 7 }, Duration::from_secs(30), || {
+            fired.store(true, Ordering::SeqCst);
+        })
+        .await;
+        assert_eq!(result, 7);
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "the hint must not fire when the future resolves before hint_after"
+        );
+    }
 
     #[test]
     fn exec_timeout_zero_means_no_limit() {

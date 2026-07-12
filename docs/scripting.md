@@ -287,8 +287,14 @@ code` on stderr, and exits 0.
 
 **No default timeout.** Without `--timeout`, or with `--timeout 0` (GNU
 `timeout` semantics: `0` means *no limit*, not "time out instantly"), `run`
-waits indefinitely for the completion mark. Press `Ctrl-C` to abandon the wait
-(the command keeps running in the pane).
+waits indefinitely for the completion mark. There is no client-side watchdog
+for this case: a command that never completes (`tail -f`, a hung build, a
+prompt waiting on interactive input it'll never get) blocks `run` until the
+`plexy-glass` process itself is killed, e.g. `Ctrl-C` (the command keeps
+running in the pane either way; `run` never sends it a signal). **Always pass
+`--timeout` when calling `run` from an unattended script or agent** — without
+one, a single stuck command hangs the whole script with no way out short of
+killing the process from outside.
 
 ### `--json` — structured run output
 
