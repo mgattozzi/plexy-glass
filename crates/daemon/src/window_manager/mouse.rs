@@ -806,8 +806,8 @@ impl WindowManager {
                 && let Some(pane) = self.active_window().pane(sel.source_pane).cloned()
                 && pane.scroll_offset().get() == 0
             {
-                let (row, col) = sel.anchor;
-                if osc_actions::click_to_position(&pane, row, col).await? {
+                let anchor = sel.anchor;
+                if osc_actions::click_to_position(&pane, anchor.row, anchor.col).await? {
                     self.notify.notify_one();
                 }
             }

@@ -9,6 +9,8 @@ use plexy_glass_emulator::Screen;
 use plexy_glass_emulator::coords::{Col, Row};
 use regex::Regex;
 
+use crate::rect::Point;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HintKind {
     Hyperlink,
@@ -39,8 +41,8 @@ impl HintKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HintTarget {
-    /// Cell where the span starts (row, col) in the active grid.
-    pub start: (u16, u16),
+    /// Cell where the span starts, in the active grid.
+    pub start: Point,
     /// The span's text. For `Hyperlink` this is the OSC 8 URL, not the
     /// on-screen label; every other kind is the matched on-screen substring.
     pub text: String,
@@ -176,7 +178,7 @@ fn scan_row(screen: &Screen, row: u16, out: &mut Vec<HintTarget>) {
 
     for s in resolve_overlaps(spans) {
         out.push(HintTarget {
-            start: (row, s.start_col),
+            start: Point::new(row, s.start_col),
             text: s.text,
             kind: s.kind,
         });
@@ -456,7 +458,7 @@ mod tests {
         assert_eq!(ts.len(), 1);
         assert_eq!(ts[0].kind, HintKind::Url);
         assert_eq!(ts[0].text, "http://example.com/x");
-        assert_eq!(ts[0].start, (0, 4));
+        assert_eq!(ts[0].start, Point::new(0, 4));
     }
 
     #[test]
@@ -523,7 +525,7 @@ mod tests {
             .find(|t| t.kind == HintKind::Hyperlink)
             .expect("link");
         assert_eq!(t.text, "https://docs.rs");
-        assert_eq!(t.start, (0, 0));
+        assert_eq!(t.start, Point::new(0, 0));
     }
 
     #[test]
@@ -534,7 +536,7 @@ mod tests {
 
     fn t(text: &str, kind: HintKind) -> HintTarget {
         HintTarget {
-            start: (0, 0),
+            start: Point::new(0, 0),
             text: text.into(),
             kind,
         }

@@ -364,9 +364,9 @@ pub fn compose(
         && let Some(view) = panes.iter().find(|v| v.id == sel.source_pane)
     {
         let cols = view.screen.active.num_cols();
-        for (row, col) in sel.cells(cols) {
-            let logical_r = view.rect.row().saturating_add(row);
-            let host_c = view.rect.col().saturating_add(col);
+        for p in sel.cells(cols) {
+            let logical_r = view.rect.row().saturating_add(p.row);
+            let host_c = view.rect.col().saturating_add(p.col);
             if logical_r >= pane_area_rows || host_c >= host_cols {
                 continue;
             }
@@ -1877,7 +1877,10 @@ fn paint_hint(
     let clip = (rect.col() + rect.cols()).min(host_cols);
     let typed_len = state.typed.len();
     for (label, target) in state.visible() {
-        let (trow, tcol) = target.start;
+        let Point {
+            row: trow,
+            col: tcol,
+        } = target.start;
         if trow >= rect.rows() || tcol >= rect.cols() {
             continue;
         }
@@ -2851,7 +2854,7 @@ mod tests {
         // focused pane's screen origin (row 0, col 4), not the screen's (0,0),
         // which is the unfocused left pane.
         let target = HintTarget {
-            start: (0, 0),
+            start: Point::new(0, 0),
             text: "https://x".into(),
             kind: HintKind::Url,
         };

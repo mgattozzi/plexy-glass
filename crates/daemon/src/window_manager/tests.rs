@@ -4,8 +4,8 @@ use plexy_glass_emulator::Notification;
 use plexy_glass_emulator::coords::{Col, Row};
 use plexy_glass_mux::{
     Command, HintAction, HintKind, HintState, HintTarget, KeyEvent, MouseButton, MouseEvent,
-    MouseKind, PickerEntry, ScrollOffset, SwapTarget, TreeAction, TreeNode, UnifiedLine, WheelAxis,
-    blocks, palette,
+    MouseKind, PickerEntry, Point, ScrollOffset, SwapTarget, TreeAction, TreeNode, UnifiedLine,
+    WheelAxis, blocks, palette,
 };
 use tokio::sync::broadcast;
 use tokio::time;
@@ -4216,7 +4216,7 @@ async fn hint_overlay_pick_returns_copy() {
     )
     .unwrap();
     let targets = vec![HintTarget {
-        start: (0, 0),
+        start: Point::new(0, 0),
         text: "alpha".into(),
         kind: HintKind::Sha,
     }];

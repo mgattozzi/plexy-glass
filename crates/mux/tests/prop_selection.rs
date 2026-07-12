@@ -2,10 +2,10 @@
 //! is always ordered, and the click dead-zone is consistent with its definition.
 
 use hegel::{TestCase, generators as gs};
-use plexy_glass_mux::{PaneId, Selection};
+use plexy_glass_mux::{PaneId, Point, Selection};
 
-fn draw_point(tc: &TestCase) -> (u16, u16) {
-    (
+fn draw_point(tc: &TestCase) -> Point {
+    Point::new(
         tc.draw(gs::integers::<u16>().min_value(0).max_value(200)),
         tc.draw(gs::integers::<u16>().min_value(0).max_value(200)),
     )
@@ -23,8 +23,8 @@ fn draw_selection(tc: &TestCase) -> Selection {
 
 #[hegel::test(test_cases = 500)]
 fn fresh_selection_is_empty_and_a_click(tc: TestCase) {
-    let (r, c) = draw_point(&tc);
-    let s = Selection::start(PaneId(0), r, c);
+    let p = draw_point(&tc);
+    let s = Selection::start(PaneId(0), p.row, p.col);
     assert!(s.is_empty(), "a fresh selection has anchor == head");
     assert!(
         s.is_click(),
@@ -46,9 +46,9 @@ fn normalized_is_lexicographically_ordered(tc: TestCase) {
 fn is_click_implies_same_row_and_one_cell_drift(tc: TestCase) {
     let s = draw_selection(&tc);
     if s.is_click() {
-        assert_eq!(s.anchor.0, s.head.0, "a click stays on one row");
+        assert_eq!(s.anchor.row, s.head.row, "a click stays on one row");
         assert!(
-            s.anchor.1.abs_diff(s.head.1) <= 1,
+            s.anchor.col.abs_diff(s.head.col) <= 1,
             "a click drifts at most one column"
         );
     }

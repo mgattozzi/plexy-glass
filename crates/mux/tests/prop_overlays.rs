@@ -9,8 +9,8 @@
 use hegel::{TestCase, generators as gs};
 use plexy_glass_mux::{
     Direction, HintKind, HintState, HintTarget, HistoryEntry, HistoryState, Key, KeyEvent,
-    Modifiers, PaneId, TreeNode, TreeState, WindowId, handle_hint, handle_history, handle_tree,
-    pane_label, session_label, window_label,
+    Modifiers, PaneId, Point, TreeNode, TreeState, WindowId, handle_hint, handle_history,
+    handle_tree, pane_label, session_label, window_label,
 };
 
 /// A char biased toward the keys the overlays actually branch on (navigation,
@@ -136,7 +136,7 @@ fn draw_hints(tc: &TestCase) -> Vec<HintTarget> {
     let n = tc.draw(gs::integers::<usize>().min_value(0).max_value(20));
     (0..n)
         .map(|i| HintTarget {
-            start: (0, i as u16),
+            start: Point::new(0, i as u16),
             text: format!("target-{i}"),
             kind: HintKind::Sha,
         })

@@ -4,23 +4,23 @@
 use crate::blocks::{self, FoldProjection};
 use crate::line::{ScrollOffset, VisibleLine};
 use crate::pane_id::PaneId;
-use crate::rect::Rect;
+use crate::rect::{Point, Rect};
 
 #[derive(Debug, Clone)]
 pub struct Selection {
     pub source_pane: PaneId,
-    /// (row, col) within the source pane's local coords. Anchor is the
+    /// Position within the source pane's local coords. Anchor is the
     /// click-down point; head is the current end (moves while dragging).
-    pub anchor: (u16, u16),
-    pub head: (u16, u16),
+    pub anchor: Point,
+    pub head: Point,
 }
 
 impl Selection {
     pub const fn start(source_pane: PaneId, row: u16, col: u16) -> Self {
         Self {
             source_pane,
-            anchor: (row, col),
-            head: (row, col),
+            anchor: Point::new(row, col),
+            head: Point::new(row, col),
         }
     }
 
@@ -29,12 +29,12 @@ impl Selection {
     pub fn extend(&mut self, row: u16, col: u16, pane_rect: Rect) {
         let max_row = pane_rect.rows().saturating_sub(1);
         let max_col = pane_rect.cols().saturating_sub(1);
-        self.head = (row.min(max_row), col.min(max_col));
+        self.head = Point::new(row.min(max_row), col.min(max_col));
     }
 
     /// Iterate cells in selection order (left-to-right, top-to-bottom) given
     /// the normalized rectangle the selection covers.
-    pub fn cells(&self, max_cols: u16) -> impl Iterator<Item = (u16, u16)> + '_ {
+    pub fn cells(&self, max_cols: u16) -> impl Iterator<Item = Point> + '_ {
         let (start, end) = self.normalized();
         SelectionCells {
             cur: start,
@@ -44,7 +44,7 @@ impl Selection {
     }
 
     /// Normalized (anchor, head) so anchor <= head in lexicographic order.
-    pub fn normalized(&self) -> ((u16, u16), (u16, u16)) {
+    pub fn normalized(&self) -> (Point, Point) {
         if self.anchor <= self.head {
             (self.anchor, self.head)
         } else {
@@ -63,18 +63,18 @@ impl Selection {
     /// one-character selection) keeps click-to-reposition from degrading into a
     /// stray single-character copy on imprecise hardware.
     pub const fn is_click(&self) -> bool {
-        self.anchor.0 == self.head.0 && self.anchor.1.abs_diff(self.head.1) <= 1
+        self.anchor.row == self.head.row && self.anchor.col.abs_diff(self.head.col) <= 1
     }
 }
 
 struct SelectionCells {
-    cur: (u16, u16),
-    end: (u16, u16),
+    cur: Point,
+    end: Point,
     max_cols: u16,
 }
 
 impl Iterator for SelectionCells {
-    type Item = (u16, u16);
+    type Item = Point;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.cur > self.end {
@@ -83,16 +83,16 @@ impl Iterator for SelectionCells {
         let here = self.cur;
         // Advance: col + 1, or row + 1 + col 0 if we'd run past max_cols or
         // past the end-row's column.
-        let on_end_row = here.0 == self.end.0;
+        let on_end_row = here.row == self.end.row;
         let last_col = if on_end_row {
-            self.end.1
+            self.end.col
         } else {
             self.max_cols.saturating_sub(1)
         };
-        if here.1 >= last_col {
-            self.cur = (here.0.saturating_add(1), 0);
+        if here.col >= last_col {
+            self.cur = Point::new(here.row.saturating_add(1), 0);
         } else {
-            self.cur = (here.0, here.1 + 1);
+            self.cur = Point::new(here.row, here.col + 1);
         }
         Some(here)
     }
@@ -209,8 +209,8 @@ pub fn word_at(
     }
     Some(Selection {
         source_pane,
-        anchor: (row, start),
-        head: (row, end),
+        anchor: Point::new(row, start),
+        head: Point::new(row, end),
     })
 }
 
@@ -238,8 +238,8 @@ pub fn line_at(
     let end = last?;
     Some(Selection {
         source_pane,
-        anchor: (row, 0),
-        head: (row, end),
+        anchor: Point::new(row, 0),
+        head: Point::new(row, end),
     })
 }
 
@@ -269,7 +269,7 @@ pub fn extract_text(
     let (start, end) = selection.normalized();
     let cols = screen.active.num_cols();
     let mut out = String::new();
-    for r in start.0..=end.0 {
+    for r in start.row..=end.row {
         // Viewport row r → unified content line (scrollback ++ grid), via the
         // fold projection at the current scroll position.
         let visible_idx = top_visible + u32::from(r);
@@ -277,10 +277,10 @@ pub fn extract_text(
             .then(|| proj.to_unified(VisibleLine::new(visible_idx)))
             .and_then(|u| blocks::row_at(screen, u.get()));
         if let Some(row) = row {
-            let mut row_start = if r == start.0 { start.1 } else { 0 };
+            let mut row_start = if r == start.row { start.col } else { 0 };
             // If a drag anchor landed on a wide grapheme's spacer half, back up
             // to the owning grapheme cell so the leading glyph isn't dropped.
-            if r == start.0
+            if r == start.row
                 && row_start > 0
                 && row
                     .cells
@@ -289,8 +289,8 @@ pub fn extract_text(
             {
                 row_start -= 1;
             }
-            let row_end = if r == end.0 {
-                end.1
+            let row_end = if r == end.row {
+                end.col
             } else {
                 cols.saturating_sub(1)
             };
@@ -311,7 +311,7 @@ pub fn extract_text(
                 }
             }
         }
-        if r < end.0 {
+        if r < end.row {
             out.push('\n');
         }
     }
@@ -350,7 +350,7 @@ mod tests {
     fn start_then_extend_within_bounds() {
         let mut s = Selection::start(PaneId(0), 1, 2);
         s.extend(3, 5, Rect::new(Point::new(0, 0), Size::new(10, 10)));
-        assert_eq!(s.head, (3, 5));
+        assert_eq!(s.head, Point::new(3, 5));
     }
 
     #[test]
@@ -376,8 +376,8 @@ mod tests {
         // Drag anchor on 中's spacer (col 1) → head at 'b' (col 5): 中 must survive.
         let sel = Selection {
             source_pane: PaneId(0),
-            anchor: (0, 1),
-            head: (0, 5),
+            anchor: Point::new(0, 1),
+            head: Point::new(0, 5),
         };
         assert_eq!(extract_text(&sel, s, 5, ScrollOffset::new(0)), "中文ab");
     }
@@ -386,11 +386,11 @@ mod tests {
     fn is_click_holds_within_a_one_cell_dead_zone() {
         let mut s = Selection::start(PaneId(0), 5, 5);
         assert!(s.is_click(), "no drift is a click");
-        for head in [(5, 4), (5, 6)] {
+        for head in [Point::new(5, 4), Point::new(5, 6)] {
             s.head = head;
             assert!(s.is_click(), "{head:?}: one-cell drift is still a click");
         }
-        for head in [(5, 7), (5, 3), (6, 5)] {
+        for head in [Point::new(5, 7), Point::new(5, 3), Point::new(6, 5)] {
             s.head = head;
             assert!(!s.is_click(), "{head:?}: a real drag is not a click");
         }
@@ -400,7 +400,7 @@ mod tests {
     fn extend_clamps_to_rect() {
         let mut s = Selection::start(PaneId(0), 1, 2);
         s.extend(99, 99, Rect::new(Point::new(0, 0), Size::new(10, 10)));
-        assert_eq!(s.head, (9, 9));
+        assert_eq!(s.head, Point::new(9, 9));
     }
 
     #[test]
@@ -408,8 +408,8 @@ mod tests {
         let mut s = Selection::start(PaneId(0), 5, 5);
         s.extend(2, 3, Rect::new(Point::new(0, 0), Size::new(10, 10)));
         let (a, b) = s.normalized();
-        assert_eq!(a, (2, 3));
-        assert_eq!(b, (5, 5));
+        assert_eq!(a, Point::new(2, 3));
+        assert_eq!(b, Point::new(5, 5));
     }
 
     #[test]
@@ -418,7 +418,17 @@ mod tests {
         s.extend(1, 2, Rect::new(Point::new(0, 0), Size::new(3, 3)));
         let cells: Vec<_> = s.cells(3).collect();
         // Row 0: (0,0), (0,1), (0,2); Row 1: (1,0), (1,1), (1,2).
-        assert_eq!(cells, vec![(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2),]);
+        assert_eq!(
+            cells,
+            vec![
+                Point::new(0, 0),
+                Point::new(0, 1),
+                Point::new(0, 2),
+                Point::new(1, 0),
+                Point::new(1, 1),
+                Point::new(1, 2),
+            ]
+        );
     }
 
     #[test]
@@ -426,7 +436,15 @@ mod tests {
         let mut s = Selection::start(PaneId(0), 2, 1);
         s.extend(2, 4, Rect::new(Point::new(0, 0), Size::new(10, 10)));
         let cells: Vec<_> = s.cells(10).collect();
-        assert_eq!(cells, vec![(2, 1), (2, 2), (2, 3), (2, 4)]);
+        assert_eq!(
+            cells,
+            vec![
+                Point::new(2, 1),
+                Point::new(2, 2),
+                Point::new(2, 3),
+                Point::new(2, 4)
+            ]
+        );
     }
 
     #[test]
@@ -501,8 +519,8 @@ mod tests {
             2,
         )
         .expect("on 'hello'");
-        assert_eq!(s.anchor, (0, 0));
-        assert_eq!(s.head, (0, 4));
+        assert_eq!(s.anchor, Point::new(0, 0));
+        assert_eq!(s.head, Point::new(0, 4));
     }
 
     #[test]
@@ -550,8 +568,8 @@ mod tests {
             2,
         )
         .expect("on 'foo_bar-baz'");
-        assert_eq!(s.anchor, (0, 0));
-        assert_eq!(s.head, (0, 10));
+        assert_eq!(s.anchor, Point::new(0, 0));
+        assert_eq!(s.head, Point::new(0, 10));
     }
 
     #[test]
@@ -566,8 +584,8 @@ mod tests {
             4,
         )
         .expect("on last 'o'");
-        assert_eq!(s.anchor, (0, 0));
-        assert_eq!(s.head, (0, 4));
+        assert_eq!(s.anchor, Point::new(0, 0));
+        assert_eq!(s.head, Point::new(0, 4));
     }
 
     #[test]
@@ -581,8 +599,8 @@ mod tests {
             0,
         )
         .expect("non-blank row");
-        assert_eq!(s.anchor, (0, 0));
-        assert_eq!(s.head, (0, 4));
+        assert_eq!(s.anchor, Point::new(0, 0));
+        assert_eq!(s.head, Point::new(0, 4));
     }
 
     #[test]
@@ -614,12 +632,12 @@ mod tests {
 
         // Live (offset 0): viewport row 0 = grid's "grid0".
         let w = word_at(PaneId(0), &screen, 2, ScrollOffset::new(0), 0, 1).expect("word on grid0");
-        assert_eq!((w.anchor, w.head), ((0, 0), (0, 4)));
+        assert_eq!((w.anchor, w.head), (Point::new(0, 0), Point::new(0, 4)));
         // Scrolled back 2: viewport row 0 = scrollback's "sb0one".
         let w = word_at(PaneId(0), &screen, 2, ScrollOffset::new(2), 0, 1).expect("word on sb0one");
-        assert_eq!((w.anchor, w.head), ((0, 0), (0, 5)));
+        assert_eq!((w.anchor, w.head), (Point::new(0, 0), Point::new(0, 5)));
         let l = line_at(PaneId(0), &screen, 2, ScrollOffset::new(2), 0).expect("line on sb0one");
-        assert_eq!((l.anchor, l.head), ((0, 0), (0, 5)));
+        assert_eq!((l.anchor, l.head), (Point::new(0, 0), Point::new(0, 5)));
     }
 
     // ── screen_text tests ────────────────────────────────────────────────────
@@ -669,7 +687,15 @@ mod tests {
         let cells: Vec<_> = s.cells(5).collect();
         assert_eq!(
             cells,
-            vec![(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (1, 0), (1, 1),],
+            vec![
+                Point::new(0, 0),
+                Point::new(0, 1),
+                Point::new(0, 2),
+                Point::new(0, 3),
+                Point::new(0, 4),
+                Point::new(1, 0),
+                Point::new(1, 1),
+            ],
             "row 0 must run to max_cols-1, row 1 only to end.1"
         );
     }
@@ -800,8 +826,8 @@ mod tests {
         let screen = screen_from(1, 15, &["hello world"]);
         let sel = Selection {
             source_pane: PaneId(0),
-            anchor: (0, 6),
-            head: (0, 10),
+            anchor: Point::new(0, 6),
+            head: Point::new(0, 10),
         };
         assert_eq!(
             extract_text(

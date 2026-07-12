@@ -15,7 +15,11 @@ use crate::direction::SplitDir;
 use crate::layout::Ratio;
 
 /// A grid position: row (from the top) and col (from the left).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// `Ord` is row-major (row, then col) since `row` is declared first, which is
+/// exactly the lexicographic order the old `(row, col)` selection tuples had —
+/// `Selection::normalized` and the cell walk rely on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Point {
     pub row: u16,
     pub col: u16,
