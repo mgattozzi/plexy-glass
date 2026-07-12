@@ -1128,6 +1128,7 @@ dependencies = [
 name = "plexy-glass-client"
 version = "0.1.0"
 dependencies = [
+ "bolero",
  "bytes",
  "hegeltest",
  "nix 0.31.3",

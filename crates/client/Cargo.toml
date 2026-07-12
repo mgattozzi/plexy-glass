@@ -22,6 +22,7 @@ tempfile = { workspace = true }
 tokio-test = { workspace = true }
 portable-pty = { workspace = true }
 hegeltest = { workspace = true }
+bolero = { workspace = true }
 
 [lints]
 workspace = true
