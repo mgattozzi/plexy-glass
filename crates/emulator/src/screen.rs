@@ -1205,7 +1205,11 @@ impl Screen {
             'J' => {
                 let mode = first.unwrap_or(0);
                 let (r, c) = (self.cursor.row, self.cursor.col);
-                let (last_r, last_c) = (Row::new(self.rows() - 1), Col::new(self.cols() - 1));
+                // invariant: dims clamped >=1 at construction; saturating for defense
+                let (last_r, last_c) = (
+                    Row::new(self.rows().saturating_sub(1)),
+                    Col::new(self.cols().saturating_sub(1)),
+                );
                 match mode {
                     0 => {
                         self.active.clear_rect(r, c, r, last_c);
@@ -1251,7 +1255,8 @@ impl Screen {
             'K' => {
                 let mode = first.unwrap_or(0);
                 let (r, c) = (self.cursor.row, self.cursor.col);
-                let last_c = Col::new(self.cols() - 1);
+                // invariant: dims clamped >=1 at construction; saturating for defense
+                let last_c = Col::new(self.cols().saturating_sub(1));
                 match mode {
                     0 => self.active.clear_rect(r, c, r, last_c),
                     1 => self.active.clear_rect(r, Col::ZERO, r, c),
@@ -3875,6 +3880,17 @@ mod tests {
         let s = Screen::new(8, 24);
         assert!(s.active.rows.iter().all(|r| r.mark.is_empty()));
         assert!(s.clipboard_writes.is_empty());
+    }
+
+    #[test]
+    fn zero_dim_screen_does_not_panic_on_erase() {
+        // A degenerate 0-dim construction must not underflow the ED/EL handlers.
+        let mut p = Parser::new();
+        let mut s = Screen::new(0, 0);
+        p.advance(&mut s, b"\x1b[2J"); // ED all -- screen.rs last_r = rows()-1
+        p.advance(&mut s, b"\x1b[2K"); // EL all -- screen.rs last_c = cols()-1
+        // no panic; dims were clamped to at least 1x1
+        assert!(s.rows() >= 1 && s.cols() >= 1);
     }
 
     #[test]
