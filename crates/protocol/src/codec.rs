@@ -48,6 +48,15 @@ impl Codec {
                 got: len,
             });
         }
+        // Eagerly allocate the full declared length in one shot rather than
+        // reading in bounded chunks. A lying peer can make us allocate up to
+        // `MAX_FRAME_BYTES` (128 MiB, checked just above) before the first
+        // payload byte arrives, but that cap plus the same-user-socket threat
+        // model this codec lives in (see the doc comment on `MAX_FRAME_BYTES`
+        // above) make that a deliberate, bounded tradeoff rather than an
+        // unbounded-allocation bug: only a process running as this user can
+        // reach this socket at all, so the worst case is a self-inflicted
+        // 128 MiB, not a remote memory-exhaustion vector.
         let mut buf = BytesMut::with_capacity(len as usize);
         buf.resize(len as usize, 0);
         reader.read_exact(&mut buf).await.map_err(|e| {
