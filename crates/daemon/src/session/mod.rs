@@ -2666,6 +2666,52 @@ mod tests {
             "session did not converge to closing"
         );
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn closing_is_true_by_the_time_the_tail_frame_arrives() {
+        let _g = test_env::isolate();
+        // Same interactive-shell-semantics echo spec as
+        // coordinator_emits_tail_frame_when_last_pane_dies above: it exits on
+        // its own and closes the window (see Bug 1 / handle_pane_death).
+        let spec = SpawnSpec {
+            program: "/bin/echo".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        };
+        let s = Session::new("test".into(), spec, size(), cfg()).unwrap();
+        let mut rx = s.frame_rx_template.clone();
+        // The coordinator now stores `closing` before sending the is_empty
+        // branch's blank tail frame (mirroring begin_close). Drain LIVE frame
+        // updates (echo's own output, etc.) up to the deadline: any live
+        // update must show closing still consistent (true only once the tail
+        // frame itself has gone out), and the channel must never close
+        // (frame_tx dropping on coordinator return) before we've observed
+        // closing=true on a live update — that would mean the tail frame (or
+        // the coordinator's return) raced ahead of the store, exactly the
+        // ordering this fix prevents.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "session did not emit a tail frame with closing observably true in time"
+            );
+            match time::timeout(Duration::from_millis(500), rx.changed()).await {
+                Ok(Ok(())) => {
+                    if s.closing.load(Ordering::SeqCst) {
+                        break;
+                    }
+                }
+                Ok(Err(_)) => panic!(
+                    "frame_tx closed before any live frame showed closing=true; \
+                     the tail frame was sent (or the coordinator returned) before \
+                     the closing store became visible"
+                ),
+                Err(_) => {}
+            }
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_single_pane() {
         use plexy_glass_config::{PaneNode, PaneTemplate, SessionTemplate, WindowTemplate};

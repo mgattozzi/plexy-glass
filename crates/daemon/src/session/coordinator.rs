@@ -80,6 +80,13 @@ pub(super) async fn render_coordinator(
             let mut m = session.window_manager.lock().await;
             if m.is_empty() {
                 let host = m.host_size();
+                // Mirror begin_close: mark closing before the teardown frame so
+                // a client racing register_client sees `closing` true as soon as
+                // the tail frame goes out, not only after the loop exits below.
+                // This narrows but can't hermetically close the register_client
+                // TOCTOU: register_client itself holds no WM lock, so a client
+                // could still slip in between this store and its own check.
+                session.closing.store(true, Ordering::SeqCst);
                 let _ = frame_tx.send(Arc::new(VirtualScreen::blank(host.rows, host.cols)));
                 break;
             }
