@@ -573,7 +573,14 @@ impl WindowManager {
     /// otherwise flicker at 1 Hz (tick sets → render clears → tick re-fires).
     #[must_use = "schedule the status-message TTL wake when a silence edge fired"]
     pub fn check_silence_alerts(&mut self) -> bool {
-        let active = self.active_index();
+        // The silence tick can race the teardown lock and reach here after
+        // `windows` has emptied (the abort lands just after the lock is
+        // released), so don't `active_index().expect(...)` on an empty set —
+        // no windows means no silence to report (the old raw-index loop just
+        // no-oped here too).
+        let Some(active) = self.windows.iter().position(|w| w.id == self.active) else {
+            return false;
+        };
         let now = Instant::now();
         let mut message: Option<String> = None;
         let auto_rename = self.config.auto_rename;
