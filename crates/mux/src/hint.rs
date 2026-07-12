@@ -359,7 +359,10 @@ impl HintState {
 
 /// Uniform-length, prefix-free labels. Length is the smallest `L` with
 /// `alphabet_len^L >= n`. Assumes `alphabet` has >= 2 chars (enforced at config
-/// load); a 1-char alphabet is clamped so this can't loop forever.
+/// load); a 1-char alphabet is clamped so this can't loop forever. `len` grows
+/// until `cap` reaches `n` OR further growth would overflow `usize` (at which
+/// point every representable label is already in play, so growing further
+/// can't help); real hint counts never come close to either bound.
 pub fn assign_labels(n: usize, alphabet: &str) -> Vec<String> {
     if n == 0 {
         return Vec::new();
@@ -368,9 +371,12 @@ pub fn assign_labels(n: usize, alphabet: &str) -> Vec<String> {
     let k = chars.len().max(2);
     let mut len = 1usize;
     let mut cap = k;
-    while cap < n && len < 6 {
+    while cap < n {
+        let Some(next) = cap.checked_mul(k) else {
+            break;
+        };
         len += 1;
-        cap = cap.saturating_mul(k);
+        cap = next;
     }
     let mut out = Vec::with_capacity(n);
     let mut idx = vec![0usize; len];
@@ -854,9 +860,31 @@ mod tests {
     // chars.len() (the counter resets at k), so i < chars.len() ≤ chars.len() ± 1,
     // making i.min(any of these) = i. The clamp never fires for valid alphabet
     // sizes (≥ 2). Both mutations are equivalent for all reachable states.
-    // Equivalent note (line 351:26): `len < 6 → len <= 6` adds one extra label-
-    // length increment; for practical hint counts (≤ 2000 with a ≥ 2-char alphabet)
-    // cap = k^6 ≥ 64 is always sufficient and the loop exits on the cap condition,
-    // not the len guard. Observable difference only for n > k^6, which does not
-    // occur in the application. Equivalent.
+    //
+    // NOTE: this file used to carry an "equivalent" note here claiming a
+    // hardcoded `len < 6` cap was safe because "n > k^6 does not occur in the
+    // application". That was wrong: a configured 2-char alphabet (`k=2`) caps
+    // at 64 labels, and a screen with > 64 hint targets (a dense `ls -la` on a
+    // wide pane, say) is reachable. Past the cap the mixed-radix counter wrapped
+    // silently and handed out DUPLICATE labels, so two on-screen targets shared
+    // one label and one became unreachable. `assign_labels` now grows `len`
+    // until `cap >= n` (bounded only by `usize` overflow) instead of stopping at
+    // a fixed length; see `assign_labels_are_unique_and_prefix_free` in
+    // `tests/prop_hint.rs`, which reproduced this with `n=65, alphabet="ab"`.
+
+    #[test]
+    fn assign_labels_past_old_hardcoded_cap_stays_unique() {
+        // Regression for the bug above: a 2-char alphabet with 65 targets used
+        // to wrap the mixed-radix counter at 2^6=64 and repeat "aaaaaa" for
+        // both target 0 and target 64.
+        let labels = assign_labels(65, "ab");
+        let mut sorted = labels.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            65,
+            "all 65 labels must be distinct: {labels:?}"
+        );
+    }
 }
