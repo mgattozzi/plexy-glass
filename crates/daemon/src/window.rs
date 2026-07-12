@@ -137,8 +137,8 @@ pub struct Window {
 /// the pane's own cell box, so the child sees the REAL cell size (`CSI 14/16/18t`
 /// reports and inline-image footprints) rather than the emulator's fallback.
 fn pane_pty_size(rect: Rect, cell_px: CellPx) -> PtySize {
-    let rows = rect.rows.max(1);
-    let cols = rect.cols.max(1);
+    let rows = rect.rows().max(1);
+    let cols = rect.cols().max(1);
     PtySize {
         rows,
         cols,
@@ -1008,6 +1008,7 @@ fn basename(path: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_env;
+    use plexy_glass_mux::{Point, Size};
 
     fn notify() -> Arc<Notify> {
         Arc::new(Notify::new())
@@ -1033,7 +1034,7 @@ mod tests {
     async fn display_name_prefers_manual_then_falls_back() {
         // `isolate()` pins `SHELL=/bin/sh` so `shell_basename` is deterministic.
         let _g = test_env::isolate();
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let mut w = Window::spawn_first(
             WindowId(0),
             String::new(), // empty → auto-named
@@ -1065,7 +1066,7 @@ mod tests {
     /// A window built with a real name is pinned from the start.
     #[tokio::test]
     async fn named_window_is_pinned() {
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let w = Window::spawn_first(
             WindowId(0),
             "logs".into(),
@@ -1095,7 +1096,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_first_creates_one_pane() {
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let w = Window::spawn_first(
             WindowId(0),
             "w0".into(),
@@ -1114,7 +1115,7 @@ mod tests {
 
     #[tokio::test]
     async fn split_adds_pane_and_makes_active() {
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let mut w = Window::spawn_first(
             WindowId(0),
             "w0".into(),
@@ -1144,7 +1145,7 @@ mod tests {
 
     #[tokio::test]
     async fn close_active_promotes_focus_history() {
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let mut w = Window::spawn_first(
             WindowId(0),
             "w0".into(),
@@ -1174,7 +1175,7 @@ mod tests {
 
     #[tokio::test]
     async fn resize_keeps_zoomed_pane_at_full_viewport() {
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let mut w = Window::spawn_first(
             WindowId(0),
             "w0".into(),
@@ -1200,7 +1201,7 @@ mod tests {
         assert!(w.toggle_zoom(), "active pane is now zoomed");
         // A subsequent host resize must keep the zoomed pane at the full
         // viewport, not collapse it back to its split rect.
-        let new_vp = Rect::new(0, 0, 40, 100);
+        let new_vp = Rect::new(Point::new(0, 0), Size::new(40, 100));
         w.resize(new_vp).unwrap();
         let (rows, cols) = w
             .pane(PaneId(1))
@@ -1215,7 +1216,7 @@ mod tests {
 
     #[tokio::test]
     async fn close_pane_clears_zoom_when_zoomed_pane_dies() {
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let mut w = Window::spawn_first(
             WindowId(0),
             "w0".into(),
@@ -1251,7 +1252,7 @@ mod tests {
     #[tokio::test]
     async fn drain_surfaces_completion_event_regardless_of_flag() {
         use plexy_glass_emulator::{Row, RowMark};
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let mut w = Window::spawn_first(
             WindowId(0),
             "w0".into(),
@@ -1301,7 +1302,7 @@ mod tests {
     }
 
     fn two_pane_window() -> Window {
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let mut w = Window::spawn_first(
             WindowId(0),
             "w0".into(),
@@ -1341,7 +1342,7 @@ mod tests {
 
     #[tokio::test]
     async fn detach_last_pane_empties_layout() {
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let mut w = Window::spawn_first(
             WindowId(0),
             "w0".into(),
@@ -1361,7 +1362,7 @@ mod tests {
 
     #[tokio::test]
     async fn adopt_split_inserts_existing_pane_and_activates() {
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let mut src = two_pane_window();
         let moved = src.detach_pane(PaneId(1)).expect("present"); // PaneId(1)
         let mut dst = Window::spawn_first(
@@ -1397,7 +1398,7 @@ mod tests {
     /// A live standalone `Pane` (detached from a throwaway window) for
     /// `swap_occupant` tests.
     fn donor_pane(id: PaneId) -> Pane {
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let mut w = Window::spawn_first(
             WindowId(99),
             "donor".into(),
@@ -1416,7 +1417,7 @@ mod tests {
     #[tokio::test]
     async fn swap_occupant_replaces_slot_and_returns_old_pane() {
         let mut w = two_pane_window(); // panes {0,1}, active 1
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let r0 = w.layout().rect_of(PaneId(0), viewport).unwrap();
         let Ok(old) = w.swap_occupant(PaneId(0), donor_pane(PaneId(9))) else {
             panic!("pane 0 present")
@@ -1455,7 +1456,7 @@ mod tests {
         // pane 0, the slot being swapped. After the swap (0 → 9) the close of
         // the active pane must fall back to 9; without the rewrite the dead
         // entry 0 would be filtered and focus would fall to 1 instead.
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let mut w = two_pane_window(); // h=[0], active 1
         w.split(
             SplitDir::Vertical,
@@ -1496,7 +1497,7 @@ mod tests {
 
     #[tokio::test]
     async fn neighbor_leaf_wraps_and_handles_single_pane() {
-        let viewport = Rect::new(0, 0, 24, 80);
+        let viewport = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let mut w = Window::spawn_first(
             WindowId(0),
             "w0".into(),

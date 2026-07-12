@@ -27,8 +27,8 @@ impl Selection {
     /// Move the head; clamps to the pane's rect (`rect` in viewport coords;
     /// caller must pre-clamp to local coords).
     pub fn extend(&mut self, row: u16, col: u16, pane_rect: Rect) {
-        let max_row = pane_rect.rows.saturating_sub(1);
-        let max_col = pane_rect.cols.saturating_sub(1);
+        let max_row = pane_rect.rows().saturating_sub(1);
+        let max_col = pane_rect.cols().saturating_sub(1);
         self.head = (row.min(max_row), col.min(max_col));
     }
 
@@ -344,11 +344,12 @@ pub fn screen_text(screen: &plexy_glass_emulator::Screen) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rect::{Point, Size};
 
     #[test]
     fn start_then_extend_within_bounds() {
         let mut s = Selection::start(PaneId(0), 1, 2);
-        s.extend(3, 5, Rect::new(0, 0, 10, 10));
+        s.extend(3, 5, Rect::new(Point::new(0, 0), Size::new(10, 10)));
         assert_eq!(s.head, (3, 5));
     }
 
@@ -398,14 +399,14 @@ mod tests {
     #[test]
     fn extend_clamps_to_rect() {
         let mut s = Selection::start(PaneId(0), 1, 2);
-        s.extend(99, 99, Rect::new(0, 0, 10, 10));
+        s.extend(99, 99, Rect::new(Point::new(0, 0), Size::new(10, 10)));
         assert_eq!(s.head, (9, 9));
     }
 
     #[test]
     fn normalized_orders_anchor_before_head() {
         let mut s = Selection::start(PaneId(0), 5, 5);
-        s.extend(2, 3, Rect::new(0, 0, 10, 10));
+        s.extend(2, 3, Rect::new(Point::new(0, 0), Size::new(10, 10)));
         let (a, b) = s.normalized();
         assert_eq!(a, (2, 3));
         assert_eq!(b, (5, 5));
@@ -414,7 +415,7 @@ mod tests {
     #[test]
     fn cells_walks_inclusive_left_to_right_top_to_bottom() {
         let mut s = Selection::start(PaneId(0), 0, 0);
-        s.extend(1, 2, Rect::new(0, 0, 3, 3));
+        s.extend(1, 2, Rect::new(Point::new(0, 0), Size::new(3, 3)));
         let cells: Vec<_> = s.cells(3).collect();
         // Row 0: (0,0), (0,1), (0,2); Row 1: (1,0), (1,1), (1,2).
         assert_eq!(cells, vec![(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2),]);
@@ -423,7 +424,7 @@ mod tests {
     #[test]
     fn cells_on_single_row_is_inclusive() {
         let mut s = Selection::start(PaneId(0), 2, 1);
-        s.extend(2, 4, Rect::new(0, 0, 10, 10));
+        s.extend(2, 4, Rect::new(Point::new(0, 0), Size::new(10, 10)));
         let cells: Vec<_> = s.cells(10).collect();
         assert_eq!(cells, vec![(2, 1), (2, 2), (2, 3), (2, 4)]);
     }
@@ -454,7 +455,7 @@ mod tests {
     fn extract_simple_word() {
         let screen = screen_from(2, 10, &["hello", ""]);
         let mut s = Selection::start(PaneId(0), 0, 0);
-        s.extend(0, 4, Rect::new(0, 0, 2, 10));
+        s.extend(0, 4, Rect::new(Point::new(0, 0), Size::new(2, 10)));
         assert_eq!(extract_text(&s, &screen, 2, ScrollOffset::new(0)), "hello");
     }
 
@@ -462,7 +463,7 @@ mod tests {
     fn extract_across_rows_joins_with_newline() {
         let screen = screen_from(2, 10, &["abc", "def"]);
         let mut s = Selection::start(PaneId(0), 0, 0);
-        s.extend(1, 2, Rect::new(0, 0, 2, 10));
+        s.extend(1, 2, Rect::new(Point::new(0, 0), Size::new(2, 10)));
         let txt = extract_text(&s, &screen, 2, ScrollOffset::new(0));
         assert!(txt.starts_with("abc"));
         assert!(txt.contains('\n'));
@@ -481,7 +482,7 @@ mod tests {
             "setup: 2 rows scrolled off"
         );
         let mut s = Selection::start(PaneId(0), 0, 0);
-        s.extend(0, 2, Rect::new(0, 0, 2, 10)); // row 0, cols 0..=2
+        s.extend(0, 2, Rect::new(Point::new(0, 0), Size::new(2, 10))); // row 0, cols 0..=2
         // Live (scroll_offset 0): viewport row 0 is the grid's row 0 → "gri".
         assert_eq!(extract_text(&s, &screen, 2, ScrollOffset::new(0)), "gri");
         // Scrolled back 2: viewport row 0 is scrollback's "sb0" (the bug).
@@ -664,7 +665,7 @@ mod tests {
         // `== → !=` mutation at 83:33 inverts on_end_row: row 0 would use end.1=1
         // (stopping early) and row 1 would use max_cols-1=4 (running long).
         let mut s = Selection::start(PaneId(0), 0, 0);
-        s.extend(1, 1, Rect::new(0, 0, 5, 5));
+        s.extend(1, 1, Rect::new(Point::new(0, 0), Size::new(5, 5)));
         let cells: Vec<_> = s.cells(5).collect();
         assert_eq!(
             cells,

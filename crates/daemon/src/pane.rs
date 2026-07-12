@@ -756,6 +756,7 @@ fn wait_child(child: &mut Box<dyn Child + Send + Sync>) -> ExitStatus {
 
 #[cfg(test)]
 mod tests {
+    use plexy_glass_emulator::coords::{Col, Row};
     use plexy_glass_mux::{PaneId, ScrollOffset};
     use tokio::sync::Notify;
     use tokio::time::{self, Instant};
@@ -986,7 +987,7 @@ mod tests {
                 (0..s.active.num_cols())
                     .filter_map(|c| {
                         s.active
-                            .get_cell(0, c)
+                            .get_cell(Row::new(0), Col::new(c))
                             .map(|cell| cell.grapheme.as_str().to_string())
                     })
                     .collect::<String>()

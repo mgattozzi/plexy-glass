@@ -339,8 +339,8 @@ impl WindowManager {
                     let scrollback_len = s.scrollback.len() as u32;
                     let active_rows = u32::from(s.active.num_rows());
                     let total = scrollback_len + active_rows;
-                    let start_line = scrollback_len + u32::from(s.cursor.row);
-                    let start_col = s.cursor.col;
+                    let start_line = scrollback_len + u32::from(s.cursor.row.get());
+                    let start_col = s.cursor.col.get();
                     let pane_rows = s.active.num_rows();
                     (total, pane_rows, start_line, start_col)
                 });

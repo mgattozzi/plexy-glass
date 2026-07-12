@@ -1,6 +1,7 @@
 //! Rectangular cell grid with wrap-origin tracking on rows.
 
 use crate::cell::Cell;
+use crate::coords;
 use crate::width::display_width;
 
 /// Per-row wrap origin. Used by reflow to reconstruct logical lines.
@@ -243,18 +244,18 @@ impl Grid {
         self.cols
     }
 
-    pub fn put_cell(&mut self, row: u16, col: u16, cell: Cell) {
-        if let Some(r) = self.rows.get_mut(row as usize)
-            && let Some(c) = r.cells.get_mut(col as usize)
+    pub fn put_cell(&mut self, row: coords::Row, col: coords::Col, cell: Cell) {
+        if let Some(r) = self.rows.get_mut(row.get() as usize)
+            && let Some(c) = r.cells.get_mut(col.get() as usize)
         {
             *c = cell;
         }
     }
 
-    pub fn get_cell(&self, row: u16, col: u16) -> Option<&Cell> {
+    pub fn get_cell(&self, row: coords::Row, col: coords::Col) -> Option<&Cell> {
         self.rows
-            .get(row as usize)
-            .and_then(|r| r.cells.get(col as usize))
+            .get(row.get() as usize)
+            .and_then(|r| r.cells.get(col.get() as usize))
     }
 
     /// Reset every cell to default.
@@ -281,9 +282,19 @@ impl Grid {
     /// half is blanked too (via `normalize_wide_pairs`) so the row stays
     /// well-formed, no dangling spacer and no half-wide grapheme. This is what
     /// the erase ops (ED/EL/ECH) route through.
-    pub fn clear_rect(&mut self, start_row: u16, start_col: u16, end_row: u16, end_col: u16) {
-        let end_row = end_row.min(self.num_rows().saturating_sub(1));
-        let end_col = end_col.min(self.cols.saturating_sub(1));
+    pub fn clear_rect(
+        &mut self,
+        start_row: coords::Row,
+        start_col: coords::Col,
+        end_row: coords::Row,
+        end_col: coords::Col,
+    ) {
+        // Convert to raw indices at the boundary; the rectangle math below is
+        // unchanged u16 (the `(row, col)` order is fixed by the param types).
+        let start_row = start_row.get();
+        let start_col = start_col.get();
+        let end_row = end_row.get().min(self.num_rows().saturating_sub(1));
+        let end_col = end_col.get().min(self.cols.saturating_sub(1));
         // Equivalent note: `|| vs &&`. With `&&`, a rect where only one pair
         // is out-of-order still proceeds to the loop, but Rust inclusive ranges
         // with start > end iterate 0 times, so the grid is unchanged either way.
@@ -307,10 +318,10 @@ impl Grid {
     /// ICH: insert `n` blank cells at (`row`, `col`), shifting the rest of the
     /// row right; cells pushed past the right edge are lost. Cursor is not moved
     /// here, the caller homes the cursor as required by the op.
-    pub fn insert_cells(&mut self, row: u16, col: u16, n: u16) {
+    pub fn insert_cells(&mut self, row: coords::Row, col: coords::Col, n: u16) {
         let cols = self.cols as usize;
-        let col = col as usize;
-        let Some(r) = self.rows.get_mut(row as usize) else {
+        let col = col.get() as usize;
+        let Some(r) = self.rows.get_mut(row.get() as usize) else {
             return;
         };
         if col >= cols {
@@ -326,10 +337,10 @@ impl Grid {
 
     /// DCH: delete `n` cells at (`row`, `col`), shifting the rest of the row
     /// left; blanks fill in from the right edge. Cursor is not moved here.
-    pub fn delete_cells(&mut self, row: u16, col: u16, n: u16) {
+    pub fn delete_cells(&mut self, row: coords::Row, col: coords::Col, n: u16) {
         let cols = self.cols as usize;
-        let col = col as usize;
-        let Some(r) = self.rows.get_mut(row as usize) else {
+        let col = col.get() as usize;
+        let Some(r) = self.rows.get_mut(row.get() as usize) else {
             return;
         };
         if col >= cols {
@@ -346,9 +357,15 @@ impl Grid {
     /// Scroll a region [top, bottom] (inclusive) up by `n`. If `popped` is
     /// provided, rows that fall off the top are appended to it; otherwise
     /// discarded. New blank rows are inserted at the bottom of the region.
-    pub fn scroll_up(&mut self, top: u16, bottom: u16, n: u16, mut popped: Option<&mut Vec<Row>>) {
-        let top = top as usize;
-        let bottom = (bottom as usize).min(self.rows.len().saturating_sub(1));
+    pub fn scroll_up(
+        &mut self,
+        top: coords::Row,
+        bottom: coords::Row,
+        n: u16,
+        mut popped: Option<&mut Vec<Row>>,
+    ) {
+        let top = top.get() as usize;
+        let bottom = (bottom.get() as usize).min(self.rows.len().saturating_sub(1));
         if top > bottom {
             return;
         }
@@ -365,9 +382,9 @@ impl Grid {
 
     /// Scroll region [top, bottom] (inclusive) down by `n`. Bottom rows are
     /// discarded; blank rows inserted at the top.
-    pub fn scroll_down(&mut self, top: u16, bottom: u16, n: u16) {
-        let top = top as usize;
-        let bottom = (bottom as usize).min(self.rows.len().saturating_sub(1));
+    pub fn scroll_down(&mut self, top: coords::Row, bottom: coords::Row, n: u16) {
+        let top = top.get() as usize;
+        let bottom = (bottom.get() as usize).min(self.rows.len().saturating_sub(1));
         if top > bottom {
             return;
         }
@@ -391,6 +408,16 @@ mod tests {
     use smol_str::SmolStr;
 
     use super::*;
+    use crate::coords;
+
+    // Terse coordinate constructors so the many `put_cell`/`get_cell` sites stay
+    // readable (`Row` here would collide with the cell-row `Row` this module owns).
+    fn row(v: u16) -> coords::Row {
+        coords::Row::new(v)
+    }
+    fn col(v: u16) -> coords::Col {
+        coords::Col::new(v)
+    }
 
     fn x_cell() -> Cell {
         Cell {
@@ -611,16 +638,16 @@ mod tests {
         let g = Grid::new(3, 4);
         assert_eq!(g.num_rows(), 3);
         assert_eq!(g.num_cols(), 4);
-        assert!(g.get_cell(0, 0).unwrap().is_blank());
+        assert!(g.get_cell(row(0), col(0)).unwrap().is_blank());
     }
 
     #[test]
     fn put_cell_oob_is_noop() {
         let mut g = Grid::new(2, 2);
-        g.put_cell(99, 99, x_cell());
+        g.put_cell(row(99), col(99), x_cell());
         for r in 0..2 {
             for c in 0..2 {
-                assert!(g.get_cell(r, c).unwrap().is_blank());
+                assert!(g.get_cell(row(r), col(c)).unwrap().is_blank());
             }
         }
     }
@@ -638,7 +665,7 @@ mod tests {
     fn clear_rect_keeps_row_marks() {
         let mut g = Grid::new(2, 2);
         g.rows[0].mark.set(RowMark::PROMPT_START);
-        g.clear_rect(0, 0, 1, 1);
+        g.clear_rect(row(0), col(0), row(1), col(1));
         assert!(g.rows[0].mark.contains(RowMark::PROMPT_START));
     }
 
@@ -647,30 +674,30 @@ mod tests {
         let mut g = Grid::new(3, 3);
         for r in 0..3 {
             for c in 0..3 {
-                g.put_cell(r, c, x_cell());
+                g.put_cell(row(r), col(c), x_cell());
             }
         }
-        g.clear_rect(1, 1, 2, 2);
-        assert_eq!(g.get_cell(0, 0).unwrap(), &x_cell());
-        assert!(g.get_cell(1, 1).unwrap().is_blank());
-        assert!(g.get_cell(2, 2).unwrap().is_blank());
+        g.clear_rect(row(1), col(1), row(2), col(2));
+        assert_eq!(g.get_cell(row(0), col(0)).unwrap(), &x_cell());
+        assert!(g.get_cell(row(1), col(1)).unwrap().is_blank());
+        assert!(g.get_cell(row(2), col(2)).unwrap().is_blank());
     }
 
     #[test]
     fn scroll_up_moves_rows_and_blanks_bottom() {
         let mut g = Grid::new(3, 1);
-        g.put_cell(0, 0, x_cell());
-        g.scroll_up(0, 2, 1, None);
-        assert!(g.get_cell(0, 0).unwrap().is_blank());
-        assert!(g.get_cell(2, 0).unwrap().is_blank());
+        g.put_cell(row(0), col(0), x_cell());
+        g.scroll_up(row(0), row(2), 1, None);
+        assert!(g.get_cell(row(0), col(0)).unwrap().is_blank());
+        assert!(g.get_cell(row(2), col(0)).unwrap().is_blank());
     }
 
     #[test]
     fn scroll_up_collects_popped() {
         let mut g = Grid::new(3, 1);
-        g.put_cell(0, 0, x_cell());
+        g.put_cell(row(0), col(0), x_cell());
         let mut out = Vec::new();
-        g.scroll_up(0, 2, 1, Some(&mut out));
+        g.scroll_up(row(0), row(2), 1, Some(&mut out));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].cells[0], x_cell());
     }
@@ -678,10 +705,10 @@ mod tests {
     #[test]
     fn scroll_down_blanks_top_discards_bottom() {
         let mut g = Grid::new(3, 1);
-        g.put_cell(2, 0, x_cell());
-        g.scroll_down(0, 2, 1);
-        assert!(g.get_cell(0, 0).unwrap().is_blank());
-        assert!(g.get_cell(2, 0).unwrap().is_blank());
+        g.put_cell(row(2), col(0), x_cell());
+        g.scroll_down(row(0), row(2), 1);
+        assert!(g.get_cell(row(0), col(0)).unwrap().is_blank());
+        assert!(g.get_cell(row(2), col(0)).unwrap().is_blank());
     }
 
     // ---- RowMark::is_empty ----
@@ -728,25 +755,25 @@ mod tests {
         let mut g = Grid::new(3, 3);
         for r in 0..3u16 {
             for c in 0..3u16 {
-                g.put_cell(r, c, x_cell());
+                g.put_cell(row(r), col(c), x_cell());
             }
         }
         // Single-row clear (start_row == end_row); the `> → >=` mutation would
         // return early from the guard and skip this clear.
-        g.clear_rect(1, 0, 1, 2);
+        g.clear_rect(row(1), col(0), row(1), col(2));
         for c in 0..3u16 {
             assert!(
-                g.get_cell(1, c).unwrap().is_blank(),
+                g.get_cell(row(1), col(c)).unwrap().is_blank(),
                 "row 1 col {c} must be blank"
             );
         }
         assert_eq!(
-            g.get_cell(0, 0).unwrap(),
+            g.get_cell(row(0), col(0)).unwrap(),
             &x_cell(),
             "row 0 must be unchanged"
         );
         assert_eq!(
-            g.get_cell(2, 0).unwrap(),
+            g.get_cell(row(2), col(0)).unwrap(),
             &x_cell(),
             "row 2 must be unchanged"
         );
@@ -757,24 +784,24 @@ mod tests {
         let mut g = Grid::new(3, 3);
         for r in 0..3u16 {
             for c in 0..3u16 {
-                g.put_cell(r, c, x_cell());
+                g.put_cell(row(r), col(c), x_cell());
             }
         }
         // Single-col clear; tests the start_col == end_col case.
-        g.clear_rect(0, 1, 2, 1);
+        g.clear_rect(row(0), col(1), row(2), col(1));
         for r in 0..3u16 {
             assert!(
-                g.get_cell(r, 1).unwrap().is_blank(),
+                g.get_cell(row(r), col(1)).unwrap().is_blank(),
                 "col 1 row {r} must be blank"
             );
         }
         assert_eq!(
-            g.get_cell(0, 0).unwrap(),
+            g.get_cell(row(0), col(0)).unwrap(),
             &x_cell(),
             "col 0 must be unchanged"
         );
         assert_eq!(
-            g.get_cell(0, 2).unwrap(),
+            g.get_cell(row(0), col(2)).unwrap(),
             &x_cell(),
             "col 2 must be unchanged"
         );
@@ -787,21 +814,21 @@ mod tests {
         // top == bottom: a single-row region. The `> → >=` mutation returns early
         // (1 >= 1), leaving the row non-blank.
         let mut g = Grid::new(3, 1);
-        g.put_cell(0, 0, x_cell());
-        g.put_cell(1, 0, x_cell());
-        g.put_cell(2, 0, x_cell());
-        g.scroll_up(1, 1, 1, None);
+        g.put_cell(row(0), col(0), x_cell());
+        g.put_cell(row(1), col(0), x_cell());
+        g.put_cell(row(2), col(0), x_cell());
+        g.scroll_up(row(1), row(1), 1, None);
         assert!(
-            g.get_cell(1, 0).unwrap().is_blank(),
+            g.get_cell(row(1), col(0)).unwrap().is_blank(),
             "single-row scroll must blank row 1"
         );
         assert_eq!(
-            g.get_cell(0, 0).unwrap(),
+            g.get_cell(row(0), col(0)).unwrap(),
             &x_cell(),
             "row 0 must be unchanged"
         );
         assert_eq!(
-            g.get_cell(2, 0).unwrap(),
+            g.get_cell(row(2), col(0)).unwrap(),
             &x_cell(),
             "row 2 must be unchanged"
         );
@@ -815,16 +842,30 @@ mod tests {
         // caps n to 2 (pop 2 rows), but the mutation allows n=3 (pop 3 rows).
         let mut g = Grid::new(4, 1);
         for r in 0..4u16 {
-            g.put_cell(r, 0, x_cell());
+            g.put_cell(row(r), col(0), x_cell());
         }
         // n=3 > actual region size (2), so n is capped to 2 in the original.
         // The mutation region=4 does NOT cap n, giving popped.len()=3 instead of 2.
         let mut popped = Vec::new();
-        g.scroll_up(1, 2, 3, Some(&mut popped));
-        assert_eq!(g.get_cell(0, 0).unwrap(), &x_cell(), "row 0 unchanged");
-        assert!(g.get_cell(1, 0).unwrap().is_blank(), "row 1 blanked");
-        assert!(g.get_cell(2, 0).unwrap().is_blank(), "row 2 blanked");
-        assert_eq!(g.get_cell(3, 0).unwrap(), &x_cell(), "row 3 unchanged");
+        g.scroll_up(row(1), row(2), 3, Some(&mut popped));
+        assert_eq!(
+            g.get_cell(row(0), col(0)).unwrap(),
+            &x_cell(),
+            "row 0 unchanged"
+        );
+        assert!(
+            g.get_cell(row(1), col(0)).unwrap().is_blank(),
+            "row 1 blanked"
+        );
+        assert!(
+            g.get_cell(row(2), col(0)).unwrap().is_blank(),
+            "row 2 blanked"
+        );
+        assert_eq!(
+            g.get_cell(row(3), col(0)).unwrap(),
+            &x_cell(),
+            "row 3 unchanged"
+        );
         assert_eq!(
             popped.len(),
             2,
@@ -839,12 +880,12 @@ mod tests {
         // row would NOT be scrolled.
         let mut g = Grid::new(3, 1);
         for r in 0..3u16 {
-            g.put_cell(r, 0, x_cell());
+            g.put_cell(row(r), col(0), x_cell());
         }
-        g.scroll_up(0, 2, 3, None); // n = 3 = region size
+        g.scroll_up(row(0), row(2), 3, None); // n = 3 = region size
         for r in 0..3u16 {
             assert!(
-                g.get_cell(r, 0).unwrap().is_blank(),
+                g.get_cell(row(r), col(0)).unwrap().is_blank(),
                 "row {r} must be blank after full scroll"
             );
         }
@@ -856,15 +897,23 @@ mod tests {
     fn scroll_down_single_row_blanks_it() {
         let mut g = Grid::new(3, 1);
         for r in 0..3u16 {
-            g.put_cell(r, 0, x_cell());
+            g.put_cell(row(r), col(0), x_cell());
         }
-        g.scroll_down(1, 1, 1);
+        g.scroll_down(row(1), row(1), 1);
         assert!(
-            g.get_cell(1, 0).unwrap().is_blank(),
+            g.get_cell(row(1), col(0)).unwrap().is_blank(),
             "single-row scroll_down must blank row 1"
         );
-        assert_eq!(g.get_cell(0, 0).unwrap(), &x_cell(), "row 0 unchanged");
-        assert_eq!(g.get_cell(2, 0).unwrap(), &x_cell(), "row 2 unchanged");
+        assert_eq!(
+            g.get_cell(row(0), col(0)).unwrap(),
+            &x_cell(),
+            "row 0 unchanged"
+        );
+        assert_eq!(
+            g.get_cell(row(2), col(0)).unwrap(),
+            &x_cell(),
+            "row 2 unchanged"
+        );
     }
 
     #[test]
@@ -874,12 +923,12 @@ mod tests {
         // The `+ → *` mutation: region = bottom - top * 1 = bottom - top = 2 (off-by-one).
         let mut g = Grid::new(3, 1);
         for r in 0..3u16 {
-            g.put_cell(r, 0, x_cell());
+            g.put_cell(row(r), col(0), x_cell());
         }
-        g.scroll_down(0, 2, 3); // n = 3 = region size
+        g.scroll_down(row(0), row(2), 3); // n = 3 = region size
         for r in 0..3u16 {
             assert!(
-                g.get_cell(r, 0).unwrap().is_blank(),
+                g.get_cell(row(r), col(0)).unwrap().is_blank(),
                 "row {r} must be blank after full scroll_down"
             );
         }
@@ -889,13 +938,27 @@ mod tests {
     fn scroll_down_subregion_with_nonzero_top() {
         let mut g = Grid::new(4, 1);
         for r in 0..4u16 {
-            g.put_cell(r, 0, x_cell());
+            g.put_cell(row(r), col(0), x_cell());
         }
         // Scroll region [1,2] down by 2 (the full region). Both become blank.
-        g.scroll_down(1, 2, 2);
-        assert_eq!(g.get_cell(0, 0).unwrap(), &x_cell(), "row 0 unchanged");
-        assert!(g.get_cell(1, 0).unwrap().is_blank(), "row 1 blanked");
-        assert!(g.get_cell(2, 0).unwrap().is_blank(), "row 2 blanked");
-        assert_eq!(g.get_cell(3, 0).unwrap(), &x_cell(), "row 3 unchanged");
+        g.scroll_down(row(1), row(2), 2);
+        assert_eq!(
+            g.get_cell(row(0), col(0)).unwrap(),
+            &x_cell(),
+            "row 0 unchanged"
+        );
+        assert!(
+            g.get_cell(row(1), col(0)).unwrap().is_blank(),
+            "row 1 blanked"
+        );
+        assert!(
+            g.get_cell(row(2), col(0)).unwrap().is_blank(),
+            "row 2 blanked"
+        );
+        assert_eq!(
+            g.get_cell(row(3), col(0)).unwrap(),
+            &x_cell(),
+            "row 3 unchanged"
+        );
     }
 }

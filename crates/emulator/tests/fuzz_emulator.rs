@@ -27,14 +27,14 @@ fn parser_advance() {
         }
         // The cursor is always clamped inside the grid.
         assert!(
-            s.cursor.row < ROWS,
+            s.cursor.row.get() < ROWS,
             "cursor.row {} out of bounds",
-            s.cursor.row
+            s.cursor.row.get()
         );
         assert!(
-            s.cursor.col < COLS,
+            s.cursor.col.get() < COLS,
             "cursor.col {} out of bounds",
-            s.cursor.col
+            s.cursor.col.get()
         );
     });
 }

@@ -3,6 +3,7 @@
 use unicode_width::UnicodeWidthStr;
 
 use crate::cell::Cell;
+use crate::coords;
 use crate::cursor::Cursor;
 use crate::grid::{Grid, Row, RowMark, WrapOrigin};
 use crate::scrollback::Scrollback;
@@ -24,8 +25,8 @@ pub fn reflow(
     let active_start_idx = all_rows.len();
     all_rows.append(&mut active.rows);
 
-    let cursor_abs_row = active_start_idx + cursor.row as usize;
-    let cursor_col_in_row = cursor.col as usize;
+    let cursor_abs_row = active_start_idx + cursor.row.get() as usize;
+    let cursor_col_in_row = cursor.col.get() as usize;
 
     // 2. Reconstruct logical lines. A line is a contiguous run of rows where
     //    the first has WrapOrigin::Hard and subsequent rows have
@@ -226,15 +227,15 @@ pub fn reflow(
         if abs < split_at {
             // Cursor's logical position is now in scrollback, so clamp to the top of
             // the active area.
-            cursor.row = 0;
-            cursor.col = 0;
+            cursor.row = coords::Row::ZERO;
+            cursor.col = coords::Col::ZERO;
         } else {
-            cursor.row = (abs - split_at) as u16;
-            cursor.col = cursor_new_col.min(new_cols.saturating_sub(1));
+            cursor.row = coords::Row::new((abs - split_at) as u16);
+            cursor.col = coords::Col::new(cursor_new_col.min(new_cols.saturating_sub(1)));
         }
     } else {
-        cursor.row = cursor.row.min(new_rows.saturating_sub(1));
-        cursor.col = cursor.col.min(new_cols.saturating_sub(1));
+        cursor.row = cursor.row.min(coords::Row::new(new_rows.saturating_sub(1)));
+        cursor.col = cursor.col.min(coords::Col::new(new_cols.saturating_sub(1)));
     }
     cursor.pending_wrap = false;
 }
@@ -274,6 +275,8 @@ mod tests {
     use smol_str::SmolStr;
 
     use super::*;
+    // Coordinate constructors; `Row` alone is the cell-row type in this module.
+    use crate::coords::{Col, Row as CoordRow};
 
     fn cell(s: &str) -> Cell {
         Cell {
@@ -312,8 +315,8 @@ mod tests {
         };
         let mut sb = Scrollback::with_cap(100);
         let mut c = Cursor {
-            row: 1,
-            col: 2,
+            row: CoordRow::new(1),
+            col: Col::new(2),
             ..Cursor::default()
         };
 
@@ -325,8 +328,8 @@ mod tests {
         assert_eq!(row_text(&active.rows[0]), "Hello!");
         assert_eq!(active.rows[0].wrap_origin, WrapOrigin::Hard);
         // Cursor was at logical col 6 (length of "Hello!"); on the new row at col 6.
-        assert_eq!(c.row, 0);
-        assert_eq!(c.col, 6);
+        assert_eq!(c.row, CoordRow::new(0));
+        assert_eq!(c.col, Col::new(6));
     }
 
     #[test]
@@ -369,14 +372,18 @@ mod tests {
         };
         let mut sb = Scrollback::with_cap(100);
         let mut c = Cursor {
-            row: 2,
-            col: 5,
+            row: CoordRow::new(2),
+            col: Col::new(5),
             ..Cursor::default()
         };
         reflow(&mut active, &mut sb, &mut c, 4, 16);
         assert_eq!(row_text(&active.rows[0]), "Hello World");
         assert_eq!(row_text(&active.rows[1]), "ab");
-        assert_eq!(c.row, 1, "cursor must follow 'ab' to the joined-up row");
+        assert_eq!(
+            c.row,
+            CoordRow::new(1),
+            "cursor must follow 'ab' to the joined-up row"
+        );
     }
 
     #[test]
@@ -403,13 +410,17 @@ mod tests {
         };
         let mut sb = Scrollback::with_cap(100);
         let mut c = Cursor {
-            row: 0,
-            col: 1,
+            row: CoordRow::new(0),
+            col: Col::new(1),
             ..Cursor::default()
         };
         reflow(&mut active, &mut sb, &mut c, 4, 16);
-        assert_eq!(c.row, 0);
-        assert_eq!(c.col, 0, "spacer cursor must resolve to the wide grapheme");
+        assert_eq!(c.row, CoordRow::new(0));
+        assert_eq!(
+            c.col,
+            Col::new(0),
+            "spacer cursor must resolve to the wide grapheme"
+        );
     }
 
     #[test]
@@ -716,14 +727,15 @@ mod tests {
         };
         let mut sb = Scrollback::with_cap(100);
         let mut c = Cursor {
-            row: 1,
-            col: 0,
+            row: CoordRow::new(1),
+            col: Col::new(0),
             ..Cursor::default()
         };
         reflow(&mut active, &mut sb, &mut c, 2, 4);
-        assert_eq!(c.row, 0);
+        assert_eq!(c.row, CoordRow::new(0));
         assert_eq!(
-            c.col, 2,
+            c.col.get(),
+            2,
             "logical col = col_offset(2) + cursor_col(0) = 2, not 2*0=0"
         );
     }
@@ -745,16 +757,17 @@ mod tests {
         };
         let mut sb = Scrollback::with_cap(100);
         let mut c = Cursor {
-            row: 2,
-            col: 0,
+            row: CoordRow::new(2),
+            col: Col::new(0),
             ..Cursor::default()
         };
         reflow(&mut active, &mut sb, &mut c, 4, 6);
         assert_eq!(
-            c.row, 1,
+            c.row.get(),
+            1,
             "empty logical line must follow join of 'abcdef' to row 1"
         );
-        assert_eq!(c.col, 0);
+        assert_eq!(c.col, Col::new(0));
     }
 
     /// Lines 121:42: `col_in_row + 2 > new_cols` must use `>`, not `>=` / `<` / `==`.
@@ -907,8 +920,8 @@ mod tests {
         };
         let mut sb = Scrollback::with_cap(100);
         let mut c = Cursor {
-            row: 0,
-            col: 2,
+            row: CoordRow::new(0),
+            col: Col::new(2),
             ..Cursor::default()
         };
         reflow(&mut active, &mut sb, &mut c, 3, 2);
@@ -919,10 +932,11 @@ mod tests {
         assert_eq!(row_text(&active.rows[0]), "好");
         assert_eq!(row_text(&active.rows[1]), "好");
         assert_eq!(
-            c.row, 1,
+            c.row.get(),
+            1,
             "cursor at col=2 of 4-col row must follow second '好' to row 1"
         );
-        assert_eq!(c.col, 0);
+        assert_eq!(c.col, Col::new(0));
     }
 
     /// Lines 157/158/160: combining mark (cw=0) merges into the cell before it.

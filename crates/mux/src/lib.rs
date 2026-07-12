@@ -68,7 +68,7 @@ pub use overlay::{Overlay, OverlayAction, PickerEntry, RenameTarget, picker_filt
 pub use palette::{PaletteAction, PaletteEntry, PaletteOutcome, PaletteState, handle_palette};
 pub use pane_id::{PaneId, WindowId};
 pub use preset::LayoutPreset;
-pub use rect::Rect;
+pub use rect::{Point, Rect, Size};
 pub use selection::{Selection, extract_text, line_at, screen_text, viewport_content_row, word_at};
 pub use status::StatusLine;
 pub use tree::{

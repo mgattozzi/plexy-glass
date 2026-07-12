@@ -1416,6 +1416,7 @@ mod tests {
 
     use nix::sys::signal;
     use nix::unistd::Pid;
+    use plexy_glass_emulator::coords::{Col, Row};
     use plexy_glass_protocol::SpawnSpec;
     use tokio::io;
     use tokio::net::UnixStream;
@@ -2188,7 +2189,7 @@ mod tests {
                 .filter_map(|c| {
                     screen
                         .active
-                        .get_cell(0, c)
+                        .get_cell(Row::new(0), Col::new(c))
                         .map(|cell| cell.grapheme.as_str().to_string())
                 })
                 .collect::<String>()
@@ -2232,7 +2233,7 @@ mod tests {
                     .filter_map(|c| {
                         screen
                             .active
-                            .get_cell(0, c)
+                            .get_cell(Row::new(0), Col::new(c))
                             .map(|cell| cell.grapheme.as_str().to_string())
                     })
                     .collect::<String>()
@@ -2345,7 +2346,7 @@ mod tests {
             let m = s.window_manager.lock().await;
             let vp = m.viewport();
             let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
-            (r0.row + r0.rows / 2, r0.col + r0.cols / 2)
+            (r0.row() + r0.rows() / 2, r0.col() + r0.cols() / 2)
         };
         s.handle_mouse(MouseEvent {
             kind: MouseKind::Press,
@@ -2408,8 +2409,8 @@ mod tests {
             kind,
             button: MouseButton::Left,
             modifiers: MouseModifiers::default(),
-            row: r0.row + 2,
-            col: r0.col + col,
+            row: r0.row() + 2,
+            col: r0.col() + col,
         };
         // Press→move→release across 5 columns → a real drag-select (Δcol > 1, not
         // a click). Session::handle_mouse awaits the off-lock clipboard write
@@ -2645,7 +2646,7 @@ mod tests {
             let r1 = win.layout().rect_of(leaves[1], vp).unwrap();
             // Equal within one cell (odd usable width splits off-by-one).
             assert!(
-                (i32::from(r0.cols) - i32::from(r1.cols)).abs() <= 1,
+                (i32::from(r0.cols()) - i32::from(r1.cols())).abs() <= 1,
                 "{r0:?} {r1:?}"
             );
         }
@@ -2669,7 +2670,7 @@ mod tests {
             let leaves = win.layout().dfs_leaves();
             let widths: Vec<u16> = leaves
                 .iter()
-                .map(|p| win.layout().rect_of(*p, vp).unwrap().cols)
+                .map(|p| win.layout().rect_of(*p, vp).unwrap().cols())
                 .collect();
             // All three within ~2 cells of each other (gutters + rounding).
             let max = i32::from(*widths.iter().max().unwrap());
@@ -2697,10 +2698,10 @@ mod tests {
             let r1 = win.layout().rect_of(leaves[1], vp).unwrap();
             // First pane should be ~2x the second (2:1).
             assert!(
-                f32::from(r0.cols) / f32::from(r1.cols) > 1.6,
+                f32::from(r0.cols()) / f32::from(r1.cols()) > 1.6,
                 "expected ~2:1, got {} vs {}",
-                r0.cols,
-                r1.cols
+                r0.cols(),
+                r1.cols()
             );
         }
         s.terminate_panes().await;
@@ -2728,10 +2729,10 @@ mod tests {
             // Left pane is ~2x the right column's width (outer 2:1), and the
             // right panes share the right column's width.
             assert!(
-                f32::from(left.cols) / f32::from(right_top.cols) > 1.6,
+                f32::from(left.cols()) / f32::from(right_top.cols()) > 1.6,
                 "outer 2:1: left {} vs right {}",
-                left.cols,
-                right_top.cols
+                left.cols(),
+                right_top.cols()
             );
         }
         s.terminate_panes().await;

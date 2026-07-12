@@ -5,6 +5,7 @@
 //! against spec-correct expected values (DEC VT510 manual, xterm ctlseqs,
 //! esctest). A failing case is a real conformance bug.
 
+use plexy_glass_emulator::coords::{Col, Row};
 use plexy_glass_emulator::parser::Parser;
 use plexy_glass_emulator::{Modes, Screen};
 
@@ -70,7 +71,12 @@ fn check(cases: &[Case]) {
     for c in cases {
         let s = run(c.rows, c.cols, c.input);
         if let Some((r, col)) = c.cursor {
-            assert_eq!((s.cursor.row, s.cursor.col), (r, col), "{}: cursor", c.name);
+            assert_eq!(
+                (s.cursor.row, s.cursor.col),
+                (Row::new(r), Col::new(col)),
+                "{}: cursor",
+                c.name
+            );
         }
         if let Some(sr) = c.scroll_region {
             assert_eq!(s.scroll_region, sr, "{}: scroll_region", c.name);
@@ -89,7 +95,7 @@ fn check(cases: &[Case]) {
         for (r, col, e) in c.cells {
             let cell = s
                 .active
-                .get_cell(*r, *col)
+                .get_cell(Row::new(*r), Col::new(*col))
                 .unwrap_or_else(|| panic!("{}: cell ({},{}) out of bounds", c.name, r, col));
             match e {
                 Expect::Text(t) => {

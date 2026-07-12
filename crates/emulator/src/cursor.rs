@@ -2,6 +2,7 @@
 
 use crate::attrs::{Attrs, UnderlineStyle};
 use crate::color::Color;
+use crate::coords::{Col, Row};
 use crate::hyperlinks::HyperlinkId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,8 +16,8 @@ pub enum CursorShape {
 
 #[derive(Debug, Clone)]
 pub struct Cursor {
-    pub row: u16,
-    pub col: u16,
+    pub row: Row,
+    pub col: Col,
     /// SGR attributes that newly-written cells inherit.
     pub attrs: Attrs,
     pub fg: Color,
@@ -39,8 +40,8 @@ pub struct Cursor {
 impl Default for Cursor {
     fn default() -> Self {
         Self {
-            row: 0,
-            col: 0,
+            row: Row::ZERO,
+            col: Col::ZERO,
             attrs: Attrs::empty(),
             fg: Color::Default,
             bg: Color::Default,
@@ -57,33 +58,33 @@ impl Default for Cursor {
 
 impl Cursor {
     /// Move to an absolute (row, col), clamped into the grid.
-    pub fn move_to(&mut self, row: u16, col: u16, max_rows: u16, max_cols: u16) {
-        self.row = row.min(max_rows.saturating_sub(1));
-        self.col = col.min(max_cols.saturating_sub(1));
+    pub fn move_to(&mut self, row: Row, col: Col, max_rows: Row, max_cols: Col) {
+        self.row = row.min(max_rows.retreat(1));
+        self.col = col.min(max_cols.retreat(1));
         self.pending_wrap = false;
     }
 
     /// Move up by `n`, clamped to row 0.
     pub const fn up(&mut self, n: u16) {
-        self.row = self.row.saturating_sub(n);
+        self.row = self.row.retreat(n);
         self.pending_wrap = false;
     }
 
     /// Move down by `n`, clamped to the last row.
-    pub fn down(&mut self, n: u16, max_rows: u16) {
-        self.row = self.row.saturating_add(n).min(max_rows.saturating_sub(1));
+    pub fn down(&mut self, n: u16, max_rows: Row) {
+        self.row = self.row.advance(n).min(max_rows.retreat(1));
         self.pending_wrap = false;
     }
 
     /// Move left by `n`, clamped to column 0.
     pub const fn left(&mut self, n: u16) {
-        self.col = self.col.saturating_sub(n);
+        self.col = self.col.retreat(n);
         self.pending_wrap = false;
     }
 
     /// Move right by `n`, clamped to the last column.
-    pub fn right(&mut self, n: u16, max_cols: u16) {
-        self.col = self.col.saturating_add(n).min(max_cols.saturating_sub(1));
+    pub fn right(&mut self, n: u16, max_cols: Col) {
+        self.col = self.col.advance(n).min(max_cols.retreat(1));
         self.pending_wrap = false;
     }
 }
@@ -95,7 +96,7 @@ mod tests {
     #[test]
     fn default_at_home_visible_default_shape() {
         let c = Cursor::default();
-        assert_eq!((c.row, c.col), (0, 0));
+        assert_eq!((c.row, c.col), (Row::ZERO, Col::ZERO));
         assert!(c.visible);
         assert_eq!(c.shape, CursorShape::Default);
         assert!(!c.pending_wrap);
@@ -104,58 +105,58 @@ mod tests {
     #[test]
     fn move_to_clamps() {
         let mut c = Cursor::default();
-        c.move_to(100, 100, 24, 80);
-        assert_eq!((c.row, c.col), (23, 79));
+        c.move_to(Row::new(100), Col::new(100), Row::new(24), Col::new(80));
+        assert_eq!((c.row, c.col), (Row::new(23), Col::new(79)));
     }
 
     #[test]
     fn up_saturates_at_zero() {
         let mut c = Cursor {
-            row: 2,
+            row: Row::new(2),
             ..Cursor::default()
         };
         c.up(5);
-        assert_eq!(c.row, 0);
+        assert_eq!(c.row, Row::ZERO);
     }
 
     #[test]
     fn down_clamps_to_max() {
         let mut c = Cursor {
-            row: 20,
+            row: Row::new(20),
             ..Cursor::default()
         };
-        c.down(10, 24);
-        assert_eq!(c.row, 23);
+        c.down(10, Row::new(24));
+        assert_eq!(c.row, Row::new(23));
     }
 
     #[test]
     fn left_decrements_col() {
         let mut c = Cursor {
-            col: 10,
+            col: Col::new(10),
             ..Cursor::default()
         };
         c.left(3);
-        assert_eq!(c.col, 7);
+        assert_eq!(c.col, Col::new(7));
     }
 
     #[test]
     fn left_saturates_at_zero() {
         let mut c = Cursor {
-            col: 2,
+            col: Col::new(2),
             ..Cursor::default()
         };
         c.left(5);
-        assert_eq!(c.col, 0);
+        assert_eq!(c.col, Col::ZERO);
     }
 
     #[test]
     fn right_increments_col() {
         let mut c = Cursor {
-            col: 5,
+            col: Col::new(5),
             ..Cursor::default()
         };
-        c.right(3, 80);
-        assert_eq!(c.col, 8);
+        c.right(3, Col::new(80));
+        assert_eq!(c.col, Col::new(8));
     }
 
     #[test]
@@ -164,19 +165,19 @@ mod tests {
             pending_wrap: true,
             ..Cursor::default()
         };
-        c.right(1, 80);
+        c.right(1, Col::new(80));
         assert!(!c.pending_wrap);
     }
 
     #[test]
     fn left_clears_pending_wrap() {
         let mut c = Cursor {
-            col: 5,
+            col: Col::new(5),
             pending_wrap: true,
             ..Cursor::default()
         };
         c.left(1);
         assert!(!c.pending_wrap);
-        assert_eq!(c.col, 4);
+        assert_eq!(c.col, Col::new(4));
     }
 }

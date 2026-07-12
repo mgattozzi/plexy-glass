@@ -211,7 +211,7 @@ pub async fn click_to_position(
 ) -> Result<bool, DaemonError> {
     let plan = pane.with_screen(|s| {
         // Only the cursor's own row is the editable line.
-        if click_row != s.cursor.row {
+        if click_row != s.cursor.row.get() {
             return None;
         }
         // Never move the cursor of a full-screen app; it owns the grid.
@@ -219,7 +219,7 @@ pub async fn click_to_position(
             return None;
         }
         let cursor = &s.cursor;
-        let row = s.active.rows.get(cursor.row as usize);
+        let row = s.active.rows.get(cursor.row.get() as usize);
         // PROMPT_END is a floor, not a gate: refuse clicks in the prompt prefix
         // when we know where input starts, but still fire when it's absent.
         if let Some(prompt_col) = row.and_then(|r| r.mark.prompt_end_col())
@@ -231,12 +231,15 @@ pub async fn click_to_position(
         // (CJK/emoji) grapheme spans two grid columns. Count real grapheme cells
         // (skipping wide spacers) so the arrows land on the click target instead
         // of overshooting by one per wide char.
-        let (lo, hi) = (cursor.col.min(click_col), cursor.col.max(click_col));
+        let (lo, hi) = (
+            cursor.col.get().min(click_col),
+            cursor.col.get().max(click_col),
+        );
         let count = row.map_or_else(
             || usize::from(hi - lo),
             |r| graphemes_in_span(&r.cells, lo, hi),
         );
-        Some((click_col > cursor.col, count))
+        Some((click_col > cursor.col.get(), count))
     });
 
     let Some((rightward, count)) = plan else {
@@ -269,6 +272,8 @@ fn graphemes_in_span(cells: &[plexy_glass_emulator::Cell], lo: u16, hi: u16) -> 
 mod tests {
     use std::time::Instant;
     use std::{env, fs};
+
+    use plexy_glass_emulator::coords::{Col, Row};
 
     use super::*;
 
@@ -423,8 +428,8 @@ mod tests {
         // PROMPT_END at row 0 col 2; cursor at col 2; click the same row at col 6.
         p.with_screen_mut(|s| {
             s.active.rows[0].mark.set_prompt_end(2);
-            s.cursor.row = 0;
-            s.cursor.col = 2;
+            s.cursor.row = Row::new(0);
+            s.cursor.col = Col::new(2);
         });
         assert!(click_to_position(&p, 0, 6).await.unwrap());
         let _ = p.send_input(Bytes::from_static(&[0x04])).await; // EOF
@@ -437,8 +442,8 @@ mod tests {
         // terminal. Regression guard for the dead-on-non-integrated-shell bug.
         let p = cat_pane();
         p.with_screen_mut(|s| {
-            s.cursor.row = 5;
-            s.cursor.col = 8;
+            s.cursor.row = Row::new(5);
+            s.cursor.col = Col::new(8);
         });
         assert!(
             click_to_position(&p, 5, 4).await.unwrap(),
@@ -451,8 +456,8 @@ mod tests {
     async fn click_to_position_ignores_clicks_off_the_cursor_row() {
         let p = cat_pane();
         p.with_screen_mut(|s| {
-            s.cursor.row = 5;
-            s.cursor.col = 8;
+            s.cursor.row = Row::new(5);
+            s.cursor.col = Col::new(8);
         });
         // Click on row 3 (not the cursor's row 5) → not the editable line.
         assert!(!click_to_position(&p, 3, 4).await.unwrap());
@@ -464,8 +469,8 @@ mod tests {
         let p = cat_pane();
         p.with_screen_mut(|s| {
             s.modes.insert(plexy_glass_emulator::Modes::ALT_SCREEN);
-            s.cursor.row = 5;
-            s.cursor.col = 8;
+            s.cursor.row = Row::new(5);
+            s.cursor.col = Col::new(8);
         });
         assert!(
             !click_to_position(&p, 5, 4).await.unwrap(),
@@ -479,8 +484,8 @@ mod tests {
         let p = cat_pane();
         p.with_screen_mut(|s| {
             s.active.rows[0].mark.set_prompt_end(4);
-            s.cursor.row = 0;
-            s.cursor.col = 7;
+            s.cursor.row = Row::new(0);
+            s.cursor.col = Col::new(7);
         });
         // Click at col 2 (< prompt input col 4) → refuse, it's the prompt prefix.
         assert!(!click_to_position(&p, 0, 2).await.unwrap());

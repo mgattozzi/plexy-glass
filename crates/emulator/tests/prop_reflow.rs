@@ -5,6 +5,7 @@
 //! so the expected shape is easy to compute independently of the implementation.
 
 use hegel::{TestCase, generators as gs};
+use plexy_glass_emulator::coords::{Col, Row as CoordRow};
 use plexy_glass_emulator::reflow::reflow;
 use plexy_glass_emulator::{Cell, Cursor, Grid, Row, RowMark, Scrollback, WrapOrigin};
 use smol_str::SmolStr;
@@ -211,8 +212,8 @@ fn cursor_stays_in_bounds_after_reflow(tc: TestCase) {
     let mut active = Grid::new(init_rows, init_cols);
     // Place cursor somewhere valid.
     let mut c = Cursor {
-        row: tc.draw(gs::integers::<u16>().min_value(0).max_value(init_rows - 1)),
-        col: tc.draw(gs::integers::<u16>().min_value(0).max_value(init_cols - 1)),
+        row: CoordRow::new(tc.draw(gs::integers::<u16>().min_value(0).max_value(init_rows - 1))),
+        col: Col::new(tc.draw(gs::integers::<u16>().min_value(0).max_value(init_cols - 1))),
         ..Cursor::default()
     };
     let mut sb = Scrollback::with_cap(1000);
@@ -221,22 +222,22 @@ fn cursor_stays_in_bounds_after_reflow(tc: TestCase) {
 
     tc.note(&format!(
         "cursor after reflow: ({}, {}) grid: {}x{}",
-        c.row,
-        c.col,
+        c.row.get(),
+        c.col.get(),
         active.num_rows(),
         active.num_cols()
     ));
 
     assert!(
-        c.row < active.num_rows(),
+        c.row.get() < active.num_rows(),
         "cursor.row={} must be < num_rows={}",
-        c.row,
+        c.row.get(),
         active.num_rows()
     );
     assert!(
-        c.col < active.num_cols(),
+        c.col.get() < active.num_cols(),
         "cursor.col={} must be < num_cols={}",
-        c.col,
+        c.col.get(),
         active.num_cols()
     );
 }
@@ -371,20 +372,25 @@ fn cursor_at_start_of_single_char_line_stays_at_zero(tc: TestCase) {
     };
     let mut sb = Scrollback::with_cap(1000);
     let mut c = Cursor {
-        row: 0,
-        col: 0,
+        row: CoordRow::ZERO,
+        col: Col::ZERO,
         ..Cursor::default()
     };
 
     reflow(&mut active, &mut sb, &mut c, new_rows, new_cols);
 
-    tc.note(&format!("cursor after = ({}, {})", c.row, c.col));
+    tc.note(&format!(
+        "cursor after = ({}, {})",
+        c.row.get(),
+        c.col.get()
+    ));
 
-    assert!(c.row < active.num_rows(), "cursor.row out of bounds");
-    assert!(c.col < active.num_cols(), "cursor.col out of bounds");
+    assert!(c.row.get() < active.num_rows(), "cursor.row out of bounds");
+    assert!(c.col.get() < active.num_cols(), "cursor.col out of bounds");
     // The 'X' is always the first cell of its row, so col should be 0.
     assert_eq!(
-        c.col, 0,
+        c.col.get(),
+        0,
         "cursor at col 0 of the first char must stay at col 0"
     );
 }
@@ -449,8 +455,8 @@ fn empty_grid_reflow_is_valid(tc: TestCase) {
 
     assert_eq!(active.num_rows(), new_rows);
     assert_eq!(active.num_cols(), new_cols);
-    assert!(c.row < active.num_rows());
-    assert!(c.col < active.num_cols());
+    assert!(c.row.get() < active.num_rows());
+    assert!(c.col.get() < active.num_cols());
 }
 
 /// P11: Several DISTINCT hard logical lines survive a narrow→wide round-trip with

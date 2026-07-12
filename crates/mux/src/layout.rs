@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::direction::{Direction, SplitDir};
 use crate::pane_id::PaneId;
 use crate::preset::{self, LayoutPreset};
-use crate::rect::Rect;
+use crate::rect::{Point, Rect};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LayoutNode {
@@ -233,13 +233,13 @@ impl LayoutTree {
                 let target_col = src.right_edge_col().checked_add(2)?;
                 pick_neighbor(
                     &panes,
-                    |r| r.col == target_col,
+                    |r| r.col() == target_col,
                     src,
                     /*horizontal=*/ true,
                 )
             }
             Direction::Left => {
-                let target_right = src.col.checked_sub(2)?;
+                let target_right = src.col().checked_sub(2)?;
                 pick_neighbor(
                     &panes,
                     |r| r.right_edge_col() == target_right,
@@ -251,13 +251,13 @@ impl LayoutTree {
                 let target_row = src.bottom_edge_row().checked_add(2)?;
                 pick_neighbor(
                     &panes,
-                    |r| r.row == target_row,
+                    |r| r.row() == target_row,
                     src,
                     /*horizontal=*/ false,
                 )
             }
             Direction::Up => {
-                let target_bottom = src.row.checked_sub(2)?;
+                let target_bottom = src.row().checked_sub(2)?;
                 pick_neighbor(
                     &panes,
                     |r| r.bottom_edge_row() == target_bottom,
@@ -405,8 +405,9 @@ fn border_at_recurse(node: &LayoutNode, viewport: Rect, row: u16, col: u16) -> O
                 SplitDir::Vertical => {
                     // Gutter column sits between `a` and `b` (subdivide reserves
                     // one separator cell). It's the column after `a`'s last col.
-                    let gutter_col = a.col.saturating_add(a.cols);
-                    if col == gutter_col && row >= a.row && row < a.row.saturating_add(a.rows) {
+                    let gutter_col = a.col().saturating_add(a.cols());
+                    if col == gutter_col && row >= a.row() && row < a.row().saturating_add(a.rows())
+                    {
                         return Some(BorderHit {
                             adjacent_pane: rightmost_leaf(first),
                             side: BorderSide::Right,
@@ -414,8 +415,9 @@ fn border_at_recurse(node: &LayoutNode, viewport: Rect, row: u16, col: u16) -> O
                     }
                 }
                 SplitDir::Horizontal => {
-                    let gutter_row = a.row.saturating_add(a.rows);
-                    if row == gutter_row && col >= a.col && col < a.col.saturating_add(a.cols) {
+                    let gutter_row = a.row().saturating_add(a.rows());
+                    if row == gutter_row && col >= a.col() && col < a.col().saturating_add(a.cols())
+                    {
                         return Some(BorderHit {
                             adjacent_pane: bottommost_leaf(first),
                             side: BorderSide::Bottom,
@@ -479,15 +481,15 @@ fn adjust_split_recurse(
     if split_matches {
         // subdivide reserves a 1-cell gutter, so total usable = total - 1.
         let total_usable = match *dir {
-            SplitDir::Vertical => viewport.cols.saturating_sub(1),
-            SplitDir::Horizontal => viewport.rows.saturating_sub(1),
+            SplitDir::Vertical => viewport.cols().saturating_sub(1),
+            SplitDir::Horizontal => viewport.rows().saturating_sub(1),
         };
         if total_usable < 2 * MIN_PANE_CELLS {
             return 0;
         }
         let first_cells = match *dir {
-            SplitDir::Vertical => a.cols,
-            SplitDir::Horizontal => a.rows,
+            SplitDir::Vertical => a.cols(),
+            SplitDir::Horizontal => a.rows(),
         };
         let new_first = (i32::from(first_cells) + i32::from(delta))
             .max(i32::from(MIN_PANE_CELLS))
@@ -568,7 +570,7 @@ where
 fn pane_at_in(node: &LayoutNode, viewport: Rect, row: u16, col: u16) -> Option<PaneId> {
     match node {
         LayoutNode::Leaf(p) => {
-            if viewport.contains(row, col) {
+            if viewport.contains(Point::new(row, col)) {
                 Some(*p)
             } else {
                 None
@@ -581,9 +583,9 @@ fn pane_at_in(node: &LayoutNode, viewport: Rect, row: u16, col: u16) -> Option<P
             second,
         } => {
             let (a, b) = viewport.subdivide(*dir, *ratio);
-            if a.contains(row, col) {
+            if a.contains(Point::new(row, col)) {
                 pane_at_in(first, a, row, col)
-            } else if b.contains(row, col) {
+            } else if b.contains(Point::new(row, col)) {
                 pane_at_in(second, b, row, col)
             } else {
                 None
@@ -604,9 +606,9 @@ fn pick_neighbor(
     horizontal: bool,
 ) -> Option<PaneId> {
     let (src_lo, src_hi) = if horizontal {
-        (src.row, src.bottom_edge_row())
+        (src.row(), src.bottom_edge_row())
     } else {
-        (src.col, src.right_edge_col())
+        (src.col(), src.right_edge_col())
     };
     let src_center = i32::from(src_lo) + (i32::from(src_hi) - i32::from(src_lo)) / 2;
 
@@ -615,9 +617,9 @@ fn pick_neighbor(
         .filter(|(_, r)| edge_pred(r))
         .filter_map(|(p, r)| {
             let (lo, hi) = if horizontal {
-                (r.row, r.bottom_edge_row())
+                (r.row(), r.bottom_edge_row())
             } else {
-                (r.col, r.right_edge_col())
+                (r.col(), r.right_edge_col())
             };
             let overlap = overlap_len(lo, hi, src_lo, src_hi);
             if overlap == 0 {
@@ -673,8 +675,8 @@ fn resize_in(
             let adjust_here = dir == axis && (in_first || in_second) && !descendant_handled;
             if adjust_here {
                 let size = match axis {
-                    SplitDir::Horizontal => i32::from(viewport.rows.saturating_sub(1).max(1)),
-                    SplitDir::Vertical => i32::from(viewport.cols.saturating_sub(1).max(1)),
+                    SplitDir::Horizontal => i32::from(viewport.rows().saturating_sub(1).max(1)),
+                    SplitDir::Vertical => i32::from(viewport.cols().saturating_sub(1).max(1)),
                 };
                 let dr = (delta_cells as f32) / (size as f32);
                 if in_first {
@@ -828,11 +830,12 @@ fn rect_of_in(node: &LayoutNode, target: PaneId, viewport: Rect) -> Option<Rect>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rect::Size;
 
     #[test]
     fn single_pane_has_full_viewport() {
         let t = LayoutTree::single(PaneId(0));
-        let vp = Rect::new(0, 0, 24, 80);
+        let vp = Rect::new(Point::new(0, 0), Size::new(24, 80));
         assert_eq!(t.rect_of(PaneId(0), vp), Some(vp));
     }
 
@@ -876,12 +879,12 @@ mod tests {
             SplitPosition::After,
         )
         .unwrap();
-        let vp = Rect::new(0, 0, 24, 21);
+        let vp = Rect::new(Point::new(0, 0), Size::new(24, 21));
         let r0 = t.rect_of(PaneId(0), vp).unwrap();
         let r1 = t.rect_of(PaneId(1), vp).unwrap();
-        assert_eq!(r0.cols + r1.cols, 20); // 21 minus 1 separator
-        assert_eq!(r0.col, 0);
-        assert!(r1.col > r0.col);
+        assert_eq!(r0.cols() + r1.cols(), 20); // 21 minus 1 separator
+        assert_eq!(r0.col(), 0);
+        assert!(r1.col() > r0.col());
     }
 
     #[test]
@@ -896,7 +899,7 @@ mod tests {
         .unwrap();
         assert_eq!(t.close(PaneId(1)), CloseOutcome::SiblingPromoted);
         assert_eq!(t.panes(), vec![PaneId(0)]);
-        let vp = Rect::new(0, 0, 24, 21);
+        let vp = Rect::new(Point::new(0, 0), Size::new(24, 21));
         assert_eq!(t.rect_of(PaneId(0), vp), Some(vp));
     }
 
@@ -929,7 +932,7 @@ mod tests {
     #[test]
     fn pane_at_coord_finds_left_and_right() {
         let t = build_two_pane_vertical();
-        let vp = Rect::new(0, 0, 24, 21);
+        let vp = Rect::new(Point::new(0, 0), Size::new(24, 21));
         assert_eq!(t.pane_at_coord(vp, 5, 2), Some(PaneId(0)));
         assert_eq!(t.pane_at_coord(vp, 5, 18), Some(PaneId(1)));
     }
@@ -937,7 +940,7 @@ mod tests {
     #[test]
     fn next_in_direction_finds_right_neighbor() {
         let t = build_two_pane_vertical();
-        let vp = Rect::new(0, 0, 24, 21);
+        let vp = Rect::new(Point::new(0, 0), Size::new(24, 21));
         assert_eq!(
             t.next_in_direction(PaneId(0), vp, Direction::Right),
             Some(PaneId(1))
@@ -951,7 +954,7 @@ mod tests {
     #[test]
     fn next_in_direction_returns_none_off_edge() {
         let t = build_two_pane_vertical();
-        let vp = Rect::new(0, 0, 24, 21);
+        let vp = Rect::new(Point::new(0, 0), Size::new(24, 21));
         assert_eq!(t.next_in_direction(PaneId(0), vp, Direction::Up), None);
         assert_eq!(t.next_in_direction(PaneId(1), vp, Direction::Right), None);
     }
@@ -959,10 +962,10 @@ mod tests {
     #[test]
     fn resize_split_changes_ratio() {
         let mut t = build_two_pane_vertical();
-        let vp = Rect::new(0, 0, 24, 21);
-        let before = t.rect_of(PaneId(0), vp).unwrap().cols;
+        let vp = Rect::new(Point::new(0, 0), Size::new(24, 21));
+        let before = t.rect_of(PaneId(0), vp).unwrap().cols();
         t.resize_split(PaneId(0), SplitDir::Vertical, 3, vp);
-        let after = t.rect_of(PaneId(0), vp).unwrap().cols;
+        let after = t.rect_of(PaneId(0), vp).unwrap().cols();
         assert!(after > before, "pane 0 should have grown");
     }
 
@@ -986,7 +989,7 @@ mod tests {
             SplitPosition::After,
         )
         .unwrap();
-        let vp = Rect::new(0, 0, 24, 80);
+        let vp = Rect::new(Point::new(0, 0), Size::new(24, 80));
 
         let a_before = t.rect_of(PaneId(0), vp).unwrap();
         let b_before = t.rect_of(PaneId(1), vp).unwrap();
@@ -999,11 +1002,11 @@ mod tests {
         let c_after = t.rect_of(PaneId(2), vp).unwrap();
 
         // A is unrelated to the B|C boundary: its position and width are fixed.
-        assert_eq!(a_before.col, a_after.col, "A must not move");
-        assert_eq!(a_before.cols, a_after.cols, "A width must not change");
+        assert_eq!(a_before.col(), a_after.col(), "A must not move");
+        assert_eq!(a_before.cols(), a_after.cols(), "A width must not change");
         // Only the nearest (B|C) border moved: C grew, B shrank.
-        assert!(c_after.cols > c_before.cols, "C should have grown");
-        assert!(b_after.cols < b_before.cols, "B should have shrunk");
+        assert!(c_after.cols() > c_before.cols(), "C should have grown");
+        assert!(b_after.cols() < b_before.cols(), "B should have shrunk");
     }
 
     /// L | TR / BR: vertical split, then horizontal split on the right side.
@@ -1026,7 +1029,7 @@ mod tests {
             SplitPosition::After,
         )
         .unwrap();
-        let vp = Rect::new(0, 0, 24, 80);
+        let vp = Rect::new(Point::new(0, 0), Size::new(24, 80));
 
         // From L, Right should reach one of the two right-side panes.
         let neighbor = t.next_in_direction(PaneId(0), vp, Direction::Right);
@@ -1067,7 +1070,7 @@ mod tests {
             SplitPosition::After,
         )
         .unwrap();
-        let vp = Rect::new(0, 0, 10, 21);
+        let vp = Rect::new(Point::new(0, 0), Size::new(10, 21));
         // 21 cols → usable 20 → first.cols ≈ 10 → gutter at col 10.
         let hit = t.border_at(vp, 5, 10).expect("on gutter");
         assert_eq!(hit.adjacent_pane, PaneId(0));
@@ -1084,7 +1087,7 @@ mod tests {
             SplitPosition::After,
         )
         .unwrap();
-        let vp = Rect::new(0, 0, 10, 21);
+        let vp = Rect::new(Point::new(0, 0), Size::new(10, 21));
         assert!(t.border_at(vp, 5, 5).is_none());
         assert!(t.border_at(vp, 5, 15).is_none());
     }
@@ -1099,7 +1102,7 @@ mod tests {
             SplitPosition::After,
         )
         .unwrap();
-        let vp = Rect::new(0, 0, 11, 20);
+        let vp = Rect::new(Point::new(0, 0), Size::new(11, 20));
         // 11 rows → usable 10 → first.rows ≈ 5 → gutter at row 5.
         let hit = t.border_at(vp, 5, 10).expect("on horizontal gutter");
         assert_eq!(hit.side, BorderSide::Bottom);
@@ -1116,12 +1119,12 @@ mod tests {
             SplitPosition::After,
         )
         .unwrap();
-        let vp = Rect::new(0, 0, 10, 21);
+        let vp = Rect::new(Point::new(0, 0), Size::new(10, 21));
         let before = t.rect_of(PaneId(0), vp).unwrap();
         let applied = t.adjust_split(PaneId(0), BorderSide::Right, 3, vp);
         assert!(applied > 0, "delta of 3 should apply at least partially");
         let after = t.rect_of(PaneId(0), vp).unwrap();
-        assert!(after.cols > before.cols, "first pane should grow");
+        assert!(after.cols() > before.cols(), "first pane should grow");
     }
 
     #[test]
@@ -1134,7 +1137,7 @@ mod tests {
             SplitPosition::After,
         )
         .unwrap();
-        let vp = Rect::new(0, 0, 10, 21);
+        let vp = Rect::new(Point::new(0, 0), Size::new(10, 21));
         // Try to shrink the first pane below `MIN_PANE_CELLS` (4) with a huge
         // negative delta.
         let applied = t.adjust_split(PaneId(0), BorderSide::Right, -100, vp);
@@ -1160,13 +1163,13 @@ mod tests {
             SplitPosition::After,
         )
         .unwrap();
-        let vp = Rect::new(0, 0, 10, 101);
+        let vp = Rect::new(Point::new(0, 0), Size::new(10, 101));
         let before = t.rect_of(PaneId(0), vp).unwrap();
         let applied = t.adjust_split(PaneId(0), BorderSide::Right, 1000, vp);
         let after = t.rect_of(PaneId(0), vp).unwrap();
         assert_eq!(
             applied,
-            after.cols as i16 - before.cols as i16,
+            after.cols() as i16 - before.cols() as i16,
             "applied delta must equal the painted border movement",
         );
     }
@@ -1174,7 +1177,7 @@ mod tests {
     #[test]
     fn swap_panes_exchanges_two_leaf_rects() {
         let mut t = build_two_pane_vertical(); // PaneId(0) left, PaneId(1) right
-        let vp = Rect::new(0, 0, 24, 21);
+        let vp = Rect::new(Point::new(0, 0), Size::new(24, 21));
         let r0 = t.rect_of(PaneId(0), vp).unwrap();
         let r1 = t.rect_of(PaneId(1), vp).unwrap();
         assert!(t.swap_panes(PaneId(0), PaneId(1)));
@@ -1205,7 +1208,7 @@ mod tests {
             SplitPosition::After,
         )
         .unwrap();
-        let vp = Rect::new(0, 0, 24, 80);
+        let vp = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let r0 = t.rect_of(PaneId(0), vp).unwrap();
         let r1 = t.rect_of(PaneId(1), vp).unwrap();
         let r2 = t.rect_of(PaneId(2), vp).unwrap();
@@ -1230,7 +1233,7 @@ mod tests {
     #[test]
     fn replace_leaf_swaps_occupant_at_same_rect() {
         let mut t = build_two_pane_vertical(); // PaneId(0) left, PaneId(1) right
-        let vp = Rect::new(0, 0, 24, 21);
+        let vp = Rect::new(Point::new(0, 0), Size::new(24, 21));
         let r0 = t.rect_of(PaneId(0), vp).unwrap();
         let r1 = t.rect_of(PaneId(1), vp).unwrap();
         assert!(t.replace_leaf(PaneId(0), PaneId(5)));
@@ -1249,7 +1252,7 @@ mod tests {
     #[test]
     fn replace_leaf_absent_returns_false_and_leaves_tree_unchanged() {
         let mut t = build_two_pane_vertical();
-        let vp = Rect::new(0, 0, 24, 21);
+        let vp = Rect::new(Point::new(0, 0), Size::new(24, 21));
         let r0 = t.rect_of(PaneId(0), vp).unwrap();
         let r1 = t.rect_of(PaneId(1), vp).unwrap();
         assert!(!t.replace_leaf(PaneId(99), PaneId(5)));
@@ -1276,7 +1279,7 @@ mod tests {
             SplitPosition::After,
         )
         .unwrap();
-        let vp = Rect::new(0, 0, 24, 80);
+        let vp = Rect::new(Point::new(0, 0), Size::new(24, 80));
         let r0 = t.rect_of(PaneId(0), vp).unwrap();
         let r1 = t.rect_of(PaneId(1), vp).unwrap();
         let r2 = t.rect_of(PaneId(2), vp).unwrap();
@@ -1311,14 +1314,14 @@ mod tests {
         // Preorder: root split, then the nested split under `first`.
         let applied = t.set_ratios_preorder(&[0.3, 0.95]);
         assert_eq!(applied, 2);
-        let vp = Rect::new(0, 0, 40, 100);
+        let vp = Rect::new(Point::new(0, 0), Size::new(40, 100));
         let r0 = t.rect_of(PaneId(0), vp).unwrap();
         // Root ratio 0.3 over usable 99 cols → first child ~30 wide.
-        assert!((29..=31).contains(&r0.cols), "{r0:?}");
+        assert!((29..=31).contains(&r0.cols()), "{r0:?}");
         let r2 = t.rect_of(PaneId(2), vp).unwrap();
         // Nested 0.95 clamps to 0.9: pane 0 gets ~90% of the first column's
         // usable rows, pane 2 the rest (small but >= 1).
-        assert!(r2.rows >= 1 && r2.rows <= 8, "{r2:?}");
+        assert!(r2.rows() >= 1 && r2.rows() <= 8, "{r2:?}");
         // Extra ratios are ignored; missing ones leave defaults.
         assert_eq!(t.set_ratios_preorder(&[0.5]), 1);
     }
@@ -1326,7 +1329,7 @@ mod tests {
     #[test]
     fn adjust_split_returns_zero_for_nonexistent_border() {
         let mut t = LayoutTree::single(PaneId(0));
-        let vp = Rect::new(0, 0, 10, 21);
+        let vp = Rect::new(Point::new(0, 0), Size::new(10, 21));
         let applied = t.adjust_split(PaneId(99), BorderSide::Right, 3, vp);
         assert_eq!(applied, 0);
     }
@@ -1386,7 +1389,7 @@ mod tests {
         // `< → <=` at 357:65: extends the gutter's valid row range by one,
         // matching a row that is exactly `vp.rows` (out of viewport).
         let t = build_two_pane_vertical(); // [0] | [1], each full height
-        let vp = Rect::new(0, 0, 10, 21); // 10 rows
+        let vp = Rect::new(Point::new(0, 0), Size::new(10, 21)); // 10 rows
         // Last valid row (9) must be a gutter hit; row 10 must not.
         assert!(
             t.border_at(vp, 9, 10).is_some(),
@@ -1412,7 +1415,7 @@ mod tests {
             SplitPosition::After,
         )
         .unwrap();
-        let vp = Rect::new(0, 0, 11, 20); // gutter at row 5, cols 0-19
+        let vp = Rect::new(Point::new(0, 0), Size::new(11, 20)); // gutter at row 5, cols 0-19
         // Gutter row is a hit.
         assert!(t.border_at(vp, 5, 10).is_some(), "gutter row must be a hit");
         // Rows adjacent to the gutter are NOT hits (kills 366:42 and 366:58).
@@ -1439,7 +1442,7 @@ mod tests {
         // (`bottommost_leaf == pane`), incorrectly applying an adjustment.
         let t_orig = build_two_pane_vertical(); // [0] | [1], vertical
         let mut t = t_orig;
-        let vp = Rect::new(0, 0, 10, 21);
+        let vp = Rect::new(Point::new(0, 0), Size::new(10, 21));
         // BorderSide::Bottom makes no sense for a vertical split; must return 0.
         let applied = t.adjust_split(PaneId(0), BorderSide::Bottom, 5, vp);
         assert_eq!(

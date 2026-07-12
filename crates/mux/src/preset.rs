@@ -155,7 +155,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::{LayoutTree, PaneId, Rect};
+    use crate::{LayoutTree, PaneId, Point, Rect, Size};
 
     fn ids(n: u32) -> Vec<PaneId> {
         (0..n).map(PaneId).collect()
@@ -167,7 +167,7 @@ mod tests {
         let panes = ids(n);
         let mut tree = LayoutTree::single(panes[0]);
         tree.apply_preset(preset, &panes);
-        let vp = Rect::new(0, 0, 40, 120);
+        let vp = Rect::new(Point::new(0, 0), Size::new(40, 120));
         panes
             .iter()
             .map(|p| tree.rect_of(*p, vp).expect("pane present after preset"))
@@ -202,10 +202,13 @@ mod tests {
         for n in 2..=5u32 {
             let rs = rects(LayoutPreset::EvenHorizontal, n);
             // All panes span the full height, sit at row 0.
-            assert!(rs.iter().all(|r| r.row == 0 && r.rows == 40), "{n}: {rs:?}");
+            assert!(
+                rs.iter().all(|r| r.row() == 0 && r.rows() == 40),
+                "{n}: {rs:?}"
+            );
             // Widths even within 1 cell.
-            let min = rs.iter().map(|r| r.cols).min().unwrap();
-            let max = rs.iter().map(|r| r.cols).max().unwrap();
+            let min = rs.iter().map(|r| r.cols()).min().unwrap();
+            let max = rs.iter().map(|r| r.cols()).max().unwrap();
             assert!(max - min <= 1, "{n} panes: widths {rs:?}");
         }
     }
@@ -215,11 +218,11 @@ mod tests {
         for n in 2..=5u32 {
             let rs = rects(LayoutPreset::EvenVertical, n);
             assert!(
-                rs.iter().all(|r| r.col == 0 && r.cols == 120),
+                rs.iter().all(|r| r.col() == 0 && r.cols() == 120),
                 "{n}: {rs:?}"
             );
-            let min = rs.iter().map(|r| r.rows).min().unwrap();
-            let max = rs.iter().map(|r| r.rows).max().unwrap();
+            let min = rs.iter().map(|r| r.rows()).min().unwrap();
+            let max = rs.iter().map(|r| r.rows()).max().unwrap();
             assert!(max - min <= 1, "{n} panes: heights {rs:?}");
         }
     }
@@ -229,16 +232,19 @@ mod tests {
         for n in 2..=5u32 {
             let rs = rects(LayoutPreset::MainVertical, n);
             let main = rs[0];
-            assert_eq!((main.row, main.col), (0, 0));
-            assert_eq!(main.rows, 40, "main pane spans full height");
+            assert_eq!((main.row(), main.col()), (0, 0));
+            assert_eq!(main.rows(), 40, "main pane spans full height");
             // ~60% of 120 usable-minus-separator; allow rounding slack.
-            assert!(main.cols >= 65 && main.cols <= 75, "main width {main:?}");
+            assert!(
+                main.cols() >= 65 && main.cols() <= 75,
+                "main width {main:?}"
+            );
             // The rest stack evenly to the right of the main pane.
             for r in &rs[1..] {
-                assert!(r.col > main.cols, "stacked pane left of main: {r:?}");
+                assert!(r.col() > main.cols(), "stacked pane left of main: {r:?}");
             }
-            let min = rs[1..].iter().map(|r| r.rows).min().unwrap();
-            let max = rs[1..].iter().map(|r| r.rows).max().unwrap();
+            let min = rs[1..].iter().map(|r| r.rows()).min().unwrap();
+            let max = rs[1..].iter().map(|r| r.rows()).max().unwrap();
             assert!(max - min <= 1, "{n}: stack heights {rs:?}");
         }
     }
@@ -248,21 +254,21 @@ mod tests {
         for n in 2..=5u32 {
             let rs = rects(LayoutPreset::MainHorizontal, n);
             let main = rs[0];
-            assert_eq!((main.row, main.col), (0, 0));
-            assert_eq!(main.cols, 120, "main pane spans full width");
+            assert_eq!((main.row(), main.col()), (0, 0));
+            assert_eq!(main.cols(), 120, "main pane spans full width");
             assert!(
-                main.rows >= 21 && main.rows <= 26,
+                main.rows() >= 21 && main.rows() <= 26,
                 "{n}: main height {main:?}"
             );
             // The rest tile below the main pane, evenly.
             for r in &rs[1..] {
-                assert!(r.row > main.rows, "{n}: row pane above main: {r:?}");
+                assert!(r.row() > main.rows(), "{n}: row pane above main: {r:?}");
             }
-            let min = rs[1..].iter().map(|r| r.rows).min().unwrap();
-            let max = rs[1..].iter().map(|r| r.rows).max().unwrap();
+            let min = rs[1..].iter().map(|r| r.rows()).min().unwrap();
+            let max = rs[1..].iter().map(|r| r.rows()).max().unwrap();
             assert!(max - min <= 1, "{n}: row heights {rs:?}");
-            let wmin = rs[1..].iter().map(|r| r.cols).min().unwrap();
-            let wmax = rs[1..].iter().map(|r| r.cols).max().unwrap();
+            let wmin = rs[1..].iter().map(|r| r.cols()).min().unwrap();
+            let wmax = rs[1..].iter().map(|r| r.cols()).max().unwrap();
             assert!(wmax - wmin <= 1, "{n}: row widths {rs:?}");
         }
     }
@@ -271,7 +277,7 @@ mod tests {
     fn tiled_grid_dimensions_match_tmux() {
         // N=2 → 1x2; N=3 → 2 rows (2+1); N=4 → 2x2; N=5 → 2 rows (3+2).
         let distinct_rows = |rs: &[Rect]| {
-            let mut rows: Vec<u16> = rs.iter().map(|r| r.row).collect();
+            let mut rows: Vec<u16> = rs.iter().map(|r| r.row()).collect();
             rows.sort_unstable();
             rows.dedup();
             rows.len()
@@ -282,14 +288,14 @@ mod tests {
         assert_eq!(distinct_rows(&rects(LayoutPreset::Tiled, 5)), 2);
         // 3 panes: first row has 2 panes, second has 1.
         let rs = rects(LayoutPreset::Tiled, 3);
-        let top_row = rs.iter().filter(|r| r.row == 0).count();
+        let top_row = rs.iter().filter(|r| r.row() == 0).count();
         assert_eq!(top_row, 2, "{rs:?}");
     }
 
     #[test]
     fn single_pane_is_a_bare_leaf() {
         let rs = rects(LayoutPreset::Tiled, 1);
-        assert_eq!(rs[0], Rect::new(0, 0, 40, 120));
+        assert_eq!(rs[0], Rect::new(Point::new(0, 0), Size::new(40, 120)));
     }
 
     #[test]
@@ -301,7 +307,7 @@ mod tests {
         let row_heights = |rs: &[Rect]| -> Vec<u16> {
             let mut map = HashMap::new();
             for r in rs {
-                map.insert(r.row, r.rows);
+                map.insert(r.row(), r.rows());
             }
             let mut v: Vec<u16> = map.values().copied().collect();
             v.sort_unstable();

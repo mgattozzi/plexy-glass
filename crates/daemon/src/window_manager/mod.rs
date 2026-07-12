@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use mouse::{ClickHistory, PaneDrag, ResizeDrag, TabDrag};
 use plexy_glass_config::GlyphTier;
-use plexy_glass_mux::{Overlay, PaneId, Rect, Selection, SplitDir, WindowId};
+use plexy_glass_mux::{Overlay, PaneId, Point, Rect, Selection, Size, SplitDir, WindowId};
 use plexy_glass_protocol::{PtySize, SpawnSpec};
 // See window.rs: tokio::time::Instant is used so unit tests with
 // start_paused = true / time::advance control silence checks without real sleeps.
@@ -1131,7 +1131,7 @@ fn host_viewport(host: PtySize) -> Rect {
     // band down by one more row when the status bar is on top.
     let rows = host.rows.saturating_sub(3).max(1); // 1 status + 2 frame rows
     let cols = host.cols.saturating_sub(2).max(1); // 2 frame cols
-    Rect::new(1, 1, rows, cols)
+    Rect::new(Point::new(1, 1), Size::new(rows, cols))
 }
 
 mod commands;

@@ -15,7 +15,7 @@ use smol_str::SmolStr;
 
 use crate::blocks::BlockLineStatus;
 use crate::compositor::PaneDragRole;
-use crate::rect::Rect;
+use crate::rect::{Point, Rect};
 use crate::virtual_screen::VirtualScreen;
 
 /// Border color of the pane being dragged (source) during a pane-swap drag.
@@ -134,17 +134,17 @@ pub fn draw(
         .find(|f| matches!(f.drag_role, PaneDragRole::Target))
         .map(|f| f.rect);
 
-    for r in band.row..=band.bottom_edge_row() {
-        for c in band.col..=band.right_edge_col() {
+    for r in band.row()..=band.bottom_edge_row() {
+        for c in band.col()..=band.right_edge_col() {
             if !is_border(r, c, band, &rects) {
                 continue;
             }
-            let n = r > band.row && is_border(r - 1, c, band, &rects);
+            let n = r > band.row() && is_border(r - 1, c, band, &rects);
             // Equivalent note (`s`: `< → <=`): `is_border(r+1, ...)` calls
             // `band.contains(r+1, c)` which is false when r = bottom_edge_row,
             // so `r < B` and `r <= B` both produce `s = false` at the boundary.
             let s = r < band.bottom_edge_row() && is_border(r + 1, c, band, &rects);
-            let w = c > band.col && is_border(r, c - 1, band, &rects);
+            let w = c > band.col() && is_border(r, c - 1, band, &rects);
             // Equivalent note (`e`: `< → <=`): same argument for columns, when
             // c = right_edge_col, `is_border(r, c+1, ...)` returns false because
             // c+1 is outside the band, so `<` and `<=` give the same `e` value.
@@ -217,12 +217,12 @@ pub fn draw(
         let Some(title) = f.title.filter(|t| !t.is_empty()) else {
             continue;
         };
-        if f.rect.row == 0 {
+        if f.rect.row() == 0 {
             continue; // no border row above (shouldn't happen with an inset band)
         }
-        let title_row = f.rect.row - 1;
+        let title_row = f.rect.row() - 1;
         // Start two cells in; clip to the pane width.
-        let start = f.rect.col.saturating_add(1);
+        let start = f.rect.col().saturating_add(1);
         let max_col = f.rect.right_edge_col();
         let active_color = (active_rect == Some(f.rect)).then_some(rings.active);
         paint_title(screen, title_row, start, max_col, title, active_color);
@@ -243,16 +243,16 @@ fn left_segment_status(r: u16, c: u16, frames: &[PaneFrame<'_>]) -> Option<Block
         }
         // Left segment column is rect.col - 1; skip this frame if the pane is
         // flush against the left edge (col=0 means no border column to the left).
-        let Some(left_col) = f.rect.col.checked_sub(1) else {
+        let Some(left_col) = f.rect.col().checked_sub(1) else {
             continue;
         };
         if c != left_col {
             continue;
         }
-        if r < f.rect.row || r >= f.rect.row.saturating_add(f.rect.rows) {
+        if r < f.rect.row() || r >= f.rect.row().saturating_add(f.rect.rows()) {
             continue;
         }
-        let row_idx = (r - f.rect.row) as usize;
+        let row_idx = (r - f.rect.row()) as usize;
         return f.block_rows.get(row_idx).and_then(|s| *s);
     }
     None
@@ -267,14 +267,14 @@ fn selected_bracket(r: u16, c: u16, frames: &[PaneFrame<'_>]) -> Option<(Color, 
         let Some(sel) = &f.selected_block else {
             continue;
         };
-        let Some(left_col) = f.rect.col.checked_sub(1) else {
+        let Some(left_col) = f.rect.col().checked_sub(1) else {
             continue;
         };
         if c != left_col {
             continue;
         }
-        let top_abs = f.rect.row.saturating_add(sel.rows.0);
-        let bot_abs = f.rect.row.saturating_add(sel.rows.1);
+        let top_abs = f.rect.row().saturating_add(sel.rows.0);
+        let bot_abs = f.rect.row().saturating_add(sel.rows.1);
         if r < top_abs || r > bot_abs {
             continue;
         }
@@ -292,19 +292,19 @@ fn selected_bracket(r: u16, c: u16, frames: &[PaneFrame<'_>]) -> Option<(Color, 
 
 /// A cell is a border cell when it is inside the band but not inside any pane.
 fn is_border(r: u16, c: u16, band: Rect, rects: &[Rect]) -> bool {
-    if !band.contains(r, c) {
+    if !band.contains(Point::new(r, c)) {
         return false;
     }
-    !rects.iter().any(|rect| rect.contains(r, c))
+    !rects.iter().any(|rect| rect.contains(Point::new(r, c)))
 }
 
 /// Whether `(r, c)` lies on `rect`'s one-cell border ring, the cells of the
 /// frame box immediately surrounding the pane, corners included. A border cell
 /// in this ring belongs to the pane's frame and gets the active highlight.
 const fn touches(r: u16, c: u16, rect: Rect) -> bool {
-    let top = rect.row.saturating_sub(1);
+    let top = rect.row().saturating_sub(1);
     let bottom = rect.bottom_edge_row().saturating_add(1);
-    let left = rect.col.saturating_sub(1);
+    let left = rect.col().saturating_sub(1);
     let right = rect.right_edge_col().saturating_add(1);
     r >= top && r <= bottom && c >= left && c <= right
 }
@@ -367,6 +367,7 @@ fn paint_title(
 mod tests {
     use super::*;
     use crate::blocks::BlockLineStatus;
+    use crate::rect::Size;
 
     fn frame(rect: Rect, active: bool, title: Option<&str>) -> PaneFrame<'_> {
         PaneFrame {
@@ -429,8 +430,8 @@ mod tests {
     #[test]
     fn selected_block_draws_capped_bracket() {
         // Band 6x7; pane inset at (1,1) sized 4x5. Left segment = col 0, rows 1..=4.
-        let band = Rect::new(0, 0, 6, 7);
-        let pane = Rect::new(1, 1, 4, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(6, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(4, 5));
         let sel = SelectedBlock {
             rows: (0, 3),
             cap_top: true,
@@ -470,8 +471,8 @@ mod tests {
     /// Off-screen top: no ┏ cap, ┃ continues to the visible top row.
     #[test]
     fn selected_block_no_top_cap_when_scrolled() {
-        let band = Rect::new(0, 0, 6, 7);
-        let pane = Rect::new(1, 1, 4, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(6, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(4, 5));
         let sel = SelectedBlock {
             rows: (0, 3),
             cap_top: false,
@@ -501,8 +502,8 @@ mod tests {
     /// The bracket beats block-status coloring on its rows.
     #[test]
     fn selected_block_beats_block_status() {
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5));
         let colors = test_colors();
         let sel = SelectedBlock {
             rows: (0, 2),
@@ -545,8 +546,8 @@ mod tests {
     #[test]
     fn single_pane_gets_a_full_frame() {
         // Band 5x7; one pane inset to (1,1) sized 3x5.
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5));
         let mut screen = VirtualScreen::blank(5, 7);
         draw(
             &[frame(pane, false, None)],
@@ -566,9 +567,9 @@ mod tests {
     #[test]
     fn side_by_side_panes_share_a_tee_jointed_separator() {
         // Band 5x9; two panes inset, separated by a vertical line at col 4.
-        let band = Rect::new(0, 0, 5, 9);
-        let left = Rect::new(1, 1, 3, 3); // cols 1..=3
-        let right = Rect::new(1, 5, 3, 3); // cols 5..=7, gap at col 4
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 9));
+        let left = Rect::new(Point::new(1, 1), Size::new(3, 3)); // cols 1..=3
+        let right = Rect::new(Point::new(1, 5), Size::new(3, 3)); // cols 5..=7, gap at col 4
         let mut screen = VirtualScreen::blank(5, 9);
         draw(
             &[frame(left, false, None), frame(right, false, None)],
@@ -587,8 +588,8 @@ mod tests {
 
     #[test]
     fn title_paints_on_top_edge() {
-        let band = Rect::new(0, 0, 5, 12);
-        let pane = Rect::new(1, 1, 3, 10);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 12));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 10));
         let mut screen = VirtualScreen::blank(5, 12);
         draw(
             &[frame(pane, false, Some("ed"))],
@@ -604,8 +605,8 @@ mod tests {
 
     #[test]
     fn title_paints_wide_grapheme_with_spacer() {
-        let band = Rect::new(0, 0, 5, 12);
-        let pane = Rect::new(1, 1, 3, 10);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 12));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 10));
         let mut screen = VirtualScreen::blank(5, 12);
         draw(
             &[frame(pane, false, Some("好"))],
@@ -621,8 +622,8 @@ mod tests {
 
     #[test]
     fn long_title_does_not_overrun_the_right_corner() {
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5));
         let mut screen = VirtualScreen::blank(5, 7);
         draw(
             &[frame(pane, false, Some("a very long title"))],
@@ -638,8 +639,8 @@ mod tests {
     #[test]
     fn active_pane_frame_highlights_corners() {
         use plexy_glass_emulator::Attrs;
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5));
         let mut screen = VirtualScreen::blank(5, 7);
         draw(
             &[frame(pane, true, None)],
@@ -661,8 +662,8 @@ mod tests {
     fn marked_unnamed_pane_gets_a_magenta_ring_with_intact_glyphs() {
         use plexy_glass_emulator::{Attrs, Color};
         // No title, so the marked indicator must be the border color, not a glyph.
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5));
         let mut screen = VirtualScreen::blank(5, 7);
         draw(
             &[marked_frame(pane, false, None)],
@@ -689,8 +690,8 @@ mod tests {
     #[test]
     fn ring_colors_come_from_the_supplied_palette_not_hardcoded_ansi() {
         use plexy_glass_emulator::Color;
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5));
         let mut screen = VirtualScreen::blank(5, 7);
         // A bespoke (non-ANSI) ring palette, what the coordinator passes after
         // resolving `highlight`/`warn`/etc. from config.
@@ -708,8 +709,8 @@ mod tests {
 
     #[test]
     fn untitled_pane_keeps_a_plain_top_border() {
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5));
         let mut screen = VirtualScreen::blank(5, 7);
         draw(
             &[frame(pane, false, None)],
@@ -727,8 +728,8 @@ mod tests {
         // with pane at (1,1) 3x5) should be ─ (horizontal).  With `replace - with /`
         // in the north-neighbour check (line 136), `is_border(r, c)` is used instead
         // of `is_border(r-1, c)`, making n=true for those cells and turning ─ into ┴.
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5));
         let mut screen = VirtualScreen::blank(5, 7);
         draw(
             &[frame(pane, false, None)],
@@ -762,8 +763,8 @@ mod tests {
         // `active_color = (active_rect == Some(f.rect)).then_some(...)`.  The
         // `== → !=` mutation would apply the active color to the NON-active pane.
         use plexy_glass_emulator::Color;
-        let band = Rect::new(0, 0, 5, 12);
-        let pane = Rect::new(1, 1, 3, 10);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 12));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 10));
         let rings = RingColors {
             active: Color::Rgb(255, 0, 0), // red
             marked: Color::Rgb(0, 255, 0),
@@ -810,8 +811,8 @@ mod tests {
         // The `|| → &&` mutation at line 263 makes `r < top || r > bot` → `&&`
         // which is always false, coloring ALL left-border cells as bracket.
         // Verify cells above and below the block range keep their normal styling.
-        let band = Rect::new(0, 0, 8, 7);
-        let pane = Rect::new(1, 1, 6, 5); // rows 1-6, left border at col 0
+        let band = Rect::new(Point::new(0, 0), Size::new(8, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(6, 5)); // rows 1-6, left border at col 0
         // Block covers ONLY rows 1-3 (top at 0+1=1, bot at 2+1=3,
         // cap_top = true, cap_bottom = false).
         let sel = SelectedBlock {
@@ -854,9 +855,9 @@ mod tests {
         // be painted; the guard on line 334 must use the right threshold.
         // With `+ → -` or `+ → *` in `c + 1 > max_col`, the check is wrong and
         // the wide grapheme would overrun the border.
-        let band = Rect::new(0, 0, 5, 7);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
         // Pane at (1,1) 3x3: right border at col 4, pane right edge col is col 3.
-        let pane = Rect::new(1, 1, 3, 3); // cols 1-3, right_edge_col=4
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 3)); // cols 1-3, right_edge_col=4
         let mut screen = VirtualScreen::blank(5, 7);
         // "好" (wide, width=2) followed by "x" (narrow): the wide glyph needs cols
         // 2 and 3. start = pane.col + 1 = 2. max_col = pane.right_edge_col() = 4.
@@ -885,8 +886,8 @@ mod tests {
     fn block_ok_segment_fg_and_glyph() {
         // Band 5x7; pane inset at (1,1) sized 3x5.
         // Left segment is col 0, rows 1..=3.
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5));
         let block_rows = vec![Some(BlockLineStatus::Ok); 3];
         let colors = test_colors();
         let mut screen = VirtualScreen::blank(5, 7);
@@ -911,8 +912,8 @@ mod tests {
     /// Failed status row: left-segment `│` becomes `▐` with fail fg.
     #[test]
     fn block_failed_segment_replaces_pipe_with_half_block() {
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5));
         let block_rows = vec![Some(BlockLineStatus::Failed); 3];
         let colors = test_colors();
         let mut screen = VirtualScreen::blank(5, 7);
@@ -940,9 +941,9 @@ mod tests {
     /// not fire on ┤.
     #[test]
     fn block_failed_tee_at_left_segment_col_keeps_glyph() {
-        let band = Rect::new(0, 0, 5, 10);
-        let left_pane = Rect::new(1, 1, 3, 2); // cols 1..=2
-        let right_pane = Rect::new(1, 5, 3, 4); // cols 5..=8; left segment = col 4
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 10));
+        let left_pane = Rect::new(Point::new(1, 1), Size::new(3, 2)); // cols 1..=2
+        let right_pane = Rect::new(Point::new(1, 5), Size::new(3, 4)); // cols 5..=8; left segment = col 4
         let colors = test_colors();
         let f_left = frame_with_blocks(left_pane, false, false, vec![]);
         let f_right = frame_with_blocks(
@@ -980,8 +981,8 @@ mod tests {
     /// byte-identical to a frame drawn with `None`.
     #[test]
     fn none_rows_identical_to_blocks_disabled() {
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5));
         let colors = test_colors();
         // Frame with Some(colors) but all-None block_rows.
         let block_rows = vec![None; 3];
@@ -1011,8 +1012,8 @@ mod tests {
     /// Marked pane: ring color + glyph win over Failed (no ▐ on a marked ring).
     #[test]
     fn marked_pane_beats_failed_block_status() {
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5));
         let colors = test_colors();
         let block_rows = vec![Some(BlockLineStatus::Failed); 3];
         let f = frame_with_blocks(pane, false, true, block_rows);
@@ -1046,8 +1047,8 @@ mod tests {
     #[test]
     fn failed_beats_active_ring_on_status_rows() {
         // Pane is active. Row 0 of block_rows = Failed, rows 1..2 = None.
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5));
         let colors = test_colors();
         let block_rows = vec![Some(BlockLineStatus::Failed), None, None];
         let f = frame_with_blocks(pane, true, false, block_rows);
@@ -1085,9 +1086,9 @@ mod tests {
     fn shared_separator_right_status_beats_left_active_ring() {
         // Band 5x9; left (1,1,3,3) active, right (1,5,3,3) inactive with Failed.
         // Separator column = col 4 (right pane's left segment, rows 1..=3).
-        let band = Rect::new(0, 0, 5, 9);
-        let left_rect = Rect::new(1, 1, 3, 3);
-        let right_rect = Rect::new(1, 5, 3, 3);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 9));
+        let left_rect = Rect::new(Point::new(1, 1), Size::new(3, 3));
+        let right_rect = Rect::new(Point::new(1, 5), Size::new(3, 3));
         let colors = test_colors();
         let f_left = frame_with_blocks(left_rect, true, false, vec![]);
         let f_right = frame_with_blocks(
@@ -1143,9 +1144,9 @@ mod tests {
     fn marked_left_pane_beats_failed_right_on_shared_separator() {
         // Band 5x9; left (1,1,3,3) marked, right (1,5,3,3) inactive with Failed.
         // Separator column = col 4 (right pane's left segment AND left pane's ring).
-        let band = Rect::new(0, 0, 5, 9);
-        let left_rect = Rect::new(1, 1, 3, 3);
-        let right_rect = Rect::new(1, 5, 3, 3);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 9));
+        let left_rect = Rect::new(Point::new(1, 1), Size::new(3, 3));
+        let right_rect = Rect::new(Point::new(1, 5), Size::new(3, 3));
         let colors = test_colors();
         let f_left = frame_with_blocks(left_rect, false, true, vec![]);
         let f_right = frame_with_blocks(
@@ -1185,8 +1186,8 @@ mod tests {
         // Single pane. All-Failed block rows.
         // The right border (col = rect.right_edge_col() + 1 = col 6) should NOT
         // be colored; only col 0 (the left segment) should be.
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5));
         let colors = test_colors();
         let block_rows = vec![Some(BlockLineStatus::Failed); 3];
         let f = frame_with_blocks(pane, false, false, block_rows);
@@ -1222,9 +1223,9 @@ mod tests {
     fn drag_source_and_target_get_distinct_ring_colors() {
         // Two side-by-side panes inset in a band; one is the drag source, the other the target.
         // Band 5x12; src pane (1,1,3,4); tgt pane (1,7,3,4).
-        let band = Rect::new(0, 0, 5, 12);
-        let src_rect = Rect::new(1, 1, 3, 4);
-        let tgt_rect = Rect::new(1, 7, 3, 4);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 12));
+        let src_rect = Rect::new(Point::new(1, 1), Size::new(3, 4));
+        let tgt_rect = Rect::new(Point::new(1, 7), Size::new(3, 4));
         let frames = vec![
             PaneFrame {
                 rect: src_rect,
@@ -1265,8 +1266,8 @@ mod tests {
         // Kills: 136:49 `- → /`: `is_border(r/1, c)` equals `is_border(r, c)` which
         // is always true, making n=true for cells whose northern neighbor is pane
         // content. This turns the bottom-border `─` into `┴` (T-junction).
-        let band = Rect::new(0, 0, 5, 7);
-        let pane = Rect::new(1, 1, 3, 5); // content rows 1-3; bottom border at row 4
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 5)); // content rows 1-3; bottom border at row 4
         let mut screen = VirtualScreen::blank(5, 7);
         draw(
             &[frame(pane, false, None)],
@@ -1290,10 +1291,10 @@ mod tests {
         // character that lands exactly on max_col.
         // Also kills: 340:14 `== → !=`: with !=, the wide guard fires for narrow
         // chars (w=1) and breaks before 'a' reaches the screen.
-        let band = Rect::new(0, 0, 5, 7);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 7));
         // pane col=1, cols=3 → max_col=3, start=2.  title "ab" → text=" ab ".
         // 'a' lands at col 3 = max_col (must be painted).
-        let pane = Rect::new(1, 1, 3, 3);
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 3));
         let mut screen = VirtualScreen::blank(5, 7);
         draw(
             &[frame(pane, false, Some("ab"))],
@@ -1313,10 +1314,10 @@ mod tests {
     fn paint_title_wide_char_fits_when_ends_at_max_col() {
         // Kills: 340:29 `> → >=`: `c + 1 >= max_col` rejects a wide char whose
         // right half lands exactly at max_col, even though it fits.
-        let band = Rect::new(0, 0, 5, 10);
+        let band = Rect::new(Point::new(0, 0), Size::new(5, 10));
         // pane col=1, cols=4 → max_col=4, start=2.  "好" lands at c=3, ends at col 4.
         // c+1=4: original `4 > 4 = false` → painted. Mutation `4 >= 4 = true` → rejected.
-        let pane = Rect::new(1, 1, 3, 4);
+        let pane = Rect::new(Point::new(1, 1), Size::new(3, 4));
         let mut screen = VirtualScreen::blank(5, 10);
         draw(
             &[frame(pane, false, Some("好"))],
@@ -1339,8 +1340,8 @@ mod tests {
         // Simulate a tight layout: band 4 rows, pane uses 3 content rows (1..=3),
         // block_rows length = 3. Band bottom = row 3. The pane's left segment
         // spans rows 1..=3 which is within the band, so no overflow.
-        let band = Rect::new(0, 0, 4, 7);
-        let pane = Rect::new(1, 1, 2, 5); // content rows 1..=2 only
+        let band = Rect::new(Point::new(0, 0), Size::new(4, 7));
+        let pane = Rect::new(Point::new(1, 1), Size::new(2, 5)); // content rows 1..=2 only
         let colors = test_colors();
         let block_rows = vec![Some(BlockLineStatus::Failed); 2];
         let f = frame_with_blocks(pane, false, false, block_rows);

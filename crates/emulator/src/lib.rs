@@ -9,6 +9,7 @@
 pub mod attrs;
 pub mod cell;
 pub mod color;
+pub mod coords;
 pub mod cursor;
 pub mod graphics;
 pub mod grid;

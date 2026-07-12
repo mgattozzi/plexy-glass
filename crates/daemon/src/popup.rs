@@ -23,8 +23,8 @@ pub struct Popup {
 /// Shared by spawn and host-resize so the two can't drift.
 pub(crate) fn popup_pty_size(rect: plexy_glass_mux::Rect) -> PtySize {
     PtySize {
-        rows: rect.rows.saturating_sub(2).max(1),
-        cols: rect.cols.saturating_sub(2).max(1),
+        rows: rect.rows().saturating_sub(2).max(1),
+        cols: rect.cols().saturating_sub(2).max(1),
         pixel_width: 0,
         pixel_height: 0,
     }

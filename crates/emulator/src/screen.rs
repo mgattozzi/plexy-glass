@@ -12,12 +12,13 @@ use unicode_width::UnicodeWidthStr;
 use crate::attrs::{Attrs, UnderlineStyle};
 use crate::cell::Cell;
 use crate::color::Color;
+use crate::coords::{Col, Row};
 use crate::cursor::{Cursor, CursorShape};
 use crate::graphics::{
     self, AnimControl, Frame, Image, ImageFormat, ImageId, ImageProtocol, ImageStore, Placement,
     PlacementId, VirtualPlacement,
 };
-use crate::grid::{Grid, Row, RowMark, WrapOrigin};
+use crate::grid::{Grid, Row as GridRow, RowMark, WrapOrigin};
 use crate::hyperlinks::HyperlinkTable;
 use crate::keyboard::{KeyboardState, ScreenBuffer};
 use crate::modes::Modes;
@@ -686,7 +687,7 @@ impl Screen {
             r.unwrap_or_else(|| pixel_h.div_ceil(u32::from(cell_h).max(1)).clamp(1, 1000) as u16);
         let cols =
             c.unwrap_or_else(|| pixel_w.div_ceil(u32::from(cell_w).max(1)).clamp(1, 1000) as u16);
-        let anchor_line = self.scrollback.len() as u32 + u32::from(self.cursor.row);
+        let anchor_line = self.scrollback.len() as u32 + u32::from(self.cursor.row.get());
         self.placement_id_seq = self.placement_id_seq.wrapping_add(1);
         let placement_id = PlacementId(self.placement_id_seq);
         let seq = self.graphics_seq;
@@ -700,7 +701,7 @@ impl Screen {
             placement_id,
             protocol,
             anchor_line,
-            col: self.cursor.col,
+            col: self.cursor.col.get(),
             rows,
             cols,
             z,
@@ -709,13 +710,13 @@ impl Screen {
         for _ in 0..rows {
             self.advance_to_next_row(false);
         }
-        self.cursor.col = 0;
+        self.cursor.col = Col::ZERO;
     }
 
     /// Push a row into scrollback, keeping placement anchors valid: each evicted
     /// front row shifts every absolute `anchor_line` down by one, and placements
     /// whose anchor falls off the front (their rows left history) are dropped.
-    fn push_scrollback(&mut self, row: Row) {
+    fn push_scrollback(&mut self, row: GridRow) {
         let evicted = self.scrollback.push(row) as u32;
         if evicted == 0 || self.placements.is_empty() {
             return;
@@ -737,8 +738,8 @@ impl Screen {
         for r in 0..rows {
             for c in 0..cols {
                 self.active.put_cell(
-                    r,
-                    c,
+                    Row::new(r),
+                    Col::new(c),
                     Cell {
                         grapheme: "E".into(),
                         ..Cell::default()
@@ -746,7 +747,8 @@ impl Screen {
                 );
             }
         }
-        self.cursor.move_to(0, 0, rows, cols);
+        self.cursor
+            .move_to(Row::ZERO, Col::ZERO, Row::new(rows), Col::new(cols));
         self.last_graphic = None;
     }
 
@@ -853,31 +855,31 @@ impl Screen {
 
         if self.cursor.pending_wrap && self.modes.contains(Modes::AUTOWRAP) {
             self.advance_to_next_row(true);
-            self.cursor.col = 0;
+            self.cursor.col = Col::ZERO;
             self.cursor.pending_wrap = false;
         }
 
         // If a wide char doesn't fit, pad the last column and wrap.
-        if w == 2 && self.cursor.col + 1 >= self.cols() {
+        if w == 2 && self.cursor.col.get() + 1 >= self.cols() {
             if self.modes.contains(Modes::AUTOWRAP) {
-                if self.cursor.col < self.cols() {
+                if self.cursor.col.get() < self.cols() {
                     // The pad blank can land on a wide grapheme's spacer at the last
                     // column, so clean up the orphaned grapheme to its left.
                     self.clear_wide_straddle(self.cursor.col, self.cursor.col);
                     self.put_cell_at_cursor(Cell::default());
                 }
                 self.advance_to_next_row(true);
-                self.cursor.col = 0;
+                self.cursor.col = Col::ZERO;
                 self.cursor.pending_wrap = false;
             } else {
                 // No autowrap: clamp the cursor and overwrite the last cell.
-                self.cursor.col = self.cols().saturating_sub(2);
+                self.cursor.col = Col::new(self.cols().saturating_sub(2));
             }
         }
 
         // Overwriting one half of an existing wide grapheme destroys the whole
         // char (xterm/VTE): blank the orphaned half so the row stays well-formed.
-        self.clear_wide_straddle(self.cursor.col, self.cursor.col + u16::from(w == 2));
+        self.clear_wide_straddle(self.cursor.col, self.cursor.col.advance(u16::from(w == 2)));
 
         let cell = Cell {
             grapheme: cluster.into(),
@@ -891,14 +893,14 @@ impl Screen {
         self.put_cell_at_cursor(cell);
 
         if w == 2 {
-            self.cursor.col += 1;
+            self.cursor.col = self.cursor.col.advance(1);
             self.put_cell_at_cursor(Cell::wide_spacer());
         }
 
-        if self.cursor.col + 1 >= self.cols() {
+        if self.cursor.col.get() + 1 >= self.cols() {
             self.cursor.pending_wrap = true;
         } else {
-            self.cursor.col += 1;
+            self.cursor.col = self.cursor.col.advance(1);
         }
     }
 
@@ -912,16 +914,16 @@ impl Screen {
     /// grapheme is always followed by its spacer; a spacer always follows one).
     /// Mirrors the erase path's `normalize_wide_pairs`, but O(1) for the hot
     /// print path: only the two straddled boundary cells can ever be orphaned.
-    fn clear_wide_straddle(&mut self, start: u16, end: u16) {
+    fn clear_wide_straddle(&mut self, start: Col, end: Col) {
         let row = self.cursor.row;
         // Left edge lands on a spacer, so its grapheme to the left is orphaned.
-        if start > 0
+        if start > Col::ZERO
             && self
                 .active
                 .get_cell(row, start)
                 .is_some_and(super::cell::Cell::is_wide_spacer)
         {
-            self.active.put_cell(row, start - 1, Cell::default());
+            self.active.put_cell(row, start.retreat(1), Cell::default());
         }
         // Right edge lands on a wide grapheme → its spacer to the right is orphaned.
         if self
@@ -929,7 +931,7 @@ impl Screen {
             .get_cell(row, end)
             .is_some_and(|c| display_width(c.grapheme.as_str()) == 2)
         {
-            self.active.put_cell(row, end + 1, Cell::default());
+            self.active.put_cell(row, end.advance(1), Cell::default());
         }
     }
 
@@ -941,7 +943,7 @@ impl Screen {
         let base = if self.cursor.pending_wrap {
             Some(self.cursor.col)
         } else {
-            self.cursor.col.checked_sub(1)
+            self.cursor.col.get().checked_sub(1).map(Col::new)
         };
         if let Some(mut base) = base {
             // A wide grapheme leaves the cursor two columns past its base, so the
@@ -950,7 +952,7 @@ impl Screen {
                 .active
                 .get_cell(self.cursor.row, base)
                 .is_some_and(super::cell::Cell::is_wide_spacer)
-                && let Some(b) = base.checked_sub(1)
+                && let Some(b) = base.get().checked_sub(1).map(Col::new)
             {
                 base = b;
             }
@@ -961,15 +963,16 @@ impl Screen {
                 updated.grapheme = s.into();
                 self.active.put_cell(self.cursor.row, base, updated);
             }
-        } else if self.cursor.row > 0 {
+        } else if self.cursor.row > Row::ZERO {
             // Append to the last cell of the previous row.
-            let prev_col = self.cols().saturating_sub(1);
-            if let Some(prev) = self.active.get_cell(self.cursor.row - 1, prev_col) {
+            let prev_col = Col::new(self.cols().saturating_sub(1));
+            if let Some(prev) = self.active.get_cell(self.cursor.row.retreat(1), prev_col) {
                 let mut updated = prev.clone();
                 let mut s = String::from(updated.grapheme.as_str());
                 s.push_str(cluster);
                 updated.grapheme = s.into();
-                self.active.put_cell(self.cursor.row - 1, prev_col, updated);
+                self.active
+                    .put_cell(self.cursor.row.retreat(1), prev_col, updated);
             }
         }
         // If there's no previous cell, drop the zero-width char.
@@ -982,18 +985,18 @@ impl Screen {
     /// row, honoring DEC origin mode (DECOM, `?6`): when set the argument is
     /// relative to the scroll-region top and confined to `[top, bottom]`;
     /// otherwise it is an absolute grid row clamped to the grid.
-    fn absolute_row(&self, row_arg: u16) -> u16 {
+    fn absolute_row(&self, row_arg: u16) -> Row {
         if self.modes.contains(Modes::ORIGIN) {
             let (top, bottom) = self.scroll_region;
-            top.saturating_add(row_arg).min(bottom)
+            Row::new(top.saturating_add(row_arg).min(bottom))
         } else {
-            row_arg.min(self.rows().saturating_sub(1))
+            Row::new(row_arg.min(self.rows().saturating_sub(1)))
         }
     }
 
     pub fn advance_to_next_row(&mut self, soft_wrap: bool) {
         let (top, bottom) = self.scroll_region;
-        match self.cursor.row.cmp(&bottom) {
+        match self.cursor.row.get().cmp(&bottom) {
             Ordering::Equal => {
                 // At the bottom margin: scroll the region up by one. Only the
                 // physical top line of the screen (region top at row 0) feeds
@@ -1001,27 +1004,32 @@ impl Screen {
                 // interior region, and rows leaving the top of THAT region are
                 // discarded (matching xterm/tmux/wezterm/VTE), not pushed into
                 // scrollback, which would corrupt history/block marks.
-                let mut popped: Vec<Row> = Vec::new();
+                let mut popped: Vec<GridRow> = Vec::new();
                 let target = if self.alt.is_none() && top == 0 {
                     Some(&mut popped)
                 } else {
                     None
                 };
-                self.active.scroll_up(top, bottom, 1, target);
+                self.active
+                    .scroll_up(Row::new(top), Row::new(bottom), 1, target);
                 for r in popped {
                     self.push_scrollback(r);
                 }
                 // Stay at the bottom; new content goes there.
-                self.cursor.row = bottom;
+                self.cursor.row = Row::new(bottom);
             }
             Ordering::Greater => {
                 // Below the scroll region: a line feed moves the cursor down toward
                 // the grid bottom WITHOUT scrolling the region (per xterm, the cursor
                 // is outside the region, so the region's content is untouched).
-                self.cursor.row = (self.cursor.row + 1).min(self.rows().saturating_sub(1));
+                self.cursor.row = self
+                    .cursor
+                    .row
+                    .advance(1)
+                    .min(Row::new(self.rows().saturating_sub(1)));
             }
             Ordering::Less => {
-                self.cursor.row += 1;
+                self.cursor.row = self.cursor.row.advance(1);
             }
         }
         if soft_wrap {
@@ -1029,8 +1037,8 @@ impl Screen {
             // approximate: reflow only needs to know "this row continues the
             // previous row", so we use the destination row's index.
             let dest = self.cursor.row;
-            if let Some(row) = self.active.rows.get_mut(dest as usize) {
-                row.wrap_origin = WrapOrigin::SoftFrom(u32::from(dest));
+            if let Some(row) = self.active.rows.get_mut(dest.get() as usize) {
+                row.wrap_origin = WrapOrigin::SoftFrom(u32::from(dest.get()));
             }
         }
     }
@@ -1043,16 +1051,16 @@ impl Screen {
             0x07 => self.bell_pending = true, // BEL → flag for per-window monitoring
             0x08 => {
                 // Backspace
-                self.cursor.col = self.cursor.col.saturating_sub(1);
+                self.cursor.col = self.cursor.col.retreat(1);
                 self.cursor.pending_wrap = false;
             }
             0x09 => {
                 // HT: horizontal tab to the next stop
                 let next = self
                     .tabs
-                    .next(self.cursor.col)
+                    .next(self.cursor.col.get())
                     .unwrap_or_else(|| self.cols().saturating_sub(1));
-                self.cursor.col = next.min(self.cols().saturating_sub(1));
+                self.cursor.col = Col::new(next.min(self.cols().saturating_sub(1)));
                 self.cursor.pending_wrap = false;
             }
             0x0A..=0x0C => {
@@ -1062,7 +1070,7 @@ impl Screen {
             }
             0x0D => {
                 // CR
-                self.cursor.col = 0;
+                self.cursor.col = Col::ZERO;
                 self.cursor.pending_wrap = false;
             }
             0x0E => self.gl = GSet::G1, // SO (shift out): GL → G1
@@ -1091,8 +1099,8 @@ impl Screen {
                 // CUU stops at the top scroll margin when the cursor is at or
                 // below it (xterm), and at grid row 0 when above the region.
                 let (top, _) = self.scroll_region;
-                let floor = if self.cursor.row >= top { top } else { 0 };
-                self.cursor.row = self.cursor.row.saturating_sub(n).max(floor);
+                let floor = if self.cursor.row.get() >= top { top } else { 0 };
+                self.cursor.row = self.cursor.row.retreat(n).max(Row::new(floor));
                 self.cursor.pending_wrap = false;
             }
             'B' => {
@@ -1100,18 +1108,18 @@ impl Screen {
                 // CUD stops at the bottom scroll margin when at or above it, and
                 // at the last grid row when below the region.
                 let (_, bottom) = self.scroll_region;
-                let ceil = if self.cursor.row <= bottom {
+                let ceil = if self.cursor.row.get() <= bottom {
                     bottom
                 } else {
                     self.rows().saturating_sub(1)
                 };
-                self.cursor.row = self.cursor.row.saturating_add(n).min(ceil);
+                self.cursor.row = self.cursor.row.advance(n).min(Row::new(ceil));
                 self.cursor.pending_wrap = false;
             }
             'C' => {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 let max = self.cols();
-                self.cursor.right(n, max);
+                self.cursor.right(n, Col::new(max));
             }
             'D' => {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
@@ -1121,27 +1129,27 @@ impl Screen {
                 // CNL (cursor next line): down N (clamped like CUD 'B'), col 0.
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 let (_, bottom) = self.scroll_region;
-                let ceil = if self.cursor.row <= bottom {
+                let ceil = if self.cursor.row.get() <= bottom {
                     bottom
                 } else {
                     self.rows().saturating_sub(1)
                 };
-                self.cursor.row = self.cursor.row.saturating_add(n).min(ceil);
-                self.cursor.col = 0;
+                self.cursor.row = self.cursor.row.advance(n).min(Row::new(ceil));
+                self.cursor.col = Col::ZERO;
                 self.cursor.pending_wrap = false;
             }
             'F' => {
                 // CPL (cursor previous line): up N (clamped like CUU 'A'), col 0.
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 let (top, _) = self.scroll_region;
-                let floor = if self.cursor.row >= top { top } else { 0 };
-                self.cursor.row = self.cursor.row.saturating_sub(n).max(floor);
-                self.cursor.col = 0;
+                let floor = if self.cursor.row.get() >= top { top } else { 0 };
+                self.cursor.row = self.cursor.row.retreat(n).max(Row::new(floor));
+                self.cursor.col = Col::ZERO;
                 self.cursor.pending_wrap = false;
             }
             'G' => {
                 let col = first.unwrap_or(1).saturating_sub(1);
-                self.cursor.col = col.min(self.cols().saturating_sub(1));
+                self.cursor.col = Col::new(col.min(self.cols().saturating_sub(1)));
                 self.cursor.pending_wrap = false;
             }
             'H' | 'f' => {
@@ -1149,7 +1157,7 @@ impl Screen {
                 let col = nth(params, 1).unwrap_or(1).saturating_sub(1);
                 let max_cols = self.cols();
                 self.cursor.row = self.absolute_row(row_arg);
-                self.cursor.col = col.min(max_cols.saturating_sub(1));
+                self.cursor.col = Col::new(col.min(max_cols.saturating_sub(1)));
                 self.cursor.pending_wrap = false;
             }
             'd' => {
@@ -1162,10 +1170,10 @@ impl Screen {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 let last = self.cols().saturating_sub(1);
                 for _ in 0..n {
-                    if let Some(c) = self.tabs.next(self.cursor.col) {
-                        self.cursor.col = c.min(last);
+                    if let Some(c) = self.tabs.next(self.cursor.col.get()) {
+                        self.cursor.col = Col::new(c.min(last));
                     } else {
-                        self.cursor.col = last;
+                        self.cursor.col = Col::new(last);
                         break;
                     }
                 }
@@ -1175,10 +1183,10 @@ impl Screen {
                 // CBT (cursor backward tabulation): retreat N tab stops.
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 for _ in 0..n {
-                    if let Some(c) = self.tabs.prev(self.cursor.col) {
-                        self.cursor.col = c;
+                    if let Some(c) = self.tabs.prev(self.cursor.col.get()) {
+                        self.cursor.col = Col::new(c);
                     } else {
-                        self.cursor.col = 0;
+                        self.cursor.col = Col::ZERO;
                         break;
                     }
                 }
@@ -1197,19 +1205,21 @@ impl Screen {
             'J' => {
                 let mode = first.unwrap_or(0);
                 let (r, c) = (self.cursor.row, self.cursor.col);
-                let (last_r, last_c) = (self.rows() - 1, self.cols() - 1);
+                let (last_r, last_c) = (Row::new(self.rows() - 1), Col::new(self.cols() - 1));
                 match mode {
                     0 => {
                         self.active.clear_rect(r, c, r, last_c);
                         if r < last_r {
-                            self.active.clear_rect(r + 1, 0, last_r, last_c);
+                            self.active
+                                .clear_rect(r.advance(1), Col::ZERO, last_r, last_c);
                         }
                     }
                     1 => {
-                        if r > 0 {
-                            self.active.clear_rect(0, 0, r - 1, last_c);
+                        if r > Row::ZERO {
+                            self.active
+                                .clear_rect(Row::ZERO, Col::ZERO, r.retreat(1), last_c);
                         }
-                        self.active.clear_rect(r, 0, r, c);
+                        self.active.clear_rect(r, Col::ZERO, r, c);
                     }
                     2 => {
                         self.active.clear();
@@ -1241,11 +1251,11 @@ impl Screen {
             'K' => {
                 let mode = first.unwrap_or(0);
                 let (r, c) = (self.cursor.row, self.cursor.col);
-                let last_c = self.cols() - 1;
+                let last_c = Col::new(self.cols() - 1);
                 match mode {
                     0 => self.active.clear_rect(r, c, r, last_c),
-                    1 => self.active.clear_rect(r, 0, r, c),
-                    2 => self.active.clear_rect(r, 0, r, last_c),
+                    1 => self.active.clear_rect(r, Col::ZERO, r, c),
+                    2 => self.active.clear_rect(r, Col::ZERO, r, last_c),
                     _ => {}
                 }
                 self.cursor.pending_wrap = false;
@@ -1282,7 +1292,12 @@ impl Screen {
                 } else {
                     0
                 };
-                self.cursor.move_to(home_row, 0, max_rows, max_cols);
+                self.cursor.move_to(
+                    Row::new(home_row),
+                    Col::ZERO,
+                    Row::new(max_rows),
+                    Col::new(max_cols),
+                );
             }
             'S' => {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
@@ -1296,7 +1311,8 @@ impl Screen {
                 } else {
                     None
                 };
-                self.active.scroll_up(top, bottom, n, target);
+                self.active
+                    .scroll_up(Row::new(top), Row::new(bottom), n, target);
                 for r in popped {
                     self.push_scrollback(r);
                 }
@@ -1304,7 +1320,7 @@ impl Screen {
             'T' => {
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 let (top, bottom) = self.scroll_region;
-                self.active.scroll_down(top, bottom, n);
+                self.active.scroll_down(Row::new(top), Row::new(bottom), n);
             }
             '@' => {
                 // ICH: insert N blank cells at the cursor, shifting right (overflow lost).
@@ -1324,7 +1340,9 @@ impl Screen {
                 // ECH: erase N cells from the cursor (overwrite blank, no shift).
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 let (r, c) = (self.cursor.row, self.cursor.col);
-                let last = c.saturating_add(n - 1).min(self.cols().saturating_sub(1));
+                let last = c
+                    .advance(n - 1)
+                    .min(Col::new(self.cols().saturating_sub(1)));
                 self.active.clear_rect(r, c, r, last);
                 self.cursor.pending_wrap = false;
             }
@@ -1333,9 +1351,10 @@ impl Screen {
                 // Cursor homes to column 0 (DEC VT220 pg. reference; xterm matches).
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 let (top, bottom) = self.scroll_region;
-                if self.cursor.row >= top && self.cursor.row <= bottom {
-                    self.active.scroll_down(self.cursor.row, bottom, n);
-                    self.cursor.col = 0;
+                if self.cursor.row.get() >= top && self.cursor.row.get() <= bottom {
+                    self.active
+                        .scroll_down(self.cursor.row, Row::new(bottom), n);
+                    self.cursor.col = Col::ZERO;
                     self.cursor.pending_wrap = false;
                 }
             }
@@ -1344,16 +1363,17 @@ impl Screen {
                 // Cursor homes to column 0 (DEC VT220 pg. reference; xterm matches).
                 let n = first.filter(|&n| n > 0).unwrap_or(1);
                 let (top, bottom) = self.scroll_region;
-                if self.cursor.row >= top && self.cursor.row <= bottom {
-                    self.active.scroll_up(self.cursor.row, bottom, n, None);
-                    self.cursor.col = 0;
+                if self.cursor.row.get() >= top && self.cursor.row.get() <= bottom {
+                    self.active
+                        .scroll_up(self.cursor.row, Row::new(bottom), n, None);
+                    self.cursor.col = Col::ZERO;
                     self.cursor.pending_wrap = false;
                 }
             }
             'g' => {
                 let mode = first.unwrap_or(0);
                 match mode {
-                    0 => self.tabs.clear(self.cursor.col),
+                    0 => self.tabs.clear(self.cursor.col.get()),
                     3 => self.tabs.clear_all(),
                     _ => {}
                 }
@@ -1386,8 +1406,8 @@ impl Screen {
                         }
                         6 => {
                             // Cursor Position Report: `ESC [ row ; col R`, 1-indexed.
-                            let r = self.cursor.row.saturating_add(1);
-                            let c = self.cursor.col.saturating_add(1);
+                            let r = self.cursor.row.get().saturating_add(1);
+                            let c = self.cursor.col.get().saturating_add(1);
                             self.replies.push(format!("\x1b[{r};{c}R").into_bytes());
                         }
                         _ => {}
@@ -1672,7 +1692,12 @@ impl Screen {
                 }
                 let home_row = if on { self.scroll_region.0 } else { 0 };
                 let (max_rows, max_cols) = (self.rows(), self.cols());
-                self.cursor.move_to(home_row, 0, max_rows, max_cols);
+                self.cursor.move_to(
+                    Row::new(home_row),
+                    Col::ZERO,
+                    Row::new(max_rows),
+                    Col::new(max_cols),
+                );
                 return;
             }
             7 => Modes::AUTOWRAP,
@@ -1909,7 +1934,7 @@ impl Screen {
                 }
             }
             b'H' => {
-                self.tabs.set(self.cursor.col);
+                self.tabs.set(self.cursor.col.get());
             }
             b'c' => {
                 // RIS (full reset). Preserve the pane's spawn identity (`term`,
@@ -1924,9 +1949,9 @@ impl Screen {
             }
             b'M' => {
                 let (top, _) = self.scroll_region;
-                if self.cursor.row == top {
+                if self.cursor.row.get() == top {
                     let (t, b) = self.scroll_region;
-                    self.active.scroll_down(t, b, 1);
+                    self.active.scroll_down(Row::new(t), Row::new(b), 1);
                 } else {
                     self.cursor.up(1);
                 }
@@ -1941,7 +1966,7 @@ impl Screen {
             }
             b'E' => {
                 // NEL (next line) = CR + IND.
-                self.cursor.col = 0;
+                self.cursor.col = Col::ZERO;
                 self.advance_to_next_row(false);
                 self.cursor.pending_wrap = false;
             }
@@ -2133,7 +2158,7 @@ impl Screen {
                 self.last_block_duration = duration_ms;
             }
             b'B' => {
-                let col = self.cursor.col;
+                let col = self.cursor.col.get();
                 self.mark_cursor_row(|m| m.set_prompt_end(col));
             }
             other => {
@@ -2145,7 +2170,7 @@ impl Screen {
     /// Apply `f` to the cursor row's block annotation. Flag setting is `|=`,
     /// so re-marking (shells redraw prompts) is idempotent.
     fn mark_cursor_row(&mut self, f: impl FnOnce(&mut RowMark)) {
-        if let Some(row) = self.active.rows.get_mut(self.cursor.row as usize) {
+        if let Some(row) = self.active.rows.get_mut(self.cursor.row.get() as usize) {
             f(&mut row.mark);
         }
     }
@@ -2328,7 +2353,7 @@ mod tests {
         e.advance(chunk1.as_bytes());
         assert_eq!(
             e.screen().cursor.row,
-            0,
+            Row::new(0),
             "no cursor move before the final chunk"
         );
         assert!(e.screen().images.is_empty(), "not finalized yet");
@@ -2346,7 +2371,8 @@ mod tests {
             "footprint from dims ÷ default cell"
         );
         assert_eq!(
-            s.cursor.row, 2,
+            s.cursor.row,
+            Row::new(2),
             "cursor advanced by the footprint after m=0"
         );
     }
@@ -2529,7 +2555,7 @@ mod tests {
             e.screen().placements.is_empty(),
             "no placement for unknown id"
         );
-        assert_eq!(e.screen().cursor.row, 0, "cursor untouched");
+        assert_eq!(e.screen().cursor.row, Row::new(0), "cursor untouched");
     }
 
     #[test]
@@ -2612,7 +2638,11 @@ mod tests {
         assert!(s.images.contains(ImageId(9)), "image stored");
         assert!(s.placements.is_empty(), "no anchored placement");
         assert_eq!(s.virtual_placements.len(), 1);
-        assert_eq!(s.cursor.row, 0, "no cursor advance for a virtual placement");
+        assert_eq!(
+            s.cursor.row,
+            Row::new(0),
+            "no cursor advance for a virtual placement"
+        );
     }
 
     #[test]
@@ -2841,7 +2871,11 @@ mod tests {
         assert_eq!(s.images.len(), 1, "sixel stored as an image");
         assert_eq!(s.placements.len(), 1);
         assert_eq!(s.placements[0].protocol, ImageProtocol::Sixel);
-        assert_eq!(s.cursor.row, 1, "cursor advanced by the 1-row footprint");
+        assert_eq!(
+            s.cursor.row,
+            Row::new(1),
+            "cursor advanced by the 1-row footprint"
+        );
         // The stored payload is re-emittable: <params>q<data>, ending in the
         // sixel data, with the raster attrs intact right after `q`.
         let img = s.images.get(s.placements[0].image_id).unwrap();
@@ -2869,7 +2903,11 @@ mod tests {
         assert_eq!(s.images.len(), 1, "iterm2 image stored");
         assert_eq!(s.placements.len(), 1);
         assert_eq!(s.placements[0].protocol, ImageProtocol::Iterm2);
-        assert_eq!(s.cursor.row, 1, "cursor advanced by the 1-row footprint");
+        assert_eq!(
+            s.cursor.row,
+            Row::new(1),
+            "cursor advanced by the 1-row footprint"
+        );
         let img = s.images.get(s.placements[0].image_id).unwrap();
         assert_eq!(
             img.data_b64.as_ref(),
@@ -3018,9 +3056,9 @@ mod tests {
     fn ascii_writes_left_to_right() {
         let s = drive(b"hello");
         assert!(text_at(&s, 0).starts_with("hello"));
-        assert_eq!(s.cursor.row, 0);
+        assert_eq!(s.cursor.row, Row::new(0));
         // After 5 chars at col 0..4, cursor at col 5.
-        assert_eq!(s.cursor.col, 5);
+        assert_eq!(s.cursor.col, Col::new(5));
     }
 
     #[test]
@@ -3034,11 +3072,11 @@ mod tests {
     fn wide_char_takes_two_columns_and_emits_spacer() {
         // "好" is width 2.
         let s = drive("好".as_bytes());
-        let c0 = s.active.get_cell(0, 0).unwrap();
-        let c1 = s.active.get_cell(0, 1).unwrap();
+        let c0 = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
+        let c1 = s.active.get_cell(Row::new(0), Col::new(1)).unwrap();
         assert_eq!(c0.grapheme.as_str(), "好");
         assert!(c1.is_wide_spacer());
-        assert_eq!(s.cursor.col, 2);
+        assert_eq!(s.cursor.col, Col::new(2));
     }
 
     #[test]
@@ -3048,11 +3086,28 @@ mod tests {
         // orphaned grapheme cell at col 0 is blanked too.
         let s = drive("好x\x1b[1;2Ha".as_bytes());
         assert!(
-            s.active.get_cell(0, 0).unwrap().is_blank(),
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .is_blank(),
             "好's grapheme half not cleared"
         );
-        assert_eq!(s.active.get_cell(0, 1).unwrap().grapheme.as_str(), "a");
-        assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "x");
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(1))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "a"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(2))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "x"
+        );
     }
 
     #[test]
@@ -3060,57 +3115,71 @@ mod tests {
         // "好x" → 好@0-1, x@2. CUP to col 0 (the grapheme), write 'a'. The now-
         // orphaned spacer at col 1 is blanked (not left dangling).
         let s = drive("好x\x1b[1;1Ha".as_bytes());
-        assert_eq!(s.active.get_cell(0, 0).unwrap().grapheme.as_str(), "a");
-        let c1 = s.active.get_cell(0, 1).unwrap();
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "a"
+        );
+        let c1 = s.active.get_cell(Row::new(0), Col::new(1)).unwrap();
         assert!(
             c1.is_blank() && !c1.is_wide_spacer(),
             "orphaned spacer not cleared"
         );
-        assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "x");
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(2))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "x"
+        );
     }
 
     #[test]
     fn cursor_advances_to_pending_wrap_at_end_of_row() {
         let s = drive(b"abcdefgh"); // exactly 8 chars
-        assert_eq!(s.cursor.col, 7);
+        assert_eq!(s.cursor.col, Col::new(7));
         assert!(s.cursor.pending_wrap);
     }
 
     #[test]
     fn cr_returns_to_column_zero() {
         let mut s = Screen::new(4, 8);
-        s.cursor.col = 5;
+        s.cursor.col = Col::new(5);
         s.execute_c0(0x0D);
-        assert_eq!(s.cursor.col, 0);
+        assert_eq!(s.cursor.col, Col::new(0));
     }
 
     #[test]
     fn lf_moves_down_keeps_column() {
         let mut s = Screen::new(4, 8);
-        s.cursor.row = 0;
-        s.cursor.col = 3;
+        s.cursor.row = Row::new(0);
+        s.cursor.col = Col::new(3);
         s.execute_c0(0x0A);
-        assert_eq!((s.cursor.row, s.cursor.col), (1, 3));
+        assert_eq!((s.cursor.row, s.cursor.col), (Row::new(1), Col::new(3)));
     }
 
     #[test]
     fn bs_moves_left_and_saturates() {
         let mut s = Screen::new(4, 8);
-        s.cursor.col = 1;
+        s.cursor.col = Col::new(1);
         s.execute_c0(0x08);
-        assert_eq!(s.cursor.col, 0);
+        assert_eq!(s.cursor.col, Col::new(0));
         s.execute_c0(0x08);
-        assert_eq!(s.cursor.col, 0);
+        assert_eq!(s.cursor.col, Col::new(0));
     }
 
     #[test]
     fn ht_jumps_to_next_tab_stop() {
         let mut s = Screen::new(4, 24);
-        s.cursor.col = 1;
+        s.cursor.col = Col::new(1);
         s.execute_c0(0x09);
-        assert_eq!(s.cursor.col, 8);
+        assert_eq!(s.cursor.col, Col::new(8));
         s.execute_c0(0x09);
-        assert_eq!(s.cursor.col, 16);
+        assert_eq!(s.cursor.col, Col::new(16));
     }
 
     #[test]
@@ -3135,7 +3204,8 @@ mod tests {
         // Region rows 3..7 (top=2). Cursor at row 5, CUU 10 stops at the margin.
         let s = parse(b"\x1b[3;7r\x1b[6;1H\x1b[10A");
         assert_eq!(
-            s.cursor.row, 2,
+            s.cursor.row,
+            Row::new(2),
             "CUU must stop at the top margin, not grid 0"
         );
     }
@@ -3145,7 +3215,8 @@ mod tests {
         // Region rows 3..7 (bottom=6). Cursor at row 3, CUD 10 stops at the margin.
         let s = parse(b"\x1b[3;7r\x1b[4;1H\x1b[10B");
         assert_eq!(
-            s.cursor.row, 6,
+            s.cursor.row,
+            Row::new(6),
             "CUD must stop at the bottom margin, not the grid edge"
         );
     }
@@ -3156,7 +3227,8 @@ mod tests {
         // must move it DOWN to row 5, not snap it up to the bottom margin.
         let s = parse(b"\x1b[1;3r\x1b[5;1H\n");
         assert_eq!(
-            s.cursor.row, 5,
+            s.cursor.row,
+            Row::new(5),
             "LF below the region must move down, not snap to the margin"
         );
     }
@@ -3166,16 +3238,22 @@ mod tests {
         // Region rows 5..8 (top=4). DECSET ?6h homes to the region top...
         let s = parse(b"\x1b[5;8r\x1b[?6h");
         assert_eq!(
-            s.cursor.row, 4,
+            s.cursor.row,
+            Row::new(4),
             "DECOM set homes the cursor to the region top"
         );
         // ...and CUP rows become relative to the region top.
         let s = parse(b"\x1b[5;8r\x1b[?6h\x1b[3;1H");
-        assert_eq!(s.cursor.row, 6, "CUP row 3 in origin mode = top(4) + 2");
+        assert_eq!(
+            s.cursor.row,
+            Row::new(6),
+            "CUP row 3 in origin mode = top(4) + 2"
+        );
         // Reset returns to absolute addressing.
         let s = parse(b"\x1b[5;8r\x1b[?6h\x1b[?6l\x1b[3;1H");
         assert_eq!(
-            s.cursor.row, 2,
+            s.cursor.row,
+            Row::new(2),
             "CUP row 3 with origin reset = absolute grid row 2"
         );
     }
@@ -3206,7 +3284,7 @@ mod tests {
         let mut underlined = 0usize;
         for r in 0..s.rows() {
             for c in 0..s.cols() {
-                let Some(cell) = s.active.get_cell(r, c) else {
+                let Some(cell) = s.active.get_cell(Row::new(r), Col::new(c)) else {
                     continue;
                 };
                 if cell.is_blank() || cell.is_wide_spacer() {
@@ -3341,32 +3419,32 @@ mod tests {
     #[test]
     fn cup_homes_cursor() {
         let s = parse(b"abc\x1b[H");
-        assert_eq!((s.cursor.row, s.cursor.col), (0, 0));
+        assert_eq!((s.cursor.row, s.cursor.col), (Row::new(0), Col::new(0)));
     }
 
     #[test]
     fn cup_with_params() {
         let s = parse(b"\x1b[3;5H");
-        assert_eq!((s.cursor.row, s.cursor.col), (2, 4));
+        assert_eq!((s.cursor.row, s.cursor.col), (Row::new(2), Col::new(4)));
     }
 
     #[test]
     fn cuf_advances_columns() {
         let s = parse(b"\x1b[5C");
-        assert_eq!(s.cursor.col, 5);
+        assert_eq!(s.cursor.col, Col::new(5));
     }
 
     #[test]
     fn cuu_clamps_at_top() {
         let s = parse(b"\x1b[3;1H\x1b[10A");
-        assert_eq!(s.cursor.row, 0);
+        assert_eq!(s.cursor.row, Row::new(0));
     }
 
     #[test]
     fn cup_clamps_outside_grid() {
         let s = parse(b"\x1b[100;100H");
-        assert_eq!(s.cursor.row, 7);
-        assert_eq!(s.cursor.col, 23);
+        assert_eq!(s.cursor.row, Row::new(7));
+        assert_eq!(s.cursor.col, Col::new(23));
     }
 
     #[test]
@@ -3374,7 +3452,12 @@ mod tests {
         let s = parse(b"hello\x1b[2J");
         for r in 0..8 {
             for c in 0..24 {
-                assert!(s.active.get_cell(r, c).unwrap().is_blank());
+                assert!(
+                    s.active
+                        .get_cell(Row::new(r), Col::new(c))
+                        .unwrap()
+                        .is_blank()
+                );
             }
         }
     }
@@ -3382,10 +3465,34 @@ mod tests {
     #[test]
     fn el_clears_to_end_of_line() {
         let s = parse(b"abcdef\x1b[H\x1b[3C\x1b[K");
-        assert_eq!(s.active.get_cell(0, 0).unwrap().grapheme.as_str(), "a");
-        assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "c");
-        assert!(s.active.get_cell(0, 3).unwrap().is_blank());
-        assert!(s.active.get_cell(0, 5).unwrap().is_blank());
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "a"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(2))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "c"
+        );
+        assert!(
+            s.active
+                .get_cell(Row::new(0), Col::new(3))
+                .unwrap()
+                .is_blank()
+        );
+        assert!(
+            s.active
+                .get_cell(Row::new(0), Col::new(5))
+                .unwrap()
+                .is_blank()
+        );
     }
 
     #[test]
@@ -3393,10 +3500,10 @@ mod tests {
         use crate::attrs::Attrs;
         use crate::color::Color;
         let s = parse(b"\x1b[1;31mhi\x1b[0mlo");
-        let c0 = s.active.get_cell(0, 0).unwrap();
+        let c0 = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
         assert!(c0.attrs.contains(Attrs::BOLD));
         assert_eq!(c0.fg, Color::Indexed(1));
-        let c2 = s.active.get_cell(0, 2).unwrap();
+        let c2 = s.active.get_cell(Row::new(0), Col::new(2)).unwrap();
         assert!(!c2.attrs.contains(Attrs::BOLD));
         assert_eq!(c2.fg, Color::Default);
     }
@@ -3409,7 +3516,7 @@ mod tests {
         let s = parse(b"\x1b[4mX\x1b[mY");
         assert!(
             s.active
-                .get_cell(0, 0)
+                .get_cell(Row::new(0), Col::new(0))
                 .unwrap()
                 .attrs
                 .contains(Attrs::UNDERLINE),
@@ -3417,7 +3524,7 @@ mod tests {
         );
         assert!(
             !s.active
-                .get_cell(0, 1)
+                .get_cell(Row::new(0), Col::new(1))
                 .unwrap()
                 .attrs
                 .contains(Attrs::UNDERLINE),
@@ -3433,7 +3540,7 @@ mod tests {
         let s = parse(b"\x1b[4:3mX\x1b[4:0mY");
         assert!(
             s.active
-                .get_cell(0, 0)
+                .get_cell(Row::new(0), Col::new(0))
                 .unwrap()
                 .attrs
                 .contains(Attrs::UNDERLINE),
@@ -3441,7 +3548,7 @@ mod tests {
         );
         assert!(
             !s.active
-                .get_cell(0, 0)
+                .get_cell(Row::new(0), Col::new(0))
                 .unwrap()
                 .attrs
                 .contains(Attrs::ITALIC),
@@ -3449,7 +3556,7 @@ mod tests {
         );
         assert!(
             !s.active
-                .get_cell(0, 1)
+                .get_cell(Row::new(0), Col::new(1))
                 .unwrap()
                 .attrs
                 .contains(Attrs::UNDERLINE),
@@ -3463,7 +3570,7 @@ mod tests {
         // \e[4:3m must record Curly style AND set the UNDERLINE boolean (and must
         // NOT set italic, cross-checking `styled_underline_colon_subparams`).
         let s = parse(b"\x1b[4:3mX");
-        let c = s.active.get_cell(0, 0).unwrap();
+        let c = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
         assert_eq!(c.underline_style, UnderlineStyle::Curly, "4:3 = curly");
         assert!(
             c.attrs.contains(Attrs::UNDERLINE),
@@ -3476,12 +3583,12 @@ mod tests {
     fn underline_style_double_dotted_dashed() {
         use crate::attrs::{Attrs, UnderlineStyle};
         let s = parse(b"\x1b[4:2mD\x1b[4:4mO\x1b[4:5mA");
-        let d = s.active.get_cell(0, 0).unwrap();
+        let d = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
         assert_eq!(d.underline_style, UnderlineStyle::Double, "4:2 = double");
         assert!(d.attrs.contains(Attrs::UNDERLINE));
-        let o = s.active.get_cell(0, 1).unwrap();
+        let o = s.active.get_cell(Row::new(0), Col::new(1)).unwrap();
         assert_eq!(o.underline_style, UnderlineStyle::Dotted, "4:4 = dotted");
-        let a = s.active.get_cell(0, 2).unwrap();
+        let a = s.active.get_cell(Row::new(0), Col::new(2)).unwrap();
         assert_eq!(a.underline_style, UnderlineStyle::Dashed, "4:5 = dashed");
     }
 
@@ -3490,7 +3597,7 @@ mod tests {
         use crate::attrs::{Attrs, UnderlineStyle};
         // \e[4:0m turns underline OFF: style `None` and the boolean cleared.
         let s = parse(b"\x1b[4:3mX\x1b[4:0mY");
-        let y = s.active.get_cell(0, 1).unwrap();
+        let y = s.active.get_cell(Row::new(0), Col::new(1)).unwrap();
         assert_eq!(y.underline_style, UnderlineStyle::None, "4:0 = none");
         assert!(!y.attrs.contains(Attrs::UNDERLINE), "4:0 clears UNDERLINE");
     }
@@ -3500,14 +3607,14 @@ mod tests {
         use crate::attrs::{Attrs, UnderlineStyle};
         // Plain \e[4m is Single + UNDERLINE; \e[24m clears to None.
         let s = parse(b"\x1b[4mX\x1b[24mY");
-        let x = s.active.get_cell(0, 0).unwrap();
+        let x = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
         assert_eq!(
             x.underline_style,
             UnderlineStyle::Single,
             "plain 4 = single"
         );
         assert!(x.attrs.contains(Attrs::UNDERLINE));
-        let y = s.active.get_cell(0, 1).unwrap();
+        let y = s.active.get_cell(Row::new(0), Col::new(1)).unwrap();
         assert_eq!(y.underline_style, UnderlineStyle::None, "24 = none");
         assert!(!y.attrs.contains(Attrs::UNDERLINE));
     }
@@ -3518,7 +3625,10 @@ mod tests {
         // \e[0m must reset the style pen back to `None`.
         let s = parse(b"\x1b[4:3mX\x1b[0mY");
         assert_eq!(
-            s.active.get_cell(0, 1).unwrap().underline_style,
+            s.active
+                .get_cell(Row::new(0), Col::new(1))
+                .unwrap()
+                .underline_style,
             UnderlineStyle::None,
             "\\e[0m resets the underline style"
         );
@@ -3530,7 +3640,7 @@ mod tests {
         use crate::color::Color;
         // SGR 58 (color) and 4:3 (style) on the same cell: both survive, distinct.
         let s = parse(b"\x1b[58:5:9m\x1b[4:3mX");
-        let c = s.active.get_cell(0, 0).unwrap();
+        let c = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
         assert_eq!(c.underline_style, UnderlineStyle::Curly, "style = curly");
         assert_eq!(c.underline_color, Color::Indexed(9), "color = indexed 9");
     }
@@ -3539,7 +3649,7 @@ mod tests {
     fn sgr_rgb_truecolor() {
         use crate::color::Color;
         let s = parse(b"\x1b[38;2;10;20;30mX");
-        let c0 = s.active.get_cell(0, 0).unwrap();
+        let c0 = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
         assert_eq!(c0.fg, Color::Rgb(10, 20, 30));
     }
 
@@ -3547,7 +3657,7 @@ mod tests {
     fn sgr_indexed_256() {
         use crate::color::Color;
         let s = parse(b"\x1b[38;5;200mY");
-        let c0 = s.active.get_cell(0, 0).unwrap();
+        let c0 = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
         assert_eq!(c0.fg, Color::Indexed(200));
     }
 
@@ -3555,7 +3665,7 @@ mod tests {
     fn sgr_bright_bg() {
         use crate::color::Color;
         let s = parse(b"\x1b[101mZ");
-        let c0 = s.active.get_cell(0, 0).unwrap();
+        let c0 = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
         assert_eq!(c0.bg, Color::Indexed(9));
     }
 
@@ -3564,7 +3674,12 @@ mod tests {
         let s = parse(b"main\x1b[?1049h");
         assert!(s.modes.contains(Modes::ALT_SCREEN));
         assert!(s.alt.is_some());
-        assert!(s.active.get_cell(0, 0).unwrap().is_blank());
+        assert!(
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .is_blank()
+        );
 
         let mut p = Parser::new();
         let mut s2 = Screen::new(8, 24);
@@ -3572,7 +3687,14 @@ mod tests {
         p.flush(&mut s2);
         assert!(!s2.modes.contains(Modes::ALT_SCREEN));
         assert!(s2.alt.is_none());
-        assert_eq!(s2.active.get_cell(0, 0).unwrap().grapheme.as_str(), "m");
+        assert_eq!(
+            s2.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "m"
+        );
     }
 
     #[test]
@@ -3589,7 +3711,7 @@ mod tests {
     fn decstbm_sets_scroll_region_and_homes_cursor() {
         let s = parse(b"\x1b[2;6r");
         assert_eq!(s.scroll_region, (1, 5));
-        assert_eq!((s.cursor.row, s.cursor.col), (0, 0));
+        assert_eq!((s.cursor.row, s.cursor.col), (Row::new(0), Col::new(0)));
     }
 
     #[test]
@@ -3599,7 +3721,12 @@ mod tests {
         p.advance(&mut s, b"AAAA\nBBBB\nCCCC\nDDDD");
         p.flush(&mut s);
         p.advance(&mut s, b"\x1b[H\x1b[S");
-        assert!(s.active.get_cell(3, 0).unwrap().is_blank());
+        assert!(
+            s.active
+                .get_cell(Row::new(3), Col::new(0))
+                .unwrap()
+                .is_blank()
+        );
     }
 
     #[test]
@@ -3644,22 +3771,48 @@ mod tests {
         p.advance(&mut s, b"X");
         p.flush(&mut s);
         // Overwrite, not insert: row 0 is "Xbc" (insert mode would give "Xabc").
-        assert_eq!(s.active.get_cell(0, 0).unwrap().grapheme.as_str(), "X");
-        assert_eq!(s.active.get_cell(0, 1).unwrap().grapheme.as_str(), "b");
-        assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "c");
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "X"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(1))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "b"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(2))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "c"
+        );
     }
 
     #[test]
     fn decsc_decrc_round_trip() {
         let s = parse(b"\x1b[3;5H\x1b7\x1b[1;1H\x1b8");
-        assert_eq!((s.cursor.row, s.cursor.col), (2, 4));
+        assert_eq!((s.cursor.row, s.cursor.col), (Row::new(2), Col::new(4)));
     }
 
     #[test]
     fn ris_resets_screen() {
         let s = parse(b"hello\x1bc");
-        assert!(s.active.get_cell(0, 0).unwrap().is_blank());
-        assert_eq!((s.cursor.row, s.cursor.col), (0, 0));
+        assert!(
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .is_blank()
+        );
+        assert_eq!((s.cursor.row, s.cursor.col), (Row::new(0), Col::new(0)));
     }
 
     #[test]
@@ -3669,7 +3822,12 @@ mod tests {
         p.advance(&mut s, b"AAAA\nBBBB\nCCCC\nDDDD\x1b[H");
         p.flush(&mut s);
         p.advance(&mut s, b"\x1bM");
-        assert!(s.active.get_cell(0, 0).unwrap().is_blank());
+        assert!(
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .is_blank()
+        );
     }
 
     #[test]
@@ -3677,7 +3835,7 @@ mod tests {
         let mut p = Parser::new();
         let mut s = Screen::new(8, 24);
         p.advance(&mut s, b"\x1b[1;4H\x1bH\x1b[1;1H\t");
-        assert_eq!(s.cursor.col, 3);
+        assert_eq!(s.cursor.col, Col::new(3));
     }
 
     #[test]
@@ -3702,9 +3860,9 @@ mod tests {
         );
         p.flush(&mut s);
         let id = s.hyperlinks.intern("https://example.com");
-        let l = s.active.get_cell(0, 0).unwrap();
+        let l = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
         assert_eq!(l.hyperlink_id, id);
-        let a = s.active.get_cell(0, 4).unwrap();
+        let a = s.active.get_cell(Row::new(0), Col::new(4)).unwrap();
         assert_eq!(a.hyperlink_id, None);
     }
 
@@ -4137,7 +4295,7 @@ mod tests {
         // Code emits it during keyboard-protocol setup; the '>' intermediate must
         // route it away from `handle_sgr` so 'X' is not painted underline+dim.
         let s = drive(b"\x1b[>4;2mX");
-        let c0 = s.active.get_cell(0, 0).unwrap();
+        let c0 = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
         assert_eq!(c0.grapheme.as_str(), "X");
         assert!(
             !c0.attrs.contains(Attrs::UNDERLINE),
@@ -4157,14 +4315,14 @@ mod tests {
         // underline would never clear and bleed onto 'z'.
         let s = drive(b"\x1b[>4;2m\x1b[38;5;174mhi\x1b[39m\x1b[22m\x1b[0mz");
         for (col, want) in [(0u16, 'h'), (1, 'i')] {
-            let c = s.active.get_cell(0, col).unwrap();
+            let c = s.active.get_cell(Row::new(0), Col::new(col)).unwrap();
             assert_eq!(c.grapheme.chars().next(), Some(want));
             assert!(
                 !c.attrs.contains(Attrs::UNDERLINE),
                 "col {col} ({want}) must not be underlined"
             );
         }
-        let z = s.active.get_cell(0, 2).unwrap();
+        let z = s.active.get_cell(Row::new(0), Col::new(2)).unwrap();
         assert_eq!(z.grapheme.as_str(), "z");
         assert!(
             !z.attrs.contains(Attrs::UNDERLINE),
@@ -4177,7 +4335,10 @@ mod tests {
         use crate::color::Color;
         let s = parse(b"\x1b[58:5:9mX");
         assert_eq!(
-            s.active.get_cell(0, 0).unwrap().underline_color,
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .underline_color,
             Color::Indexed(9)
         );
     }
@@ -4186,7 +4347,10 @@ mod tests {
         use crate::color::Color;
         let s = parse(b"\x1b[58:2:10:20:30mX");
         assert_eq!(
-            s.active.get_cell(0, 0).unwrap().underline_color,
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .underline_color,
             Color::Rgb(10, 20, 30)
         );
     }
@@ -4197,7 +4361,10 @@ mod tests {
         // for empty).
         let s = parse(b"\x1b[58:2::10:20:30mX");
         assert_eq!(
-            s.active.get_cell(0, 0).unwrap().underline_color,
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .underline_color,
             Color::Rgb(10, 20, 30)
         );
     }
@@ -4206,7 +4373,10 @@ mod tests {
         use crate::color::Color;
         let s = parse(b"\x1b[58;2;10;20;30mX");
         assert_eq!(
-            s.active.get_cell(0, 0).unwrap().underline_color,
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .underline_color,
             Color::Rgb(10, 20, 30)
         );
     }
@@ -4215,7 +4385,10 @@ mod tests {
         use crate::color::Color;
         let s = parse(b"\x1b[58:5:9m\x1b[59mX");
         assert_eq!(
-            s.active.get_cell(0, 0).unwrap().underline_color,
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .underline_color,
             Color::Default
         );
     }
@@ -4224,7 +4397,10 @@ mod tests {
         use crate::color::Color;
         let s = parse(b"\x1b[58:5:9m\x1b[0mX");
         assert_eq!(
-            s.active.get_cell(0, 0).unwrap().underline_color,
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .underline_color,
             Color::Default
         );
     }
@@ -4234,13 +4410,13 @@ mod tests {
         // 38:2::1:2:3 (ISO, colorspace slot) must consume all its elements so the
         // following \e[4m underlines Y, not leak a stray param onto X.
         let s = parse(b"\x1b[38:2::1:2:3mX\x1b[4mY");
-        let x = s.active.get_cell(0, 0).unwrap();
+        let x = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
         assert!(
             !x.attrs.contains(Attrs::UNDERLINE),
             "X must NOT be underlined"
         );
         assert_eq!(x.fg, Color::Rgb(1, 2, 3));
-        let y = s.active.get_cell(0, 1).unwrap();
+        let y = s.active.get_cell(Row::new(0), Col::new(1)).unwrap();
         assert!(
             y.attrs.contains(Attrs::UNDERLINE),
             "Y SHOULD be underlined (the \\e[4m)"
@@ -4252,7 +4428,7 @@ mod tests {
         // fg + bg truecolor in ONE semicolon SGR. fg must consume exactly 4 params
         // and leave 48 for bg, since a 5-element RGB arm would corrupt the second color.
         let s = parse(b"\x1b[38;2;1;2;3;48;2;4;5;6mX");
-        let c0 = s.active.get_cell(0, 0).unwrap();
+        let c0 = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
         assert_eq!(c0.fg, Color::Rgb(1, 2, 3));
         assert_eq!(c0.bg, Color::Rgb(4, 5, 6));
     }
@@ -4278,7 +4454,7 @@ mod tests {
     fn xtmodkeys_does_not_mutate_sgr() {
         use crate::attrs::Attrs;
         let s = parse(b"\x1b[>4;2mX");
-        let c0 = s.active.get_cell(0, 0).unwrap();
+        let c0 = s.active.get_cell(Row::new(0), Col::new(0)).unwrap();
         assert!(
             !c0.attrs.contains(Attrs::UNDERLINE),
             "X must not be underlined"
@@ -4343,7 +4519,10 @@ mod tests {
             "DECSTR clears modifyOtherKeys"
         );
         assert_eq!(
-            s.active.get_cell(0, 0).unwrap().underline_color,
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .underline_color,
             Color::Default,
             "DECSTR resets the cursor's underline color"
         );

@@ -21,14 +21,14 @@ fn graphics_advance() {
         assert_eq!(s.active.num_rows(), ROWS, "row count changed");
         assert_eq!(s.active.num_cols(), COLS, "col count changed");
         assert!(
-            s.cursor.row < ROWS,
+            s.cursor.row.get() < ROWS,
             "cursor.row {} out of bounds",
-            s.cursor.row
+            s.cursor.row.get()
         );
         assert!(
-            s.cursor.col < COLS,
+            s.cursor.col.get() < COLS,
             "cursor.col {} out of bounds",
-            s.cursor.col
+            s.cursor.col.get()
         );
         // Every placement's image id must actually resolve, or be tolerated
         // as evicted (never dangling in a way that panics downstream) — the

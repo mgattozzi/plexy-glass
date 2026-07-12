@@ -1,6 +1,7 @@
 use std::env;
 
 use plexy_glass_emulator::Notification;
+use plexy_glass_emulator::coords::{Col, Row};
 use plexy_glass_mux::{
     Command, HintAction, HintKind, HintState, HintTarget, KeyEvent, MouseButton, MouseEvent,
     MouseKind, PickerEntry, ScrollOffset, SwapTarget, TreeAction, TreeNode, UnifiedLine, WheelAxis,
@@ -304,8 +305,8 @@ async fn click_release_on_cursor_row_repositions_without_a_mark() {
     let pane = m.active_window().pane(PaneId(0)).cloned().unwrap();
     // Cursor at (row 5, col 8), NO PROMPT_END mark, primary screen.
     pane.with_screen_mut(|s| {
-        s.cursor.row = 5;
-        s.cursor.col = 8;
+        s.cursor.row = Row::new(5);
+        s.cursor.col = Col::new(8);
     });
 
     // Physical (6,6) → pane-local (5,5): the frame inset is one cell on each
@@ -328,8 +329,8 @@ async fn click_release_on_cursor_row_repositions_without_a_mark() {
     // A DRAG (press, move to a different cell, release) must NOT reposition, it is
     // a selection. No arrows should be injected.
     pane.with_screen_mut(|s| {
-        s.cursor.row = 5;
-        s.cursor.col = 8;
+        s.cursor.row = Row::new(5);
+        s.cursor.col = Col::new(8);
     });
     let mut rx2 = pane.subscribe_output();
     m.handle_mouse(press(6, 6)).await.unwrap();
@@ -345,8 +346,8 @@ async fn click_release_on_cursor_row_repositions_without_a_mark() {
     // reposition and not degrade into a one-character selection/copy. Press (5,5),
     // nudge one cell to (5,6), release → repositions to the anchor col 5.
     pane.with_screen_mut(|s| {
-        s.cursor.row = 5;
-        s.cursor.col = 8;
+        s.cursor.row = Row::new(5);
+        s.cursor.col = Col::new(8);
     });
     let mut rx3 = pane.subscribe_output();
     m.handle_mouse(press(6, 6)).await.unwrap();
@@ -395,8 +396,8 @@ async fn double_click_on_a_two_char_word_still_copies() {
     // "  ls  " on row 5; cursor parked elsewhere so the first click's reposition
     // path is a no-op (wrong row) and can't interfere.
     pane.with_screen_mut(|s| {
-        s.cursor.row = 0;
-        s.cursor.col = 0;
+        s.cursor.row = Row::new(0);
+        s.cursor.col = Col::new(0);
         for (i, ch) in "  ls  ".chars().enumerate() {
             s.active.rows[5].cells[i].grapheme = ch.to_string().into();
         }
@@ -499,17 +500,17 @@ async fn copy_mode_mouse_uses_pane_local_coords() {
         .rect_of(active, m.viewport())
         .unwrap();
     assert!(
-        rect.col > 1,
+        rect.col() > 1,
         "right pane should be offset from the viewport origin"
     );
-    pane.enter_copy_mode(100, rect.rows, 0, 0);
+    pane.enter_copy_mode(100, rect.rows(), 0, 0);
 
     m.handle_mouse(MouseEvent {
         kind: MouseKind::Press,
         button: MouseButton::Left,
         modifiers: MouseModifiers::default(),
-        row: rect.row + 2,
-        col: rect.col + 5,
+        row: rect.row() + 2,
+        col: rect.col() + 5,
     })
     .await
     .unwrap();
@@ -519,7 +520,7 @@ async fn copy_mode_mouse_uses_pane_local_coords() {
         col,
         5,
         "copy-mode cursor col must be pane-local (5), not viewport ({})",
-        rect.col + 5
+        rect.col() + 5
     );
 }
 
@@ -558,7 +559,7 @@ async fn forwarded_mouse_uses_pane_local_coords() {
         .rect_of(active, m.viewport())
         .unwrap();
     assert!(
-        rect.col > 1,
+        rect.col() > 1,
         "right pane should be offset from the viewport origin"
     );
 
@@ -567,8 +568,8 @@ async fn forwarded_mouse_uses_pane_local_coords() {
         kind: MouseKind::Press,
         button: MouseButton::Left,
         modifiers: MouseModifiers::default(),
-        row: rect.row + 3,
-        col: rect.col + 5,
+        row: rect.row() + 3,
+        col: rect.col() + 5,
     })
     .await
     .unwrap();
@@ -900,10 +901,10 @@ async fn select_layout_puts_active_pane_in_the_main_slot() {
         .into_iter()
         .map(|p| (p, m.active_window().layout().rect_of(p, vp).unwrap()))
         .collect();
-    let (widest, widest_rect) = rects.iter().max_by_key(|(_, r)| r.cols).copied().unwrap();
+    let (widest, widest_rect) = rects.iter().max_by_key(|(_, r)| r.cols()).copied().unwrap();
     assert_eq!(widest, active, "active pane takes the main slot: {rects:?}");
     assert!(
-        widest_rect.cols > vp.cols / 2,
+        widest_rect.cols() > vp.cols() / 2,
         "main pane has the major share: {widest_rect:?}"
     );
     // Focus unchanged; PTYs resized to the new rects.
@@ -913,7 +914,7 @@ async fn select_layout_puts_active_pane_in_the_main_slot() {
         .pane(active)
         .unwrap()
         .with_screen(|s| (s.active.num_rows(), s.active.num_cols()));
-    assert_eq!((rows, cols), (widest_rect.rows, widest_rect.cols));
+    assert_eq!((rows, cols), (widest_rect.rows(), widest_rect.cols()));
 }
 
 #[tokio::test]
@@ -1240,7 +1241,7 @@ fn gutter_col_for(m: &WindowManager) -> u16 {
     m.active_window()
         .layout()
         .rect_of(PaneId(0), vp)
-        .map_or(0, |r| r.col + r.cols)
+        .map_or(0, |r| r.col() + r.cols())
 }
 
 #[tokio::test]
@@ -1370,7 +1371,7 @@ async fn resize_drag_move_changes_the_split_border() {
     .unwrap();
     let after = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
     assert!(
-        after.cols > before.cols,
+        after.cols() > before.cols(),
         "drag right widened pane 0: {before:?} -> {after:?}"
     );
 }
@@ -1402,8 +1403,8 @@ async fn left_click_focuses_non_active_pane_even_with_app_mouse_mode() {
         kind: MouseKind::Press,
         button: MouseButton::Left,
         modifiers: plexy_glass_mux::MouseModifiers::default(),
-        row: rect.row + rect.rows / 2 + m.pane_row_offset,
-        col: rect.col + rect.cols / 2,
+        row: rect.row() + rect.rows() / 2 + m.pane_row_offset,
+        col: rect.col() + rect.cols() / 2,
     };
     m.handle_mouse(event).await.unwrap();
     assert_eq!(
@@ -1440,8 +1441,8 @@ async fn status_top_offset_shifts_border_hit_row() {
     let vp = m.viewport();
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
     let r1 = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
-    let top = if r0.row <= r1.row { r0 } else { r1 };
-    let gutter_row = top.row + top.rows; // logical border row between panes
+    let top = if r0.row() <= r1.row() { r0 } else { r1 };
+    let gutter_row = top.row() + top.rows(); // logical border row between panes
 
     // Status bar on top → pane band shifted down one physical row.
     m.set_status_layout(Some(0), 1);
@@ -1484,7 +1485,8 @@ async fn on_host_resize_propagates_to_all_panes() {
     // The layout region is inset by the pane frame: full width (120) minus
     // the two outer frame columns.
     assert_eq!(
-        vp.cols, 118,
+        vp.cols(),
+        118,
         "viewport width did not update (120 - 2 frame cols)"
     );
     let win = m.active_window();
@@ -1496,8 +1498,8 @@ async fn on_host_resize_propagates_to_all_panes() {
             .pane(id)
             .unwrap()
             .with_screen(|s| (s.active.num_rows(), s.active.num_cols()));
-        assert_eq!(er, rect.rows, "pane {id:?} emulator rows != layout rect");
-        assert_eq!(ec, rect.cols, "pane {id:?} emulator cols != layout rect");
+        assert_eq!(er, rect.rows(), "pane {id:?} emulator rows != layout rect");
+        assert_eq!(ec, rect.cols(), "pane {id:?} emulator cols != layout rect");
     }
 }
 
@@ -1610,7 +1612,7 @@ async fn zoom_resizes_pane_to_full_then_restores() {
         .pane(active)
         .unwrap()
         .with_screen(|s| s.active.num_cols());
-    assert_eq!(zoomed_cols, vp.cols, "zoomed pane should span full width");
+    assert_eq!(zoomed_cols, vp.cols(), "zoomed pane should span full width");
     m.handle_command(Command::ZoomToggle).unwrap();
     let restored_cols = m
         .active_window()
@@ -1618,7 +1620,7 @@ async fn zoom_resizes_pane_to_full_then_restores() {
         .unwrap()
         .with_screen(|s| s.active.num_cols());
     assert!(
-        restored_cols < vp.cols,
+        restored_cols < vp.cols(),
         "unzoom should restore the split width"
     );
 }
@@ -1630,10 +1632,20 @@ async fn resize_pane_right_widens_active_pane() {
     let mut m = make_two_pane_manager().await; // vertical split; active = second (right)
     let vp = m.viewport();
     let active = m.active_window().active();
-    let before = m.active_window().layout().rect_of(active, vp).unwrap().cols;
+    let before = m
+        .active_window()
+        .layout()
+        .rect_of(active, vp)
+        .unwrap()
+        .cols();
     m.handle_command(Command::ResizePane(plexy_glass_mux::Direction::Right))
         .unwrap();
-    let after = m.active_window().layout().rect_of(active, vp).unwrap().cols;
+    let after = m
+        .active_window()
+        .layout()
+        .rect_of(active, vp)
+        .unwrap()
+        .cols();
     assert!(
         after >= before,
         "active pane should not shrink when growing right"
@@ -2567,15 +2579,15 @@ async fn swap_marked_cross_window_resizes_both_windows() {
         .pane(PaneId(2))
         .unwrap()
         .with_screen(|s| s.active.num_cols());
-    assert_eq!(c2, r2.cols, "M resized to the full-viewport slot");
-    assert_eq!(c2, vp.cols);
+    assert_eq!(c2, r2.cols(), "M resized to the full-viewport slot");
+    assert_eq!(c2, vp.cols());
     let r0 = m.windows()[1].layout().rect_of(PaneId(0), vp).unwrap();
     let c0 = m.windows()[1]
         .pane(PaneId(0))
         .unwrap()
         .with_screen(|s| s.active.num_cols());
-    assert_eq!(c0, r0.cols, "A resized to the half-width slot");
-    assert!(c0 < vp.cols);
+    assert_eq!(c0, r0.cols(), "A resized to the half-width slot");
+    assert!(c0 < vp.cols());
 }
 
 #[tokio::test]
@@ -3501,7 +3513,7 @@ async fn open_popup_sets_state_with_derived_size() {
         .unwrap()
         .pane
         .with_screen(|s| (s.active.num_rows(), s.active.num_cols()));
-    assert_eq!((rows, cols), (rect.rows - 2, rect.cols - 2));
+    assert_eq!((rows, cols), (rect.rows() - 2, rect.cols() - 2));
     assert_eq!(m.popup().unwrap().title, "popup");
 }
 
@@ -3759,7 +3771,7 @@ async fn host_resize_resizes_popup_pane() {
         .unwrap()
         .pane
         .with_screen(|s| (s.active.num_rows(), s.active.num_cols()));
-    assert_eq!((rows, cols), (rect.rows - 2, rect.cols - 2));
+    assert_eq!((rows, cols), (rect.rows() - 2, rect.cols() - 2));
 }
 
 #[tokio::test]
@@ -3782,15 +3794,15 @@ async fn popup_swallows_clicks_outside_and_keeps_focus() {
     let rect = m.active_window().layout().rect_of(other, vp).unwrap();
     let popup_box = plexy_glass_mux::popup_rect(vp);
     assert!(
-        rect.col < popup_box.col || rect.row + 1 < popup_box.row,
+        rect.col() < popup_box.col() || rect.row() + 1 < popup_box.row(),
         "test premise: click target must be outside the popup box"
     );
     m.handle_mouse(MouseEvent {
         kind: MouseKind::Press,
         button: MouseButton::Left,
         modifiers: plexy_glass_mux::MouseModifiers::default(),
-        row: rect.row + 1 + m.pane_row_offset,
-        col: rect.col,
+        row: rect.row() + 1 + m.pane_row_offset,
+        col: rect.col(),
     })
     .await
     .unwrap();
@@ -3821,8 +3833,8 @@ async fn popup_swallows_interior_click_when_child_has_no_mouse_mode() {
         kind: MouseKind::Press,
         button: MouseButton::Left,
         modifiers: plexy_glass_mux::MouseModifiers::default(),
-        row: rect.row + rect.rows / 2 + m.pane_row_offset,
-        col: rect.col + rect.cols / 2,
+        row: rect.row() + rect.rows() / 2 + m.pane_row_offset,
+        col: rect.col() + rect.cols() / 2,
     })
     .await
     .unwrap();
@@ -4543,7 +4555,7 @@ async fn open_popup_clears_in_flight_pane_drag() {
     let mut m = make_two_pane_manager().await; // `PaneId(0)`, `PaneId(1)`; active = 1
     let vp = m.viewport();
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
-    let (cr, cc) = (r0.row + r0.rows / 2, r0.col + r0.cols / 2);
+    let (cr, cc) = (r0.row() + r0.rows() / 2, r0.col() + r0.cols() / 2);
     // Alt-press inside pane 0 → pane drag begins.
     m.handle_mouse(mev(MouseKind::Press, cr, cc, true))
         .await
@@ -4601,8 +4613,8 @@ async fn alt_drag_swaps_panes_and_focuses_source() {
     let vp = m.viewport();
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
     let r1 = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
-    let (c0r, c0c) = (r0.row + r0.rows / 2, r0.col + r0.cols / 2);
-    let (c1r, c1c) = (r1.row + r1.rows / 2, r1.col + r1.cols / 2);
+    let (c0r, c0c) = (r0.row() + r0.rows() / 2, r0.col() + r0.cols() / 2);
+    let (c1r, c1c) = (r1.row() + r1.rows() / 2, r1.col() + r1.cols() / 2);
 
     // Alt-press in pane 0 → drag begins, source = pane 0.
     m.handle_mouse(mev(MouseKind::Press, c0r, c0c, true))
@@ -4642,7 +4654,7 @@ async fn plain_press_in_pane_does_not_start_drag() {
     let mut m = make_two_pane_manager().await; // active = 1
     let vp = m.viewport();
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
-    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, false))
+    m.handle_mouse(mev(MouseKind::Press, r0.row() + 1, r0.col() + 1, false))
         .await
         .unwrap();
     assert_eq!(m.pane_drag_roles(), None, "no drag without the modifier");
@@ -4658,7 +4670,7 @@ async fn alt_drag_release_on_same_pane_is_noop() {
     let mut m = make_two_pane_manager().await;
     let vp = m.viewport();
     let r1 = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
-    let (cr, cc) = (r1.row + r1.rows / 2, r1.col + r1.cols / 2);
+    let (cr, cc) = (r1.row() + r1.rows() / 2, r1.col() + r1.cols() / 2);
     let before = m.active_window().layout().dfs_leaves();
     m.handle_mouse(mev(MouseKind::Press, cr, cc, true))
         .await
@@ -4680,7 +4692,7 @@ async fn alt_drag_release_off_content_aborts() {
     let vp = m.viewport();
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
     let before = m.active_window().layout().dfs_leaves();
-    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, true))
+    m.handle_mouse(mev(MouseKind::Press, r0.row() + 1, r0.col() + 1, true))
         .await
         .unwrap();
     // Release far off the grid → pane_at_coord None → abort.
@@ -4707,7 +4719,7 @@ async fn alt_drag_preempts_child_mouse_mode() {
     assert!(m.pane_has_any_mouse_mode(PaneId(1)));
     let vp = m.viewport();
     let r1 = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
-    m.handle_mouse(mev(MouseKind::Press, r1.row + 1, r1.col + 1, true))
+    m.handle_mouse(mev(MouseKind::Press, r1.row() + 1, r1.col() + 1, true))
         .await
         .unwrap();
     assert_eq!(
@@ -4808,7 +4820,7 @@ async fn reset_mouse_gestures_clears_in_flight_drag() {
     let mut m = make_two_pane_manager().await;
     let vp = m.viewport();
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
-    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, true))
+    m.handle_mouse(mev(MouseKind::Press, r0.row() + 1, r0.col() + 1, true))
         .await
         .unwrap();
     assert!(m.pane_drag_roles().is_some(), "premise: pane drag started");
@@ -4826,7 +4838,7 @@ async fn open_overlay_clears_in_flight_pane_drag() {
     let mut m = make_two_pane_manager().await; // `PaneId(0)`, `PaneId(1)`; active = 1
     let vp = m.viewport();
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
-    let (cr, cc) = (r0.row + r0.rows / 2, r0.col + r0.cols / 2);
+    let (cr, cc) = (r0.row() + r0.rows() / 2, r0.col() + r0.cols() / 2);
     // Alt-press inside pane 0 → pane drag begins.
     m.handle_mouse(mev(MouseKind::Press, cr, cc, true))
         .await
@@ -4851,7 +4863,7 @@ async fn pane_drag_release_on_status_row_aborts() {
     let vp = m.viewport();
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
     let before = m.active_window().layout().dfs_leaves();
-    m.handle_mouse(mev(MouseKind::Press, r0.row + 1, r0.col + 1, true))
+    m.handle_mouse(mev(MouseKind::Press, r0.row() + 1, r0.col() + 1, true))
         .await
         .unwrap();
     assert!(m.pane_drag_roles().is_some(), "premise: pane drag started");

@@ -116,6 +116,7 @@ impl Emulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coords::{Col, Row};
     use crate::grid::RowMark;
     use crate::screen::pack_da2_version;
 
@@ -126,8 +127,22 @@ mod tests {
         // Force flush so we can observe the trailing grapheme.
         e.parser.flush(&mut e.screen);
         let s = e.screen();
-        assert_eq!(s.active.get_cell(0, 0).unwrap().grapheme.as_str(), "h");
-        assert_eq!(s.active.get_cell(0, 1).unwrap().grapheme.as_str(), "i");
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "h"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(1))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "i"
+        );
     }
 
     #[test]
@@ -138,7 +153,12 @@ mod tests {
         e.resize(4, 16);
         assert_eq!(e.screen().active.num_cols(), 16);
         assert_eq!(
-            e.screen().active.get_cell(0, 0).unwrap().grapheme.as_str(),
+            e.screen()
+                .active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .grapheme
+                .as_str(),
             "h"
         );
     }
@@ -192,7 +212,12 @@ mod tests {
         assert_eq!(e.screen().rows(), 6);
         // Content survived the parked-grid reflow.
         assert_eq!(
-            e.screen().active.get_cell(0, 0).unwrap().grapheme.as_str(),
+            e.screen()
+                .active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .grapheme
+                .as_str(),
             "m"
         );
     }
@@ -263,17 +288,69 @@ mod tests {
         e.advance(b"\x1b[1;1HAAA\x1bEBBBx");
         e.parser.flush(&mut e.screen);
         let s = e.screen();
-        assert_eq!(s.active.get_cell(0, 0).unwrap().grapheme.as_str(), "A");
-        assert_eq!(s.active.get_cell(0, 1).unwrap().grapheme.as_str(), "A");
-        assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "A");
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "A"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(1))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "A"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(2))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "A"
+        );
         assert!(
-            s.active.get_cell(0, 3).unwrap().is_blank(),
+            s.active
+                .get_cell(Row::new(0), Col::new(3))
+                .unwrap()
+                .is_blank(),
             "row 0 must not carry BBBx after NEL"
         );
-        assert_eq!(s.active.get_cell(1, 0).unwrap().grapheme.as_str(), "B");
-        assert_eq!(s.active.get_cell(1, 1).unwrap().grapheme.as_str(), "B");
-        assert_eq!(s.active.get_cell(1, 2).unwrap().grapheme.as_str(), "B");
-        assert_eq!(s.active.get_cell(1, 3).unwrap().grapheme.as_str(), "x");
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(1), Col::new(0))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "B"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(1), Col::new(1))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "B"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(1), Col::new(2))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "B"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(1), Col::new(3))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "x"
+        );
     }
 
     #[test]
@@ -285,17 +362,69 @@ mod tests {
         e.advance(b"\x1b[1;1HAAA\x1bDBBBx");
         e.parser.flush(&mut e.screen);
         let s = e.screen();
-        assert_eq!(s.active.get_cell(0, 0).unwrap().grapheme.as_str(), "A");
-        assert_eq!(s.active.get_cell(0, 1).unwrap().grapheme.as_str(), "A");
-        assert_eq!(s.active.get_cell(0, 2).unwrap().grapheme.as_str(), "A");
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(0))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "A"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(1))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "A"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(0), Col::new(2))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "A"
+        );
         assert!(
-            s.active.get_cell(0, 3).unwrap().is_blank(),
+            s.active
+                .get_cell(Row::new(0), Col::new(3))
+                .unwrap()
+                .is_blank(),
             "row 0 must not carry BBBx after IND"
         );
-        assert_eq!(s.active.get_cell(1, 3).unwrap().grapheme.as_str(), "B");
-        assert_eq!(s.active.get_cell(1, 4).unwrap().grapheme.as_str(), "B");
-        assert_eq!(s.active.get_cell(1, 5).unwrap().grapheme.as_str(), "B");
-        assert_eq!(s.active.get_cell(1, 6).unwrap().grapheme.as_str(), "x");
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(1), Col::new(3))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "B"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(1), Col::new(4))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "B"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(1), Col::new(5))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "B"
+        );
+        assert_eq!(
+            s.active
+                .get_cell(Row::new(1), Col::new(6))
+                .unwrap()
+                .grapheme
+                .as_str(),
+            "x"
+        );
     }
 
     #[test]

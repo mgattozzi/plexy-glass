@@ -6,6 +6,7 @@
 use std::sync::LazyLock;
 
 use plexy_glass_emulator::Screen;
+use plexy_glass_emulator::coords::{Col, Row};
 use regex::Regex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +133,7 @@ fn scan_row(screen: &Screen, row: u16, out: &mut Vec<HintTarget>) {
     let mut line = String::new();
     let mut starts: Vec<(usize, u16)> = Vec::new();
     for col in 0..cols {
-        let Some(cell) = grid.get_cell(row, col) else {
+        let Some(cell) = grid.get_cell(Row::new(row), Col::new(col)) else {
             continue;
         };
         if cell.is_wide_spacer() {
@@ -235,13 +236,20 @@ fn push_hyperlink_spans(screen: &Screen, row: u16, spans: &mut Vec<Span>) {
     let cols = grid.num_cols();
     let mut col = 0u16;
     while col < cols {
-        let id = grid.get_cell(row, col).and_then(|c| c.hyperlink_id);
+        let id = grid
+            .get_cell(Row::new(row), Col::new(col))
+            .and_then(|c| c.hyperlink_id);
         let Some(id) = id else {
             col += 1;
             continue;
         };
         let start = col;
-        while col < cols && grid.get_cell(row, col).and_then(|c| c.hyperlink_id) == Some(id) {
+        while col < cols
+            && grid
+                .get_cell(Row::new(row), Col::new(col))
+                .and_then(|c| c.hyperlink_id)
+                == Some(id)
+        {
             col += 1;
         }
         if let Some(url) = screen.hyperlinks.get(id) {

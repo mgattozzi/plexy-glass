@@ -74,12 +74,12 @@ impl WindowManager {
         if let Some(popup) = self.popup.as_ref() {
             let event = self.to_pane_coords(event);
             let rect = plexy_glass_mux::popup_rect(self.viewport());
-            let interior = rect.rows >= 3
-                && rect.cols >= 3
-                && event.row > rect.row
-                && event.row < rect.row + rect.rows - 1
-                && event.col > rect.col
-                && event.col < rect.col + rect.cols - 1;
+            let interior = rect.rows() >= 3
+                && rect.cols() >= 3
+                && event.row > rect.row()
+                && event.row < rect.row() + rect.rows() - 1
+                && event.col > rect.col()
+                && event.col < rect.col() + rect.cols() - 1;
             if !interior {
                 return Ok(None);
             }
@@ -87,8 +87,8 @@ impl WindowManager {
                 return Ok(None);
             }
             let mut local = event;
-            local.row = event.row - rect.row - 1;
-            local.col = event.col - rect.col - 1;
+            local.row = event.row - rect.row() - 1;
+            local.col = event.col - rect.col() - 1;
             let encoding = popup.pane.with_screen(|s| mouse_encoding_for(s.modes));
             let bytes = encode_for_child(local, encoding);
             let pane = popup.pane.clone();
@@ -422,8 +422,8 @@ impl WindowManager {
             .rect_of(pane_id, viewport)
             .unwrap_or(viewport);
         let mut local = event;
-        local.row = event.row.saturating_sub(rect.row);
-        local.col = event.col.saturating_sub(rect.col);
+        local.row = event.row.saturating_sub(rect.row());
+        local.col = event.col.saturating_sub(rect.col());
         let Some(pane) = self.active_window().pane(pane_id).cloned() else {
             return Ok(None);
         };
@@ -530,8 +530,8 @@ impl WindowManager {
                 return Ok(());
             }
             let mut local = event;
-            local.row = event.row.saturating_sub(rect.row);
-            local.col = event.col.saturating_sub(rect.col);
+            local.row = event.row.saturating_sub(rect.row());
+            local.col = event.col.saturating_sub(rect.col());
             let encoding = mouse_encoding_for(modes);
             let bytes = encode_for_child(local, encoding);
             let _ = pane.send_input(bytes::Bytes::from(bytes)).await;
@@ -624,8 +624,8 @@ impl WindowManager {
             .layout()
             .rect_of(pane_id, viewport)
             .unwrap_or(viewport);
-        let local_row = event.row.saturating_sub(pane_rect.row);
-        let local_col = event.col.saturating_sub(pane_rect.col);
+        let local_row = event.row.saturating_sub(pane_rect.row());
+        let local_col = event.col.saturating_sub(pane_rect.col());
 
         // Shift+left-click EXTENDS the existing selection in this pane
         // instead of starting a new one.
@@ -776,8 +776,8 @@ impl WindowManager {
         let Some(pane_rect) = self.active_window().layout().rect_of(source_pane, viewport) else {
             return;
         };
-        let local_row = event.row.saturating_sub(pane_rect.row);
-        let local_col = event.col.saturating_sub(pane_rect.col);
+        let local_row = event.row.saturating_sub(pane_rect.row());
+        let local_col = event.col.saturating_sub(pane_rect.col());
         if let Some(sel) = self.selection.as_mut() {
             sel.extend(local_row, local_col, pane_rect);
         }

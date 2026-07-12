@@ -43,12 +43,13 @@ fn ind_matches_lf_position_away_from_bottom_margin(tc: TestCase) {
         "IND must land at the same cursor position as a single LF"
     );
     assert_eq!(
-        ind_screen.cursor.row,
+        ind_screen.cursor.row.get(),
         row + 1,
         "IND must move exactly one row down"
     );
     assert_eq!(
-        ind_screen.cursor.col, col,
+        ind_screen.cursor.col.get(),
+        col,
         "IND must preserve the column (no carriage return)"
     );
 }
@@ -73,7 +74,7 @@ fn nel_matches_cr_then_ind(tc: TestCase) {
         (nel.cursor.row, nel.cursor.col),
         "NEL must land at the same cursor position as CR followed by IND"
     );
-    assert_eq!(nel.cursor.col, 0, "NEL must reset the column to 0");
+    assert_eq!(nel.cursor.col.get(), 0, "NEL must reset the column to 0");
 }
 
 /// P3: Under any sequence of {CUU, CUD, CR, LF, IND, NEL}, the cursor row never
@@ -107,7 +108,7 @@ fn cursor_row_stays_in_bounds_under_vertical_motion_sequence(tc: TestCase) {
         "rows={rows} cols={cols} steps={steps} log={log:?}"
     ));
 
-    let row = e.screen().cursor.row;
+    let row = e.screen().cursor.row.get();
     assert!(
         row < rows,
         "cursor row {row} must stay within [0, {rows}) after {log:?}"

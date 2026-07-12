@@ -17,7 +17,7 @@ use crate::line::{ScrollOffset, UnifiedLine, VisibleLine};
 use crate::overlay::{PickerEntry, picker_filtered_indices};
 use crate::palette::PaletteState;
 use crate::pane_id::PaneId;
-use crate::rect::Rect;
+use crate::rect::{Point, Rect, Size};
 use crate::selection::Selection;
 use crate::status::StatusLine;
 use crate::tree::TreeState;
@@ -44,7 +44,7 @@ impl FoldCtx {
     /// Build for a pane. The live view and **block mode** honour folds; copy mode
     /// renders expanded (raw text for selection).
     fn for_view(view: &PaneView<'_>) -> Self {
-        let rows = u32::from(view.rect.rows);
+        let rows = u32::from(view.rect.rows());
         // Copy mode: identity projection, the prior viewport_top behavior.
         if view.copy_mode.is_some() {
             let proj = FoldProjection::identity(blocks::total_lines(view.screen));
@@ -147,13 +147,13 @@ const MIN_POPUP_COLS: u16 = 12;
 pub fn popup_rect(pane_area: Rect) -> Rect {
     // invariant: rows/cols are u16, so (u32 * 8) / 10 < u16::MAX and the
     // narrowing back to u16 cannot truncate.
-    let want_rows = u16::try_from((u32::from(pane_area.rows) * 8) / 10).unwrap_or(u16::MAX);
-    let want_cols = u16::try_from((u32::from(pane_area.cols) * 8) / 10).unwrap_or(u16::MAX);
-    let rows = want_rows.max(MIN_POPUP_ROWS).min(pane_area.rows);
-    let cols = want_cols.max(MIN_POPUP_COLS).min(pane_area.cols);
-    let row = pane_area.row + (pane_area.rows - rows) / 2;
-    let col = pane_area.col + (pane_area.cols - cols) / 2;
-    Rect::new(row, col, rows, cols)
+    let want_rows = u16::try_from((u32::from(pane_area.rows()) * 8) / 10).unwrap_or(u16::MAX);
+    let want_cols = u16::try_from((u32::from(pane_area.cols()) * 8) / 10).unwrap_or(u16::MAX);
+    let rows = want_rows.max(MIN_POPUP_ROWS).min(pane_area.rows());
+    let cols = want_cols.max(MIN_POPUP_COLS).min(pane_area.cols());
+    let row = pane_area.row() + (pane_area.rows() - rows) / 2;
+    let col = pane_area.col() + (pane_area.cols() - cols) / 2;
+    Rect::new(Point::new(row, col), Size::new(rows, cols))
 }
 
 /// Where the status bar sits relative to the pane area.
@@ -319,10 +319,10 @@ pub fn compose(
     // command rows are dimmed so a fold reads as folded, not as a no-output run.
     for view in panes {
         let ctx = &fold_ctx[&view.id];
-        let max_r = view.rect.rows;
-        let max_c = view.rect.cols.min(view.screen.active.num_cols());
+        let max_r = view.rect.rows();
+        let max_c = view.rect.cols().min(view.screen.active.num_cols());
         for r in 0..max_r {
-            if view.rect.row.saturating_add(r) >= pane_area_rows {
+            if view.rect.row().saturating_add(r) >= pane_area_rows {
                 continue;
             }
             let Some(line) = ctx.line_at(r) else { continue };
@@ -336,7 +336,7 @@ pub fn compose(
             // skip the per-cell check for every other pane (finding #3).
             let refold = !view.screen.virtual_placements.is_empty();
             for c in 0..max_c {
-                if view.rect.col.saturating_add(c) >= host_cols {
+                if view.rect.col().saturating_add(c) >= host_cols {
                     continue;
                 }
                 if let Some(cell) = cells.get(c as usize) {
@@ -350,8 +350,8 @@ pub fn compose(
                         refold_placeholder_cell(&mut cell, view.id.0);
                     }
                     screen.put(
-                        pane_row_offset + view.rect.row.saturating_add(r),
-                        view.rect.col.saturating_add(c),
+                        pane_row_offset + view.rect.row().saturating_add(r),
+                        view.rect.col().saturating_add(c),
                         cell,
                     );
                 }
@@ -365,8 +365,8 @@ pub fn compose(
     {
         let cols = view.screen.active.num_cols();
         for (row, col) in sel.cells(cols) {
-            let logical_r = view.rect.row.saturating_add(row);
-            let host_c = view.rect.col.saturating_add(col);
+            let logical_r = view.rect.row().saturating_add(row);
+            let host_c = view.rect.col().saturating_add(col);
             if logical_r >= pane_area_rows || host_c >= host_cols {
                 continue;
             }
@@ -387,24 +387,24 @@ pub fn compose(
             (cm.cursor, anchor)
         };
         let viewport_lo = cm.viewport_top;
-        let viewport_hi = cm.viewport_top + u32::from(view.rect.rows);
+        let viewport_hi = cm.viewport_top + u32::from(view.rect.rows());
         for line in start.0..=end.0 {
             if line < viewport_lo || line >= viewport_hi {
                 continue;
             }
             let local_row = (line - viewport_lo) as u16;
-            let host_r = pane_row_offset + view.rect.row + local_row;
+            let host_r = pane_row_offset + view.rect.row() + local_row;
             // Clamp to the pane's own columns: `cm.cursor`/`anchor` cols are captured
             // against the grid width that was live when the user navigated, so a
             // column-shrinking resize while copy mode stays open can leave a col
             // past the pane rect. `cell_mut` is only bounds-safe against the whole
             // host screen, so without this the REVERSE would bleed onto the pane
             // border / a neighbour (mirrors the search-highlight + content paths).
-            let last = view.rect.cols.saturating_sub(1);
+            let last = view.rect.cols().saturating_sub(1);
             let row_start = if line == start.0 { start.1 } else { 0 }.min(last);
             let row_end = if line == end.0 { end.1 } else { last }.min(last);
             for c in row_start..=row_end {
-                let host_c = view.rect.col + c;
+                let host_c = view.rect.col() + c;
                 if host_c >= host_cols {
                     break;
                 }
@@ -422,22 +422,22 @@ pub fn compose(
             continue;
         }
         let viewport_lo = cm.viewport_top;
-        let viewport_hi = cm.viewport_top + u32::from(view.rect.rows);
+        let viewport_hi = cm.viewport_top + u32::from(view.rect.rows());
         for m in &cm.search.matches {
             if m.line_idx < viewport_lo || m.line_idx >= viewport_hi {
                 continue;
             }
             let local_row = (m.line_idx - viewport_lo) as u16;
-            let host_r = pane_row_offset + view.rect.row + local_row;
+            let host_r = pane_row_offset + view.rect.row() + local_row;
             // Clamp to the pane's own columns: a match's `col_end` is captured
             // at search time against the grid width, so a column-shrinking
             // resize while copy mode stays open can leave `col_end` past the
             // pane rect. `cell_mut` is only bounds-safe against the whole host
             // screen, so without this the HIGHLIGHT would bleed onto the
             // pane border / a neighbouring pane (mirrors the content path).
-            let last_col = m.col_end.min(view.rect.cols.saturating_sub(1));
+            let last_col = m.col_end.min(view.rect.cols().saturating_sub(1));
             for c in m.col_start..=last_col {
-                let host_c = view.rect.col + c;
+                let host_c = view.rect.col() + c;
                 if host_c >= host_cols {
                     break;
                 }
@@ -466,16 +466,16 @@ pub fn compose(
 
         // Dim: any display row whose governing block is not a match (including
         // rows with no governing prompt) gets DIM on its content cells.
-        for r in 0..view.rect.rows {
+        for r in 0..view.rect.rows() {
             let Some(line) = ctx.line_at(r) else { continue };
             let is_match = blocks::prompt_at_or_above(view.screen, line)
                 .is_some_and(|p| filter.matches.contains(&p));
             if is_match {
                 continue;
             }
-            let host_r = pane_row_offset + view.rect.row + r;
-            for c in 0..view.rect.cols {
-                let host_c = view.rect.col + c;
+            let host_r = pane_row_offset + view.rect.row() + r;
+            for c in 0..view.rect.cols() {
+                let host_c = view.rect.col() + c;
                 if let Some(cell) = screen.cell_mut(host_r, host_c) {
                     cell.attrs |= plexy_glass_emulator::Attrs::DIM;
                 }
@@ -483,15 +483,15 @@ pub fn compose(
         }
 
         // Highlight: query occurrences on each visible display row's unified line.
-        for r in 0..view.rect.rows {
+        for r in 0..view.rect.rows() {
             let Some(line) = ctx.line_at(r) else { continue };
-            let host_r = pane_row_offset + view.rect.row + r;
+            let host_r = pane_row_offset + view.rect.row() + r;
             for (_, col_start, col_end) in
                 filter_match_spans(view.screen, &filter.query, line, line + 1)
             {
-                let last_col = col_end.min(view.rect.cols.saturating_sub(1));
+                let last_col = col_end.min(view.rect.cols().saturating_sub(1));
                 for c in col_start..=last_col {
-                    let host_c = view.rect.col + c;
+                    let host_c = view.rect.col() + c;
                     if host_c >= host_cols {
                         break;
                     }
@@ -507,12 +507,18 @@ pub fn compose(
     // frame lands on the physical pane band (matters for top status). The
     // band is the whole physical pane area; the layout already inset pane
     // rects by one cell on every side to leave room for the frame.
-    let band = Rect::new(pane_row_offset, 0, pane_area_rows, host_cols);
+    let band = Rect::new(
+        Point::new(pane_row_offset, 0),
+        Size::new(pane_area_rows, host_cols),
+    );
     let frames: Vec<borders::PaneFrame<'_>> = panes
         .iter()
         .map(|v| {
-            let mut r = v.rect;
-            r.row = r.row.saturating_add(pane_row_offset);
+            let base = v.rect;
+            let r = Rect::new(
+                Point::new(base.row().saturating_add(pane_row_offset), base.col()),
+                base.size(),
+            );
             // Same fold context as the content copy, so block status and the
             // selection bracket agree with what's painted. `top` is the VISIBLE
             // top line; block extents map into visible space through `ctx.proj`.
@@ -523,10 +529,10 @@ pub fn compose(
             } else if ctx.proj.is_identity() {
                 // No folds: the single-pass scan (display row r == unified top+r,
                 // and identity means visible top == unified top).
-                viewport_block_status(v.screen, top.get(), v.rect.rows)
+                viewport_block_status(v.screen, top.get(), v.rect.rows())
             } else {
                 // Folded: status per display row through the projection.
-                (0..v.rect.rows)
+                (0..v.rect.rows())
                     .map(|r| {
                         ctx.line_at(r)
                             .and_then(|line| block_status_at(v.screen, line))
@@ -539,7 +545,7 @@ pub fn compose(
             // marks belong to the main grid. Mirrors `viewport_block_status`'s
             // alt guard. The 0-row guard keeps the `vp_end - 1` math total.)
             let selected_block = v.block_mode.and_then(|bm| {
-                if v.rect.rows == 0 || v.screen.alt.is_some() {
+                if v.rect.rows() == 0 || v.screen.alt.is_some() {
                     return None;
                 }
                 let (u_start, u_end_full) = blocks::block_extent(v.screen, bm.selected);
@@ -556,7 +562,7 @@ pub fn compose(
                 // Map to visible display rows (prompt + command rows are never folded).
                 let vs = ctx.proj.from_unified(UnifiedLine::new(u_start))?;
                 let ve = ctx.proj.from_unified(UnifiedLine::new(u_end))?;
-                let vp_end = top.advance(u32::from(v.rect.rows)); // exclusive, visible
+                let vp_end = top.advance(u32::from(v.rect.rows())); // exclusive, visible
                 if ve < top || vs >= vp_end {
                     return None; // block entirely off-screen
                 }
@@ -600,8 +606,8 @@ pub fn compose(
         let ctx = &fold_ctx[&v.id];
         let threshold = blocks.and_then(|b| b.duration_threshold);
         let duration_on = threshold.is_some() && v.copy_mode.is_none();
-        for r in 0..v.rect.rows {
-            if v.rect.row.saturating_add(r) >= pane_area_rows {
+        for r in 0..v.rect.rows() {
+            if v.rect.row().saturating_add(r) >= pane_area_rows {
                 continue;
             }
             let Some(line) = ctx.line_at(r) else { continue };
@@ -642,23 +648,24 @@ pub fn compose(
                 (None, None) => continue,
             };
             let sw = display_width(&annotation);
-            let host_row = pane_row_offset + v.rect.row + r;
-            let pane_right = (v.rect.col + v.rect.cols).min(host_cols);
-            if pane_right <= v.rect.col + sw {
+            let host_row = pane_row_offset + v.rect.row() + r;
+            let pane_right = (v.rect.col() + v.rect.cols()).min(host_cols);
+            if pane_right <= v.rect.col() + sw {
                 continue; // pane too narrow for the annotation
             }
             let start_col = pane_right - sw;
             // Don't overwrite the command text: scan the WHOLE pane row (including
             // the annotation columns) for the command's right edge; omit the
             // annotation when the command reaches into (or within one cell of) it.
-            let cmd_end = (v.rect.col..pane_right)
+            let pane_col = v.rect.col();
+            let cmd_end = (pane_col..pane_right)
                 .rev()
                 .find(|&c| {
                     screen
                         .cell(host_row, c)
                         .is_some_and(|cell| !cell.is_blank())
                 })
-                .map_or(v.rect.col, |c| c + 1);
+                .map_or(pane_col, |c| c + 1);
             if cmd_end >= start_col {
                 continue; // command fills the row up to the annotation → omit
             }
@@ -702,7 +709,7 @@ pub fn compose(
             {
                 continue;
             }
-            if v.rect.row >= pane_area_rows {
+            if v.rect.row() >= pane_area_rows {
                 continue;
             }
             let ctx = &fold_ctx[&v.id];
@@ -718,11 +725,11 @@ pub fn compose(
             let Some(cmd) = blocks::block_command_line(v.screen, prompt) else {
                 continue;
             };
-            let host_row = pane_row_offset + v.rect.row;
-            let pane_right = (v.rect.col + v.rect.cols).min(host_cols);
+            let host_row = pane_row_offset + v.rect.row();
+            let pane_right = (v.rect.col() + v.rect.cols()).min(host_cols);
             // Replace the row's content with the dimmed command line, no bright
             // bar: the cleared cells keep the theme background.
-            for c in v.rect.col..pane_right {
+            for c in v.rect.col()..pane_right {
                 if let Some(cell) = screen.cell_mut(host_row, c) {
                     *cell = plexy_glass_emulator::Cell::default();
                 }
@@ -730,7 +737,7 @@ pub fn compose(
             let cmd_end = put_str(
                 &mut screen,
                 host_row,
-                v.rect.col,
+                v.rect.col(),
                 &cmd,
                 Attrs::DIM,
                 pane_right,
@@ -742,7 +749,7 @@ pub fn compose(
             }) {
                 let d = blocks::format_duration(ms);
                 let dw = display_width(&d);
-                if pane_right > v.rect.col + dw {
+                if pane_right > v.rect.col() + dw {
                     let start_col = pane_right - dw;
                     if cmd_end < start_col {
                         put_str(&mut screen, host_row, start_col, &d, Attrs::DIM, pane_right);
@@ -771,8 +778,8 @@ pub fn compose(
             let top = ctx.top_visible;
             // Pane bottom in visible viewport rows, also bounded by the logical
             // pane band (so a tall image can't paint over the status bar).
-            let band_rows = u32::from(pane_area_rows.saturating_sub(v.rect.row));
-            let vis_bottom_local = u32::from(v.rect.rows).min(band_rows);
+            let band_rows = u32::from(pane_area_rows.saturating_sub(v.rect.row()));
+            let vis_bottom_local = u32::from(v.rect.rows()).min(band_rows);
             for p in &v.screen.placements {
                 let Some(img) = v.screen.images.get(p.image_id) else {
                     continue; // image evicted, skip
@@ -793,14 +800,14 @@ pub fn compose(
                 let rows_off = vis_top.saturating_delta(img_top) as u16; // image rows hidden above
                 let vis_rows = vis_bot.saturating_delta(vis_top) as u16;
                 // Horizontal: clip the cell box to the pane's columns.
-                let avail_cols = v.rect.cols.saturating_sub(p.col);
+                let avail_cols = v.rect.cols().saturating_sub(p.col);
                 let vis_cols = p.cols.min(avail_cols);
                 if vis_cols == 0 {
                     continue;
                 }
                 let local_row = vis_top.saturating_delta(top) as u16;
-                let host_row = pane_row_offset + v.rect.row + local_row;
-                let host_col = v.rect.col + p.col;
+                let host_row = pane_row_offset + v.rect.row() + local_row;
+                let host_col = v.rect.col() + p.col;
                 // Source pixel crop, proportional to the cell clip.
                 let (src_y, src_h) = crop_axis(img.pixel_h, p.rows, rows_off, vis_rows);
                 let (src_x, src_w) = crop_axis(img.pixel_w, p.cols, 0, vis_cols);
@@ -878,29 +885,30 @@ pub fn compose(
     if let Some(active) = panes.iter().find(|v| v.is_active) {
         let cursor_pos = if let Some(cm) = active.copy_mode {
             if cm.cursor.0 >= cm.viewport_top
-                && cm.cursor.0 < cm.viewport_top + u32::from(active.rect.rows)
+                && cm.cursor.0 < cm.viewport_top + u32::from(active.rect.rows())
             {
                 let local_row = (cm.cursor.0 - cm.viewport_top) as u16;
-                let host_r = active.rect.row.saturating_add(local_row);
-                let host_c = active.rect.col.saturating_add(cm.cursor.1);
+                let host_r = active.rect.row().saturating_add(local_row);
+                let host_c = active.rect.col().saturating_add(cm.cursor.1);
                 Some((host_r, host_c))
             } else {
                 None
             }
         } else {
             let cur = &active.screen.cursor;
-            let c = active.rect.col.saturating_add(cur.col);
+            let c = active.rect.col().saturating_add(cur.col.get());
             // Live panes map the cursor's unified line through the fold
             // context (folds above it shift it up; a folded/off-screen cursor
             // hides). Copy/block panes keep the prior active-grid placement.
             let local_row = if active.copy_mode.is_none() && active.block_mode.is_none() {
                 let sb_len = active.screen.scrollback.len() as u32;
-                fold_ctx[&active.id].display_row(sb_len + u32::from(cur.row), active.rect.rows)
+                fold_ctx[&active.id]
+                    .display_row(sb_len + u32::from(cur.row.get()), active.rect.rows())
             } else {
-                Some(cur.row)
+                Some(cur.row.get())
             };
             local_row.and_then(|lr| {
-                let r = active.rect.row.saturating_add(lr);
+                let r = active.rect.row().saturating_add(lr);
                 (r < pane_area_rows && c < host_cols).then_some((r, c))
             })
         };
@@ -928,14 +936,14 @@ pub fn compose(
         && let Some(cm) = active.copy_mode
         && cm.search.prompt_active
     {
-        let prompt_row = pane_row_offset + active.rect.row + active.rect.rows.saturating_sub(1);
+        let prompt_row = pane_row_offset + active.rect.row() + active.rect.rows().saturating_sub(1);
         let mut text = String::from("/");
         text.push_str(&cm.search.prompt_buf);
         let prompt_attrs = plexy_glass_emulator::Attrs::REVERSE;
         put_str(
             &mut screen,
             prompt_row,
-            active.rect.col,
+            active.rect.col(),
             &text,
             prompt_attrs,
             host_cols,
@@ -949,7 +957,7 @@ pub fn compose(
         && filter.prompt_active
     {
         let total = blocks::all_prompt_lines(active.screen).len();
-        let prompt_row = pane_row_offset + active.rect.row + active.rect.rows.saturating_sub(1);
+        let prompt_row = pane_row_offset + active.rect.row() + active.rect.rows().saturating_sub(1);
         let text = format!(
             "filter: {} ({}/{})",
             filter.query,
@@ -959,7 +967,7 @@ pub fn compose(
         put_str(
             &mut screen,
             prompt_row,
-            active.rect.col,
+            active.rect.col(),
             &text,
             plexy_glass_emulator::Attrs::REVERSE,
             host_cols,
@@ -1135,7 +1143,7 @@ fn effective_scroll_for(view: &PaneView<'_>) -> ScrollOffset {
             ScrollOffset::new(
                 total_lines
                     .saturating_sub(vt)
-                    .saturating_sub(u32::from(view.rect.rows)),
+                    .saturating_sub(u32::from(view.rect.rows())),
             )
         }
         None => view.scroll_offset,
@@ -1274,7 +1282,8 @@ fn paint_overlay(
             // Hint mode is pane-scoped: dim and label the FOCUSED pane only, at
             // its rect origin. Fall back to the full pane band if (impossibly)
             // there's no active pane.
-            let rect = active_rect.unwrap_or_else(|| Rect::new(0, 0, pane_area_rows, cols));
+            let rect = active_rect
+                .unwrap_or_else(|| Rect::new(Point::new(0, 0), Size::new(pane_area_rows, cols)));
             paint_hint(screen, state, *colors, pane_row_offset, rect, cols);
             screen.cursor_visible = false;
         }
@@ -1854,26 +1863,26 @@ fn paint_hint(
     // rect origin. Without that the labels land at the screen origin, i.e. in
     // whatever pane sits at column 0. Both the dim wash and the labels stay
     // inside the focused pane's rect.
-    for r in 0..rect.rows {
-        for c in 0..rect.cols {
-            let col = rect.col + c;
+    for r in 0..rect.rows() {
+        for c in 0..rect.cols() {
+            let col = rect.col() + c;
             if col >= host_cols {
                 break;
             }
-            if let Some(cell) = screen.cell_mut(pane_row_offset + rect.row + r, col) {
+            if let Some(cell) = screen.cell_mut(pane_row_offset + rect.row() + r, col) {
                 cell.attrs |= Attrs::DIM;
             }
         }
     }
-    let clip = (rect.col + rect.cols).min(host_cols);
+    let clip = (rect.col() + rect.cols()).min(host_cols);
     let typed_len = state.typed.len();
     for (label, target) in state.visible() {
         let (trow, tcol) = target.start;
-        if trow >= rect.rows || tcol >= rect.cols {
+        if trow >= rect.rows() || tcol >= rect.cols() {
             continue;
         }
-        let r = pane_row_offset + rect.row + trow;
-        let base_col = rect.col + tcol;
+        let r = pane_row_offset + rect.row() + trow;
+        let base_col = rect.col() + tcol;
         let pre = &label[..typed_len.min(label.len())];
         let suf = &label[typed_len.min(label.len())..];
         let after = put_colored(
@@ -2132,24 +2141,24 @@ fn paint_popup(
     // shape the user set in a different pane.
     screen.cursor_style = None;
     let rect = popup.rect;
-    if rect.rows < 3 || rect.cols < 3 {
+    if rect.rows() < 3 || rect.cols() < 3 {
         return;
     }
-    if rect.row.saturating_add(rect.rows) > pane_area_rows
-        || rect.col.saturating_add(rect.cols) > cols
+    if rect.row().saturating_add(rect.rows()) > pane_area_rows
+        || rect.col().saturating_add(rect.cols()) > cols
     {
         // Stale geometry mid-resize; skip this frame rather than overflow.
         return;
     }
     let attrs = plexy_glass_emulator::Attrs::empty();
     // Border frame + cleared interior.
-    for r in 0..rect.rows {
-        for c in 0..rect.cols {
-            let ch = border_glyph(r, c, rect.rows, rect.cols);
+    for r in 0..rect.rows() {
+        for c in 0..rect.cols() {
+            let ch = border_glyph(r, c, rect.rows(), rect.cols());
             put_char(
                 screen,
-                pane_row_offset + rect.row + r,
-                rect.col + c,
+                pane_row_offset + rect.row() + r,
+                rect.col() + c,
                 ch,
                 attrs,
             );
@@ -2157,20 +2166,20 @@ fn paint_popup(
     }
     // Title centered on the top border.
     let title = format!(" {} ", popup.title);
-    let inner_w = rect.cols - 2;
+    let inner_w = rect.cols() - 2;
     let tw = display_width(&title);
-    let tcol = rect.col + 1 + inner_w.saturating_sub(tw) / 2;
+    let tcol = rect.col() + 1 + inner_w.saturating_sub(tw) / 2;
     put_str(
         screen,
-        pane_row_offset + rect.row,
+        pane_row_offset + rect.row(),
         tcol,
         &title,
         attrs,
-        rect.col + rect.cols - 1,
+        rect.col() + rect.cols() - 1,
     );
     // Interior: the popup pane's grid.
-    let max_r = (rect.rows - 2).min(popup.screen.active.num_rows());
-    let max_c = (rect.cols - 2).min(popup.screen.active.num_cols());
+    let max_r = (rect.rows() - 2).min(popup.screen.active.num_rows());
+    let max_c = (rect.cols() - 2).min(popup.screen.active.num_cols());
     for r in 0..max_r {
         let Some(row) = popup.screen.active.rows.get(r as usize) else {
             continue;
@@ -2178,8 +2187,8 @@ fn paint_popup(
         for c in 0..max_c {
             if let Some(cell) = row.cells.get(c as usize) {
                 screen.put(
-                    pane_row_offset + rect.row + 1 + r,
-                    rect.col + 1 + c,
+                    pane_row_offset + rect.row() + 1 + r,
+                    rect.col() + 1 + c,
                     cell.clone(),
                 );
             }
@@ -2190,13 +2199,13 @@ fn paint_popup(
     // Alt screen → `viewport_block_status` already returns all-None, so no extra
     // guard is needed here.
     if let Some(colors) = blocks {
-        let interior_rows = rect.rows - 2;
+        let interior_rows = rect.rows() - 2;
         let top = popup.screen.scrollback.len() as u32;
         let statuses = viewport_block_status(popup.screen, top, interior_rows);
         for (r, status) in statuses.into_iter().enumerate() {
             let Some(status) = status else { continue };
-            let border_row = pane_row_offset + rect.row + 1 + r as u16;
-            let border_col = rect.col;
+            let border_row = pane_row_offset + rect.row() + 1 + r as u16;
+            let border_col = rect.col();
             // Clip: don't paint outside the box or the screen.
             if border_row >= pane_area_rows.saturating_add(pane_row_offset) || border_col >= cols {
                 continue;
@@ -2221,10 +2230,10 @@ fn paint_popup(
     }
     // Focused popup: its child cursor wins (translated to the interior).
     let cur = &popup.screen.cursor;
-    if cur.row < rect.rows - 2 && cur.col < rect.cols - 2 {
+    if cur.row.get() < rect.rows() - 2 && cur.col.get() < rect.cols() - 2 {
         screen.cursor = Some((
-            pane_row_offset + rect.row + 1 + cur.row,
-            rect.col + 1 + cur.col,
+            pane_row_offset + rect.row() + 1 + cur.row.get(),
+            rect.col() + 1 + cur.col.get(),
         ));
     } else {
         // Resize race: the popup grid momentarily exceeds the interior. No
@@ -2475,7 +2484,7 @@ mod tests {
         pane(&mut e, b"hi ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 6),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 6)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -2509,7 +2518,7 @@ mod tests {
         pane(&mut e, b"hi \x1b[5 q");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 6),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 6)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -2544,7 +2553,7 @@ mod tests {
         pane(&mut e, b"hi \x1b[5 q");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 6),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 6)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -2581,23 +2590,23 @@ mod tests {
     #[test]
     fn popup_rect_is_80pct_centered() {
         // Band like a 24x80 host: `host_viewport` → (1,1,21,78).
-        let band = Rect::new(1, 1, 21, 78);
+        let band = Rect::new(Point::new(1, 1), Size::new(21, 78));
         let r = popup_rect(band);
-        assert_eq!((r.rows, r.cols), (16, 62)); // floor(21*0.8), floor(78*0.8)
-        assert_eq!(r.row, 1 + (21 - 16) / 2);
-        assert_eq!(r.col, 1 + (78 - 62) / 2);
+        assert_eq!((r.rows(), r.cols()), (16, 62)); // floor(21*0.8), floor(78*0.8)
+        assert_eq!(r.row(), 1 + (21 - 16) / 2);
+        assert_eq!(r.col(), 1 + (78 - 62) / 2);
     }
 
     #[test]
     fn popup_rect_clamps_to_min_and_band() {
         // Tiny band: the min box is 5x12 but the band caps it.
-        let band = Rect::new(0, 0, 4, 10);
+        let band = Rect::new(Point::new(0, 0), Size::new(4, 10));
         let r = popup_rect(band);
-        assert_eq!((r.rows, r.cols), (4, 10));
+        assert_eq!((r.rows(), r.cols()), (4, 10));
         // Small-but-roomy band: the 5x12 minimum wins over 80%.
-        let band = Rect::new(0, 0, 6, 14);
+        let band = Rect::new(Point::new(0, 0), Size::new(6, 14));
         let r = popup_rect(band);
-        assert_eq!((r.rows, r.cols), (5, 12));
+        assert_eq!((r.rows(), r.cols()), (5, 12));
     }
 
     #[test]
@@ -2609,7 +2618,7 @@ mod tests {
         pane(&mut e, b"\x1b[4;12HUNDERNEATH ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 10, 40),
+            rect: Rect::new(Point::new(0, 0), Size::new(10, 40)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -2622,7 +2631,7 @@ mod tests {
         // Popup pane: 6x20 grid showing "hi".
         let mut pe = Emulator::new(6, 20);
         pane(&mut pe, b"hi ");
-        let rect = Rect::new(2, 10, 8, 22); // interior 6x20
+        let rect = Rect::new(Point::new(2, 10), Size::new(8, 22)); // interior 6x20
         let pv = PopupView {
             rect,
             screen: pe.screen(),
@@ -2669,7 +2678,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 9, 40),
+            rect: Rect::new(Point::new(0, 0), Size::new(9, 40)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -2681,7 +2690,7 @@ mod tests {
         };
         let mut pe = Emulator::new(3, 10);
         pane(&mut pe, b"p ");
-        let rect = Rect::new(2, 10, 5, 12); // interior 3x10
+        let rect = Rect::new(Point::new(2, 10), Size::new(5, 12)); // interior 3x10
         let pv = PopupView {
             rect,
             screen: pe.screen(),
@@ -2719,7 +2728,7 @@ mod tests {
         pane(&mut e, b"hello ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 6),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 6)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -2730,7 +2739,7 @@ mod tests {
             drag_role: PaneDragRole::None,
         };
         let mut sel = Selection::start(PaneId(0), 0, 0);
-        sel.extend(0, 4, Rect::new(0, 0, 4, 6));
+        sel.extend(0, 4, Rect::new(Point::new(0, 0), Size::new(4, 6)));
         let vs = compose(
             &[view],
             (4, 6),
@@ -2765,7 +2774,7 @@ mod tests {
         pane(&mut right, b"R ");
         let lv = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 3),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 3)),
             screen: left.screen(),
             is_active: false,
             scroll_offset: ScrollOffset::new(0),
@@ -2777,7 +2786,7 @@ mod tests {
         };
         let rv = PaneView {
             id: PaneId(1),
-            rect: Rect::new(0, 4, 4, 3),
+            rect: Rect::new(Point::new(0, 4), Size::new(4, 3)),
             screen: right.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -2816,7 +2825,7 @@ mod tests {
         pane(&mut right, b"R ");
         let lv = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 3),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 3)),
             screen: left.screen(),
             is_active: false,
             scroll_offset: ScrollOffset::new(0),
@@ -2828,7 +2837,7 @@ mod tests {
         };
         let rv = PaneView {
             id: PaneId(1),
-            rect: Rect::new(0, 4, 4, 3),
+            rect: Rect::new(Point::new(0, 4), Size::new(4, 3)),
             screen: right.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -2905,7 +2914,7 @@ mod tests {
         let s = e.screen().clone();
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 2, 4),
+            rect: Rect::new(Point::new(0, 0), Size::new(2, 4)),
             screen: &s,
             is_active: true,
             scroll_offset: ScrollOffset::new(1),
@@ -2951,7 +2960,7 @@ mod tests {
         };
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 20),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 20)),
             screen: &screen,
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -2993,7 +3002,7 @@ mod tests {
         };
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 20),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 20)),
             screen: &screen,
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3051,7 +3060,7 @@ mod tests {
         };
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 20),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 20)),
             screen: &screen,
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3117,7 +3126,7 @@ mod tests {
         };
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 20),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 20)),
             screen: &screen,
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3173,7 +3182,7 @@ mod tests {
         };
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 20),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 20)),
             screen: &screen,
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3248,7 +3257,7 @@ mod tests {
         pane(&mut e, b"X ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 2, 8),
+            rect: Rect::new(Point::new(0, 0), Size::new(2, 8)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3288,7 +3297,7 @@ mod tests {
         pane(&mut e, b"X ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 2, 4),
+            rect: Rect::new(Point::new(0, 0), Size::new(2, 4)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3332,7 +3341,7 @@ mod tests {
         pane(&mut e, b"X ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 2, 4),
+            rect: Rect::new(Point::new(0, 0), Size::new(2, 4)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3375,7 +3384,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 20),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 20)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3418,7 +3427,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 20),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 20)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3458,7 +3467,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 20),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 20)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3511,7 +3520,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 4, 20),
+            rect: Rect::new(Point::new(0, 0), Size::new(4, 20)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3555,7 +3564,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 10, 40),
+            rect: Rect::new(Point::new(0, 0), Size::new(10, 40)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3611,7 +3620,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 10, 40),
+            rect: Rect::new(Point::new(0, 0), Size::new(10, 40)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3664,7 +3673,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 16, 60),
+            rect: Rect::new(Point::new(0, 0), Size::new(16, 60)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3726,7 +3735,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 10, 50),
+            rect: Rect::new(Point::new(0, 0), Size::new(10, 50)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3785,7 +3794,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 10, 50),
+            rect: Rect::new(Point::new(0, 0), Size::new(10, 50)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3837,7 +3846,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 10, 50),
+            rect: Rect::new(Point::new(0, 0), Size::new(10, 50)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3887,7 +3896,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 3, 40),
+            rect: Rect::new(Point::new(0, 0), Size::new(3, 40)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -3957,7 +3966,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 12, 50),
+            rect: Rect::new(Point::new(0, 0), Size::new(12, 50)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -4040,7 +4049,7 @@ mod tests {
         pane(&mut e, b"hi");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 12, 60),
+            rect: Rect::new(Point::new(0, 0), Size::new(12, 60)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -4132,7 +4141,7 @@ mod tests {
         pane(&mut e, b"hi");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 12, 60),
+            rect: Rect::new(Point::new(0, 0), Size::new(12, 60)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -4204,7 +4213,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 10, 50),
+            rect: Rect::new(Point::new(0, 0), Size::new(10, 50)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -4264,7 +4273,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 10, 50),
+            rect: Rect::new(Point::new(0, 0), Size::new(10, 50)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -4309,7 +4318,7 @@ mod tests {
         // Inset the pane so a border ring exists around it within the band.
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(1, 1, 1, 6),
+            rect: Rect::new(Point::new(1, 1), Size::new(1, 6)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -4352,7 +4361,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 12, 60),
+            rect: Rect::new(Point::new(0, 0), Size::new(12, 60)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -4400,7 +4409,7 @@ mod tests {
         pane(&mut e, b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, rows, cols),
+            rect: Rect::new(Point::new(0, 0), Size::new(rows, cols)),
             screen: e.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -4526,7 +4535,7 @@ mod tests {
         let fail_color = colors.fail;
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(1, 1, 1, 18),
+            rect: Rect::new(Point::new(1, 1), Size::new(1, 18)),
             screen: &screen,
             is_active: false,
             scroll_offset: ScrollOffset::new(0),
@@ -4575,7 +4584,7 @@ mod tests {
         // Use a pane inset so a border exists.
         let view_fn = || PaneView {
             id: PaneId(0),
-            rect: Rect::new(1, 1, 2, 4),
+            rect: Rect::new(Point::new(1, 1), Size::new(2, 4)),
             screen: e.screen(),
             is_active: false,
             scroll_offset: ScrollOffset::new(0),
@@ -4654,7 +4663,7 @@ mod tests {
         // Block 1 (lines 0..2) is Failed → left-segment cells should be colored.
         let view_scrolled = PaneView {
             id: PaneId(0),
-            rect: Rect::new(1, 1, 3, 18),
+            rect: Rect::new(Point::new(1, 1), Size::new(3, 18)),
             screen: &screen,
             is_active: false,
             scroll_offset: ScrollOffset::new(3),
@@ -4691,7 +4700,7 @@ mod tests {
         // running) → left-segment should NOT be fail colored.
         let view_live = PaneView {
             id: PaneId(0),
-            rect: Rect::new(1, 1, 3, 18),
+            rect: Rect::new(Point::new(1, 1), Size::new(3, 18)),
             screen: &screen,
             is_active: false,
             scroll_offset: ScrollOffset::new(0),
@@ -4757,7 +4766,7 @@ mod tests {
         };
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(1, 1, 8, 18),
+            rect: Rect::new(Point::new(1, 1), Size::new(8, 18)),
             screen: &screen,
             is_active: false,
             scroll_offset: ScrollOffset::new(0),
@@ -4836,7 +4845,7 @@ mod tests {
         };
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(1, 1, 3, 18),
+            rect: Rect::new(Point::new(1, 1), Size::new(3, 18)),
             screen: &screen,
             is_active: false,
             scroll_offset: ScrollOffset::new(0),
@@ -4890,7 +4899,7 @@ mod tests {
         };
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(1, 1, 6, 18),
+            rect: Rect::new(Point::new(1, 1), Size::new(6, 18)),
             screen: &screen,
             is_active: false,
             scroll_offset: ScrollOffset::new(0),
@@ -4953,7 +4962,7 @@ mod tests {
         };
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(1, 1, 8, 18),
+            rect: Rect::new(Point::new(1, 1), Size::new(8, 18)),
             screen: &screen,
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -5016,7 +5025,7 @@ mod tests {
         };
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(1, 1, 6, 18),
+            rect: Rect::new(Point::new(1, 1), Size::new(6, 18)),
             screen: &screen,
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -5077,7 +5086,7 @@ mod tests {
         };
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(1, 1, 8, 18),
+            rect: Rect::new(Point::new(1, 1), Size::new(8, 18)),
             screen: &screen,
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -5134,7 +5143,7 @@ mod tests {
         let colors = block_colors();
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(1, 1, 3, 18),
+            rect: Rect::new(Point::new(1, 1), Size::new(3, 18)),
             screen: &screen,
             is_active: false,
             scroll_offset: ScrollOffset::new(3), // viewport = lines 0..2, all Failed
@@ -5207,7 +5216,7 @@ mod tests {
         };
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(1, 1, 3, 18),
+            rect: Rect::new(Point::new(1, 1), Size::new(3, 18)),
             screen: &screen,
             is_active: false,
             scroll_offset: ScrollOffset::new(0), // copy-mode overrides this
@@ -5263,7 +5272,7 @@ mod tests {
         bg.advance(b"x ");
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 12, 40),
+            rect: Rect::new(Point::new(0, 0), Size::new(12, 40)),
             screen: bg.screen(),
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -5274,7 +5283,7 @@ mod tests {
             drag_role: PaneDragRole::None,
         };
         // Outer box 8 rows × 22 cols at (2, 10); interior = 6 rows × 20 cols.
-        let rect = Rect::new(2, 10, 8, 22);
+        let rect = Rect::new(Point::new(2, 10), Size::new(8, 22));
         let pv = PopupView {
             rect,
             screen: popup_screen,
@@ -5495,7 +5504,7 @@ mod tests {
 
         let view = PaneView {
             id: PaneId(3),
-            rect: Rect::new(1, 1, 8, 38),
+            rect: Rect::new(Point::new(1, 1), Size::new(8, 38)),
             screen: &screen,
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -5640,7 +5649,7 @@ mod tests {
         };
         let view = PaneView {
             id: PaneId(0),
-            rect: Rect::new(0, 0, 2, 4),
+            rect: Rect::new(Point::new(0, 0), Size::new(2, 4)),
             screen: &screen,
             is_active: true,
             scroll_offset: ScrollOffset::new(0),
@@ -5697,7 +5706,7 @@ mod tests {
         // shows the top 2 of 4 rows, the rest clipped at the pane bottom.
         let screen = screen_with_tall_image(2);
         assert_eq!(screen.placements[0].rows, 4, "4-row footprint captured");
-        let view = scrolled_view(&screen, Rect::new(0, 0, 2, 40), 3);
+        let view = scrolled_view(&screen, Rect::new(Point::new(0, 0), Size::new(2, 40)), 3);
         let vs = compose(
             &[view],
             (3, 40),
@@ -5725,7 +5734,7 @@ mod tests {
     fn wide_image_cropped_to_pane_right() {
         let screen = screen_with_tall_image(8);
         // Pane only 2 cols wide → image clipped to its left 2 cols.
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 2));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 2)));
         let vs = compose(
             &[view],
             (8, 2),
@@ -5757,7 +5766,7 @@ mod tests {
         let screen = e.screen().clone();
         // Viewing at the bottom (scroll_offset 0): the image's line is above the
         // viewport top → no visible placement.
-        let view = plain_view(&screen, Rect::new(0, 0, 3, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(3, 40)));
         let vs = compose(
             &[view],
             (4, 40),
@@ -5777,7 +5786,7 @@ mod tests {
     #[test]
     fn overlay_suppresses_all_images() {
         let screen = screen_with_tall_image(8);
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let ov = OverlayView::RenamePrompt {
             label: "rename",
             buf: "x",
@@ -5805,11 +5814,11 @@ mod tests {
     fn popup_suppresses_all_images() {
         use plexy_glass_emulator::Emulator;
         let screen = screen_with_tall_image(8);
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let mut pe = Emulator::new(4, 20);
         pe.advance(b"popup");
         let pv = PopupView {
-            rect: Rect::new(2, 2, 4, 20),
+            rect: Rect::new(Point::new(2, 2), Size::new(4, 20)),
             screen: pe.screen(),
             title: "p",
         };
@@ -5845,7 +5854,7 @@ mod tests {
         };
         let view = PaneView {
             copy_mode: Some(&cm),
-            ..plain_view(&screen, Rect::new(0, 0, 4, 40))
+            ..plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(4, 40)))
         };
         let vs = compose(
             &[view],
@@ -5879,7 +5888,7 @@ mod tests {
         };
         let view = PaneView {
             block_mode: Some(&bm),
-            ..plain_view(&screen, Rect::new(0, 0, 4, 40))
+            ..plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(4, 40)))
         };
         let vs = compose(
             &[view],
@@ -5909,7 +5918,7 @@ mod tests {
         e.advance(b"\x1b[m");
         // On the main grid: one visible placement.
         let s_main = e.screen().clone();
-        let v1 = plain_view(&s_main, Rect::new(0, 0, 8, 40));
+        let v1 = plain_view(&s_main, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs1 = compose(
             &[v1],
             (9, 40),
@@ -5927,7 +5936,7 @@ mod tests {
         // Enter alt-screen: image suppressed.
         e.advance(b"\x1b[?1049h");
         let s_alt = e.screen().clone();
-        let v2 = plain_view(&s_alt, Rect::new(0, 0, 8, 40));
+        let v2 = plain_view(&s_alt, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs2 = compose(
             &[v2],
             (9, 40),
@@ -5945,7 +5954,7 @@ mod tests {
         // Leave alt-screen: the main-grid placement resolves again.
         e.advance(b"\x1b[?1049l");
         let s_back = e.screen().clone();
-        let v3 = plain_view(&s_back, Rect::new(0, 0, 8, 40));
+        let v3 = plain_view(&s_back, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs3 = compose(
             &[v3],
             (9, 40),
@@ -5973,7 +5982,7 @@ mod tests {
         // A 4-row image in a 4-row pane: its top row scrolled into scrollback, so
         // the live view shows the lower 3 rows, cropped at the top.
         let screen = screen_with_tall_image(4);
-        let view = plain_view(&screen, Rect::new(0, 0, 4, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(4, 40)));
         let vs = compose(
             &[view],
             (5, 40),
@@ -6010,7 +6019,7 @@ mod tests {
         // A single-row pane scrolled to a middle row of the image: cropped above
         // AND below.
         let screen = screen_with_tall_image(1);
-        let view = scrolled_view(&screen, Rect::new(0, 0, 1, 40), 2);
+        let view = scrolled_view(&screen, Rect::new(Point::new(0, 0), Size::new(1, 40)), 2);
         let vs = compose(
             &[view],
             (2, 40),
@@ -6036,7 +6045,7 @@ mod tests {
         // 4-row image in a 2-row pane, scrolled to its top, with a top status bar.
         let screen = screen_with_tall_image(2);
         let status = status_with_left("S");
-        let view = scrolled_view(&screen, Rect::new(0, 0, 2, 40), 3);
+        let view = scrolled_view(&screen, Rect::new(Point::new(0, 0), Size::new(2, 40)), 3);
         let vs = compose(
             &[view],
             (3, 40),
@@ -6162,7 +6171,7 @@ mod tests {
     fn inline_duration_painted_above_threshold() {
         let screen = duration_block_screen("$ slow", 0, 3000);
         let colors = block_colors_with(Some(2000), false);
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs = compose(
             &[view],
             (8, 40),
@@ -6199,7 +6208,7 @@ mod tests {
             .expect("BLOCK_END row");
         d.mark.set_duration(Some(3000));
         let colors = block_colors_with(Some(2000), false);
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs = compose(
             &[view],
             (8, 40),
@@ -6229,7 +6238,7 @@ mod tests {
     fn inline_duration_omitted_below_threshold() {
         let screen = duration_block_screen("$ quick", 0, 500);
         let colors = block_colors_with(Some(2000), false);
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs = compose(
             &[view],
             (8, 40),
@@ -6254,7 +6263,7 @@ mod tests {
     fn inline_duration_threshold_zero_shows_all() {
         let screen = duration_block_screen("$ quick", 0, 500);
         let colors = block_colors_with(Some(0), false);
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs = compose(
             &[view],
             (8, 40),
@@ -6286,7 +6295,7 @@ mod tests {
             d.mark.set_duration(Some(3000));
         }
         let colors = block_colors_with(Some(2000), false);
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs = compose(
             &[view],
             (8, 40),
@@ -6319,7 +6328,7 @@ mod tests {
         };
         let view = PaneView {
             copy_mode: Some(&cm),
-            ..plain_view(&screen, Rect::new(0, 0, 8, 40))
+            ..plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)))
         };
         let colors = block_colors_with(Some(2000), false);
         let vs = compose(
@@ -6357,7 +6366,7 @@ mod tests {
         // gets pinned as a dim (not reverse) header.
         let screen = tall_block_screen();
         let colors = block_colors_with(None, true);
-        let view = scrolled_view(&screen, Rect::new(0, 0, 3, 40), 1);
+        let view = scrolled_view(&screen, Rect::new(Point::new(0, 0), Size::new(3, 40)), 1);
         let vs = compose(
             &[view],
             (3, 40),
@@ -6392,7 +6401,7 @@ mod tests {
         // when the command has overflowed off the top of the pane.
         let screen = tall_block_screen();
         let colors = block_colors_with(None, true);
-        let view = plain_view(&screen, Rect::new(0, 0, 3, 40)); // scroll_offset 0
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(3, 40))); // scroll_offset 0
         let vs = compose(
             &[view],
             (3, 40),
@@ -6420,7 +6429,7 @@ mod tests {
         // the header is (correctly) skipped even though we're scrolled back.
         let screen = tall_block_screen();
         let colors = block_colors_with(None, true);
-        let view = scrolled_view(&screen, Rect::new(0, 0, 3, 40), 3);
+        let view = scrolled_view(&screen, Rect::new(Point::new(0, 0), Size::new(3, 40)), 3);
         let vs = compose(
             &[view],
             (3, 40),
@@ -6446,7 +6455,7 @@ mod tests {
     fn sticky_header_disabled_paints_nothing() {
         let screen = tall_block_screen();
         let colors = block_colors_with(None, false);
-        let view = scrolled_view(&screen, Rect::new(0, 0, 3, 40), 1);
+        let view = scrolled_view(&screen, Rect::new(Point::new(0, 0), Size::new(3, 40)), 1);
         let vs = compose(
             &[view],
             (3, 40),
@@ -6477,7 +6486,7 @@ mod tests {
         screen.active.rows[last].mark.set(RowMark::BLOCK_END);
         screen.active.rows[last].mark.set_duration(Some(4000));
         let colors = block_colors_with(Some(2000), true);
-        let view = scrolled_view(&screen, Rect::new(0, 0, 3, 40), 1);
+        let view = scrolled_view(&screen, Rect::new(Point::new(0, 0), Size::new(3, 40)), 1);
         let vs = compose(
             &[view],
             (3, 40),
@@ -6513,7 +6522,7 @@ mod tests {
         screen.active.rows[last].mark.set(RowMark::BLOCK_END);
         screen.active.rows[last].mark.set_duration(Some(3000));
         let colors = block_colors_with(Some(2000), true);
-        let view = scrolled_view(&screen, Rect::new(0, 0, 3, 24), 1);
+        let view = scrolled_view(&screen, Rect::new(Point::new(0, 0), Size::new(3, 24)), 1);
         let vs = compose(
             &[view],
             (3, 60),
@@ -6549,7 +6558,7 @@ mod tests {
         e.advance(b"\x1b[m");
         let mut screen = e.screen().clone();
         blocks::set_block_folded(&mut screen, 0, true); // fold "$ one"'s output
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs = compose(
             &[view],
             (8, 40),
@@ -6586,7 +6595,7 @@ mod tests {
         e.advance(b"\x1b]133;A\x07$ next\r\nx");
         let mut screen = e.screen().clone();
         // Before folding: the image resolves to one placement.
-        let v0 = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let v0 = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs0 = compose(
             &[v0],
             (8, 40),
@@ -6603,7 +6612,7 @@ mod tests {
         assert_eq!(vs0.placements.len(), 1, "image visible before folding");
         // Fold the image's block → the image hides.
         blocks::set_block_folded(&mut screen, 0, true);
-        let v1 = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let v1 = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs1 = compose(
             &[v1],
             (8, 40),
@@ -6634,7 +6643,7 @@ mod tests {
         e.advance(b"\x1b[m");
         let mut screen = e.screen().clone();
         blocks::set_block_folded(&mut screen, 0, true);
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs = compose(
             &[view],
             (8, 40),
@@ -6681,7 +6690,7 @@ mod tests {
         };
         let view = PaneView {
             block_mode: Some(&bm),
-            ..plain_view(&screen, Rect::new(0, 0, 8, 40))
+            ..plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)))
         };
         let vs = compose(
             &[view],
@@ -6710,7 +6719,7 @@ mod tests {
     #[test]
     fn folded_command_row_is_dimmed() {
         let screen = two_block_fold_screen();
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs = compose(
             &[view],
             (8, 40),
@@ -6745,7 +6754,7 @@ mod tests {
         e.advance(b"\x1b[m");
         let mut screen = e.screen().clone();
         blocks::set_block_folded(&mut screen, 0, true);
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs = compose(
             &[view],
             (8, 40),
@@ -6778,7 +6787,10 @@ mod tests {
         e.advance(b"\x1b]133;A\x07$ one\r\n\x1b]133;C\x07o1\r\no2\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ two ");
         let screen = e.screen().clone();
         let vs0 = compose(
-            &[plain_view(&screen, Rect::new(0, 0, 8, 40))],
+            &[plain_view(
+                &screen,
+                Rect::new(Point::new(0, 0), Size::new(8, 40)),
+            )],
             (8, 40),
             None,
             StatusPlacement::Bottom,
@@ -6793,7 +6805,10 @@ mod tests {
         let mut folded = screen;
         blocks::set_block_folded(&mut folded, 0, true);
         let vs1 = compose(
-            &[plain_view(&folded, Rect::new(0, 0, 8, 40))],
+            &[plain_view(
+                &folded,
+                Rect::new(Point::new(0, 0), Size::new(8, 40)),
+            )],
             (8, 40),
             None,
             StatusPlacement::Bottom,
@@ -6826,7 +6841,7 @@ mod tests {
         );
 
         // Surfaces with no overlay.
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs = compose(
             &[view],
             (9, 40),
@@ -6848,7 +6863,7 @@ mod tests {
         );
 
         // Suppressed under a modal overlay.
-        let view2 = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view2 = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let ov = OverlayView::RenamePrompt {
             label: "r",
             buf: "x",
@@ -6875,11 +6890,11 @@ mod tests {
         let mut pe = Emulator::new(4, 20);
         pe.advance(b"p");
         let pv = PopupView {
-            rect: Rect::new(2, 2, 4, 20),
+            rect: Rect::new(Point::new(2, 2), Size::new(4, 20)),
             screen: pe.screen(),
             title: "p",
         };
-        let view3 = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view3 = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs3 = compose(
             &[view3],
             (9, 40),
@@ -6901,7 +6916,7 @@ mod tests {
         // Suppressed on alt-screen.
         e.advance(b"\x1b[?1049h");
         let alt = e.screen().clone();
-        let view4 = plain_view(&alt, Rect::new(0, 0, 8, 40));
+        let view4 = plain_view(&alt, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs4 = compose(
             &[view4],
             (9, 40),
@@ -6952,12 +6967,12 @@ mod tests {
         let sb = screen_with_virtual_placeholder(1, "REVG");
         let va = PaneView {
             id: PaneId(1),
-            ..plain_view(&sa, Rect::new(0, 0, 8, 20))
+            ..plain_view(&sa, Rect::new(Point::new(0, 0), Size::new(8, 20)))
         };
         let vb = PaneView {
             id: PaneId(2),
             is_active: false,
-            ..plain_view(&sb, Rect::new(0, 20, 8, 20))
+            ..plain_view(&sb, Rect::new(Point::new(0, 20), Size::new(8, 20)))
         };
         let vs = compose(
             &[va, vb],
@@ -7022,11 +7037,11 @@ mod tests {
         let s1 = screen_with_tall_image(8);
         let v0 = PaneView {
             id: PaneId(1),
-            ..plain_view(&s0, Rect::new(0, 0, 8, 20))
+            ..plain_view(&s0, Rect::new(Point::new(0, 0), Size::new(8, 20)))
         };
         let v1 = PaneView {
             id: PaneId(2),
-            ..plain_view(&s1, Rect::new(0, 21, 8, 19))
+            ..plain_view(&s1, Rect::new(Point::new(0, 21), Size::new(8, 19)))
         };
         let vs = compose(
             &[v0, v1],
@@ -7058,7 +7073,7 @@ mod tests {
         let mut e = Emulator::new(3, 12);
         pane(&mut e, "hello 世 ".as_bytes());
         let screen = e.screen().clone();
-        let view = plain_view(&screen, Rect::new(0, 0, 3, 12));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(3, 12)));
         let vs = compose(
             &[view],
             (3, 12),
@@ -7084,11 +7099,11 @@ mod tests {
         let lv = PaneView {
             id: PaneId(0),
             is_active: false,
-            ..plain_view(left.screen(), Rect::new(0, 0, 3, 4))
+            ..plain_view(left.screen(), Rect::new(Point::new(0, 0), Size::new(3, 4)))
         };
         let rv = PaneView {
             id: PaneId(1),
-            ..plain_view(right.screen(), Rect::new(0, 5, 3, 4))
+            ..plain_view(right.screen(), Rect::new(Point::new(0, 5), Size::new(3, 4)))
         };
         let vs = compose(
             &[lv, rv],
@@ -7114,7 +7129,7 @@ mod tests {
         pane(&mut e, b"body ");
         let screen = e.screen().clone();
         let status = status_with_left("plexy");
-        let view = plain_view(&screen, Rect::new(0, 0, 3, 16));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(3, 16)));
         let vs = compose(
             &[view],
             (4, 16),
@@ -7139,7 +7154,7 @@ mod tests {
         pane(&mut e, b"body ");
         let screen = e.screen().clone();
         let status = status_with_left("plexy");
-        let view = plain_view(&screen, Rect::new(1, 0, 3, 16));
+        let view = plain_view(&screen, Rect::new(Point::new(1, 0), Size::new(3, 16)));
         let vs = compose(
             &[view],
             (4, 16),
@@ -7168,7 +7183,7 @@ mod tests {
         };
         let view = PaneView {
             block_mode: Some(&bm),
-            ..plain_view(&screen, Rect::new(0, 0, 8, 40))
+            ..plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)))
         };
         let vs = compose(
             &[view],
@@ -7195,7 +7210,7 @@ mod tests {
     #[test]
     fn snapshot_live_view_folded_block() {
         let screen = two_block_fold_screen();
-        let view = plain_view(&screen, Rect::new(0, 0, 8, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs = compose(
             &[view],
             (8, 40),
@@ -7217,7 +7232,7 @@ mod tests {
         let mut e = Emulator::new(10, 40);
         pane(&mut e, b"body ");
         let screen = e.screen().clone();
-        let view = plain_view(&screen, Rect::new(0, 0, 10, 40));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(10, 40)));
         let lines = vec![
             ("Ctrl+a c".to_string(), "New window".to_string()),
             ("Ctrl+a |".to_string(), "Split right".to_string()),
@@ -7247,7 +7262,7 @@ mod tests {
         let mut e = Emulator::new(6, 30);
         pane(&mut e, b"body ");
         let screen = e.screen().clone();
-        let view = plain_view(&screen, Rect::new(0, 0, 6, 30));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(6, 30)));
         let ov = OverlayView::Command {
             buf: "split-window",
         };
@@ -7272,12 +7287,12 @@ mod tests {
         let mut bg = Emulator::new(10, 40);
         pane(&mut bg, b"background ");
         let bg_screen = bg.screen().clone();
-        let view = plain_view(&bg_screen, Rect::new(0, 0, 10, 40));
+        let view = plain_view(&bg_screen, Rect::new(Point::new(0, 0), Size::new(10, 40)));
 
         let mut pe = Emulator::new(6, 20);
         pane(&mut pe, b"hi ");
         let pv = PopupView {
-            rect: Rect::new(2, 10, 8, 22),
+            rect: Rect::new(Point::new(2, 10), Size::new(8, 22)),
             screen: pe.screen(),
             title: "cat",
         };
@@ -7317,7 +7332,7 @@ mod tests {
         };
         let view = PaneView {
             copy_mode: Some(&cm),
-            ..plain_view(&screen, Rect::new(0, 0, 5, 20))
+            ..plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(5, 20)))
         };
         let vs = compose(
             &[view],
@@ -7363,7 +7378,7 @@ mod tests {
         };
         let view = PaneView {
             copy_mode: Some(&cm),
-            ..plain_view(&screen, Rect::new(0, 0, 5, 20))
+            ..plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(5, 20)))
         };
         let vs = compose(
             &[view],
@@ -7388,7 +7403,7 @@ mod tests {
     fn snapshot_sticky_header_dim() {
         let screen = tall_block_screen();
         let colors = block_colors_with(None, true);
-        let view = scrolled_view(&screen, Rect::new(0, 0, 3, 40), 1);
+        let view = scrolled_view(&screen, Rect::new(Point::new(0, 0), Size::new(3, 40)), 1);
         let vs = compose(
             &[view],
             (3, 40),
@@ -7425,7 +7440,7 @@ mod tests {
         let screen = e.screen().clone();
         let colors = block_colors();
         // Pane at col 1 so the left border occupies col 0.
-        let view = plain_view(&screen, Rect::new(0, 1, 6, 29));
+        let view = plain_view(&screen, Rect::new(Point::new(0, 1), Size::new(6, 29)));
         let vs = compose(
             &[view],
             (6, 30),

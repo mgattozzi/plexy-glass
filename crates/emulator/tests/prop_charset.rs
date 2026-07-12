@@ -8,6 +8,7 @@
 
 use hegel::{TestCase, generators as gs};
 use plexy_glass_emulator::Screen;
+use plexy_glass_emulator::coords::{Col, Row};
 use plexy_glass_emulator::parser::Parser;
 
 /// Print one raw byte after an optional charset-setup prefix; return the (0,0) cell text.
@@ -18,7 +19,7 @@ fn cell0_after(prefix: &[u8], byte: u8) -> String {
     p.advance(&mut s, &[byte]);
     p.flush(&mut s); // commit the trailing grapheme
     s.active
-        .get_cell(0, 0)
+        .get_cell(Row::new(0), Col::new(0))
         .map(|c| c.grapheme.to_string())
         .unwrap_or_default()
 }
