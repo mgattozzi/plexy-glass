@@ -3,6 +3,9 @@
 # subagent-driven-development scratch (briefs, reports, diffs, ledger)
 .superpowers/
 
+# Design docs (specs + plans) are kept local-only, not tracked in git history.
+docs/superpowers/
+
 # hegel property-testing local example database (per-machine cache, like
 # Hypothesis's .hypothesis dir — not a curated regression corpus).
 .hegel/
