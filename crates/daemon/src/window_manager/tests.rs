@@ -2521,6 +2521,50 @@ async fn swap_marked_pane_same_window_then_cross_window_swaps() {
 }
 
 #[tokio::test]
+async fn swap_marked_cross_window_targets_by_id_after_reorder() {
+    // Reorder the window list so a raw `usize` into `self.windows` would be
+    // stale, then cross-window swap. The by-id routing must exchange the marked
+    // pane's window and the active window by identity, not whatever now sits at
+    // the old indices.
+    let mut m = mk_mgr(); // W0 idx0 pane0
+    m.handle_command(Command::NewWindow).unwrap(); // W1 idx1 pane1, active
+    m.handle_command(Command::NewWindow).unwrap(); // W2 idx2 pane2, active
+    m.handle_command(Command::SelectWindow(1)).unwrap(); // active W1
+    m.handle_command(Command::MarkPane).unwrap(); // marked = pane1 (W1)
+    m.status_message = None;
+    m.handle_command(Command::SelectWindow(2)).unwrap(); // active W2 (pane2)
+    let w1_id = m.windows()[1].id;
+    let w2_id = m.windows()[2].id;
+
+    // Move W2 to the front: windows become [W2, W0, W1] — both the active
+    // window (W2, now idx0) and the marked window (W1, now idx2) changed slot.
+    assert!(m.move_window(2, 0), "reorder happened");
+    assert_eq!(m.active_window().id, w2_id, "active follows W2 by id");
+
+    m.handle_command(Command::SwapMarkedPane).unwrap();
+
+    let by_id = |m: &WindowManager, id| {
+        m.windows()
+            .iter()
+            .find(|w| w.id == id)
+            .map(|w| w.layout().panes())
+            .unwrap()
+    };
+    assert!(
+        by_id(&m, w2_id).contains(&PaneId(1)),
+        "marked pane1 landed in the active window W2"
+    );
+    assert!(
+        by_id(&m, w1_id).contains(&PaneId(2)),
+        "active pane2 landed in the marked window W1"
+    );
+    assert!(!by_id(&m, w2_id).contains(&PaneId(2)));
+    assert!(!by_id(&m, w1_id).contains(&PaneId(1)));
+    assert_eq!(m.marked_pane(), Some(PaneId(1)), "mark preserved");
+    assert_eq!(m.take_active_message(), None, "no refusal message");
+}
+
+#[tokio::test]
 async fn swap_marked_cross_window_exchanges_slots() {
     let mut m = mk_mgr(); // W0: pane 0
     m.handle_command(Command::SplitV).unwrap(); // W0 {0,1}, active 1

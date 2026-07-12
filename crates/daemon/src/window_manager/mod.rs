@@ -918,6 +918,15 @@ impl WindowManager {
     // ----- choose-tree by-id actions (used by the connection against any
     // session's WM; each scans `windows` for the id, there is no id-keyed API).
 
+    /// Run `f` against the window with `id`, re-resolving the id to its current
+    /// slot at the point of use. Returns `None` (f not run) when there is no
+    /// such window. Routing a mutation through this keeps a raw `usize` index
+    /// from outliving a reorder or removal — the reference-apart-from-target
+    /// bug class the choreography arms used to risk with `self.windows[idx]`.
+    fn with_window_mut<R>(&mut self, id: WindowId, f: impl FnOnce(&mut Window) -> R) -> Option<R> {
+        self.windows.iter_mut().find(|w| w.id == id).map(f)
+    }
+
     /// Make the window with `id` active. Clears any zoom first (matching the
     /// keyboard window-switch commands). `false` if no such window.
     pub fn select_window_by_id(&mut self, id: WindowId) -> bool {

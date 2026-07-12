@@ -156,34 +156,44 @@ impl WindowManager {
             }
             Command::JoinPane(dir) => {
                 if let Some(marked) = self.marked_pane {
-                    let act_idx = self.active_index();
-                    let act_pane = self.windows[act_idx].active();
+                    let act_pane = self.active_window().active();
                     if marked == act_pane {
                         self.set_status_message(
                             "marked pane is the active pane".into(),
                             Severity::Info,
                         );
-                    } else if let Some(src_idx) =
-                        self.windows.iter().position(|w| w.pane(marked).is_some())
+                    } else if let Some(src_id) = self
+                        .windows
+                        .iter()
+                        .find(|w| w.pane(marked).is_some())
+                        .map(|w| w.id)
                     {
-                        if let Some(pane) = self.windows[src_idx].detach_pane(marked) {
-                            if self.windows[src_idx].is_layout_empty() {
+                        // Route every source-window touch through the by-id
+                        // helper: after the detach the source may be removed, so
+                        // a held `usize` index would go stale (this used to index
+                        // `self.windows[src_idx]` across the mutating calls).
+                        if let Some(pane) = self
+                            .with_window_mut(src_id, |w| w.detach_pane(marked))
+                            .flatten()
+                        {
+                            if self.with_window_mut(src_id, |w| w.is_layout_empty()) == Some(true) {
                                 // invariant: the active window is never the emptied
                                 // source, `marked != act_pane` (guarded above) means
                                 // the active window keeps act_pane and stays alive.
                                 // `active` is an id, so removing the source never
-                                // moves it — no repoint needed (this used to re-run
-                                // `position(...).expect(...)`).
-                                let src_id = self.windows[src_idx].id;
-                                self.windows.remove(src_idx);
+                                // moves it — no repoint needed.
+                                if let Some(i) = self.windows.iter().position(|w| w.id == src_id) {
+                                    self.windows.remove(i);
+                                }
                                 self.fixup_last_active_after_removal(src_id);
                             } else {
                                 // Source survives with a promoted layout, so resize it.
-                                self.windows[src_idx].resize(viewport)?;
+                                self.with_window_mut(src_id, |w| w.resize(viewport))
+                                    .transpose()?;
                             }
-                            let act_idx = self.active_index();
-                            let act_pane = self.windows[act_idx].active();
-                            self.windows[act_idx].adopt_split(act_pane, dir, pane, viewport)?;
+                            let act_pane = self.active_window().active();
+                            self.active_window_mut()
+                                .adopt_split(act_pane, dir, pane, viewport)?;
                             self.marked_pane = None;
                         }
                     } else {
@@ -201,8 +211,11 @@ impl WindowManager {
                             let w = self.active_window_mut();
                             w.layout_mut().swap_panes(a, marked);
                             w.resize(viewport)?;
-                        } else if let Some(other_idx) =
-                            self.windows.iter().position(|w| w.pane(marked).is_some())
+                        } else if let Some(other_id) = self
+                            .windows
+                            .iter()
+                            .find(|w| w.pane(marked).is_some())
+                            .map(|w| w.id)
                         {
                             // Cross-window: exchange the slot occupants. Both
                             // layout shapes are preserved; focus/zoom follow
@@ -210,26 +223,34 @@ impl WindowManager {
                             // the mark stays on M. Choreography: a map-only
                             // take of A breaks the ownership cycle, then one
                             // slot-replace per window, so no `Pane` is dropped
-                            // on any path.
-                            let act_idx = self.active_index();
+                            // on any path. Every window touch resolves by id
+                            // (active via `active_window_mut`, the other via
+                            // `with_window_mut`) so no raw index is held across
+                            // the moves.
                             // invariant: the active pane is always in its window.
-                            let pane_a = self.windows[act_idx]
+                            let pane_a = self
+                                .active_window_mut()
                                 .take_pane(a)
                                 .expect("active pane present");
-                            match self.windows[other_idx].swap_occupant(marked, pane_a) {
+                            // invariant: `other_id` was just located as marked's window.
+                            let swapped = self
+                                .with_window_mut(other_id, |w| w.swap_occupant(marked, pane_a))
+                                .expect("marked pane's window present");
+                            match swapped {
                                 Ok(pane_m) => {
-                                    self.windows[act_idx].install_in_slot(a, pane_m);
+                                    self.active_window_mut().install_in_slot(a, pane_m);
                                     // The slots' rects differ, so size both
                                     // windows' PTYs to their new rects now.
-                                    self.windows[act_idx].resize(viewport)?;
-                                    self.windows[other_idx].resize(viewport)?;
+                                    self.active_window_mut().resize(viewport)?;
+                                    self.with_window_mut(other_id, |w| w.resize(viewport))
+                                        .transpose()?;
                                 }
                                 Err(pane_a) => {
                                     // Unreachable single-threaded: the scan
                                     // above just found `marked` in that
                                     // window. Restore A's slot rather than
                                     // drop the pane.
-                                    self.windows[act_idx].install_in_slot(a, pane_a);
+                                    self.active_window_mut().install_in_slot(a, pane_a);
                                 }
                             }
                         } else {
