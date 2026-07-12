@@ -252,11 +252,16 @@ impl Session {
                     );
                 }
                 let now_empty = m.is_empty();
-                // Read the silence arm-state under the same lock window: an
-                // organic pane death can remove a silence-monitored window, and
-                // (unlike handle_command) nothing else reconciles the tick task,
-                // so it would keep waking 1 Hz for a now-pointless check.
+                // Read the silence arm-state under the same lock window and
+                // reconcile the tick task before dropping the lock (see
+                // handle_command's matching comment): an organic pane death can
+                // remove a silence-monitored window, and (unlike handle_command)
+                // nothing else reconciles the tick task, so a reconcile issued
+                // after the unlock could race a concurrent arm and leave the task
+                // armed with nothing left to monitor, or disarmed while still
+                // needed.
                 let armed = m.any_silence_monitored();
+                session_for_death.reconcile_silence_task(armed);
                 // A command-pane death that dropped to a shell sets a transient
                 // status message under this lock; schedule its TTL-expiry wake
                 // after releasing the lock (see the coordinator's set_status_message
@@ -267,7 +272,6 @@ impl Session {
                 if has_message {
                     session_for_death.schedule_status_expiry_wake();
                 }
-                session_for_death.reconcile_silence_task(armed);
                 if now_empty {
                     break;
                 }
@@ -845,17 +849,18 @@ impl Session {
         self: &Arc<Self>,
         cmd: plexy_glass_mux::Command,
     ) -> Result<(), DaemonError> {
-        let armed = {
+        {
             let mut manager = self.window_manager.lock().await;
             manager.handle_command(cmd)?;
-            // Read the arm state under the same lock window so the silence-task
-            // reconciliation below is consistent with the command just applied.
-            manager.any_silence_monitored()
-        };
+            // Read the arm state under the same lock window and reconcile the
+            // silence tick task before the lock is released (reconcile_silence_task
+            // does no `.await`, only a std mutex + spawn/abort), so a concurrent
+            // arm+death can't race past this call and leave the task armed with
+            // nothing left to monitor, or disarmed while still needed.
+            let armed = manager.any_silence_monitored();
+            self.reconcile_silence_task(armed);
+        }
         self.notify.notify_one();
-        // Arm/disarm the silence tick task in response to any monitor-silence
-        // change (cheap no-op for every other command).
-        self.reconcile_silence_task(armed);
         // A command may have set a transient message via the WM (mark/monitor/
         // kill feedback); schedule its TTL clear so it dismisses on the same ~3s
         // timer as Session-set messages, not lazily on the next render.
