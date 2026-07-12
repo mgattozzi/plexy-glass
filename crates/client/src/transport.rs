@@ -23,6 +23,33 @@ pub enum Connect {
     Only,
 }
 
+/// Whether `--install` should provision the remote binary before connecting.
+/// A named enum so it can't be silently swapped with another `bool` on `Target`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InstallPolicy {
+    /// Use whatever `plexy-glass` the remote already has (PATH or the cache path).
+    #[default]
+    UseExisting,
+    /// Provision the remote binary from the nightly release first (`--install`).
+    Provision,
+}
+
+impl InstallPolicy {
+    /// Whether to provision the remote binary before connecting.
+    pub const fn provisions(self) -> bool {
+        matches!(self, Self::Provision)
+    }
+
+    /// Flip the picker's persistent `i` toggle.
+    #[must_use]
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::UseExisting => Self::Provision,
+            Self::Provision => Self::UseExisting,
+        }
+    }
+}
+
 /// Where a verb runs: the local daemon, or a remote one over SSH.
 #[derive(Debug, Clone, Default)]
 pub struct Target {
@@ -31,7 +58,7 @@ pub struct Target {
     /// Explicit remote `plexy-glass` path (`--remote-bin`).
     pub remote_bin: Option<String>,
     /// `--install`: provision the remote binary before connecting.
-    pub install: bool,
+    pub install: InstallPolicy,
 }
 
 /// Build the argv for `ssh` (after the program name) to run `<remote-bin> cmd…`
@@ -83,7 +110,7 @@ mod ssh_tests {
         Target {
             host: Some("h".into()),
             remote_bin: remote_bin.map(str::to_string),
-            install: false,
+            install: InstallPolicy::UseExisting,
         }
     }
 
@@ -181,7 +208,7 @@ pub async fn open_transport(target: &Target, connect: Connect) -> Result<Transpo
             })
         }
         Some(host) => {
-            if target.install {
+            if target.install.provisions() {
                 install::install_remote(host).await?;
             }
             let mut child = Command::new("ssh")

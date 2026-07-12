@@ -5,7 +5,7 @@ use std::{io, str};
 use bytes::BytesMut;
 use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
-    ClientMsg, Codec, ColorScheme, ExitStatus, PtySize, ServerMsg, SessionEntry,
+    ClientMsg, Codec, ColorScheme, CreatePolicy, ExitStatus, PtySize, ServerMsg, SessionEntry,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -98,7 +98,7 @@ pub enum PumpExit {
     /// (Milestone B) the picker chose a session on a DIFFERENT daemon (or a new
     /// one on a host); the outer loop re-attaches (`lib.rs::run`'s `next =
     /// (reconnect_target, Some(reconnect_name))`). `target.host: None` reconnects
-    /// on the LOCAL daemon; `create_if_missing` is globally `true`
+    /// on the LOCAL daemon; `create_if_missing` is globally `CreateIfMissing`
     /// (`client_attach_smart`), so a fresh `name` creates and an existing one
     /// attaches — no flag needed here.
     ReconnectTo { target: crate::Target, name: String },
@@ -285,8 +285,8 @@ where
                             // session on a host (New): hand it back to the outer
                             // attach loop rather than acting on it here. `host:
                             // None` re-attaches on the LOCAL daemon; the global
-                            // `create_if_missing = true` means an existing `name`
-                            // attaches and a fresh one creates, so New needs no
+                            // `create_if_missing` (CreateIfMissing) means an existing
+                            // `name` attaches and a fresh one creates, so New needs no
                             // separate flag. `picker`/`picker_rx` are dropped
                             // along with the rest of `pump`'s state on return.
                             //
@@ -656,7 +656,7 @@ pub async fn handshake_spawn<R, W>(
     reader: &mut R,
     writer: &mut W,
     name: Option<String>,
-    create_if_missing: bool,
+    create_if_missing: CreatePolicy,
     spec: Option<plexy_glass_protocol::SpawnSpec>,
     size: PtySize,
 ) -> Result<(), ClientError>
@@ -1322,8 +1322,8 @@ mod tests {
     async fn pump_picker_new_on_host_returns_reconnect_to() {
         // `n` on a remote host's anchor row opens the new-session prompt;
         // committing it must hand `New{host,name}` back as `ReconnectTo`, same
-        // as `Reconnect` — the global `create_if_missing=true` is what actually
-        // creates the fresh session once the outer loop re-attaches.
+        // as `Reconnect` — the global `create_if_missing` (CreateIfMissing) is what
+        // actually creates the fresh session once the outer loop re-attaches.
         roster::set_test_roster(vec!["nonexistent.invalid".into()], vec![]);
 
         let (mut server_w, mut client_r) = duplex(64 * 1024);

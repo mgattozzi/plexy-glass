@@ -14,7 +14,7 @@ use plexy_glass_mux::{
 };
 use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
-    ClientMsg, Codec, ProtocolError, PtySize, ServerMsg, SpawnSpec, server_handshake,
+    ClientMsg, Codec, CreatePolicy, ProtocolError, PtySize, ServerMsg, SpawnSpec, server_handshake,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
@@ -28,6 +28,7 @@ use crate::renderer::{RenderInject, Renderer};
 use crate::session::coordinator::binding_keys;
 use crate::session::{Session, SessionHistory, SessionTree};
 use crate::window_manager::{OverlayKeyResult, Severity};
+use crate::osc_actions::{PasteFallback, Wrote};
 use crate::{InputEvent, InputRouter, osc_actions};
 
 pub async fn serve<S>(
@@ -260,7 +261,7 @@ async fn serve_attach<R, W>(
     mut writer: W,
     registry: Arc<SessionRegistry>,
     name: Option<String>,
-    create_if_missing: bool,
+    create_if_missing: CreatePolicy,
     cmd: Option<SpawnSpec>,
     mut size: PtySize,
     config: Arc<plexy_glass_config::Config>,
@@ -281,7 +282,7 @@ where
     let mut session = if let Some(n) = name {
         match registry.get(&n).await {
             Some(s) => s,
-            None if create_if_missing => {
+            None if matches!(create_if_missing, CreatePolicy::CreateIfMissing) => {
                 let spec = cmd.unwrap_or_else(default_spawn_spec);
                 let cfg = Arc::clone(&config);
                 // `attach_or_create` restores from disk if a saved file exists.
@@ -765,11 +766,16 @@ async fn dispatch_input_event(
                                 ctx.session.notify.notify_one();
                             }
                             Some(plexy_glass_mux::CopyModeAction::Yank(text)) => {
-                                let wrote = osc_actions::write_clipboard(text.as_bytes()).await;
+                                let wrote = if osc_actions::write_clipboard(text.as_bytes()).await {
+                                    Wrote::Yes
+                                } else {
+                                    Wrote::No
+                                };
                                 // Honest message: a failed clipboard write must not
                                 // claim "✓ copied". The text is still in the paste
                                 // buffer, so the warn points at Ctrl+a ].
-                                let (msg, sev) = osc_actions::yank_status(wrote, &text, true);
+                                let (msg, sev) =
+                                    osc_actions::yank_status(wrote, &text, PasteFallback::Allowed);
                                 // Also push a paste buffer (before re-taking the
                                 // WM lock, so the registry await isn't held under it).
                                 ctx.registry.push_paste_buffer(text.into_bytes()).await;
@@ -807,10 +813,15 @@ async fn dispatch_input_event(
                                 ctx.session.notify.notify_one();
                             }
                             Some(plexy_glass_mux::BlockModeAction::Yank(text)) => {
-                                let wrote = osc_actions::write_clipboard(text.as_bytes()).await;
+                                let wrote = if osc_actions::write_clipboard(text.as_bytes()).await {
+                                    Wrote::Yes
+                                } else {
+                                    Wrote::No
+                                };
                                 // Honest message (see copy-mode yank above); the
                                 // text is in the paste buffer, so warn points there.
-                                let (msg, sev) = osc_actions::yank_status(wrote, &text, true);
+                                let (msg, sev) =
+                                    osc_actions::yank_status(wrote, &text, PasteFallback::Allowed);
                                 // STAY in block mode (unlike copy mode's yank).
                                 ctx.registry.push_paste_buffer(text.into_bytes()).await;
                                 ctx.session.set_status_message(msg, sev).await;
@@ -2326,7 +2337,9 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::process;
 
-    use plexy_glass_protocol::{PROTOCOL_VERSION, PtySize, SpawnSpec, client_handshake};
+    use plexy_glass_protocol::{
+        CreatePolicy, PROTOCOL_VERSION, PtySize, SpawnSpec, client_handshake,
+    };
     use tokio::io::duplex;
 
     use super::*;
@@ -2397,7 +2410,7 @@ mod tests {
 
         let attach = ClientMsg::AttachOrCreate {
             name: Some("test".into()),
-            create_if_missing: true,
+            create_if_missing: CreatePolicy::CreateIfMissing,
             cmd: Some(SpawnSpec {
                 program: "/bin/echo".into(),
                 args: vec!["hi".into()],
@@ -2479,7 +2492,7 @@ mod tests {
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
         let attach = ClientMsg::AttachOrCreate {
             name: Some("a".into()),
-            create_if_missing: true,
+            create_if_missing: CreatePolicy::CreateIfMissing,
             cmd: Some(cat()),
             size,
         };
@@ -2579,7 +2592,7 @@ mod tests {
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
         let attach = ClientMsg::AttachOrCreate {
             name: Some("a".into()),
-            create_if_missing: true,
+            create_if_missing: CreatePolicy::CreateIfMissing,
             cmd: Some(cat()),
             size,
         };
@@ -2659,7 +2672,7 @@ mod tests {
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
         let attach = ClientMsg::AttachOrCreate {
             name: Some("prefixarm".into()),
-            create_if_missing: true,
+            create_if_missing: CreatePolicy::CreateIfMissing,
             cmd: Some(cat),
             size,
         };
@@ -2758,7 +2771,7 @@ mod tests {
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
         let attach = ClientMsg::AttachOrCreate {
             name: Some("alpha".into()),
-            create_if_missing: true,
+            create_if_missing: CreatePolicy::CreateIfMissing,
             cmd: Some(cat()),
             size,
         };
@@ -2940,7 +2953,7 @@ mod tests {
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
         let attach = ClientMsg::AttachOrCreate {
             name: Some("alpha".into()),
-            create_if_missing: true,
+            create_if_missing: CreatePolicy::CreateIfMissing,
             cmd: Some(cat()),
             size,
         };
@@ -3451,7 +3464,7 @@ mod tests {
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
         let attach = ClientMsg::AttachOrCreate {
             name: Some("alpha".into()),
-            create_if_missing: true,
+            create_if_missing: CreatePolicy::CreateIfMissing,
             cmd: Some(cat()),
             size,
         };
@@ -3818,7 +3831,7 @@ mod tests {
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
         let attach = ClientMsg::AttachOrCreate {
             name: Some("main".into()),
-            create_if_missing: true,
+            create_if_missing: CreatePolicy::CreateIfMissing,
             cmd: Some(cat()),
             size,
         };
@@ -3931,7 +3944,7 @@ mod tests {
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
         let attach = ClientMsg::AttachOrCreate {
             name: Some("main".into()),
-            create_if_missing: true,
+            create_if_missing: CreatePolicy::CreateIfMissing,
             cmd: Some(cat()),
             size,
         };
@@ -4050,7 +4063,7 @@ mod tests {
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
         let attach = ClientMsg::AttachOrCreate {
             name: Some("main".into()),
-            create_if_missing: true,
+            create_if_missing: CreatePolicy::CreateIfMissing,
             cmd: Some(cat()),
             size,
         };
@@ -4164,7 +4177,7 @@ mod tests {
         let _ = client_handshake(&mut cr, &mut cw).await.unwrap();
         let attach = ClientMsg::AttachOrCreate {
             name: Some("main".into()),
-            create_if_missing: true,
+            create_if_missing: CreatePolicy::CreateIfMissing,
             cmd: Some(cat()),
             size,
         };
@@ -4242,7 +4255,7 @@ mod tests {
             &mut cw,
             &postcard::to_allocvec(&ClientMsg::AttachOrCreate {
                 name: Some("bellmon".into()),
-                create_if_missing: true,
+                create_if_missing: CreatePolicy::CreateIfMissing,
                 cmd: Some(cat()),
                 size,
             })
@@ -4374,7 +4387,7 @@ mod tests {
             &mut cw,
             &postcard::to_allocvec(&ClientMsg::AttachOrCreate {
                 name: Some("focusrt".into()),
-                create_if_missing: true,
+                create_if_missing: CreatePolicy::CreateIfMissing,
                 cmd: Some(cat()),
                 size,
             })
@@ -4485,7 +4498,7 @@ mod tests {
             &mut cw,
             &postcard::to_allocvec(&ClientMsg::AttachOrCreate {
                 name: Some("nofocus".into()),
-                create_if_missing: true,
+                create_if_missing: CreatePolicy::CreateIfMissing,
                 cmd: Some(cat()),
                 size,
             })
@@ -4581,7 +4594,7 @@ mod tests {
             &mut cw,
             &postcard::to_allocvec(&ClientMsg::AttachOrCreate {
                 name: Some("themert".into()),
-                create_if_missing: true,
+                create_if_missing: CreatePolicy::CreateIfMissing,
                 cmd: Some(cat()),
                 size,
             })
@@ -4685,7 +4698,7 @@ mod tests {
             &mut cw,
             &postcard::to_allocvec(&ClientMsg::AttachOrCreate {
                 name: Some("notheme".into()),
-                create_if_missing: true,
+                create_if_missing: CreatePolicy::CreateIfMissing,
                 cmd: Some(cat()),
                 size,
             })
@@ -4780,7 +4793,7 @@ mod tests {
             &mut cw,
             &postcard::to_allocvec(&ClientMsg::AttachOrCreate {
                 name: Some("focusswap".into()),
-                create_if_missing: true,
+                create_if_missing: CreatePolicy::CreateIfMissing,
                 cmd: Some(cat()),
                 size,
             })

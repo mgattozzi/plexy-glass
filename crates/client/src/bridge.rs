@@ -8,7 +8,7 @@ use std::process;
 use tokio::io::{AsyncRead, AsyncWrite, copy, split, stdin, stdout};
 
 use crate::error::ClientError;
-use crate::transport::{connect_only, connect_or_spawn, default_socket_path};
+use crate::transport::{Connect, connect_only, connect_or_spawn, default_socket_path};
 
 /// Copy bytes both directions between a client pipe (`client_in`/`client_out`)
 /// and the daemon socket (`daemon_read`/`daemon_write`), finishing as soon as
@@ -33,14 +33,14 @@ where
 }
 
 /// Entry point for `plexy-glass bridge [--no-spawn]`: relay this process's
-/// stdin/stdout to the remote daemon's socket. `no_spawn` mirrors the client's
-/// connect-only verbs so a remote scripting call doesn't start a daemon.
-pub async fn run_bridge(no_spawn: bool) -> Result<(), ClientError> {
+/// stdin/stdout to the remote daemon's socket. `Connect::Only` (`--no-spawn`)
+/// mirrors the client's connect-only verbs so a remote scripting call doesn't
+/// start a daemon; `Connect::Spawn` starts one if none is running.
+pub async fn run_bridge(connect: Connect) -> Result<(), ClientError> {
     let socket = default_socket_path()?;
-    let stream = if no_spawn {
-        connect_only(&socket).await?
-    } else {
-        connect_or_spawn(&socket).await?
+    let stream = match connect {
+        Connect::Only => connect_only(&socket).await?,
+        Connect::Spawn => connect_or_spawn(&socket).await?,
     };
     let (daemon_read, daemon_write) = split(stream);
     let client_stdin = stdin();

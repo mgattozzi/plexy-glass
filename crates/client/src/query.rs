@@ -13,7 +13,7 @@ use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use crate::error::ClientError;
-use crate::transport::{Connect, Target};
+use crate::transport::{Connect, InstallPolicy, Target};
 
 /// The outcome of querying one host for its session list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +60,7 @@ pub fn spawn_query(
                 let target = Target {
                     host: Some(host.clone()),
                     remote_bin: None,
-                    install: false,
+                    install: InstallPolicy::UseExisting,
                 };
                 let res = match timeout(
                     per_host,

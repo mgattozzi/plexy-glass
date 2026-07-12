@@ -12,7 +12,7 @@ use tokio::process::Command;
 use tokio::sync::watch;
 use tokio::time;
 
-use super::Session;
+use super::{ClientAttention, Session};
 use crate::window_manager::{PendingNotification, Severity};
 
 /// Per-pane data captured under the window-manager lock, owned so the borrowed
@@ -403,18 +403,20 @@ pub(super) async fn render_coordinator(
         if !monitor_drain.notifications.is_empty() {
             let cfg = session.config_snapshot();
             let nt = &cfg.notifications;
-            if nt.enabled {
-                let (attached, any_focused, focus_reported) = session.client_attention().await;
-                // Unknown focus (terminal doesn't report ?1004) counts as focused,
-                // so we never fire a false toast; a reported FocusOut makes the
-                // active window "unattended" too, which is what the user asked for.
-                let terminal_focused = !focus_reported || any_focused;
-                let title = format!("plexy-glass: {}", session.name());
-                for p in &monitor_drain.notifications {
-                    let attended = attached > 0 && p.is_active_window && terminal_focused;
-                    if should_notify(nt.enabled, nt.min_duration, p.event.duration_ms, attended) {
-                        notify_desktop(title.clone(), notification_body(p));
-                    }
+            let enabled = if nt.enabled {
+                NotifyEnabled::On
+            } else {
+                NotifyEnabled::Off
+            };
+            let att = session.client_attention().await;
+            // Unknown focus (terminal doesn't report ?1004) counts as focused,
+            // so we never fire a false toast; a reported FocusOut makes the
+            // active window "unattended" too, which is what the user asked for.
+            let title = format!("plexy-glass: {}", session.name());
+            for p in &monitor_drain.notifications {
+                let attention = attention_for(&att, p.is_active_window);
+                if should_notify(enabled, nt.min_duration, p.event.duration_ms, attention) {
+                    notify_desktop(title.clone(), notification_body(p));
                 }
             }
         }
@@ -425,11 +427,10 @@ pub(super) async fn render_coordinator(
             let cfg = session.config_snapshot();
             let nt = &cfg.notifications;
             if nt.enabled && nt.in_band {
-                let (attached, any_focused, focus_reported) = session.client_attention().await;
-                let terminal_focused = !focus_reported || any_focused;
+                let att = session.client_attention().await;
                 for note in &monitor_drain.in_band {
-                    let attended = attached > 0 && note.is_active_window && terminal_focused;
-                    if inband_should_fire(attended) {
+                    let attention = attention_for(&att, note.is_active_window);
+                    if inband_should_fire(attention) {
                         let title = if note.title.is_empty() {
                             format!("plexy-glass: {}", session.name())
                         } else {
@@ -449,19 +450,52 @@ pub(super) async fn render_coordinator(
     // and exit their loops, which closes their sockets and lets clients restore.
 }
 
+/// Whether the notifications config is on. A named two-variant enum so the
+/// `should_notify` call can't confuse it with the `attention` axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotifyEnabled {
+    On,
+    Off,
+}
+
+/// Whether the user is looking right at the completing pane: attended means a
+/// client is attached AND the completing window is the active one AND the
+/// terminal is focused. A named enum so it can't be swapped with `NotifyEnabled`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Attention {
+    Attended,
+    Unattended,
+}
+
+/// Derive the per-notification `Attention` from the session-wide attention
+/// summary and whether the firing window is the active one.
+const fn attention_for(att: &ClientAttention, is_active_window: bool) -> Attention {
+    if att.attached > 0 && is_active_window && att.terminal_focused() {
+        Attention::Attended
+    } else {
+        Attention::Unattended
+    }
+}
+
 /// Pure desktop-notification policy: notify only for an enabled, **unattended**
-/// completion whose duration is known and ≥ the threshold. `attended` means a
-/// client is attached AND the completing window is the active one.
-fn should_notify(enabled: bool, min: Duration, duration_ms: Option<u32>, attended: bool) -> bool {
-    enabled && !attended && duration_ms.is_some_and(|d| Duration::from_millis(d.into()) >= min)
+/// completion whose duration is known and ≥ the threshold.
+fn should_notify(
+    enabled: NotifyEnabled,
+    min: Duration,
+    duration_ms: Option<u32>,
+    attention: Attention,
+) -> bool {
+    enabled == NotifyEnabled::On
+        && attention == Attention::Unattended
+        && duration_ms.is_some_and(|d| Duration::from_millis(d.into()) >= min)
 }
 
 /// Pure in-band (OSC 9 / OSC 777) notification policy: fire unless you're
-/// looking right at the firing pane (`attended`, see `should_notify`'s doc).
+/// looking right at the firing pane (`Attended`, see `should_notify`'s doc).
 /// No duration threshold, unlike `should_notify` — an explicit request from
 /// the program has no "too short to bother" case.
-const fn inband_should_fire(attended: bool) -> bool {
-    !attended
+const fn inband_should_fire(attention: Attention) -> bool {
+    matches!(attention, Attention::Unattended)
 }
 
 /// Notification body: `"✓ cargo build · exit 0 · 2m03s"` (command best-effort;
@@ -922,39 +956,42 @@ mod tests {
 
     #[test]
     fn should_notify_policy_matrix() {
+        use Attention::{Attended, Unattended};
+        use NotifyEnabled::{Off, On};
         let min_30s = Duration::from_secs(30);
-        // enabled, min, duration, attended
+        // enabled, min, duration, attention
         assert!(
-            should_notify(true, min_30s, Some(30_000), false),
+            should_notify(On, min_30s, Some(30_000), Unattended),
             "long + unattended → notify"
         );
-        assert!(should_notify(true, min_30s, Some(45_000), false));
+        assert!(should_notify(On, min_30s, Some(45_000), Unattended));
         assert!(
-            !should_notify(true, min_30s, Some(29_999), false),
+            !should_notify(On, min_30s, Some(29_999), Unattended),
             "below threshold"
         );
         assert!(
-            !should_notify(true, min_30s, Some(60_000), true),
+            !should_notify(On, min_30s, Some(60_000), Attended),
             "attended → suppress"
         );
         assert!(
-            !should_notify(false, Duration::ZERO, Some(99_999), false),
+            !should_notify(Off, Duration::ZERO, Some(99_999), Unattended),
             "disabled"
         );
         assert!(
-            !should_notify(true, min_30s, None, false),
+            !should_notify(On, min_30s, None, Unattended),
             "no duration → never"
         );
         assert!(
-            should_notify(true, Duration::ZERO, Some(1), false),
+            should_notify(On, Duration::ZERO, Some(1), Unattended),
             "min 0 notifies any unattended"
         );
     }
 
     #[test]
     fn inband_should_fire_gate() {
-        assert!(inband_should_fire(false), "unattended → fire");
-        assert!(!inband_should_fire(true), "looking right at it → suppress");
+        use Attention::{Attended, Unattended};
+        assert!(inband_should_fire(Unattended), "unattended → fire");
+        assert!(!inband_should_fire(Attended), "looking right at it → suppress");
     }
 
     #[test]

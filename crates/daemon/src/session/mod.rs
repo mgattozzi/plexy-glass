@@ -17,6 +17,7 @@ use tokio::time;
 use crate::error::DaemonError;
 use crate::pane::Pane;
 use crate::window_manager::{STATUS_TTL, Severity, WindowManager};
+use crate::osc_actions::{PasteFallback, Wrote};
 use crate::{LockExt, osc_actions, pipe};
 
 pub struct ClientHandle {
@@ -43,6 +44,29 @@ pub struct ClientHandle {
     /// aggregate behind the `ssh` status marker. Rides `ClientCtx` across session
     /// switches so it never re-derives per session.
     pub remote: bool,
+}
+
+/// Attention summary for the desktop-notification policy, returned by
+/// [`Session::client_attention`]. Named fields so the two focus bools can't be
+/// swapped at a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientAttention {
+    /// Number of attached clients.
+    pub attached: usize,
+    /// At least one attached client reports its outer terminal focused.
+    pub any_focused: bool,
+    /// At least one attached client has ever relayed a `?1004` focus event.
+    pub any_focus_reported: bool,
+}
+
+impl ClientAttention {
+    /// Whether the terminal should count as focused for the notification policy.
+    /// Unknown focus (no client ever relayed `?1004`) counts as focused, so we
+    /// never fire a false toast on a terminal that can't report focus; once any
+    /// client HAS reported, a reported FocusOut makes it unfocused.
+    pub const fn terminal_focused(&self) -> bool {
+        !self.any_focus_reported || self.any_focused
+    }
 }
 
 pub struct Session {
@@ -652,18 +676,17 @@ impl Session {
         (any_before != any_after).then_some(any_after)
     }
 
-    /// Attention summary for the desktop-notification policy:
-    /// `(attached_count, any_focused, any_focus_reported)`. `any_focus_reported`
+    /// Attention summary for the desktop-notification policy. `any_focus_reported`
     /// is `false` when no attached client has ever relayed a `?1004` event, so
     /// the coordinator treats focus as unknown→focused (no false notifications on
     /// terminals that don't report focus).
-    pub async fn client_attention(&self) -> (usize, bool, bool) {
+    pub async fn client_attention(&self) -> ClientAttention {
         let clients = self.clients.lock().await;
-        (
-            clients.len(),
-            clients.iter().any(|c| c.focused),
-            clients.iter().any(|c| c.focus_reported),
-        )
+        ClientAttention {
+            attached: clients.len(),
+            any_focused: clients.iter().any(|c| c.focused),
+            any_focus_reported: clients.iter().any(|c| c.focus_reported),
+        }
     }
 
     /// Any-client-armed aggregate for the `prefix-indicator` status widget:
@@ -1025,8 +1048,12 @@ impl Session {
         // message on re-lock. Mirrors the release→await→re-lock pattern the
         // connection.rs copy-mode / block-mode yank sites use.
         if let Some(text) = yanked {
-            let wrote = osc_actions::write_clipboard(text.as_bytes()).await;
-            let (msg, sev) = osc_actions::yank_status(wrote, &text, false);
+            let wrote = if osc_actions::write_clipboard(text.as_bytes()).await {
+                Wrote::Yes
+            } else {
+                Wrote::No
+            };
+            let (msg, sev) = osc_actions::yank_status(wrote, &text, PasteFallback::No);
             {
                 let mut manager = self.window_manager.lock().await;
                 manager.set_status_message(msg, sev);
@@ -1932,8 +1959,13 @@ mod tests {
     async fn client_attention_tracks_focus_reporting_for_notifications() {
         let _g = test_env::isolate();
         let s = Session::new("attn".into(), spec(), size(), cfg()).unwrap();
+        let attn = |attached, any_focused, any_focus_reported| ClientAttention {
+            attached,
+            any_focused,
+            any_focus_reported,
+        };
         // Detached: nobody attached.
-        assert_eq!(s.client_attention().await, (0, false, false));
+        assert_eq!(s.client_attention().await, attn(0, false, false));
         let s2 = Arc::clone(&s);
         let a = task::spawn_blocking(move || {
             s2.register_client(
@@ -1951,14 +1983,34 @@ mod tests {
         .unwrap()
         .unwrap();
         // Attached but no focus event yet → focus UNKNOWN (focus_reported false).
-        assert_eq!(s.client_attention().await, (1, false, false));
+        assert_eq!(s.client_attention().await, attn(1, false, false));
+        // Unknown focus counts as focused for the notification policy.
+        assert!(s.client_attention().await.terminal_focused());
         // Terminal reports focus-out → reported=true, not focused (the new
         // "terminal not focused while in the active window" notification case).
         s.set_client_focus(a.client_id, false).await;
-        assert_eq!(s.client_attention().await, (1, false, true));
+        assert_eq!(s.client_attention().await, attn(1, false, true));
+        // Reported and not focused → terminal_focused false.
+        assert!(!s.client_attention().await.terminal_focused());
         // Terminal regains focus → focused again.
         s.set_client_focus(a.client_id, true).await;
-        assert_eq!(s.client_attention().await, (1, true, true));
+        assert_eq!(s.client_attention().await, attn(1, true, true));
+        assert!(s.client_attention().await.terminal_focused());
+    }
+
+    #[test]
+    fn terminal_focused_truth_table() {
+        let attn = |any_focused, any_focus_reported| ClientAttention {
+            attached: 1,
+            any_focused,
+            any_focus_reported,
+        };
+        // Never reported → unknown counts as focused, regardless of any_focused.
+        assert!(attn(false, false).terminal_focused());
+        assert!(attn(true, false).terminal_focused());
+        // Reported → follows any_focused.
+        assert!(!attn(false, true).terminal_focused());
+        assert!(attn(true, true).terminal_focused());
     }
 
     #[tokio::test]
@@ -2877,8 +2929,8 @@ mod tests {
 
     /// `kill -0` semantics: a zombie still counts as alive until reaped, so
     /// `!pid_alive` asserts killed AND reaped (no zombie).
-    fn pid_alive(pid: u32) -> bool {
-        signal::kill(Pid::from_raw(pid as i32), None).is_ok()
+    fn pid_alive(pid: Pid) -> bool {
+        signal::kill(pid, None).is_ok()
     }
 
     /// A pane spec whose child is `cat`: it echoes input back as pane OUTPUT,

@@ -17,7 +17,7 @@ use crate::declared;
 use crate::error::DaemonError;
 use crate::pane::Pane;
 use crate::popup::{self, Popup};
-use crate::window::{CompletionEvent, Window};
+use crate::window::{CellPx, CompletionEvent, Window};
 
 /// How long a transient status-line message stays visible before it is cleared
 /// on the next recompose. Mirrored by the `Session` wake timer.
@@ -1107,10 +1107,10 @@ impl WindowManager {
 /// reports no pixel dimensions (the emulator then uses its 10×20 fallback).
 /// Threaded into each pane's PTY so children scale inline graphics to the real
 /// cell box and `CSI 14/16/18t` reports are accurate.
-pub(super) fn host_cell_px(host: PtySize) -> (u16, u16) {
-    let w = host.pixel_width.checked_div(host.cols).unwrap_or(0);
-    let h = host.pixel_height.checked_div(host.rows).unwrap_or(0);
-    (w, h)
+pub(super) fn host_cell_px(host: PtySize) -> CellPx {
+    let width = host.pixel_width.checked_div(host.cols).unwrap_or(0);
+    let height = host.pixel_height.checked_div(host.rows).unwrap_or(0);
+    CellPx { width, height }
 }
 
 fn host_viewport(host: PtySize) -> Rect {

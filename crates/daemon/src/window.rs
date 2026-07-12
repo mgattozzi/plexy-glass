@@ -26,6 +26,26 @@ use crate::pane::Pane;
 /// Only the most-recent entries matter for the close-pane focus fallback.
 const FOCUS_HISTORY_CAP: usize = 64;
 
+/// The host terminal's cell size in pixels. Named fields so `width` and `height`
+/// can't be silently swapped as they flow from `host_cell_px` through pane PTY
+/// sizing. `(0, 0)` (`CellPx::ZERO`) means the host reports no pixel size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellPx {
+    pub width: u16,
+    pub height: u16,
+}
+
+impl CellPx {
+    /// Host reports no pixel size; the emulator uses its 10×20 fallback. Only the
+    /// tests construct a zero cell size by hand — production derives it from the
+    /// host `PtySize` via `host_cell_px`.
+    #[cfg(test)]
+    pub(crate) const ZERO: Self = Self {
+        width: 0,
+        height: 0,
+    };
+}
+
 /// A command-completion observed in a window's pane during a drain, surfaced
 /// for the desktop-notification policy regardless of the `monitor-command` flag.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +72,7 @@ pub struct Window {
     /// child sees the REAL cell size (`CSI 14/16/18t`, inline-image footprints)
     /// instead of the emulator's 10×20 fallback. Set at construction and
     /// refreshed by `set_cell_px` on host resize.
-    cell_px: (u16, u16),
+    cell_px: CellPx,
     /// When true, input sent to the active pane is also broadcast to all other
     /// panes in this window (sync-panes mode). Defaults to false; toggled by
     /// `Command::ToggleSyncPanes`.
@@ -116,21 +136,21 @@ pub struct Window {
 /// Per-pane PTY size: the host's cell pixels (`(0, 0)` when unknown) scaled by
 /// the pane's own cell box, so the child sees the REAL cell size (`CSI 14/16/18t`
 /// reports and inline-image footprints) rather than the emulator's fallback.
-fn pane_pty_size(rect: Rect, cell_px: (u16, u16)) -> PtySize {
+fn pane_pty_size(rect: Rect, cell_px: CellPx) -> PtySize {
     let rows = rect.rows.max(1);
     let cols = rect.cols.max(1);
     PtySize {
         rows,
         cols,
-        pixel_width: cell_px.0.saturating_mul(cols),
-        pixel_height: cell_px.1.saturating_mul(rows),
+        pixel_width: cell_px.width.saturating_mul(cols),
+        pixel_height: cell_px.height.saturating_mul(rows),
     }
 }
 
 impl Window {
     /// Refresh the host cell size (pixels per cell). Called on host resize; the
     /// next `resize` propagates it to every pane's PTY.
-    pub const fn set_cell_px(&mut self, cell_px: (u16, u16)) {
+    pub const fn set_cell_px(&mut self, cell_px: CellPx) {
         self.cell_px = cell_px;
     }
 
@@ -144,7 +164,7 @@ impl Window {
         first_pane_id: PaneId,
         spec: SpawnSpec,
         rect: Rect,
-        cell_px: (u16, u16),
+        cell_px: CellPx,
         output_notify: Arc<Notify>,
         death_tx: Option<mpsc::Sender<PaneId>>,
         config: Arc<plexy_glass_config::Config>,
@@ -171,7 +191,7 @@ impl Window {
         panes: HashMap<PaneId, Pane>,
         layout: LayoutTree,
         active: PaneId,
-        cell_px: (u16, u16),
+        cell_px: CellPx,
     ) -> Self {
         Self {
             id,
@@ -605,7 +625,7 @@ impl Window {
     }
 
     /// Build a new window whose single pane is an existing `pane` (break-pane).
-    pub fn from_pane(id: WindowId, name: String, pane: Pane, cell_px: (u16, u16)) -> Self {
+    pub fn from_pane(id: WindowId, name: String, pane: Pane, cell_px: CellPx) -> Self {
         let pid = pane.id();
         let mut panes = HashMap::new();
         panes.insert(pid, pane);
@@ -989,7 +1009,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
-            (0, 0),
+            CellPx::ZERO,
             notify(),
             None,
             cfg(),
@@ -1021,7 +1041,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
-            (0, 0),
+            CellPx::ZERO,
             notify(),
             None,
             cfg(),
@@ -1051,7 +1071,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
-            (0, 0),
+            CellPx::ZERO,
             notify(),
             None,
             cfg(),
@@ -1070,7 +1090,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
-            (0, 0),
+            CellPx::ZERO,
             notify(),
             None,
             cfg(),
@@ -1100,7 +1120,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
-            (0, 0),
+            CellPx::ZERO,
             notify(),
             None,
             cfg(),
@@ -1130,7 +1150,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
-            (0, 0),
+            CellPx::ZERO,
             notify(),
             None,
             cfg(),
@@ -1171,7 +1191,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
-            (0, 0),
+            CellPx::ZERO,
             notify(),
             None,
             cfg(),
@@ -1207,7 +1227,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
-            (0, 0),
+            CellPx::ZERO,
             notify(),
             None,
             cfg(),
@@ -1257,7 +1277,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
-            (0, 0),
+            CellPx::ZERO,
             notify(),
             None,
             cfg(),
@@ -1297,7 +1317,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
-            (0, 0),
+            CellPx::ZERO,
             notify(),
             None,
             cfg(),
@@ -1319,7 +1339,7 @@ mod tests {
             PaneId(2),
             shell_spec(),
             viewport,
-            (0, 0),
+            CellPx::ZERO,
             notify(),
             None,
             cfg(),
@@ -1336,7 +1356,7 @@ mod tests {
     async fn from_pane_builds_single_pane_window() {
         let mut src = two_pane_window();
         let moved = src.detach_pane(PaneId(1)).expect("present");
-        let w = Window::from_pane(WindowId(5), "broken".into(), moved, (0, 0));
+        let w = Window::from_pane(WindowId(5), "broken".into(), moved, CellPx::ZERO);
         assert_eq!(w.id, WindowId(5));
         assert_eq!(w.name, "broken");
         assert_eq!(w.active(), PaneId(1));
@@ -1353,7 +1373,7 @@ mod tests {
             id,
             shell_spec(),
             viewport,
-            (0, 0),
+            CellPx::ZERO,
             notify(),
             None,
             cfg(),
@@ -1452,7 +1472,7 @@ mod tests {
             PaneId(0),
             shell_spec(),
             viewport,
-            (0, 0),
+            CellPx::ZERO,
             notify(),
             None,
             cfg(),

@@ -31,23 +31,46 @@ pub(crate) fn copied_message(text: &str) -> String {
     }
 }
 
+/// Whether the OS clipboard write actually landed. Named so it can't be swapped
+/// with the paste-fallback flag at a `yank_status` call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Wrote {
+    Yes,
+    No,
+}
+
+/// Whether the yanked text was also pushed to a paste buffer (so the failure
+/// message can point the user at `Ctrl+a ]`). Named so it can't be swapped with
+/// [`Wrote`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PasteFallback {
+    /// Text is in a paste buffer; a clipboard failure can suggest `Ctrl+a ]`.
+    Allowed,
+    /// No paste-buffer fallback (mouse paths); don't promise a paste.
+    No,
+}
+
 /// Pick the status message + severity for a clipboard yank given whether the OS
 /// clipboard write actually landed. On failure the message is honest
 /// ("clipboard unavailable") instead of a false "copied"; when the text was also
-/// pushed to a paste buffer (`paste_fallback`), it points the user at `Ctrl+a ]`.
-/// Shared by every yank site (copy-mode Enter, block-mode, copy-mode mouse,
-/// mouse-drag release) so the honesty is decided in one tested place.
-pub(crate) fn yank_status(wrote: bool, text: &str, paste_fallback: bool) -> (String, Severity) {
+/// pushed to a paste buffer (`PasteFallback::Allowed`), it points the user at
+/// `Ctrl+a ]`. Shared by every yank site (copy-mode Enter, block-mode, copy-mode
+/// mouse, mouse-drag release) so the honesty is decided in one tested place.
+pub(crate) fn yank_status(
+    wrote: Wrote,
+    text: &str,
+    paste_fallback: PasteFallback,
+) -> (String, Severity) {
     use crate::window_manager::Severity;
-    if wrote {
-        (copied_message(text), Severity::Success)
-    } else if paste_fallback {
-        (
+    match (wrote, paste_fallback) {
+        (Wrote::Yes, _) => (copied_message(text), Severity::Success),
+        (Wrote::No, PasteFallback::Allowed) => (
             "clipboard unavailable — paste with Ctrl+a ]".to_string(),
             Severity::Warn,
-        )
-    } else {
-        ("clipboard unavailable".to_string(), Severity::Warn)
+        ),
+        (Wrote::No, PasteFallback::No) => {
+            ("clipboard unavailable".to_string(), Severity::Warn)
+        }
     }
 }
 
@@ -268,15 +291,15 @@ mod tests {
     fn yank_status_is_honest_about_clipboard_failure() {
         use crate::window_manager::Severity;
         // Success: reports the copied text regardless of paste_fallback.
-        let (msg, sev) = yank_status(true, "hi", true);
+        let (msg, sev) = yank_status(Wrote::Yes, "hi", PasteFallback::Allowed);
         assert_eq!(sev, Severity::Success);
         assert_eq!(msg, "copied \"hi\"");
         // Failure with a paste-buffer fallback: warn + point at Ctrl+a ].
-        let (msg, sev) = yank_status(false, "hi", true);
+        let (msg, sev) = yank_status(Wrote::No, "hi", PasteFallback::Allowed);
         assert_eq!(sev, Severity::Warn);
         assert_eq!(msg, "clipboard unavailable — paste with Ctrl+a ]");
         // Failure with no fallback (mouse paths): warn, no false paste promise.
-        let (msg, sev) = yank_status(false, "hi", false);
+        let (msg, sev) = yank_status(Wrote::No, "hi", PasteFallback::No);
         assert_eq!(sev, Severity::Warn);
         assert_eq!(msg, "clipboard unavailable");
     }

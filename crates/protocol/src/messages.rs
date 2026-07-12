@@ -48,6 +48,20 @@ pub enum ExitStatus {
     Unknown,
 }
 
+/// Whether an `AttachOrCreate` may create the session when it doesn't exist.
+///
+/// Variant order is load-bearing: postcard encodes a unit enum as a varint of
+/// the declaration index, so `RequireExisting = 0` / `CreateIfMissing = 1` are
+/// byte-identical to the old `create_if_missing: bool` (`false` / `true`) it
+/// replaces. Do NOT reorder without bumping `PROTOCOL_VERSION`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CreatePolicy {
+    /// Attach only; error if the named session doesn't exist.
+    RequireExisting,
+    /// Create the session (from `cmd`) when it doesn't exist.
+    CreateIfMissing,
+}
+
 /// Bumped any time `ClientMsg` or `ServerMsg` changes meaning.
 ///
 /// History:
@@ -119,7 +133,7 @@ pub struct ServerHello {
 pub enum ClientMsg {
     AttachOrCreate {
         name: Option<String>,
-        create_if_missing: bool,
+        create_if_missing: CreatePolicy,
         cmd: Option<SpawnSpec>,
         size: PtySize,
     },
@@ -316,6 +330,17 @@ mod tests {
     }
 
     #[test]
+    fn create_policy_wire_matches_the_old_bool() {
+        // The v12 wire encoded `create_if_missing` as a bool; the enum must
+        // serialize byte-identically so it's not a protocol break. RequireExisting
+        // == false == 0x00, CreateIfMissing == true == 0x01.
+        let f = postcard::to_allocvec(&false).unwrap();
+        let t = postcard::to_allocvec(&true).unwrap();
+        assert_eq!(postcard::to_allocvec(&CreatePolicy::RequireExisting).unwrap(), f);
+        assert_eq!(postcard::to_allocvec(&CreatePolicy::CreateIfMissing).unwrap(), t);
+    }
+
+    #[test]
     fn bytes_payload_round_trips() {
         let payload = Bytes::from_static(b"hello world");
         let bytes = postcard::to_allocvec(&payload).expect("serialize");
@@ -328,7 +353,7 @@ mod tests {
         let cases = vec![
             ClientMsg::AttachOrCreate {
                 name: Some("main".into()),
-                create_if_missing: true,
+                create_if_missing: CreatePolicy::CreateIfMissing,
                 cmd: Some(SpawnSpec {
                     program: "bash".into(),
                     args: vec![],

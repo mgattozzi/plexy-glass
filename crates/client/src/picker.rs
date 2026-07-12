@@ -23,6 +23,8 @@ use plexy_glass_emulator::{display_width, truncate_to_width};
 use plexy_glass_protocol::PtySize;
 use plexy_glass_status::Rgb;
 
+use crate::transport::InstallPolicy;
+
 /// The picker's resolved colors, mapped to the same palette roles the daemon's
 /// `chrome_colors` uses so the box matches every other overlay. Resolved once at
 /// picker build from the client's `cfg.palette`; a role absent from a custom
@@ -132,7 +134,7 @@ pub enum PickerOutcome {
     Reconnect {
         host: Option<String>,
         name: String,
-        install: bool,
+        install: InstallPolicy,
     },
     /// New session `name` on `host`'s daemon (create-if-missing at reconnect).
     /// `install` carries the picker's persistent `i` toggle through to the
@@ -140,7 +142,7 @@ pub enum PickerOutcome {
     New {
         host: Option<String>,
         name: String,
-        install: bool,
+        install: InstallPolicy,
     },
     /// Forget an ad-hoc host from the client-side roster file.
     Forget { host: String },
@@ -194,7 +196,7 @@ pub struct PickerState {
     /// not tied to any row or the filter). Carried into
     /// `PickerOutcome::{Reconnect,New}` at commit and read by the pump into the
     /// reconnect `Target`.
-    install: bool,
+    install: InstallPolicy,
     /// The client's terminal size, seeded at build and updated on SIGWINCH, so
     /// `render` can center + size the box. Defaults to 24x80 for unit tests.
     size: PtySize,
@@ -212,7 +214,7 @@ impl PickerState {
             filter: String::new(),
             cursor: 0,
             mode: PickerMode::Navigate,
-            install: false,
+            install: InstallPolicy::UseExisting,
             size: PtySize {
                 rows: 24,
                 cols: 80,
@@ -246,7 +248,7 @@ impl PickerState {
             filter: String::new(),
             cursor,
             mode: PickerMode::Navigate,
-            install: false,
+            install: InstallPolicy::UseExisting,
             size: PtySize {
                 rows: 24,
                 cols: 80,
@@ -349,7 +351,7 @@ impl PickerState {
 
     /// Whether the next host connect provisions the remote binary first.
     pub const fn install_enabled(&self) -> bool {
-        self.install
+        self.install.provisions()
     }
 
     /// Apply one input byte. Returns `Some(outcome)` when the key commits/cancels
@@ -401,7 +403,7 @@ impl PickerState {
             // produces an outcome; the toggle is read at `accept`/`New`-commit
             // time and shown in the footer.
             b'i' => {
-                self.install = !self.install;
+                self.install = self.install.toggled();
                 None
             }
             // `n` opens the new-session prompt only on a host row (the LOCAL
@@ -856,7 +858,7 @@ impl PickerState {
                 " \u{23ce} confirm \u{00b7} esc cancel ".into()
             }
             PickerMode::Navigate => {
-                let ins = if self.install { "on" } else { "off" };
+                let ins = if self.install.provisions() { "on" } else { "off" };
                 format!(
                     " \u{2191}/\u{2193} move \u{00b7} \u{23ce} connect \u{00b7} / filter \u{00b7} n new \u{00b7} i install: {ins} \u{00b7} x forget \u{00b7} esc "
                 )
@@ -1523,7 +1525,7 @@ mod tests {
             Some(PickerOutcome::Reconnect {
                 host: Some("prod".into()),
                 name: "api".into(),
-                install: false,
+                install: InstallPolicy::UseExisting,
             })
         );
     }
@@ -1567,7 +1569,7 @@ mod tests {
             Some(PickerOutcome::Reconnect {
                 host: Some("prod".into()),
                 name: String::new(),
-                install: false,
+                install: InstallPolicy::UseExisting,
             })
         );
     }
@@ -1604,7 +1606,7 @@ mod tests {
             Some(PickerOutcome::Reconnect {
                 host: Some("other".into()),
                 name: "b".into(),
-                install: false,
+                install: InstallPolicy::UseExisting,
             }),
             "a session on a different daemon reconnects"
         );
@@ -1649,7 +1651,7 @@ mod tests {
             Some(PickerOutcome::Reconnect {
                 host: Some("prod".into()),
                 name: String::new(),
-                install: true,
+                install: InstallPolicy::Provision,
             })
         );
     }
@@ -1719,7 +1721,7 @@ mod tests {
             Some(PickerOutcome::Reconnect {
                 host: Some("wsl2".into()),
                 name: String::new(),
-                install: true,
+                install: InstallPolicy::Provision,
             })
         );
     }
@@ -1946,7 +1948,7 @@ mod tests {
             Some(PickerOutcome::Reconnect {
                 host: Some("prod".into()),
                 name: "api".into(),
-                install: true,
+                install: InstallPolicy::Provision,
             }),
             "connect carries the install toggle set before filtering"
         );

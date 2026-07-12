@@ -136,10 +136,15 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let install = if cli.install {
+        plexy_glass_client::InstallPolicy::Provision
+    } else {
+        plexy_glass_client::InstallPolicy::UseExisting
+    };
     let target = plexy_glass_client::Target {
         host: cli.host,
         remote_bin: cli.remote_bin,
-        install: cli.install,
+        install,
     };
     // Default to `attach` with no name when no subcommand is given.
     match cli.command.unwrap_or(Subcommands::Attach { name: None }) {
@@ -257,7 +262,12 @@ async fn main() -> anyhow::Result<()> {
             plexy_glass_daemon::run(args).await?;
         }
         Subcommands::Bridge { no_spawn } => {
-            plexy_glass_client::run_bridge(no_spawn).await?;
+            let connect = if no_spawn {
+                plexy_glass_client::Connect::Only
+            } else {
+                plexy_glass_client::Connect::Spawn
+            };
+            plexy_glass_client::run_bridge(connect).await?;
         }
     }
     Ok(())

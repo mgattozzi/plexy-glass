@@ -11,6 +11,7 @@ use std::time::Duration;
 use std::{env, thread};
 
 use bytes::Bytes;
+use nix::unistd::Pid;
 use plexy_glass_config::{Config, PaletteConfig};
 use plexy_glass_emulator::{ColorQuery, Emulator, Notification, Screen};
 use plexy_glass_mux::PaneId;
@@ -437,7 +438,7 @@ impl Pane {
 
     /// The running pipe consumer's pid, if a pipe is installed. Test
     /// observability for the kill/reap (no-zombie) assertions.
-    pub fn pipe_pid(&self) -> Option<u32> {
+    pub fn pipe_pid(&self) -> Option<Pid> {
         // invariant: pipe slot mutex held briefly; no await, no nested locks.
         self.inner
             .pipe

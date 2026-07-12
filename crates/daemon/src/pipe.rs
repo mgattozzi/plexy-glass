@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 use bytes::Bytes;
+use nix::unistd::Pid;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, watch};
@@ -74,7 +75,7 @@ pub struct PipeHandle {
     cancel_tx: watch::Sender<Option<PipeCloseReason>>,
     /// Consumer pid at spawn time. Exposed for tests' kill/reap (no-zombie)
     /// assertions.
-    pid: Option<u32>,
+    pid: Option<Pid>,
 }
 
 impl PipeHandle {
@@ -86,7 +87,7 @@ impl PipeHandle {
 
     /// The consumer's pid at spawn time (`None` if it exited before spawn
     /// returned the id).
-    pub const fn pid(&self) -> Option<u32> {
+    pub const fn pid(&self) -> Option<Pid> {
         self.pid
     }
 }
@@ -155,7 +156,9 @@ pub(crate) fn install_and_drain(
     let handle = PipeHandle {
         id,
         cancel_tx,
-        pid: child.id(),
+        // child.id() is the raw OS pid; wrap it at the boundary so the pid
+        // flows as a Pid, not a bare int, everywhere downstream.
+        pid: child.id().map(|p| Pid::from_raw(p as i32)),
     };
     let prev = {
         // invariant: pipe slot mutex held briefly; no await, no nested locks.
@@ -265,8 +268,8 @@ mod tests {
     /// Whether `pid` names a live (un-reaped) process. `kill -0` semantics:
     /// a zombie still counts as alive until its parent reaps it, which is exactly
     /// the signal the no-zombie assertions need.
-    pub fn pid_alive(pid: u32) -> bool {
-        signal::kill(Pid::from_raw(pid as i32), None).is_ok()
+    pub fn pid_alive(pid: Pid) -> bool {
+        signal::kill(pid, None).is_ok()
     }
 
     fn spawn_consumer(cmd: &str) -> (Child, ChildStdin) {
@@ -320,7 +323,7 @@ mod tests {
                 .expect("send with live receiver");
         }
         let (child, stdin) = spawn_consumer("exec sleep 30");
-        let pid = child.id().expect("consumer pid");
+        let pid = Pid::from_raw(child.id().expect("consumer pid") as i32);
         let slot: PipeSlot = Arc::new(StdMutex::new(None));
         install_and_drain(
             Arc::clone(&slot),
@@ -367,7 +370,7 @@ mod tests {
     async fn cancel_slot_kills_and_reaps_consumer() {
         let (tx, rx) = broadcast::channel::<Bytes>(256);
         let (child, stdin) = spawn_consumer("exec sleep 30");
-        let pid = child.id().expect("consumer pid");
+        let pid = Pid::from_raw(child.id().expect("consumer pid") as i32);
         let slot: PipeSlot = Arc::new(StdMutex::new(None));
         install_and_drain(Arc::clone(&slot), rx, child, stdin, Weak::new());
         assert!(!slot_empty(&slot), "handle installed");

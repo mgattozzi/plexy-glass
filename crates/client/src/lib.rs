@@ -23,8 +23,8 @@ pub use error::ClientError;
 pub use kill::{KillOutcome, kill, kill_all};
 use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
-    ClientHello, ClientMsg, Codec, ExitStatus, GraphicsCaps, NegotiatedKbd, PROTOCOL_VERSION,
-    ServerMsg, SpawnSpec, client_handshake, client_handshake_with,
+    ClientHello, ClientMsg, Codec, CreatePolicy, ExitStatus, GraphicsCaps, NegotiatedKbd,
+    PROTOCOL_VERSION, ServerMsg, SpawnSpec, client_handshake, client_handshake_with,
 };
 pub use pump::{PumpExit, handshake_spawn, pump};
 pub use shell_integration::shell_integration_snippet;
@@ -34,8 +34,8 @@ use tokio::signal::unix;
 use tokio::sync::mpsc;
 use tracing::info;
 pub use transport::{
-    Connect, Target, Transport, connect_only, connect_or_spawn, default_socket_path,
-    open_transport, ssh_args,
+    Connect, InstallPolicy, Target, Transport, connect_only, connect_or_spawn,
+    default_socket_path, open_transport, ssh_args,
 };
 pub use tty::{HostTty, current_size};
 
@@ -112,14 +112,14 @@ fn run_probe(stdin_fd: BorrowedFd<'_>) -> ProbeOutcome {
 ///
 /// - `target`: local daemon or a remote one over SSH (`-H`).
 /// - `name`: which session to target; `None` lets the daemon pick.
-/// - `create_if_missing`: when `true` the daemon creates the session if it
-///   does not yet exist; when `false` it returns `SessionNotFound`.
+/// - `create_if_missing`: `CreateIfMissing` creates the session if it does not
+///   yet exist; `RequireExisting` returns `SessionNotFound`.
 /// - `spawn_cmd`: override the program spawned in new sessions; `None` uses
 ///   the current `$SHELL`.
 pub async fn run(
     target: &Target,
     name: Option<String>,
-    create_if_missing: bool,
+    create_if_missing: CreatePolicy,
     spawn_cmd: Option<SpawnSpec>,
 ) -> Result<(), ClientError> {
     // ONE async stdin reader + one async stdout for the whole client life. A
@@ -453,7 +453,7 @@ pub async fn client_attach_smart(
     let name = explicit_name.unwrap_or_else(|| "main".to_string());
     // `None` lets `run` pick the shell: the local default for a local daemon, or
     // the remote's own `$SHELL` for a remote one (see the spec resolution there).
-    run(target, Some(name), true, None).await
+    run(target, Some(name), CreatePolicy::CreateIfMissing, None).await
 }
 
 /// Run one or more command-prompt lines against a session.
