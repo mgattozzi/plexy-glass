@@ -14,8 +14,8 @@ use crate::cell::Cell;
 use crate::color::Color;
 use crate::cursor::{Cursor, CursorShape};
 use crate::graphics::{
-    self, AnimControl, Frame, Image, ImageFormat, ImageProtocol, ImageStore, Placement,
-    VirtualPlacement,
+    self, AnimControl, Frame, Image, ImageFormat, ImageId, ImageProtocol, ImageStore, Placement,
+    PlacementId, VirtualPlacement,
 };
 use crate::grid::{Grid, Row, RowMark, WrapOrigin};
 use crate::hyperlinks::HyperlinkTable;
@@ -31,7 +31,7 @@ use crate::width::display_width;
 /// `Image` (+ a `Placement` when the action is display).
 #[derive(Clone, Debug)]
 struct PendingTx {
-    id: u32,
+    id: ImageId,
     format: ImageFormat,
     width: Option<u32>,
     height: Option<u32>,
@@ -41,14 +41,14 @@ struct PendingTx {
     place_cols: Option<u16>,
     /// `U=1`: on finalize, record a virtual placement instead of an anchored one.
     unicode: bool,
-    placement_id: Option<u32>,
+    placement_id: Option<PlacementId>,
     z: i32,
 }
 
 /// Accumulates a chunked `a=f` transmission, mirroring `PendingTx`.
 #[derive(Clone, Debug)]
 struct PendingFrame {
-    image_id: u32,
+    image_id: ImageId,
     frame_number: Option<u32>,
     canvas_source: Option<u32>,
     x: u32,
@@ -341,7 +341,7 @@ impl Screen {
         inner.extend_from_slice(payload);
 
         self.image_id_seq = self.image_id_seq.wrapping_add(1);
-        let id = self.image_id_seq;
+        let id = ImageId(self.image_id_seq);
         self.image_gen = self.image_gen.wrapping_add(1);
         let image = Image {
             id,
@@ -481,7 +481,7 @@ impl Screen {
             // Start a new transmission (drop any abandoned one).
             let id = cmd.id.unwrap_or_else(|| {
                 self.image_id_seq = self.image_id_seq.wrapping_add(1);
-                self.image_id_seq
+                ImageId(self.image_id_seq)
             });
             let format = cmd
                 .format
@@ -641,12 +641,12 @@ impl Screen {
     /// for the per-client renderer to transmit + emit `a=p,U=1` once.
     fn add_virtual_placement(
         &mut self,
-        image_id: u32,
-        placement_id: Option<u32>,
+        image_id: ImageId,
+        placement_id: Option<PlacementId>,
         r: Option<u16>,
         c: Option<u16>,
     ) {
-        let placement_id = placement_id.unwrap_or(0);
+        let placement_id = placement_id.unwrap_or(PlacementId(0));
         let seq = self.graphics_seq;
         self.graphics_seq = self.graphics_seq.wrapping_add(1);
         // Replace an existing virtual placement for the same (image, placement).
@@ -673,7 +673,7 @@ impl Screen {
     )]
     fn add_placement(
         &mut self,
-        image_id: u32,
+        image_id: ImageId,
         protocol: ImageProtocol,
         pixel_w: u32,
         pixel_h: u32,
@@ -688,7 +688,7 @@ impl Screen {
             c.unwrap_or_else(|| pixel_w.div_ceil(u32::from(cell_w).max(1)).clamp(1, 1000) as u16);
         let anchor_line = self.scrollback.len() as u32 + u32::from(self.cursor.row);
         self.placement_id_seq = self.placement_id_seq.wrapping_add(1);
-        let placement_id = self.placement_id_seq;
+        let placement_id = PlacementId(self.placement_id_seq);
         let seq = self.graphics_seq;
         self.graphics_seq = self.graphics_seq.wrapping_add(1);
         const MAX_PLACEMENTS: usize = 1024;
@@ -2046,7 +2046,7 @@ impl Screen {
         }
         let (w, h) = graphics::iterm_dimensions(args, b64).unwrap_or((0, 0));
         self.image_id_seq = self.image_id_seq.wrapping_add(1);
-        let id = self.image_id_seq;
+        let id = ImageId(self.image_id_seq);
         self.image_gen = self.image_gen.wrapping_add(1);
         let image = Image {
             id,
@@ -2335,10 +2335,10 @@ mod tests {
 
         e.advance(chunk2.as_bytes());
         let s = e.screen();
-        assert!(s.images.contains(7), "image stored on finalize");
+        assert!(s.images.contains(ImageId(7)), "image stored on finalize");
         assert_eq!(s.placements.len(), 1);
         let p = &s.placements[0];
-        assert_eq!(p.image_id, 7);
+        assert_eq!(p.image_id, ImageId(7));
         assert_eq!(p.anchor_line, 0, "anchored at the image start");
         assert_eq!(
             (p.cols, p.rows),
@@ -2437,11 +2437,11 @@ mod tests {
 
         let s = e.screen();
         assert!(
-            !s.images.contains(3),
+            !s.images.contains(ImageId(3)),
             "the abandoned id=3 transmission must not be finalized/corrupted"
         );
         assert_eq!(s.images.len(), 1, "exactly one (new) image exists");
-        let new_id = 0x8000_0001; // first synthesized id (image_id_seq starts at 0x8000_0000)
+        let new_id = ImageId(0x8000_0001); // first synthesized id (image_id_seq starts at 0x8000_0000)
         let img = s
             .images
             .get(new_id)
@@ -2472,7 +2472,7 @@ mod tests {
         e.advance(b"\n");
 
         let s = e.screen();
-        let frames = &s.images.get(7).unwrap().frames;
+        let frames = &s.images.get(ImageId(7)).unwrap().frames;
         assert_eq!(
             frames.len(),
             1,
@@ -2498,15 +2498,15 @@ mod tests {
         // real one under LRU pressure.
         let mut e = crate::Emulator::new(24, 80);
         e.advance(b"\x1b_Ga=T,i=9,f=24,s=10,v=20;QUJD\x1b\\"); // a real, already-displayed image
-        assert!(e.screen().images.contains(9));
+        assert!(e.screen().images.contains(ImageId(9)));
 
         e.advance(b"\x1b_Gm=0;QQ\x1b\\"); // stray continuation, nothing pending
 
         let s = e.screen();
-        assert!(s.images.contains(9), "the real image must survive");
+        assert!(s.images.contains(ImageId(9)), "the real image must survive");
         assert_eq!(s.images.len(), 1, "no phantom image was fabricated");
         assert!(
-            s.placements.iter().all(|p| p.image_id == 9),
+            s.placements.iter().all(|p| p.image_id == ImageId(9)),
             "no phantom placement either"
         );
     }
@@ -2596,7 +2596,7 @@ mod tests {
         let vp = &s.virtual_placements[0];
         assert_eq!(
             (vp.image_id, vp.placement_id, vp.cols, vp.rows),
-            (7, 1, 3, 2)
+            (ImageId(7), PlacementId(1), 3, 2)
         );
         assert_eq!(
             s.cursor.row, row_before,
@@ -2609,7 +2609,7 @@ mod tests {
         let mut e = crate::Emulator::new(24, 80);
         e.advance(b"\x1b_Ga=T,U=1,i=9,f=24,s=10,v=20,c=2,r=1;QUJD\x1b\\");
         let s = e.screen();
-        assert!(s.images.contains(9), "image stored");
+        assert!(s.images.contains(ImageId(9)), "image stored");
         assert!(s.placements.is_empty(), "no anchored placement");
         assert_eq!(s.virtual_placements.len(), 1);
         assert_eq!(s.cursor.row, 0, "no cursor advance for a virtual placement");
@@ -2643,7 +2643,7 @@ mod tests {
         let mut e = crate::Emulator::new(24, 80);
         e.advance(b"\x1b_Ga=t,U=1,i=9,f=24,s=10,v=20;QUJD\x1b\\");
         let s = e.screen();
-        assert!(s.images.contains(9), "image stored");
+        assert!(s.images.contains(ImageId(9)), "image stored");
         assert!(s.virtual_placements.is_empty(), "a=t,U=1 does not place");
         assert!(s.placements.is_empty());
     }
@@ -2655,12 +2655,12 @@ mod tests {
         e.advance(b"\x1b_Ga=f,i=7,f=24,s=1,v=1;QUJD\x1b\\"); // one frame
         e.advance(b"\n");
         let s = e.screen();
-        assert_eq!(s.images.get(7).unwrap().frames.len(), 1);
+        assert_eq!(s.images.get(ImageId(7)).unwrap().frames.len(), 1);
         e.advance(b"\x1b_Ga=T,i=7,f=24,s=1,v=1;RkdI\x1b\\"); // fresh transmit, same id
         e.advance(b"\n");
         let s = e.screen();
         assert_eq!(
-            s.images.get(7).unwrap().frames.len(),
+            s.images.get(ImageId(7)).unwrap().frames.len(),
             0,
             "a fresh a=t must clear the prior animation's frame log"
         );
@@ -2680,7 +2680,10 @@ mod tests {
         // Image 1 (small), placed at the cursor.
         e.advance(b"\x1b_Ga=T,i=1,f=24,s=1,v=1;QUJD\x1b\\");
         assert!(
-            e.screen().placements.iter().any(|p| p.image_id == 1),
+            e.screen()
+                .placements
+                .iter()
+                .any(|p| p.image_id == ImageId(1)),
             "image 1 must be placed before eviction"
         );
 
@@ -2701,15 +2704,15 @@ mod tests {
 
         let s = e.screen();
         assert!(
-            s.images.get(1).is_none(),
+            s.images.get(ImageId(1)).is_none(),
             "image 1 must have been evicted for the byte budget"
         );
         assert!(
-            s.images.get(2).is_some(),
+            s.images.get(ImageId(2)).is_some(),
             "image 2 (the survivor) must still be stored"
         );
         assert!(
-            !s.placements.iter().any(|p| p.image_id == 1),
+            !s.placements.iter().any(|p| p.image_id == ImageId(1)),
             "the evicted image's placement must be pruned, not left dangling"
         );
 
@@ -2721,7 +2724,7 @@ mod tests {
             .screen()
             .placements
             .iter()
-            .filter(|p| p.image_id == 1)
+            .filter(|p| p.image_id == ImageId(1))
             .count();
         assert_eq!(
             placed_for_1, 1,
@@ -2738,7 +2741,7 @@ mod tests {
         e.advance(b"\x1b_Ga=f,i=3,f=24,s=1,v=1;SklK\x1b\\");
         e.advance(b"\n");
         let s = e.screen();
-        let frames = &s.images.get(3).unwrap().frames;
+        let frames = &s.images.get(ImageId(3)).unwrap().frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].frame_number, None);
         assert_eq!(frames[1].frame_number, None);
@@ -2752,7 +2755,7 @@ mod tests {
         e.advance(b"\x1b_Ga=f,i=4,r=2,f=24,s=1,v=1;SklK\x1b\\"); // edit frame 2 in place
         e.advance(b"\n");
         let s = e.screen();
-        let frames = &s.images.get(4).unwrap().frames;
+        let frames = &s.images.get(ImageId(4)).unwrap().frames;
         // Both commands are stored as separate log entries (verbatim replay
         // principle — see the Frame doc comment), not merged into one.
         assert_eq!(frames.len(), 2);
@@ -2769,7 +2772,13 @@ mod tests {
         e.advance(b"\x1b_Ga=a,i=8,s=3,v=0,c=2\x1b\\");
         e.advance(b"\n");
         let s = e.screen();
-        let ctrl = s.images.get(8).unwrap().anim_control.as_ref().unwrap();
+        let ctrl = s
+            .images
+            .get(ImageId(8))
+            .unwrap()
+            .anim_control
+            .as_ref()
+            .unwrap();
         assert_eq!(ctrl.state, Some(3));
         assert_eq!(ctrl.loop_count, None); // v=0 means ignored/unspecified
         assert_eq!(ctrl.current_frame, Some(2));
@@ -2785,7 +2794,13 @@ mod tests {
         e.advance(b"\x1b_Ga=a,i=8,s=1\x1b\\");
         e.advance(b"\n");
         let s = e.screen();
-        let ctrl = s.images.get(8).unwrap().anim_control.as_ref().unwrap();
+        let ctrl = s
+            .images
+            .get(ImageId(8))
+            .unwrap()
+            .anim_control
+            .as_ref()
+            .unwrap();
         assert_eq!(ctrl.state, Some(1));
         assert_eq!(
             ctrl.loop_count, None,
@@ -2804,7 +2819,13 @@ mod tests {
         e.advance(b"\x1b_Ga=a,i=8,s=0\x1b\\");
         e.advance(b"\n");
         let s = e.screen();
-        let ctrl = s.images.get(8).unwrap().anim_control.as_ref().unwrap();
+        let ctrl = s
+            .images
+            .get(ImageId(8))
+            .unwrap()
+            .anim_control
+            .as_ref()
+            .unwrap();
         assert_eq!(
             ctrl.state, None,
             "s=0 means ignored/unspecified, same as v=0"
@@ -2924,9 +2945,19 @@ mod tests {
     fn retransmit_same_id_bumps_generation() {
         let mut e = crate::Emulator::new(24, 80);
         e.advance(b"\x1b_Ga=t,i=5,f=24,s=10,v=20;QQ\x1b\\"); // transmit only
-        let g1 = e.screen().images.get(5).expect("stored").generation;
+        let g1 = e
+            .screen()
+            .images
+            .get(ImageId(5))
+            .expect("stored")
+            .generation;
         e.advance(b"\x1b_Ga=t,i=5,f=24,s=10,v=20;Qg\x1b\\"); // re-transmit same id, new data
-        let g2 = e.screen().images.get(5).expect("stored").generation;
+        let g2 = e
+            .screen()
+            .images
+            .get(ImageId(5))
+            .expect("stored")
+            .generation;
         assert!(
             g2 > g1,
             "re-transmit of an existing id bumps the content generation"

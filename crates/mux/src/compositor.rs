@@ -792,8 +792,8 @@ pub fn compose(
                 let key = (u64::from(v.id.0) << 40) | (p.seq & ((1u64 << 40) - 1));
                 placements.push(VisiblePlacement {
                     key,
-                    image_id: host_image_id(v.id.0, p.image_id),
-                    placement_id: p.placement_id,
+                    image_id: host_image_id(v.id.0, p.image_id.get()),
+                    placement_id: p.placement_id.get(),
                     protocol: img.protocol,
                     iterm_args: img.iterm_args.clone(),
                     generation: img.generation,
@@ -839,8 +839,8 @@ pub fn compose(
                     // clobber each other in the client's single terminal. The
                     // content copy rewrites the placeholder cells' fg to this same
                     // wire id (finding #3).
-                    image_id: virtual_host_image_id(v.id.0, vp.image_id),
-                    placement_id: vp.placement_id,
+                    image_id: virtual_host_image_id(v.id.0, vp.image_id.get()),
+                    placement_id: vp.placement_id.get(),
                     generation: img.generation,
                     format: img.format,
                     pixel_w: img.pixel_w,

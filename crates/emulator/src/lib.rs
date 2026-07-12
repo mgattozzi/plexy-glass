@@ -33,9 +33,12 @@ pub use cell::Cell;
 pub use color::Color;
 pub use cursor::{Cursor, CursorShape};
 pub use emulator::Emulator;
-pub use graphics::{AnimControl, Frame, Image, ImageFormat, ImageProtocol, ImageStore, Placement};
+pub use graphics::{
+    AnimControl, Frame, Image, ImageFormat, ImageId, ImageProtocol, ImageStore, Placement,
+    PlacementId,
+};
 pub use grid::{Grid, Row, RowMark, WrapOrigin};
-pub use hyperlinks::HyperlinkTable;
+pub use hyperlinks::{HyperlinkId, HyperlinkTable};
 pub use keyboard::{KeyboardState, ScreenBuffer};
 pub use modes::Modes;
 pub use screen::{ColorQuery, ColorScheme, Notification, Screen};

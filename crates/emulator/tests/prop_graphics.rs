@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use hegel::{TestCase, generators as gs};
 use plexy_glass_emulator::graphics::{
-    Frame, Image, ImageFormat, ImageProtocol, ImageStore, parse_command,
+    Frame, Image, ImageFormat, ImageId, ImageProtocol, ImageStore, parse_command,
 };
 
 // ponytail: `ImageStore::CAP_FRAMES_PER_IMAGE` is a private associated const
@@ -19,7 +19,7 @@ const CAP_FRAMES_PER_IMAGE: usize = 512;
 
 fn sample_image(id: u32) -> Image {
     Image {
-        id,
+        id: ImageId(id),
         protocol: ImageProtocol::Kitty,
         format: ImageFormat::Rgba,
         pixel_w: 1,
@@ -89,7 +89,7 @@ fn prop_frame_command_round_trips_its_keys(tc: TestCase) {
         "id={id} r={r} x={x} y={y} z={z} overwrite={overwrite}"
     ));
     assert_eq!(cmd.action, b'f');
-    assert_eq!(cmd.id, Some(id));
+    assert_eq!(cmd.id, Some(ImageId(id)));
     assert_eq!(cmd.rows, Some(r));
     assert_eq!(cmd.frame_x, Some(x));
     assert_eq!(cmd.frame_y, Some(y));
@@ -115,11 +115,11 @@ fn prop_push_frame_never_exceeds_cap(tc: TestCase) {
     let mut store = ImageStore::default();
     store.insert(sample_image(1));
     for i in 0..n {
-        store.push_frame(1, sample_frame((i % 256) as u8));
+        store.push_frame(ImageId(1), sample_frame((i % 256) as u8));
     }
     tc.note(&format!("pushed {n} frames"));
     let frames = &store
-        .get(1)
+        .get(ImageId(1))
         .expect("image 1 must still be present (byte budget is far above what this test pushes)")
         .frames;
     let len = frames.len();
@@ -167,7 +167,7 @@ fn prop_frame_bytes_reflect_eviction(tc: TestCase) {
     let mut store = ImageStore::default();
     store.insert(sample_image(1));
     let base_len = store
-        .get(1)
+        .get(ImageId(1))
         .expect("image 1 must be present right after insert")
         .total_bytes();
 
@@ -177,14 +177,14 @@ fn prop_frame_bytes_reflect_eviction(tc: TestCase) {
     let mut window: VecDeque<usize> = VecDeque::new();
     for i in 0..n {
         let sz = (i % 200) + 1; // vary frame size so this isn't just a frame count
-        store.push_frame(1, sized_frame(sz));
+        store.push_frame(ImageId(1), sized_frame(sz));
         window.push_back(sz);
         if window.len() > CAP_FRAMES_PER_IMAGE {
             window.pop_front();
         }
         let expected = base_len + window.iter().sum::<usize>();
         let total = store
-            .get(1)
+            .get(ImageId(1))
             .expect(
                 "image 1 must still be present (byte budget is far above what this test pushes)",
             )

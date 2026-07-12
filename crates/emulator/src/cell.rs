@@ -4,6 +4,7 @@ use smol_str::SmolStr;
 
 use crate::attrs::{Attrs, UnderlineStyle};
 use crate::color::Color;
+use crate::hyperlinks::HyperlinkId;
 
 /// One screen cell.
 ///
@@ -27,7 +28,7 @@ pub struct Cell {
     pub attrs: Attrs,
     /// Index into the screen's `HyperlinkTable`, if this cell is part of a
     /// hyperlinked region (OSC 8).
-    pub hyperlink_id: Option<u16>,
+    pub hyperlink_id: Option<HyperlinkId>,
 }
 
 impl Default for Cell {

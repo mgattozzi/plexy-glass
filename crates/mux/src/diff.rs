@@ -1020,7 +1020,9 @@ mod tests {
     use std::sync::Arc;
 
     use hegel::{TestCase, generators as gs};
-    use plexy_glass_emulator::{CursorShape, Image, ImageFormat, ImageProtocol, ImageStore};
+    use plexy_glass_emulator::{
+        CursorShape, Image, ImageFormat, ImageId, ImageProtocol, ImageStore,
+    };
     use smol_str::SmolStr;
 
     use super::*;
@@ -1905,7 +1907,7 @@ mod tests {
         // genuine) past the cap and confirm the renderer keeps delivering.
         let mut store = ImageStore::default();
         store.insert(Image {
-            id: 7,
+            id: ImageId(7),
             protocol: ImageProtocol::Kitty,
             format: ImageFormat::Rgba,
             pixel_w: 1,
@@ -1920,9 +1922,12 @@ mod tests {
         let mut d = kitty_renderer();
         const PAST_CAP: usize = 600; // > ImageStore::CAP_FRAMES_PER_IMAGE (512)
         for i in 0..PAST_CAP {
-            store.push_frame(7, sample_frame_visible(0, format!("FR{i}Z").as_bytes()));
+            store.push_frame(
+                ImageId(7),
+                sample_frame_visible(0, format!("FR{i}Z").as_bytes()),
+            );
             let mut p = vp(1, 7, 1, 2, 3);
-            p.frames = store.get(7).unwrap().frames.clone();
+            p.frames = store.get(ImageId(7)).unwrap().frames.clone();
             let s = render_str(&mut d, &frame_with(vec![p]));
             if i >= 512 {
                 assert!(

@@ -12,6 +12,29 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD;
 
+/// Transmitted-image identity (Kitty `i=`, and the `ImageStore` map key). A
+/// newtype so it can't be crossed with `PlacementId`: the two sit adjacent as
+/// `u32`s in `Placement`/`VirtualPlacement`/`GraphicsCommand`, so swapping them
+/// used to compile. Mirrors the `PaneId`/`WindowId` pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ImageId(pub u32);
+
+/// Per-image placement identity (Kitty `p=`). Adjacent to `ImageId`; see there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PlacementId(pub u32);
+
+impl ImageId {
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl PlacementId {
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
 /// Wire image format (Kitty `f=` key).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageFormat {
@@ -58,7 +81,7 @@ impl ImageFormat {
 /// compositor's `VisiblePlacement` stay cheap.
 #[derive(Clone, Debug)]
 pub struct Image {
-    pub id: u32,
+    pub id: ImageId,
     /// Source protocol, which decides how the renderer re-emits this image.
     pub protocol: ImageProtocol,
     pub format: ImageFormat,
@@ -154,8 +177,8 @@ pub struct AnimControl {
 /// An on-screen placement of an image, anchored to an absolute unified line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Placement {
-    pub image_id: u32,
-    pub placement_id: u32,
+    pub image_id: ImageId,
+    pub placement_id: PlacementId,
     /// Source protocol of the referenced image (mirrors `Image::protocol`), so
     /// the renderer can dispatch without a store lookup.
     pub protocol: ImageProtocol,
@@ -182,8 +205,8 @@ pub struct Placement {
 /// `a=p,U=1` once. `rows`/`cols` are the placement's declared cell box.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VirtualPlacement {
-    pub image_id: u32,
-    pub placement_id: u32,
+    pub image_id: ImageId,
+    pub placement_id: PlacementId,
     pub rows: u16,
     pub cols: u16,
     /// Monotonic id (per Screen), stable across clones, for renderer dedupe.
@@ -195,8 +218,8 @@ pub struct VirtualPlacement {
 /// skipped at render time (the compositor/renderer tolerate a missing image).
 #[derive(Clone, Debug, Default)]
 pub struct ImageStore {
-    map: HashMap<u32, Image>,
-    order: VecDeque<u32>,
+    map: HashMap<ImageId, Image>,
+    order: VecDeque<ImageId>,
     bytes: usize,
 }
 
@@ -210,7 +233,7 @@ impl ImageStore {
     /// Insert (or replace) an image, evicting oldest entries while over the
     /// byte budget. Returns the ids evicted, so the caller can drop placements
     /// that reference them.
-    pub fn insert(&mut self, img: Image) -> Vec<u32> {
+    pub fn insert(&mut self, img: Image) -> Vec<ImageId> {
         let id = img.id;
         if let Some(old) = self.map.remove(&id) {
             self.bytes = self.bytes.saturating_sub(old.total_bytes());
@@ -229,7 +252,7 @@ impl ImageStore {
     /// dropped, empty Vec returned) if `id` isn't currently stored — a
     /// pathological `a=f` for an id that was never transmitted or was
     /// already evicted can't leak state.
-    pub fn push_frame(&mut self, id: u32, mut frame: Frame) -> Vec<u32> {
+    pub fn push_frame(&mut self, id: ImageId, mut frame: Frame) -> Vec<ImageId> {
         let Some(img) = self.map.get_mut(&id) else {
             return Vec::new();
         };
@@ -247,7 +270,7 @@ impl ImageStore {
         self.evict_over_budget()
     }
 
-    fn evict_over_budget(&mut self) -> Vec<u32> {
+    fn evict_over_budget(&mut self) -> Vec<ImageId> {
         let mut evicted = Vec::new();
         while self.bytes > Self::CAP_BYTES && self.order.len() > 1 {
             if let Some(victim) = self.order.pop_front() {
@@ -262,7 +285,7 @@ impl ImageStore {
         evicted
     }
 
-    pub fn get(&self, id: u32) -> Option<&Image> {
+    pub fn get(&self, id: ImageId) -> Option<&Image> {
         self.map.get(&id)
     }
 
@@ -270,11 +293,11 @@ impl ImageStore {
     /// from `a=a`). Frame appends go through `push_frame` instead, which keeps
     /// the byte budget accurate; this method does NOT track byte changes, so
     /// don't use it to touch `data_b64` or `frames` directly.
-    pub fn get_mut(&mut self, id: u32) -> Option<&mut Image> {
+    pub fn get_mut(&mut self, id: ImageId) -> Option<&mut Image> {
         self.map.get_mut(&id)
     }
 
-    pub fn contains(&self, id: u32) -> bool {
+    pub fn contains(&self, id: ImageId) -> bool {
         self.map.contains_key(&id)
     }
 
@@ -295,14 +318,14 @@ pub struct GraphicsCommand {
     /// `q` query. Defaults to transmit-and-display when absent (`a` omitted on a
     /// data-bearing command means transmit, but timg sends `a=T`).
     pub action: u8,
-    pub id: Option<u32>,           // i=
-    pub placement_id: Option<u32>, // p=
-    pub format: Option<u32>,       // f=
-    pub width: Option<u32>,        // s=
-    pub height: Option<u32>,       // v=
-    pub rows: Option<u16>,         // r=
-    pub cols: Option<u16>,         // c=
-    pub more: bool,                // m=1 (more chunks coming)
+    pub id: Option<ImageId>,               // i=
+    pub placement_id: Option<PlacementId>, // p=
+    pub format: Option<u32>,               // f=
+    pub width: Option<u32>,                // s=
+    pub height: Option<u32>,               // v=
+    pub rows: Option<u16>,                 // r=
+    pub cols: Option<u16>,                 // c=
+    pub more: bool,                        // m=1 (more chunks coming)
     /// Whether the wire carried an explicit `m=` key at all, regardless of its
     /// value (`m=0` sets this too, even though it clears `more`). A real
     /// continuation chunk always carries `m=`; a metadata-light *fresh*
@@ -357,8 +380,8 @@ pub fn parse_command(framed: &[u8]) -> Option<GraphicsCommand> {
         let val = str::from_utf8(v).unwrap_or("");
         match k {
             b"a" => cmd.action = v.first().copied().unwrap_or(b't'),
-            b"i" => cmd.id = val.parse().ok(),
-            b"p" => cmd.placement_id = val.parse().ok(),
+            b"i" => cmd.id = val.parse::<u32>().ok().map(ImageId),
+            b"p" => cmd.placement_id = val.parse::<u32>().ok().map(PlacementId),
             b"f" => cmd.format = val.parse().ok(),
             b"s" => cmd.width = val.parse().ok(),
             b"v" => cmd.height = val.parse().ok(),
@@ -593,7 +616,7 @@ mod tests {
     fn parses_transmit_and_display_keys() {
         let cmd = parse_command(b"\x1b_Ga=T,i=42,f=100,s=640,v=480,m=1;AAAA\x1b\\").unwrap();
         assert_eq!(cmd.action, b'T');
-        assert_eq!(cmd.id, Some(42));
+        assert_eq!(cmd.id, Some(ImageId(42)));
         assert_eq!(cmd.format, Some(100));
         assert_eq!(cmd.width, Some(640));
         assert_eq!(cmd.height, Some(480));
@@ -640,7 +663,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cmd.action, b'f');
-        assert_eq!(cmd.id, Some(9));
+        assert_eq!(cmd.id, Some(ImageId(9)));
         assert_eq!(cmd.rows, Some(2)); // r=: reused as frame number for a=f
         assert_eq!(cmd.cols, Some(1)); // c=: reused as canvas-source frame for a=f
         assert_eq!(cmd.frame_x, Some(10));
@@ -666,7 +689,7 @@ mod tests {
     fn parse_command_animation_control_keys() {
         let cmd = parse_command(b"\x1b_Ga=a,i=6,s=3,v=0,c=2\x1b\\").unwrap();
         assert_eq!(cmd.action, b'a');
-        assert_eq!(cmd.id, Some(6));
+        assert_eq!(cmd.id, Some(ImageId(6)));
         assert_eq!(cmd.width, Some(3)); // s=: reused as animation state for a=a
         assert_eq!(cmd.height, Some(0)); // v=: reused as loop count for a=a
         assert_eq!(cmd.cols, Some(2)); // c=: reused as current-frame selector for a=a
@@ -773,7 +796,7 @@ mod tests {
     // --- helper ---
     fn make_img(id: u32, size: usize) -> Image {
         Image {
-            id,
+            id: ImageId(id),
             format: ImageFormat::Png,
             pixel_w: 1,
             pixel_h: 1,
@@ -788,7 +811,7 @@ mod tests {
 
     fn sample_image(id: u32, data: &[u8]) -> Image {
         Image {
-            id,
+            id: ImageId(id),
             protocol: ImageProtocol::Kitty,
             format: ImageFormat::Rgba,
             pixel_w: 1,
@@ -821,7 +844,7 @@ mod tests {
     #[test]
     fn push_frame_no_op_for_unknown_id() {
         let mut store = ImageStore::default();
-        let evicted = store.push_frame(999, sample_frame(b"data"));
+        let evicted = store.push_frame(ImageId(999), sample_frame(b"data"));
         assert!(evicted.is_empty());
     }
 
@@ -829,14 +852,14 @@ mod tests {
     fn push_frame_appends_and_counts_bytes() {
         let mut store = ImageStore::default();
         store.insert(sample_image(1, b"base"));
-        store.push_frame(1, sample_frame(b"frame-one"));
-        assert_eq!(store.get(1).unwrap().frames.len(), 1);
+        store.push_frame(ImageId(1), sample_frame(b"frame-one"));
+        assert_eq!(store.get(ImageId(1)).unwrap().frames.len(), 1);
         assert_eq!(
-            store.get(1).unwrap().frames[0].data_b64.as_ref(),
+            store.get(ImageId(1)).unwrap().frames[0].data_b64.as_ref(),
             b"frame-one"
         );
         assert_eq!(
-            store.get(1).unwrap().frames[0].seq,
+            store.get(ImageId(1)).unwrap().frames[0].seq,
             1,
             "first frame ever pushed for a fresh image gets seq 1"
         );
@@ -847,9 +870,9 @@ mod tests {
         let mut store = ImageStore::default();
         store.insert(sample_image(1, b"base"));
         for i in 0..(ImageStore::CAP_FRAMES_PER_IMAGE + 5) {
-            store.push_frame(1, sample_frame(format!("f{i}").as_bytes()));
+            store.push_frame(ImageId(1), sample_frame(format!("f{i}").as_bytes()));
         }
-        let frames = &store.get(1).unwrap().frames;
+        let frames = &store.get(ImageId(1)).unwrap().frames;
         assert_eq!(frames.len(), ImageStore::CAP_FRAMES_PER_IMAGE);
         // The oldest 5 frames (f0..f4) were evicted; the log now starts at f5.
         assert_eq!(frames[0].data_b64.as_ref(), b"f5");
@@ -928,8 +951,8 @@ mod tests {
         assert!(ev1.is_empty());
         assert!(ev2.is_empty());
         assert_eq!(store.len(), 2);
-        assert!(store.contains(1));
-        assert!(store.contains(2));
+        assert!(store.contains(ImageId(1)));
+        assert!(store.contains(ImageId(2)));
     }
 
     #[test]
@@ -955,7 +978,7 @@ mod tests {
         let mb25: Arc<[u8]> = vec![0u8; 25 * 1024 * 1024].into();
         let mut store = ImageStore::default();
         store.insert(Image {
-            id: 1,
+            id: ImageId(1),
             format: ImageFormat::Png,
             pixel_w: 1,
             pixel_h: 1,
@@ -967,7 +990,7 @@ mod tests {
             anim_control: None,
         });
         store.insert(Image {
-            id: 2,
+            id: ImageId(2),
             format: ImageFormat::Png,
             pixel_w: 1,
             pixel_h: 1,
@@ -980,7 +1003,7 @@ mod tests {
         });
         // re-insert id=1 → moves it to the back of the LRU; id=2 is now oldest
         store.insert(Image {
-            id: 1,
+            id: ImageId(1),
             format: ImageFormat::Png,
             pixel_w: 1,
             pixel_h: 1,
@@ -993,7 +1016,7 @@ mod tests {
         });
         // insert id=3 → total ≈ 75 MiB > 64 MiB; id=2 (oldest) must be evicted
         let evicted = store.insert(Image {
-            id: 3,
+            id: ImageId(3),
             format: ImageFormat::Png,
             pixel_w: 1,
             pixel_h: 1,
@@ -1004,10 +1027,14 @@ mod tests {
             frames: Arc::new(Vec::new()),
             anim_control: None,
         });
-        assert_eq!(evicted, vec![2], "id=2 is oldest after re-insert of id=1");
-        assert!(store.contains(1));
-        assert!(!store.contains(2));
-        assert!(store.contains(3));
+        assert_eq!(
+            evicted,
+            vec![ImageId(2)],
+            "id=2 is oldest after re-insert of id=1"
+        );
+        assert!(store.contains(ImageId(1)));
+        assert!(!store.contains(ImageId(2)));
+        assert!(store.contains(ImageId(3)));
     }
 
     #[test]
@@ -1018,7 +1045,7 @@ mod tests {
         let mb32: Arc<[u8]> = vec![0u8; 32 * 1024 * 1024].into();
         let mut store = ImageStore::default();
         let ev1 = store.insert(Image {
-            id: 1,
+            id: ImageId(1),
             format: ImageFormat::Png,
             pixel_w: 1,
             pixel_h: 1,
@@ -1030,7 +1057,7 @@ mod tests {
             anim_control: None,
         });
         let ev2 = store.insert(Image {
-            id: 2,
+            id: ImageId(2),
             format: ImageFormat::Png,
             pixel_w: 1,
             pixel_h: 1,
@@ -1047,8 +1074,8 @@ mod tests {
             "total == cap exactly: no eviction with `>`; mutation `>=` evicts"
         );
         assert_eq!(store.len(), 2);
-        assert!(store.contains(1));
-        assert!(store.contains(2));
+        assert!(store.contains(ImageId(1)));
+        assert!(store.contains(ImageId(2)));
     }
 
     #[test]
@@ -1059,7 +1086,7 @@ mod tests {
         let mb65: Arc<[u8]> = vec![0u8; 65 * 1024 * 1024].into();
         let mut store = ImageStore::default();
         let evicted = store.insert(Image {
-            id: 1,
+            id: ImageId(1),
             format: ImageFormat::Png,
             pixel_w: 1,
             pixel_h: 1,
@@ -1075,7 +1102,7 @@ mod tests {
             "sole image must survive even if it exceeds cap"
         );
         assert_eq!(store.len(), 1);
-        assert!(store.contains(1));
+        assert!(store.contains(ImageId(1)));
     }
 
     #[test]
@@ -1085,7 +1112,7 @@ mod tests {
         let mb40: Arc<[u8]> = vec![0u8; 40 * 1024 * 1024].into();
         let mut store = ImageStore::default();
         store.insert(Image {
-            id: 1,
+            id: ImageId(1),
             format: ImageFormat::Png,
             pixel_w: 1,
             pixel_h: 1,
@@ -1097,7 +1124,7 @@ mod tests {
             anim_control: None,
         });
         let evicted = store.insert(Image {
-            id: 2,
+            id: ImageId(2),
             format: ImageFormat::Png,
             pixel_w: 1,
             pixel_h: 1,
@@ -1109,9 +1136,9 @@ mod tests {
             anim_control: None,
         });
         // After the eviction loop: id=1 gone, id=2 remains (40 MiB < 64 MiB cap).
-        assert_eq!(evicted, vec![1]);
+        assert_eq!(evicted, vec![ImageId(1)]);
         assert_eq!(store.len(), 1, "exactly one image survives");
-        assert!(store.contains(2), "the surviving image is id=2");
+        assert!(store.contains(ImageId(2)), "the surviving image is id=2");
     }
 
     // --- parse_command: d= key ---
@@ -1122,7 +1149,7 @@ mod tests {
         let cmd = parse_command(b"\x1b_Ga=d,d=a,i=5\x1b\\").unwrap();
         assert_eq!(cmd.action, b'd');
         assert_eq!(cmd.delete_target, Some(b'a'));
-        assert_eq!(cmd.id, Some(5));
+        assert_eq!(cmd.id, Some(ImageId(5)));
 
         let cmd2 = parse_command(b"\x1b_Ga=d,d=z\x1b\\").unwrap();
         assert_eq!(cmd2.delete_target, Some(b'z'));
@@ -1392,7 +1419,7 @@ mod tests {
         // Two ~40 MiB images exceed the 64 MiB cap → the first evicts.
         let big = vec![b'A'; 40 * 1024 * 1024];
         let ev1 = store.insert(Image {
-            id: 1,
+            id: ImageId(1),
             format: ImageFormat::Png,
             pixel_w: 1,
             pixel_h: 1,
@@ -1405,7 +1432,7 @@ mod tests {
         });
         assert!(ev1.is_empty());
         let ev2 = store.insert(Image {
-            id: 2,
+            id: ImageId(2),
             format: ImageFormat::Png,
             pixel_w: 1,
             pixel_h: 1,
@@ -1416,8 +1443,8 @@ mod tests {
             frames: Arc::new(Vec::new()),
             anim_control: None,
         });
-        assert_eq!(ev2, vec![1], "oldest image evicted over budget");
-        assert!(!store.contains(1));
-        assert!(store.contains(2));
+        assert_eq!(ev2, vec![ImageId(1)], "oldest image evicted over budget");
+        assert!(!store.contains(ImageId(1)));
+        assert!(store.contains(ImageId(2)));
     }
 }

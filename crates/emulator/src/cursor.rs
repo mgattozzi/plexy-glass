@@ -2,6 +2,7 @@
 
 use crate::attrs::{Attrs, UnderlineStyle};
 use crate::color::Color;
+use crate::hyperlinks::HyperlinkId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorShape {
@@ -25,7 +26,7 @@ pub struct Cursor {
     /// Underline style pen (SGR `4:0`..`4:5`). Mirrors `Attrs::UNDERLINE` (the
     /// any-underline boolean) with the specific kind for the diff renderer.
     pub underline_style: UnderlineStyle,
-    pub hyperlink_id: Option<u16>,
+    pub hyperlink_id: Option<HyperlinkId>,
     /// True when the next character should wrap to the next row. Set when the
     /// cursor advances past the last column with autowrap on.
     pub pending_wrap: bool,
