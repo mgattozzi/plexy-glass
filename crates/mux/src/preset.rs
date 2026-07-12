@@ -5,7 +5,7 @@
 use std::fmt;
 
 use crate::direction::SplitDir;
-use crate::layout::LayoutNode;
+use crate::layout::{LayoutNode, Ratio};
 use crate::pane_id::PaneId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,13 +78,13 @@ pub(crate) fn build(preset: LayoutPreset, panes: &[PaneId]) -> LayoutNode {
         LayoutPreset::EvenVertical => even_leaf_chain(panes, SplitDir::Horizontal),
         LayoutPreset::MainVertical => LayoutNode::Split {
             dir: SplitDir::Vertical,
-            ratio: MAIN_RATIO,
+            ratio: Ratio::new(MAIN_RATIO),
             first: Box::new(LayoutNode::Leaf(panes[0])),
             second: Box::new(even_leaf_chain(&panes[1..], SplitDir::Horizontal)),
         },
         LayoutPreset::MainHorizontal => LayoutNode::Split {
             dir: SplitDir::Horizontal,
-            ratio: MAIN_RATIO,
+            ratio: Ratio::new(MAIN_RATIO),
             first: Box::new(LayoutNode::Leaf(panes[0])),
             second: Box::new(even_leaf_chain(&panes[1..], SplitDir::Vertical)),
         },
@@ -126,7 +126,7 @@ fn even_leaf_chain(panes: &[PaneId], dir: SplitDir) -> LayoutNode {
     let k1 = panes.len().div_ceil(2);
     LayoutNode::Split {
         dir,
-        ratio: k1 as f32 / panes.len() as f32,
+        ratio: Ratio::new(k1 as f32 / panes.len() as f32),
         first: Box::new(even_leaf_chain(&panes[..k1], dir)),
         second: Box::new(even_leaf_chain(&panes[k1..], dir)),
     }
@@ -144,7 +144,7 @@ fn even_node_chain(mut nodes: Vec<LayoutNode>, dir: SplitDir) -> LayoutNode {
     let rest = nodes.split_off(k1);
     LayoutNode::Split {
         dir,
-        ratio: k1 as f32 / k as f32,
+        ratio: Ratio::new(k1 as f32 / k as f32),
         first: Box::new(even_node_chain(nodes, dir)),
         second: Box::new(even_node_chain(rest, dir)),
     }

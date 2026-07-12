@@ -3,6 +3,7 @@
 //! Origin at top-left. All ops clamp; nothing panics.
 
 use crate::direction::SplitDir;
+use crate::layout::Ratio;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rect {
@@ -37,12 +38,13 @@ impl Rect {
         self.col.saturating_add(self.cols).saturating_sub(1)
     }
 
-    /// Subdivide along `dir` at `ratio` (fraction of size that the first child gets).
-    /// `ratio` is clamped to `[0.1, 0.9]`. Children are sized so they sum to the
-    /// original (minus a 1-cell separator between them) so callers can paint a
-    /// border on the separator row/col.
-    pub fn subdivide(self, dir: SplitDir, ratio: f32) -> (Self, Self) {
-        let ratio = ratio.clamp(0.1, 0.9);
+    /// Subdivide along `dir` at `ratio` (fraction of size that the first child
+    /// gets). The `Ratio` type already guarantees `[0.1, 0.9]` non-NaN, so this
+    /// just reads it. Children are sized so they sum to the original (minus a
+    /// 1-cell separator between them) so callers can paint a border on the
+    /// separator row/col.
+    pub fn subdivide(self, dir: SplitDir, ratio: Ratio) -> (Self, Self) {
+        let ratio = ratio.get();
         match dir {
             SplitDir::Horizontal => {
                 if self.rows <= 1 {
@@ -122,7 +124,7 @@ mod tests {
     #[test]
     fn subdivide_vertical_splits_columns() {
         let r = Rect::new(0, 0, 10, 21);
-        let (a, b) = r.subdivide(SplitDir::Vertical, 0.5);
+        let (a, b) = r.subdivide(SplitDir::Vertical, Ratio::new(0.5));
         assert_eq!(a, Rect::new(0, 0, 10, 10));
         assert_eq!(b, Rect::new(0, 11, 10, 10));
     }
@@ -130,22 +132,23 @@ mod tests {
     #[test]
     fn subdivide_horizontal_splits_rows() {
         let r = Rect::new(0, 0, 11, 20);
-        let (a, b) = r.subdivide(SplitDir::Horizontal, 0.5);
+        let (a, b) = r.subdivide(SplitDir::Horizontal, Ratio::new(0.5));
         assert_eq!(a, Rect::new(0, 0, 5, 20));
         assert_eq!(b, Rect::new(6, 0, 5, 20));
     }
 
     #[test]
     fn subdivide_clamps_ratio() {
+        // `Ratio::new` clamps the out-of-range values before subdivide sees them.
         let r = Rect::new(0, 0, 11, 21);
-        let (a, _) = r.subdivide(SplitDir::Vertical, 0.001);
+        let (a, _) = r.subdivide(SplitDir::Vertical, Ratio::new(0.001));
         assert!(a.cols >= 1);
-        let (_, b) = r.subdivide(SplitDir::Vertical, 0.999);
+        let (_, b) = r.subdivide(SplitDir::Vertical, Ratio::new(0.999));
         assert!(b.cols >= 1);
         // Horizontal mirrors the clamp on the row axis.
-        let (a, _) = r.subdivide(SplitDir::Horizontal, 0.001);
+        let (a, _) = r.subdivide(SplitDir::Horizontal, Ratio::new(0.001));
         assert!(a.rows >= 1);
-        let (_, b) = r.subdivide(SplitDir::Horizontal, 0.999);
+        let (_, b) = r.subdivide(SplitDir::Horizontal, Ratio::new(0.999));
         assert!(b.rows >= 1);
     }
 }

@@ -2,6 +2,7 @@
 //! `Config` model. Replaces the former serde/TOML loader; the `Config` shape and
 //! every downstream consumer are unchanged.
 
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
@@ -9,8 +10,8 @@ use kdl::{KdlDocument, KdlNode, KdlValue};
 use crate::{
     BlocksConfig, ColorSource, Config, ConfigError, DragModifier, GlyphTier, HintsConfig,
     KeymapBinding, KeymapConfig, MouseConfig, NotificationsConfig, Padding, PaletteConfig, PaneNode,
-    PaneTemplate, Position, Rgb, SessionTemplate, SplitDirection, StatusConfig, StyleConfig,
-    WidgetSpec, WindowTemplate,
+    PaneTemplate, Position, Rgb, SessionTemplate, SplitChild, SplitDirection, StatusConfig,
+    StyleConfig, WidgetSpec, WindowTemplate,
 };
 
 /// Parse a KDL v2 document into a `Config`. Syntax errors and decode errors both
@@ -638,12 +639,12 @@ fn decode_split(node: &KdlNode, allow_ratio: bool, src: &str) -> Result<PaneNode
     let allowed: &[&str] = if allow_ratio { &["ratio"] } else { &[] };
     ensure_only_props(node, allowed, src)?;
     let mut children = Vec::new();
-    let mut weights = Vec::new();
     if let Some(doc) = node.children() {
         for child in doc.nodes() {
             // Each direct child carries its own `ratio=` weight (default 1).
-            weights.push(split_child_ratio(child, src)?);
-            children.push(decode_layout_node(child, /*allow_ratio=*/ true, src)?);
+            let weight = split_child_ratio(child, src)?;
+            let node = decode_layout_node(child, /*allow_ratio=*/ true, src)?;
+            children.push(SplitChild { weight, node });
         }
     }
     if children.len() < 2 {
@@ -653,40 +654,34 @@ fn decode_split(node: &KdlNode, allow_ratio: bool, src: &str) -> Result<PaneNode
             "`split` needs at least two child layout nodes",
         ));
     }
-    Ok(PaneNode::Split {
-        dir,
-        children,
-        weights,
-    })
+    Ok(PaneNode::Split { dir, children })
 }
 
-/// Read a split direct-child's `ratio=` weight: a `u32` >= 1, default 1.
-/// `ratio=0` is a decode error (it would make the preorder split formula
-/// produce a NaN ratio that poisons persistence, see the v2 spec).
-fn split_child_ratio(node: &KdlNode, src: &str) -> Result<u32, ConfigError> {
-    match prop_val(node, "ratio") {
-        None => Ok(1),
-        Some(v) => {
-            let i = v
-                .as_integer()
-                .ok_or_else(|| decode_err(src, node, "`ratio` must be a positive integer"))?;
-            let w = u32::try_from(i).map_err(|_| {
-                decode_err(
-                    src,
-                    node,
-                    "`ratio` out of range (expected a positive integer)",
-                )
-            })?;
-            if w < 1 {
-                return Err(decode_err(
-                    src,
-                    node,
-                    "`ratio` must be >= 1 (zero weights are not allowed)",
-                ));
-            }
-            Ok(w)
-        }
-    }
+/// Read a split direct-child's `ratio=` weight: a `NonZeroU32` >= 1, default 1.
+/// `ratio=0` is a decode error (a zero weight would make the preorder split
+/// formula divide by zero into a NaN ratio, see the v2 spec) — now surfaced by
+/// `NonZeroU32::new`, not a hand-rolled `w < 1` check.
+fn split_child_ratio(node: &KdlNode, src: &str) -> Result<NonZeroU32, ConfigError> {
+    let Some(v) = prop_val(node, "ratio") else {
+        return Ok(NonZeroU32::MIN); // default weight 1
+    };
+    let i = v
+        .as_integer()
+        .ok_or_else(|| decode_err(src, node, "`ratio` must be a positive integer"))?;
+    let w = u32::try_from(i).map_err(|_| {
+        decode_err(
+            src,
+            node,
+            "`ratio` out of range (expected a positive integer)",
+        )
+    })?;
+    NonZeroU32::new(w).ok_or_else(|| {
+        decode_err(
+            src,
+            node,
+            "`ratio` must be >= 1 (zero weights are not allowed)",
+        )
+    })
 }
 
 /// Count the `active=#true` leaves in a layout subtree (for the at-most-one
@@ -694,7 +689,9 @@ fn split_child_ratio(node: &KdlNode, src: &str) -> Result<u32, ConfigError> {
 fn count_active_leaves(node: &PaneNode) -> usize {
     match node {
         PaneNode::Leaf(p) => usize::from(p.active),
-        PaneNode::Split { children, .. } => children.iter().map(count_active_leaves).sum(),
+        PaneNode::Split { children, .. } => {
+            children.iter().map(|c| count_active_leaves(&c.node)).sum()
+        }
     }
 }
 
@@ -1676,15 +1673,12 @@ keymap {
         )
         .unwrap();
         match &cfg.sessions[0].windows[0].layout {
-            PaneNode::Split {
-                dir,
-                children,
-                weights,
-            } => {
+            PaneNode::Split { dir, children } => {
                 assert_eq!(*dir, SplitDirection::Vertical);
                 assert_eq!(children.len(), 3);
-                // default weights (no `ratio=`) are all 1, aligned to children.
-                assert_eq!(weights, &vec![1, 1, 1]);
+                // default weights (no `ratio=`) are all 1.
+                let weights: Vec<u32> = children.iter().map(|c| c.weight.get()).collect();
+                assert_eq!(weights, vec![1, 1, 1]);
             }
             other => panic!("expected Split, got {other:?}"),
         }
@@ -1697,7 +1691,7 @@ keymap {
         )
         .unwrap();
         match &cfg.sessions[0].windows[0].layout {
-            PaneNode::Split { children, .. } => match &children[1] {
+            PaneNode::Split { children, .. } => match &children[1].node {
                 PaneNode::Split { dir, children, .. } => {
                     assert_eq!(*dir, SplitDirection::Horizontal);
                     assert_eq!(children.len(), 2);
@@ -1717,11 +1711,9 @@ keymap {
         )
         .unwrap();
         match &cfg.sessions[0].windows[0].layout {
-            PaneNode::Split {
-                weights, children, ..
-            } => {
-                assert_eq!(weights, &vec![2, 1, 3]);
-                assert_eq!(weights.len(), children.len());
+            PaneNode::Split { children, .. } => {
+                let weights: Vec<u32> = children.iter().map(|c| c.weight.get()).collect();
+                assert_eq!(weights, vec![2, 1, 3]);
             }
             other => panic!("expected Split, got {other:?}"),
         }
@@ -1736,16 +1728,18 @@ keymap {
         )
         .unwrap();
         match &cfg.sessions[0].windows[0].layout {
-            PaneNode::Split {
-                weights, children, ..
-            } => {
+            PaneNode::Split { children, .. } => {
+                let weights: Vec<u32> = children.iter().map(|c| c.weight.get()).collect();
                 assert_eq!(
                     weights,
-                    &vec![2, 1],
+                    vec![2, 1],
                     "outer weights are 2:1 (nested split contributes its own ratio=1)"
                 );
-                match &children[1] {
-                    PaneNode::Split { weights, .. } => assert_eq!(weights, &vec![1, 1]),
+                match &children[1].node {
+                    PaneNode::Split { children, .. } => {
+                        let inner: Vec<u32> = children.iter().map(|c| c.weight.get()).collect();
+                        assert_eq!(inner, vec![1, 1]);
+                    }
                     other => panic!("expected nested Split, got {other:?}"),
                 }
             }
@@ -1787,8 +1781,8 @@ keymap {
         assert!(s.windows[1].active);
         match &s.windows[1].layout {
             PaneNode::Split { children, .. } => {
-                assert!(matches!(&children[0], PaneNode::Leaf(p) if !p.active));
-                assert!(matches!(&children[1], PaneNode::Leaf(p) if p.active));
+                assert!(matches!(&children[0].node, PaneNode::Leaf(p) if !p.active));
+                assert!(matches!(&children[1].node, PaneNode::Leaf(p) if p.active));
             }
             other => panic!("expected Split, got {other:?}"),
         }
@@ -1832,7 +1826,7 @@ keymap {
             vec![("TIER".to_string(), "win".to_string())]
         );
         match &s.windows[0].layout {
-            PaneNode::Split { children, .. } => match &children[0] {
+            PaneNode::Split { children, .. } => match &children[0].node {
                 PaneNode::Leaf(p) => {
                     assert_eq!(p.env, vec![("PORT".to_string(), "8080".to_string())]);
                 }
@@ -2115,7 +2109,7 @@ session "dev" cwd="~/projects/app" {
             } => {
                 assert_eq!(children.len(), 2);
                 assert!(matches!(
-                    &children[1],
+                    &children[1].node,
                     PaneNode::Split { dir: SplitDirection::Horizontal, children, .. } if children.len() == 2
                 ));
             }
@@ -2167,11 +2161,11 @@ session "dev" cwd="~/projects/app" {
             PaneNode::Split {
                 dir: SplitDirection::Vertical,
                 children,
-                weights,
             } => {
-                assert_eq!(weights, &vec![2, 1]);
+                let weights: Vec<u32> = children.iter().map(|c| c.weight.get()).collect();
+                assert_eq!(weights, vec![2, 1]);
                 assert_eq!(children.len(), 2);
-                match &children[1] {
+                match &children[1].node {
                     PaneNode::Leaf(p) => {
                         assert_eq!(p.env, vec![("PORT".to_string(), "8080".to_string())]);
                     }

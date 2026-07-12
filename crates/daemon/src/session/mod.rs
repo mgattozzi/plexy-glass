@@ -2461,8 +2461,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_template_split_and_multiwindow() {
+        use std::num::NonZeroU32;
+
         use plexy_glass_config::{
-            PaneNode, PaneTemplate, SessionTemplate, SplitDirection, WindowTemplate,
+            PaneNode, PaneTemplate, SessionTemplate, SplitChild, SplitDirection, WindowTemplate,
         };
         let _g = test_env::isolate();
         let pane = |c: Option<&str>| {
@@ -2473,6 +2475,10 @@ mod tests {
                 active: false,
                 env: vec![],
             })
+        };
+        let child = |node| SplitChild {
+            weight: NonZeroU32::MIN,
+            node,
         };
         let tmpl = SessionTemplate {
             name: "dev".into(),
@@ -2486,8 +2492,7 @@ mod tests {
                     env: vec![],
                     layout: PaneNode::Split {
                         dir: SplitDirection::Vertical,
-                        children: vec![pane(None), pane(None), pane(None)],
-                        weights: vec![1, 1, 1],
+                        children: vec![child(pane(None)), child(pane(None)), child(pane(None))],
                     },
                 },
                 WindowTemplate {

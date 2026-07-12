@@ -18,10 +18,40 @@ pub(crate) enum LayoutNode {
     Leaf(PaneId),
     Split {
         dir: SplitDir,
-        ratio: f32,
+        ratio: Ratio,
         first: Box<Self>,
         second: Box<Self>,
     },
+}
+
+/// A split ratio: the fraction of a split the first child gets. Always in
+/// `[0.1, 0.9]` and never NaN. `Ratio::new` is the ONE place the clamp lives —
+/// it used to be re-applied by hand at every subdivide / resize / restore site,
+/// with a defensive NaN guard scattered alongside. The type carries the range
+/// now, so those sites just construct and read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ratio(f32);
+
+impl Ratio {
+    /// Clamp `f` into `[0.1, 0.9]`. A non-finite input (NaN, ±inf) collapses to
+    /// `0.5`, a valid mid-split — `clamp` alone can't tame a NaN.
+    pub const fn new(f: f32) -> Self {
+        if f.is_finite() {
+            Self(f.clamp(0.1, 0.9))
+        } else {
+            Self(0.5)
+        }
+    }
+
+    /// `self` shifted by `delta` and re-clamped through `new`.
+    #[must_use]
+    pub const fn adjust(self, delta: f32) -> Self {
+        Self::new(self.0 + delta)
+    }
+
+    pub const fn get(self) -> f32 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,7 +194,7 @@ impl LayoutTree {
             } = node
             {
                 let Some(r) = ratios.get(*i) else { return };
-                *ratio = r.clamp(0.1, 0.9);
+                *ratio = Ratio::new(*r);
                 *i += 1;
                 walk(first, ratios, i);
                 walk(second, ratios, i);
@@ -462,14 +492,14 @@ fn adjust_split_recurse(
         let new_first = (i32::from(first_cells) + i32::from(delta))
             .max(i32::from(MIN_PANE_CELLS))
             .min(i32::from(total_usable - MIN_PANE_CELLS)) as u16;
-        let clamped = (f32::from(new_first) / f32::from(total_usable)).clamp(0.1, 0.9);
+        let clamped = Ratio::new(f32::from(new_first) / f32::from(total_usable));
         *ratio = clamped;
         // Report the delta against the ACTUAL painted first-pane width (which
         // `subdivide` re-derives from the ratio), not the cell-space `new_first`:
         // when the [0.1,0.9] ratio clamp and the `MIN_PANE_CELLS` clamp disagree
         // (at the extremes), the painted border lands at the ratio width, so a
         // cell-space `applied` would desync the drag anchor from the border.
-        let actual_first = ((f32::from(total_usable) * clamped).round() as u16)
+        let actual_first = ((f32::from(total_usable) * clamped.get()).round() as u16)
             .clamp(1, total_usable.saturating_sub(1).max(1));
         let applied = i32::from(actual_first) - i32::from(first_cells);
         return applied as i16;
@@ -530,7 +560,7 @@ where
         } => {
             let f = map_node(first, idx, leaf, split);
             let s = map_node(second, idx, leaf, split);
-            split(*dir, *ratio, f, s)
+            split(*dir, ratio.get(), f, s)
         }
     }
 }
@@ -648,9 +678,9 @@ fn resize_in(
                 };
                 let dr = (delta_cells as f32) / (size as f32);
                 if in_first {
-                    new_ratio = (ratio + dr).clamp(0.1, 0.9);
+                    new_ratio = ratio.adjust(dr);
                 } else {
-                    new_ratio = (ratio - dr).clamp(0.1, 0.9);
+                    new_ratio = ratio.adjust(-dr);
                 }
             }
             let handled = descendant_handled || adjust_here;
@@ -695,7 +725,7 @@ fn split_in(
             (
                 LayoutNode::Split {
                     dir,
-                    ratio: 0.5,
+                    ratio: Ratio::new(0.5),
                     first: Box::new(first),
                     second: Box::new(second),
                 },

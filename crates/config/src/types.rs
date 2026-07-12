@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use crate::{ColorSource, Rgb};
@@ -326,13 +327,21 @@ pub enum PaneNode {
     Leaf(PaneTemplate),
     Split {
         dir: SplitDirection,
-        children: Vec<Self>, // invariant: len() >= 2 (enforced by the decoder)
-        /// Relative split weights aligned to `children`.
-        // invariant: weights.len() == children.len() >= 2, every weight >= 1
-        // (enforced by the decoder: `ratio=` defaults to 1 and `ratio=0` is a
-        // decode error).
-        weights: Vec<u32>,
+        children: Vec<SplitChild>, // invariant: len() >= 2 (enforced by the decoder)
     },
+}
+
+/// A direct child of a `PaneNode::Split`: a child layout plus its relative split
+/// weight. Folding the weight into the child (as a `NonZeroU32`) makes the two
+/// invariants that used to be hand-maintained across the decoder and the
+/// ratio-preorder math into type facts: a length mismatch between `children` and
+/// a parallel `weights` vec, and a zero weight (which would divide-by-zero into
+/// a NaN ratio) are both now unrepresentable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SplitChild {
+    /// Relative weight in the parent split (`ratio=`, default 1).
+    pub weight: NonZeroU32,
+    pub node: PaneNode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

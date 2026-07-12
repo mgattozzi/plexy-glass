@@ -6,7 +6,7 @@
 
 use std::env;
 
-use plexy_glass_config::{PaneNode, PaneTemplate, SplitDirection};
+use plexy_glass_config::{PaneNode, PaneTemplate, SplitChild, SplitDirection};
 use plexy_glass_mux::SplitDir;
 use plexy_glass_protocol::SpawnSpec;
 
@@ -30,7 +30,7 @@ pub(crate) struct BuildOp {
 pub(crate) fn to_binary(node: &PaneNode) -> BinLayout<'_> {
     match node {
         PaneNode::Leaf(pt) => BinLayout::Leaf(pt),
-        PaneNode::Split { dir, children, .. } => fold_children(map_dir(*dir), children),
+        PaneNode::Split { dir, children } => fold_children(map_dir(*dir), children),
     }
 }
 
@@ -42,10 +42,10 @@ const fn map_dir(d: SplitDirection) -> SplitDir {
 }
 
 // invariant: `children.len() >= 2` (enforced by `decode_split`). Right-leaning fold.
-fn fold_children(dir: SplitDir, children: &[PaneNode]) -> BinLayout<'_> {
-    let first = Box::new(to_binary(&children[0]));
+fn fold_children(dir: SplitDir, children: &[SplitChild]) -> BinLayout<'_> {
+    let first = Box::new(to_binary(&children[0].node));
     let second = if children.len() == 2 {
-        Box::new(to_binary(&children[1]))
+        Box::new(to_binary(&children[1].node))
     } else {
         Box::new(fold_children(dir, &children[1..]))
     };
@@ -58,9 +58,9 @@ fn fold_children(dir: SplitDir, children: &[PaneNode]) -> BinLayout<'_> {
 ///
 /// At each right-leaning binary split node the first (direct) child's ratio is
 /// its OWN declared weight / the sum of ALL the direct children's weights at
-/// that level (the head included). A 0-total sibling group falls back to equal
-/// weights, but that path is defense only: the decoder rejects `ratio=0`, so a
-/// 0 total cannot arise from config.
+/// that level (the head included). The sum is over >= 2 `NonZeroU32` weights, so
+/// it's always >= 2 > 0 — the old 0-total NaN-avoidance branch is gone, the type
+/// makes the divisor non-zero.
 pub(crate) fn preorder_ratios(node: &PaneNode) -> Vec<f32> {
     let mut out = Vec::new();
     push_preorder_ratios(node, &mut out);
@@ -68,36 +68,29 @@ pub(crate) fn preorder_ratios(node: &PaneNode) -> Vec<f32> {
 }
 
 fn push_preorder_ratios(node: &PaneNode, out: &mut Vec<f32>) {
-    let PaneNode::Split {
-        children, weights, ..
-    } = node
-    else {
+    let PaneNode::Split { children, .. } = node else {
         return;
     };
-    push_split_chain_ratios(children, weights, out);
+    push_split_chain_ratios(children, out);
 }
 
-/// Emit the right-leaning binary split chain over `children`/`weights` in the
-/// preorder `set_ratios_preorder` walks: the chain head's ratio, then the head
-/// child's own subtree, then recurse on the remaining children as the second
-/// subtree. `children.len() == weights.len() >= 2` (decoder invariant).
-fn push_split_chain_ratios(children: &[PaneNode], weights: &[u32], out: &mut Vec<f32>) {
-    let total: u64 = weights.iter().map(|w| u64::from(*w)).sum();
-    // Defense: a 0-total group (only reachable if a PaneNode::Split is
-    // constructed bypassing the decoder) splits evenly rather than NaN.
-    let ratio = if total == 0 {
-        1.0 / weights.len() as f32
-    } else {
-        u64::from(weights[0]) as f32 / total as f32
-    };
+/// Emit the right-leaning binary split chain over `children` in the preorder
+/// `set_ratios_preorder` walks: the chain head's ratio, then the head child's
+/// own subtree, then recurse on the remaining children as the second subtree.
+/// `children.len() >= 2` (decoder invariant).
+fn push_split_chain_ratios(children: &[SplitChild], out: &mut Vec<f32>) {
+    // Sum of >= 2 `NonZeroU32` weights: always >= 2 > 0, so the division below
+    // can never produce NaN.
+    let total: u64 = children.iter().map(|c| u64::from(c.weight.get())).sum();
+    let ratio = u64::from(children[0].weight.get()) as f32 / total as f32;
     out.push(ratio);
     // First subtree: the head child's own splits.
-    push_preorder_ratios(&children[0], out);
+    push_preorder_ratios(&children[0].node, out);
     // Second subtree: the rest of the chain (>= 1 child remaining).
     if children.len() == 2 {
-        push_preorder_ratios(&children[1], out);
+        push_preorder_ratios(&children[1].node, out);
     } else {
-        push_split_chain_ratios(&children[1..], &weights[1..], out);
+        push_split_chain_ratios(&children[1..], out);
     }
 }
 
@@ -118,7 +111,7 @@ fn find_active_leaf(node: &PaneNode, idx: &mut usize) -> Option<usize> {
         }
         PaneNode::Split { children, .. } => {
             for child in children {
-                if let Some(found) = find_active_leaf(child, idx) {
+                if let Some(found) = find_active_leaf(&child.node, idx) {
                     return Some(found);
                 }
             }
@@ -278,9 +271,20 @@ pub(crate) fn expand_tilde(path: &str, home: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use plexy_glass_config::{PaneNode, PaneTemplate, SplitDirection};
+    use std::num::NonZeroU32;
+
+    use plexy_glass_config::{PaneNode, PaneTemplate, SplitChild, SplitDirection};
 
     use super::*;
+
+    /// A split child with weight `w` (>= 1). Panics on 0 — tests never pass 0
+    /// (the decoder rejects `ratio=0` and the type forbids it).
+    fn schild(node: PaneNode, w: u32) -> SplitChild {
+        SplitChild {
+            weight: NonZeroU32::new(w).expect("test weight must be >= 1"),
+            node,
+        }
+    }
 
     fn leaf(cmd: Option<&str>) -> PaneNode {
         PaneNode::Leaf(PaneTemplate {
@@ -422,8 +426,11 @@ mod tests {
         // split vertical { A B C } → side-by-side; ops split 0 then 1.
         let node = PaneNode::Split {
             dir: SplitDirection::Vertical,
-            children: vec![leaf(Some("a")), leaf(Some("b")), leaf(Some("c"))],
-            weights: vec![1, 1, 1],
+            children: vec![
+                schild(leaf(Some("a")), 1),
+                schild(leaf(Some("b")), 1),
+                schild(leaf(Some("c")), 1),
+            ],
         };
         let bin = to_binary(&node);
         let leaves = bin_leaves(&bin);
@@ -447,14 +454,15 @@ mod tests {
         let node = PaneNode::Split {
             dir: SplitDirection::Vertical,
             children: vec![
-                leaf(Some("a")),
-                PaneNode::Split {
-                    dir: SplitDirection::Horizontal,
-                    children: vec![leaf(Some("b")), leaf(Some("c"))],
-                    weights: vec![1, 1],
-                },
+                schild(leaf(Some("a")), 1),
+                schild(
+                    PaneNode::Split {
+                        dir: SplitDirection::Horizontal,
+                        children: vec![schild(leaf(Some("b")), 1), schild(leaf(Some("c")), 1)],
+                    },
+                    1,
+                ),
             ],
-            weights: vec![1, 1],
         };
         let bin = to_binary(&node);
         assert_eq!(
@@ -483,8 +491,11 @@ mod tests {
     fn split(children: Vec<PaneNode>, weights: Vec<u32>) -> PaneNode {
         PaneNode::Split {
             dir: SplitDirection::Vertical,
-            children,
-            weights,
+            children: children
+                .into_iter()
+                .zip(weights)
+                .map(|(node, w)| schild(node, w))
+                .collect(),
         }
     }
 
@@ -541,17 +552,6 @@ mod tests {
         assert!((r[1] - 0.5).abs() < 1e-6, "{r:?}");
     }
 
-    #[test]
-    fn zero_total_group_falls_back_to_equal_weights() {
-        // Defense path only (decoder rejects ratio=0): a 0-total group must not
-        // produce NaN.
-        let node = split(vec![leaf(None), leaf(None)], vec![0, 0]);
-        let r = preorder_ratios(&node);
-        assert_eq!(r.len(), 1);
-        assert!((r[0] - 0.5).abs() < 1e-6, "{r:?}");
-        assert!(!r[0].is_nan());
-    }
-
     // --- v2: active-leaf DFS index ---
 
     fn active_leaf(active: bool) -> PaneNode {
@@ -576,8 +576,7 @@ mod tests {
         // outer { L0  (inner { L1*  L2 }) } → marked leaf is DFS index 1.
         let inner = PaneNode::Split {
             dir: SplitDirection::Horizontal,
-            children: vec![active_leaf(true), active_leaf(false)],
-            weights: vec![1, 1],
+            children: vec![schild(active_leaf(true), 1), schild(active_leaf(false), 1)],
         };
         let node = split(vec![active_leaf(false), inner], vec![1, 1]);
         assert_eq!(active_leaf_index(&node), Some(1));
