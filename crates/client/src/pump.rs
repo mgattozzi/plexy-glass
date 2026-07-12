@@ -507,18 +507,9 @@ fn build_roster_rows(current_host: Option<&str>) -> RosterRows {
         remote_hosts.push(h.host);
     }
 
-    // The `＋ Connect to a host…` sentinel: appended exactly once, last, so it
-    // rides along in both the initial open (`build_picker_rows` appends these
-    // rows) and the Forget rebuild (`replace_other_rows` drops the stale one by
-    // kind first). Exempt from the picker's filter, so it stays reachable when a
-    // search matches nothing.
-    rows.push(PickerRow {
-        name: String::new(),
-        label: String::new(),
-        host: None,
-        kind: RowKind::NewHost,
-        status: RowStatus::Live,
-    });
+    // The `＋ Connect to a host…` affordance is NOT a row: the picker synthesizes
+    // it as an always-present trailing slot at render time (like the section
+    // headers/divider), so it can't be duplicated or land mid-list.
 
     RosterRows {
         rows,
@@ -1093,25 +1084,27 @@ mod tests {
             vec![Host::from("dev")],
             "prod (current) excluded"
         );
-        let locals: Vec<_> = a
-            .rows
-            .iter()
-            .filter(|r| r.host.is_none() && r.kind != RowKind::NewHost)
-            .collect();
+        let locals: Vec<_> = a.rows.iter().filter(|r| r.host.is_none()).collect();
         assert_eq!(locals.len(), 1, "one local-other anchor");
         assert_eq!(locals[0].kind, RowKind::Host);
         assert_eq!(locals[0].status, RowStatus::Pending);
     }
 
     #[test]
-    fn build_roster_rows_appends_one_newhost_last() {
+    fn build_roster_rows_synthesizes_no_connect_slot() {
+        // The `＋ Connect to a host…` affordance is render-only now: the roster
+        // stores only real host/session rows (no empty-labeled sentinel), so a
+        // duplicate or mid-list `＋` is unrepresentable.
         roster::set_test_roster(vec!["prod".into()], vec![]);
         let a = build_picker_rows(vec![], None);
-        assert_eq!(a.rows.last().map(|r| r.kind), Some(RowKind::NewHost));
+        assert!(
+            a.rows.iter().all(|r| !r.label.is_empty()),
+            "no fabricated empty-labeled slot row"
+        );
         assert_eq!(
-            a.rows.iter().filter(|r| r.kind == RowKind::NewHost).count(),
-            1,
-            "exactly one sentinel"
+            a.rows.last().map(|r| r.name.clone()),
+            Some("prod".to_string()),
+            "the last row is a real host, not a synthesized slot"
         );
     }
 

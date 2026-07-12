@@ -9,10 +9,14 @@
 //! the mux finder cores (`crates/mux/src/{tree,history}.rs`): a pure `*State` +
 //! `handle_*`→outcome enum, unit-testable independent of rendering.
 //!
-//! Section headers (`local`) and the configured/ad-hoc divider are **synthesized
-//! at render time** from which sections have ≥1 visible (filter-matching) row —
-//! they are NOT stored as rows, so the cursor never lands on them and the
-//! selectable set is exactly the real rows (session rows + host rows). Remote
+//! Section headers (`local`), the configured/ad-hoc divider, and the trailing
+//! `＋ Connect to a host…` slot are **synthesized at render time** — none are
+//! stored as rows. Headers/divider come from which sections have ≥1 visible
+//! (filter-matching) row; the `＋` slot is always present as the last selectable
+//! position. Because it's synthesized, "two `＋` sentinels" or a mid-list one is
+//! unrepresentable. The cursor ranges over `visible().len() + 1` positions: a
+//! position `< visible().len()` is a real row (`selected()`), and the last one
+//! (`== visible().len()`) is the `＋` slot (`is_new_host_selected()`). Remote
 //! hosts get a real, selectable `Host` row (the anchor for `n`/`x`) that doubles
 //! as that host's visible header.
 
@@ -116,10 +120,6 @@ impl Default for PickerTheme {
 pub enum RowKind {
     Session,
     Host,
-    /// The `＋ Connect to a host…` sentinel: a selectable row (last, exempt from
-    /// the filter) that opens a prompt for a brand-new ad-hoc ssh target. Only
-    /// present when the pump appends it in `build_roster_rows`.
-    NewHost,
 }
 
 /// Reachability of a host row (session rows are always `Live`). Filled in
@@ -195,9 +195,9 @@ pub enum PickerMode {
         host: Option<Host>,
         buf: String,
     },
-    /// Typing a brand-new ad-hoc ssh target (from the `＋` sentinel row). Enter
-    /// with a non-empty `buf` commits `Reconnect`; empty is refused; Esc returns
-    /// to `Navigate`. Distinct from `Prompting`, which names a new session.
+    /// Typing a brand-new ad-hoc ssh target (from the synthesized `＋` slot).
+    /// Enter with a non-empty `buf` commits `Reconnect`; empty is refused; Esc
+    /// returns to `Navigate`. Distinct from `Prompting`, which names a new session.
     PromptingHost {
         buf: String,
     },
@@ -350,31 +350,37 @@ impl PickerState {
         rows: Vec<PickerRow>,
         adhoc: Vec<String>,
     ) {
-        // Drop the stale NewHost sentinel by KIND (not host) before extending:
-        // the fresh `rows` carry their own single sentinel last, and dropping the
-        // old one by host would keep it mid-list on the attached-local path (its
-        // `host: None` matches `current_host == None`).
-        self.rows
-            .retain(|r| r.kind != RowKind::NewHost && &r.host == current_host);
+        self.rows.retain(|r| &r.host == current_host);
         self.rows.extend(rows);
         self.adhoc = adhoc;
         self.clamp();
     }
 
     /// Rows matching the live filter (case-insensitive substring on the label),
-    /// in original order. Every visible row is selectable — headers/dividers are
-    /// synthesized at render time and are not rows.
+    /// in original order. Every visible row is selectable — headers, the divider,
+    /// and the `＋ Connect to a host…` slot are synthesized at render time and are
+    /// not rows.
     pub fn visible(&self) -> Vec<&PickerRow> {
         let f = self.filter.to_lowercase();
         self.rows
             .iter()
-            .filter(|r| r.kind == RowKind::NewHost || r.label.to_lowercase().contains(&f))
+            .filter(|r| r.label.to_lowercase().contains(&f))
             .collect()
     }
 
-    /// The row under the cursor, or `None` when the filter matches nothing.
+    /// The row under the cursor, or `None` when the cursor sits on the synthesized
+    /// `＋` slot (`is_new_host_selected`) — which is also the only position when the
+    /// filter matches nothing, since the slot is always present.
     pub fn selected(&self) -> Option<&PickerRow> {
         self.visible().get(self.cursor).copied()
+    }
+
+    /// Whether the cursor sits on the synthesized `＋ Connect to a host…` slot,
+    /// the always-present last position (`cursor == visible().len()`). Enter here
+    /// opens the host prompt and `i` still toggles install; `selected()` is `None`
+    /// exactly when this is `true`.
+    pub fn is_new_host_selected(&self) -> bool {
+        self.cursor == self.visible().len()
     }
 
     /// The live filter text.
@@ -410,9 +416,9 @@ impl PickerState {
         match byte {
             0x1b => Some(PickerOutcome::Cancel), // Esc
             b'\r' => {
-                // The `＋` sentinel opens the host prompt instead of committing;
-                // intercept it here so `accept()` never sees a NewHost row.
-                if matches!(self.selected().map(|r| r.kind), Some(RowKind::NewHost)) {
+                // The synthesized `＋` slot opens the host prompt instead of
+                // committing; intercept it here so `accept()` only ever sees rows.
+                if self.is_new_host_selected() {
                     self.mode = PickerMode::PromptingHost { buf: String::new() };
                     return None;
                 }
@@ -454,8 +460,8 @@ impl PickerState {
                 None
             }
             // `x` forgets only an ad-hoc host row; it's a no-op on the local
-            // anchor, on configured hosts, and on session/NewHost rows — there's
-            // nothing to forget on any of those.
+            // anchor, on configured hosts, on session rows, and on the `＋` slot
+            // (`selected()` is `None` there) — nothing to forget on any of those.
             b'x' => match self.selected() {
                 Some(row) if row.kind == RowKind::Host => match &row.host {
                     Some(h) if self.is_adhoc(h) => Some(PickerOutcome::Forget { host: h.clone() }),
@@ -625,8 +631,6 @@ impl PickerState {
                 name: String::new(),
                 install: self.install,
             }),
-            // invariant: Enter intercepts NewHost before accept()
-            RowKind::NewHost => None,
         }
     }
 
@@ -639,28 +643,26 @@ impl PickerState {
         // fzf model (matching `mux::finder`): editing the filter resets the
         // cursor to the top of the narrowed view. Without this, a cursor parked
         // on the current session (or anywhere below row 0) survives the narrow
-        // and can land on the always-visible `＋ Connect to a host…` sentinel —
-        // so filtering to a session and pressing Enter would open the host
-        // prompt instead of switching.
+        // and can land on the always-present `＋ Connect to a host…` slot — so
+        // filtering to a session and pressing Enter would open the host prompt
+        // instead of switching.
         self.cursor = 0;
         self.clamp();
     }
 
-    /// Step the cursor over the selectable (visible) rows. Bounded: a single
-    /// modular step, and an empty view parks the cursor at 0.
+    /// Step the cursor over the `visible().len() + 1` selectable positions — the
+    /// real rows plus the trailing `＋` slot. Bounded via a single modular step;
+    /// `n` is at least 1 (the `＋` slot always exists) so the view is never empty.
     fn move_cursor(&mut self, d: isize) {
-        let n = self.visible().len();
-        if n == 0 {
-            self.cursor = 0;
-            return;
-        }
+        let n = self.visible().len() + 1;
         self.cursor = ((self.cursor as isize + d).rem_euclid(n as isize)) as usize;
     }
 
     fn clamp(&mut self) {
-        let n = self.visible().len();
-        if self.cursor >= n {
-            self.cursor = n.saturating_sub(1);
+        // Positions are `0..=visible().len()` (the last is the `＋` slot).
+        let last = self.visible().len();
+        if self.cursor > last {
+            self.cursor = last;
         }
     }
 
@@ -729,6 +731,19 @@ impl PickerState {
             });
             emitted_any = true;
         }
+
+        // The synthesized `＋ Connect to a host…` slot: drawn last, always present
+        // (never filtered), muted like the footer, and highlighted when the cursor
+        // sits on it (`cursor == visible.len()`). Synthesized like the headers and
+        // divider, so a second or mid-list `＋` is unrepresentable.
+        lines.push(Line {
+            glyph: String::new(),
+            glyph_color: Some(t.footer),
+            text: "\u{ff0b} Connect to a host\u{2026}".into(),
+            dim: false,
+            selected: self.cursor == visible.len(),
+            divider: false,
+        });
 
         // ---- title / footer / prompt ----
         let title = " plexy-glass ";
@@ -840,13 +855,6 @@ impl PickerState {
                 (glyph, color, text)
             }
             RowKind::Session => (format!("  {glyph}"), color, row.label.clone()),
-            // No status glyph — the empty glyph is dropped by `frame_interior`;
-            // the footer color is arbitrary (it won't be drawn).
-            RowKind::NewHost => (
-                String::new(),
-                self.theme.footer,
-                "\u{ff0b} Connect to a host\u{2026}".into(),
-            ),
         }
     }
 
@@ -1105,8 +1113,7 @@ mod tests {
         }
     }
 
-    /// The rows `roster_state` builds on, extracted so the NewHost fixture reuses
-    /// them.
+    /// The rows `roster_state` builds on.
     fn roster_rows_for_test() -> Vec<PickerRow> {
         vec![
             session("main", None),
@@ -1118,24 +1125,11 @@ mod tests {
     }
 
     // Two local sessions, a configured host + its session, and an ad-hoc host.
+    // The `＋ Connect to a host…` slot is synthesized by the picker, not a row, so
+    // it is present on EVERY `PickerState` (navigate to `visible().len()` to reach
+    // it) — there is no separate "with sentinel" fixture anymore.
     fn roster_state() -> PickerState {
         let mut s = PickerState::new(roster_rows_for_test());
-        s.set_adhoc_hosts(vec!["scratch".into()]);
-        s
-    }
-
-    /// `roster_state`'s rows plus a trailing NewHost sentinel — the shape the
-    /// pump assembles (the sentinel appended last in `build_roster_rows`).
-    fn roster_with_newhost() -> PickerState {
-        let mut rows = roster_rows_for_test();
-        rows.push(PickerRow {
-            name: String::new(),
-            label: String::new(),
-            host: None,
-            kind: RowKind::NewHost,
-            status: RowStatus::Live,
-        });
-        let mut s = PickerState::new(rows);
         s.set_adhoc_hosts(vec!["scratch".into()]);
         s
     }
@@ -1258,33 +1252,53 @@ mod tests {
         let mut s = roster_state();
         let n = s.visible().len();
         assert_eq!(n, 5, "session + host rows are all selectable");
+        // n real rows + the synthesized ＋ slot = n+1 positions. At each, the
+        // cursor lands on EXACTLY ONE of a real row (`selected`) or the ＋ slot
+        // (`is_new_host_selected`) — never a synthesized header.
         for _ in 0..(n + 2) {
-            // Every cursor position lands on a real row (headers are synthesized,
-            // never selectable), so `selected` is always `Some`.
-            assert!(s.selected().is_some(), "cursor never parks on a header");
-            s.handle_key(0x0e); // down; wraps, stays bounded
+            assert_ne!(
+                s.selected().is_some(),
+                s.is_new_host_selected(),
+                "cursor on exactly one of a real row or the ＋ slot"
+            );
+            s.handle_key(0x0e); // down; wraps over n+1, stays bounded
         }
     }
 
     #[test]
-    fn filter_matching_nothing_parks_cursor_and_enter_is_none() {
+    fn filter_matching_nothing_rests_on_the_connect_slot() {
         let mut s = roster_state();
         s.handle_key(b'/'); // enter Filtering
         for c in "zzzz".chars() {
             s.handle_key(c as u8);
         }
-        assert!(s.visible().is_empty());
-        assert_eq!(s.selected(), None);
-        // Enter ends filter mode (empty view kept); back in Navigate, move and
-        // Enter are bounded no-ops over the empty view.
+        assert!(s.visible().is_empty(), "no real row matches");
+        // With no real rows, the always-present ＋ slot is the only position.
+        assert_eq!(s.selected(), None, "no real row under the cursor");
+        assert!(s.is_new_host_selected(), "cursor rests on the ＋ slot");
+        // Enter ends filter mode (empty view kept); back in Navigate, a move is a
+        // bounded no-op (only the ＋ slot exists) and Enter opens the host prompt.
         s.handle_key(b'\r');
         assert_eq!(s.mode, PickerMode::Navigate);
         assert_eq!(
             s.handle_key(0x0e),
             None,
-            "move is a bounded no-op when empty"
+            "move is a bounded no-op (only the ＋ slot)"
         );
-        assert_eq!(s.handle_key(b'\r'), None, "Enter parks: no outcome");
+        assert!(
+            s.is_new_host_selected(),
+            "still on the ＋ slot after a move"
+        );
+        assert_eq!(
+            s.handle_key(b'\r'),
+            None,
+            "Enter opens the host prompt (no outcome yet)"
+        );
+        assert_eq!(
+            s.mode,
+            PickerMode::PromptingHost { buf: String::new() },
+            "Enter on the ＋ slot opens the host prompt"
+        );
     }
 
     // --- (c) inside `Filtering`, `n`/`x` are ordinary filter input ---
@@ -1551,9 +1565,14 @@ mod tests {
             1,
             "prod's row was dropped, none replaced it"
         );
-        assert!(
+        // The cursor must stay within the `visible().len() + 1` positions, not
+        // dangle past the end: after prod's row vanishes it lands on the still
+        // in-bounds ＋ slot (index 1 == the new `visible().len()`). Exactly one of
+        // a real row or the ＋ slot holds — never neither.
+        assert_ne!(
             s.selected().is_some(),
-            "cursor re-clamped instead of dangling"
+            s.is_new_host_selected(),
+            "cursor re-clamped to a valid position, not dangling"
         );
     }
 
@@ -1740,34 +1759,36 @@ mod tests {
         }
     }
 
-    // --- (i) Task 4: the `＋ Connect to a host…` sentinel row ---
+    // --- (i) the synthesized `＋ Connect to a host…` slot ---
 
     #[test]
-    fn newhost_row_is_selectable_and_survives_filter() {
-        let mut s = roster_with_newhost();
-        // It's the last selectable row.
-        let last = s.visible().len() - 1;
-        for _ in 0..last {
+    fn connect_slot_is_selectable_and_survives_filter() {
+        let mut s = roster_state();
+        // It's the last selectable position, past every real row.
+        let n = s.visible().len();
+        for _ in 0..n {
             s.handle_key(0x0e);
         }
-        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::NewHost));
-        // A filter matching no host still shows the NewHost row.
-        let mut s2 = roster_with_newhost();
+        assert!(s.is_new_host_selected(), "cursor reaches the ＋ slot last");
+        assert_eq!(s.selected(), None, "the ＋ slot is not a row");
+        // A filter matching no host still leaves the ＋ slot reachable.
+        let mut s2 = roster_state();
         s2.handle_key(b'/'); // enter Filtering before typing the query
         for c in "zzzznomatch".chars() {
             s2.handle_key(c as u8);
         }
-        assert_eq!(s2.visible().len(), 1);
-        assert_eq!(s2.visible()[0].kind, RowKind::NewHost);
+        assert!(s2.visible().is_empty(), "no real row survives the filter");
+        assert!(s2.is_new_host_selected(), "the ＋ slot is still reachable");
     }
 
     #[test]
-    fn enter_on_newhost_prompts_then_connects_with_install() {
-        let mut s = roster_with_newhost();
-        let last = s.visible().len() - 1;
-        for _ in 0..last {
+    fn enter_on_connect_slot_prompts_then_connects_with_install() {
+        let mut s = roster_state();
+        let n = s.visible().len();
+        for _ in 0..n {
             s.handle_key(0x0e);
         }
+        assert!(s.is_new_host_selected());
         s.handle_key(b'i'); // install on (i toggles unconditionally in Navigate)
         assert!(s.install_enabled());
         assert_eq!(s.handle_key(b'\r'), None, "Enter opens the host prompt");
@@ -1786,11 +1807,12 @@ mod tests {
 
     #[test]
     fn empty_host_prompt_is_refused() {
-        let mut s = roster_with_newhost();
-        let last = s.visible().len() - 1;
-        for _ in 0..last {
+        let mut s = roster_state();
+        let n = s.visible().len();
+        for _ in 0..n {
             s.handle_key(0x0e);
         }
+        assert!(s.is_new_host_selected());
         s.handle_key(b'\r'); // into PromptingHost
         assert_eq!(
             s.handle_key(b'\r'),
@@ -1804,6 +1826,27 @@ mod tests {
             s.handle_key(b'\r'),
             Some(PickerOutcome::Reconnect { .. })
         ));
+    }
+
+    #[test]
+    fn render_draws_the_synthesized_connect_slot_last() {
+        // The ＋ slot is synthesized at render time (not a row), always present,
+        // and drawn after every real row — even under a filter that matches
+        // nothing (the "this host isn't listed, add it" flow).
+        let s = roster_state();
+        assert!(
+            visible_text(&s.render()).contains("Connect to a host"),
+            "＋ slot rendered"
+        );
+        let mut narrowed = roster_state();
+        narrowed.handle_key(b'/');
+        for c in "zzznomatch".chars() {
+            narrowed.handle_key(c as u8);
+        }
+        assert!(
+            visible_text(&narrowed.render()).contains("Connect to a host"),
+            "＋ slot survives a non-matching filter"
+        );
     }
 
     // --- (j) explicit-filter input model: Navigate is action-first, `/` enters
@@ -1863,7 +1906,7 @@ mod tests {
     }
 
     #[test]
-    fn i_toggles_on_host_session_and_newhost_rows() {
+    fn i_toggles_on_host_session_and_connect_slot() {
         // On a host row.
         let mut s = PickerState::new(vec![host_row("prod", RowStatus::Live)]);
         assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
@@ -1876,15 +1919,15 @@ mod tests {
         s.handle_key(b'i');
         assert!(s.install_enabled(), "i toggles on a session row");
         assert_eq!(s.filter(), "");
-        // On the `＋` NewHost row.
-        let mut s = roster_with_newhost();
-        let last = s.visible().len() - 1;
-        for _ in 0..last {
+        // On the synthesized `＋` slot.
+        let mut s = roster_state();
+        let n = s.visible().len();
+        for _ in 0..n {
             s.handle_key(0x0e);
         }
-        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::NewHost));
+        assert!(s.is_new_host_selected());
         s.handle_key(b'i');
-        assert!(s.install_enabled(), "i toggles on the ＋ row");
+        assert!(s.install_enabled(), "i toggles on the ＋ slot");
         assert_eq!(s.filter(), "");
     }
 
@@ -1928,31 +1971,31 @@ mod tests {
             matches!(s.mode, PickerMode::Prompting { .. }),
             "n on a host row opens the prompt"
         );
-        // NewHost row: no-op.
-        let mut s = roster_with_newhost();
-        let last = s.visible().len() - 1;
-        for _ in 0..last {
+        // The `＋` slot: no-op.
+        let mut s = roster_state();
+        let n = s.visible().len();
+        for _ in 0..n {
             s.handle_key(0x0e);
         }
-        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::NewHost));
+        assert!(s.is_new_host_selected());
         assert_eq!(s.handle_key(b'n'), None);
-        assert_eq!(s.mode, PickerMode::Navigate, "n on the ＋ row is a no-op");
+        assert_eq!(s.mode, PickerMode::Navigate, "n on the ＋ slot is a no-op");
     }
 
     #[test]
-    fn x_is_a_no_op_on_session_and_newhost_rows() {
+    fn x_is_a_no_op_on_session_rows_and_the_connect_slot() {
         // Session row.
         let mut s = roster_state();
         assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Session));
         assert_eq!(s.handle_key(b'x'), None);
         assert_eq!(s.filter(), "");
-        // NewHost row.
-        let mut s = roster_with_newhost();
-        let last = s.visible().len() - 1;
-        for _ in 0..last {
+        // The `＋` slot.
+        let mut s = roster_state();
+        let n = s.visible().len();
+        for _ in 0..n {
             s.handle_key(0x0e);
         }
-        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::NewHost));
+        assert!(s.is_new_host_selected());
         assert_eq!(s.handle_key(b'x'), None);
         assert_eq!(s.filter(), "");
     }
@@ -2031,17 +2074,17 @@ mod tests {
     }
 
     #[test]
-    fn filter_nonmatch_leaves_newhost_selectable() {
-        let mut s = roster_with_newhost();
+    fn filter_nonmatch_leaves_connect_slot_selectable() {
+        let mut s = roster_state();
         s.handle_key(b'/');
         for c in "zzznomatch".chars() {
             s.handle_key(c as u8);
         }
-        assert_eq!(s.visible().len(), 1, "only the ＋ sentinel survives");
-        assert_eq!(s.visible()[0].kind, RowKind::NewHost);
+        assert!(s.visible().is_empty(), "no real row survives the filter");
+        assert!(s.is_new_host_selected(), "the ＋ slot is still selectable");
         s.handle_key(b'\r'); // end filter mode
         assert_eq!(s.mode, PickerMode::Navigate);
-        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::NewHost));
+        assert!(s.is_new_host_selected());
         assert_eq!(
             s.handle_key(b'\r'),
             None,
