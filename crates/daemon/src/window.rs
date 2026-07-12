@@ -524,16 +524,29 @@ impl Window {
         debug_assert!(replaced, "install_in_slot: no leaf for {old_slot:?}");
         self.panes.insert(new_id, pane);
         self.block_baselines.insert(new_id, incoming_blocks);
-        if self.active == old_slot {
-            self.set_active(new_id);
+        self.rekey_pane(old_slot, new_id);
+    }
+
+    /// Re-point every stored reference to pane `old` at `new`: the `active`
+    /// pointer, every `focus_history` entry, and the `zoomed` overlay. This is
+    /// the id-rewrite half shared by [`Self::install_in_slot`] (slot swap) and
+    /// [`Self::respawn_pane_as_shell`] (dead-slot respawn); the map work
+    /// (`panes` / `block_baselines`) differs per caller and stays at the call
+    /// site. Precondition: `new` is already live in `self.panes`, so repointing
+    /// `active` satisfies `set_active`'s always-live invariant. Keeping the four
+    /// references' rewrite in one place is what stops a future edit from moving
+    /// one of them and silently desyncing the rest.
+    fn rekey_pane(&mut self, old: PaneId, new: PaneId) {
+        if self.active == old {
+            self.set_active(new);
         }
         for p in &mut self.focus_history {
-            if *p == old_slot {
-                *p = new_id;
+            if *p == old {
+                *p = new;
             }
         }
-        if self.zoomed == Some(old_slot) {
-            self.zoomed = Some(new_id);
+        if self.zoomed == Some(old) {
+            self.zoomed = Some(new);
         }
     }
 
@@ -620,17 +633,7 @@ impl Window {
         self.block_baselines.insert(new_pane_id, 0);
         // Rewrite every reference to the dead id → the new one (focus/zoom
         // follow the slot, exactly as install_in_slot does for a swap).
-        if self.active == dead_id {
-            self.set_active(new_pane_id);
-        }
-        for p in &mut self.focus_history {
-            if *p == dead_id {
-                *p = new_pane_id;
-            }
-        }
-        if self.zoomed == Some(dead_id) {
-            self.zoomed = Some(new_pane_id);
-        }
+        self.rekey_pane(dead_id, new_pane_id);
         // Size the new pane's PTY to the slot. A resize error here is a spurious
         // PTY failure on a brand-new pane (essentially never); the slot is
         // already correctly occupied, so we log and keep the valid state rather
@@ -1479,6 +1482,44 @@ mod tests {
             w.active(),
             PaneId(9),
             "fallback focus uses the rewritten history entry"
+        );
+        old.kill_child();
+    }
+
+    #[tokio::test]
+    async fn slot_swap_repoints_every_reference_field() {
+        // A slot swap through install_in_slot must re-point every reference to
+        // the dead id in one shot: the three fields rekey_pane owns (active,
+        // every focus_history entry, zoomed) plus the call-site map work (the
+        // panes map key and the incoming pane's block baseline). One test that
+        // nothing keeps pointing at the old id after the single rekey.
+        let mut w = two_pane_window(); // panes {0,1}, active 1, h=[0]
+        w.focus(PaneId(0)); // h=[0,1], active 0
+        w.focus(PaneId(1)); // h=[0,1,0], active 1
+        assert!(w.toggle_zoom(), "zoom the slot we are about to swap"); // zoomed=Some(1)
+        assert!(
+            w.focus_history.contains(&PaneId(1)),
+            "precondition: 1 in history"
+        );
+
+        let Ok(old) = w.swap_occupant(PaneId(1), donor_pane(PaneId(9))) else {
+            panic!("pane 1 present")
+        };
+        assert_eq!(old.id(), PaneId(1));
+
+        assert_eq!(w.active(), PaneId(9), "active moved");
+        assert_eq!(w.zoomed, Some(PaneId(9)), "zoom moved");
+        assert!(
+            !w.focus_history.contains(&PaneId(1)) && w.focus_history.contains(&PaneId(9)),
+            "focus history moved"
+        );
+        assert!(
+            w.pane(PaneId(9)).is_some() && w.pane(PaneId(1)).is_none(),
+            "panes map key moved"
+        );
+        assert!(
+            w.block_baselines.contains_key(&PaneId(9)),
+            "incoming pane's block baseline seeded"
         );
         old.kill_child();
     }
