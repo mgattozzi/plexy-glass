@@ -5,6 +5,7 @@ use std::mem;
 
 use plexy_glass_emulator::Screen;
 
+use crate::line::UnifiedLine;
 use crate::{
     Direction, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseKind, WheelAxis, blocks,
     selection,
@@ -28,9 +29,15 @@ pub struct SearchState {
 
 #[derive(Debug, Clone)]
 pub struct CopyMode {
-    pub cursor: (u32, u16),
-    pub anchor: Option<(u32, u16)>,
+    /// Cursor position: unified line + display column. The line is a
+    /// [`UnifiedLine`] so it can't be crossed with a visible line or scroll
+    /// offset; the column stays a bare `u16`.
+    pub cursor: (UnifiedLine, u16),
+    pub anchor: Option<(UnifiedLine, u16)>,
     pub search: SearchState,
+    /// Unified line shown at viewport row 0. A raw `u32`: copy mode uses an
+    /// identity fold projection, so this is a plain unified index the compositor
+    /// consumes directly (converted at that seam).
     pub viewport_top: u32,
     pub pane_rows: u16,
     pub total_lines: u32,
@@ -51,10 +58,11 @@ impl CopyMode {
     ///
     /// `start_line` and `start_col` are the cursor's initial position in
     /// the unified line space (scrollback rows then active rows).
-    pub fn new(total_lines: u32, pane_rows: u16, start_line: u32, start_col: u16) -> Self {
+    pub fn new(total_lines: u32, pane_rows: u16, start_line: UnifiedLine, start_col: u16) -> Self {
         let viewport_top = total_lines.saturating_sub(u32::from(pane_rows));
+        let max_line = UnifiedLine::new(total_lines.saturating_sub(1));
         Self {
-            cursor: (start_line.min(total_lines.saturating_sub(1)), start_col),
+            cursor: (start_line.min(max_line), start_col),
             anchor: None,
             search: SearchState::default(),
             viewport_top,
@@ -75,10 +83,11 @@ impl CopyMode {
         screen: &Screen,
     ) -> CopyModeAction {
         let max_line = self.total_lines.saturating_sub(1);
-        let line = self
-            .viewport_top
-            .saturating_add(u32::from(event.row))
-            .min(max_line);
+        let line = UnifiedLine::new(
+            self.viewport_top
+                .saturating_add(u32::from(event.row))
+                .min(max_line),
+        );
         match (event.kind, event.button) {
             (MouseKind::Press, MouseButton::Left) => {
                 self.cursor = (line, event.col);
@@ -124,7 +133,7 @@ impl CopyMode {
     /// cells outward on the unified line.
     fn select_word_at_cursor(&mut self, screen: &Screen) {
         let (line, col) = self.cursor;
-        let Some(cells) = unified_line_cells(screen, line) else {
+        let Some(cells) = unified_line_cells(screen, line.get()) else {
             return;
         };
         let cols = cells.len();
@@ -195,7 +204,7 @@ impl CopyMode {
     /// Expand cursor + anchor to span the entire line (col 0 → last non-blank).
     fn select_line_at_cursor(&mut self, screen: &Screen) {
         let line = self.cursor.0;
-        let Some(cells) = unified_line_cells(screen, line) else {
+        let Some(cells) = unified_line_cells(screen, line.get()) else {
             return;
         };
         let mut last = None;
@@ -213,8 +222,8 @@ impl CopyMode {
     pub fn set_pane_rows(&mut self, pane_rows: u16, total_lines: u32) {
         self.pane_rows = pane_rows;
         self.total_lines = total_lines;
-        if self.cursor.0 >= total_lines {
-            self.cursor.0 = total_lines.saturating_sub(1);
+        if self.cursor.0.get() >= total_lines {
+            self.cursor.0 = UnifiedLine::new(total_lines.saturating_sub(1));
         }
         let max_top = total_lines.saturating_sub(u32::from(pane_rows));
         // Equivalent note (181:30): `> → >=` is equivalent because when
@@ -261,36 +270,40 @@ pub fn handle(event: &KeyEvent, state: &mut CopyMode, screen: &Screen) -> CopyMo
             state.cursor.1 = (state.cursor.1 + 1).min(cols.saturating_sub(1));
         }
         (m, Key::Char('k') | Key::Arrow(Direction::Up)) if m.is_empty() => {
-            state.cursor.0 = state.cursor.0.saturating_sub(1);
+            state.cursor.0 = state.cursor.0.retreat(1);
             ensure_visible(state);
         }
         (m, Key::Char('j') | Key::Arrow(Direction::Down)) if m.is_empty() => {
-            let max_line = state.total_lines.saturating_sub(1);
-            state.cursor.0 = (state.cursor.0 + 1).min(max_line);
+            let max_line = UnifiedLine::new(state.total_lines.saturating_sub(1));
+            state.cursor.0 = state.cursor.0.advance(1).min(max_line);
             ensure_visible(state);
         }
         (m, Key::PageUp) if m.is_empty() => {
-            state.cursor.0 = state.cursor.0.saturating_sub(u32::from(state.pane_rows));
+            state.cursor.0 = state.cursor.0.retreat(u32::from(state.pane_rows));
             ensure_visible(state);
         }
         (m, Key::PageDown) if m.is_empty() => {
-            let max_line = state.total_lines.saturating_sub(1);
-            state.cursor.0 = (state.cursor.0 + u32::from(state.pane_rows)).min(max_line);
+            let max_line = UnifiedLine::new(state.total_lines.saturating_sub(1));
+            state.cursor.0 = state
+                .cursor
+                .0
+                .advance(u32::from(state.pane_rows))
+                .min(max_line);
             ensure_visible(state);
         }
         (m, Key::Char('d')) if m == Modifiers::CTRL => {
             let half = u32::from(state.pane_rows / 2);
-            let max_line = state.total_lines.saturating_sub(1);
-            state.cursor.0 = (state.cursor.0 + half).min(max_line);
+            let max_line = UnifiedLine::new(state.total_lines.saturating_sub(1));
+            state.cursor.0 = state.cursor.0.advance(half).min(max_line);
             ensure_visible(state);
         }
         (m, Key::Char('u')) if m == Modifiers::CTRL => {
             let half = u32::from(state.pane_rows / 2);
-            state.cursor.0 = state.cursor.0.saturating_sub(half);
+            state.cursor.0 = state.cursor.0.retreat(half);
             ensure_visible(state);
         }
         (m, Key::Char('g')) if m.is_empty() => {
-            state.cursor = (0, 0);
+            state.cursor = (UnifiedLine::new(0), 0);
             ensure_visible(state);
         }
         // Shifted printables (`G`, `$`, `N`) arrive with empty mods on
@@ -298,7 +311,7 @@ pub fn handle(event: &KeyEvent, state: &mut CopyMode, screen: &Screen) -> CopyMo
         // only under Kitty disambiguation, so accept both, like the search
         // prompt's char handler below.
         (m, Key::Char('G')) if m.is_empty() || m == Modifiers::SHIFT => {
-            state.cursor = (state.total_lines.saturating_sub(1), 0);
+            state.cursor = (UnifiedLine::new(state.total_lines.saturating_sub(1)), 0);
             ensure_visible(state);
         }
         (m, Key::Char('0')) if m.is_empty() => {
@@ -354,19 +367,20 @@ pub fn handle(event: &KeyEvent, state: &mut CopyMode, screen: &Screen) -> CopyMo
 }
 
 fn ensure_visible(state: &mut CopyMode) {
+    // `viewport_top` is raw-`u32` unified space (identity projection), so take the
+    // cursor's raw index at this seam.
+    let cursor_line = state.cursor.0.get();
     // Equivalent note (319:23): `< → <=` is equivalent because when cursor.0 == vt
     // the guard fires and sets vt = cursor.0 = vt (a no-op).
-    if state.cursor.0 < state.viewport_top {
-        state.viewport_top = state.cursor.0;
+    if cursor_line < state.viewport_top {
+        state.viewport_top = cursor_line;
     }
     // Equivalent note (323:23): `> → >=` is equivalent because when cursor.0 == bottom
     // the guard fires but sets vt = cursor.0 - (pane_rows-1) = vt (a no-op).
     let bottom = state.viewport_top + u32::from(state.pane_rows.saturating_sub(1));
-    if state.cursor.0 > bottom {
-        state.viewport_top = state
-            .cursor
-            .0
-            .saturating_sub(u32::from(state.pane_rows.saturating_sub(1)));
+    if cursor_line > bottom {
+        state.viewport_top =
+            cursor_line.saturating_sub(u32::from(state.pane_rows.saturating_sub(1)));
     }
 }
 
@@ -400,9 +414,11 @@ fn extract_selection(state: &CopyMode, screen: &Screen) -> String {
     let cols = screen.active.num_cols();
     let mut out = String::new();
 
-    for line in start.0..=end.0 {
-        let row_start = if line == start.0 { start.1 } else { 0 };
-        let row_end = if line == end.0 {
+    // Iterate raw unified indices for the row scan; the tuple lines are typed.
+    let (start_line, end_line) = (start.0.get(), end.0.get());
+    for line in start_line..=end_line {
+        let row_start = if line == start_line { start.1 } else { 0 };
+        let row_end = if line == end_line {
             end.1
         } else {
             cols.saturating_sub(1)
@@ -427,14 +443,17 @@ fn extract_selection(state: &CopyMode, screen: &Screen) -> String {
                 out.push_str(cell.grapheme.as_str());
             }
         }
-        if line < end.0 {
+        if line < end_line {
             out.push('\n');
         }
     }
     out
 }
 
-fn normalize(a: (u32, u16), b: (u32, u16)) -> ((u32, u16), (u32, u16)) {
+fn normalize(
+    a: (UnifiedLine, u16),
+    b: (UnifiedLine, u16),
+) -> ((UnifiedLine, u16), (UnifiedLine, u16)) {
     if a <= b { (a, b) } else { (b, a) }
 }
 
@@ -457,11 +476,11 @@ fn handle_search_prompt(event: &KeyEvent, state: &mut CopyMode, screen: &Screen)
                 .search
                 .matches
                 .iter()
-                .position(|m| m.line_idx >= state.cursor.0)
+                .position(|m| m.line_idx >= state.cursor.0.get())
                 .unwrap_or(0);
             state.search.current = next;
             let m = &state.search.matches[next];
-            state.cursor = (m.line_idx, m.col_start);
+            state.cursor = (UnifiedLine::new(m.line_idx), m.col_start);
             ensure_visible(state);
             CopyModeAction::Render
         }
@@ -483,7 +502,7 @@ fn jump_to_next_match(state: &mut CopyMode) {
     }
     state.search.current = (state.search.current + 1) % state.search.matches.len();
     let m = &state.search.matches[state.search.current];
-    state.cursor = (m.line_idx, m.col_start);
+    state.cursor = (UnifiedLine::new(m.line_idx), m.col_start);
     ensure_visible(state);
 }
 
@@ -497,7 +516,7 @@ fn jump_to_prev_match(state: &mut CopyMode) {
         state.search.current - 1
     };
     let m = &state.search.matches[state.search.current];
-    state.cursor = (m.line_idx, m.col_start);
+    state.cursor = (UnifiedLine::new(m.line_idx), m.col_start);
     ensure_visible(state);
 }
 
@@ -560,6 +579,11 @@ mod tests {
     use super::*;
     use crate::MouseModifiers;
 
+    /// Shorthand for a `UnifiedLine` in the cursor/anchor assertions.
+    fn ul(n: u32) -> UnifiedLine {
+        UnifiedLine::new(n)
+    }
+
     fn screen(rows: u16, cols: u16) -> Screen {
         let mut e = Emulator::new(rows, cols);
         // Push a known byte so the active grid has at least one cell width.
@@ -614,28 +638,31 @@ mod tests {
     #[test]
     fn new_clamps_cursor_to_total_lines() {
         let cm = CopyMode::new(
-            /*total*/ 5, /*rows*/ 3, /*start_line*/ 10, /*start_col*/ 0,
+            /*total*/ 5,
+            /*rows*/ 3,
+            /*start_line*/ ul(10),
+            /*start_col*/ 0,
         );
-        assert_eq!(cm.cursor.0, 4);
+        assert_eq!(cm.cursor.0.get(), 4);
     }
 
     #[test]
     fn new_sets_viewport_top_to_bottom_of_history() {
-        let cm = CopyMode::new(10, 3, 9, 0);
+        let cm = CopyMode::new(10, 3, ul(9), 0);
         assert_eq!(cm.viewport_top, 7);
     }
 
     #[test]
     fn set_pane_rows_clamps_cursor_and_viewport() {
-        let mut cm = CopyMode::new(10, 5, 9, 0);
+        let mut cm = CopyMode::new(10, 5, ul(9), 0);
         cm.set_pane_rows(3, 4);
-        assert_eq!(cm.cursor.0, 3);
+        assert_eq!(cm.cursor.0.get(), 3);
         assert_eq!(cm.viewport_top, 1);
     }
 
     #[test]
     fn h_moves_cursor_left_and_clamps() {
-        let mut s = CopyMode::new(10, 5, 5, 3);
+        let mut s = CopyMode::new(10, 5, ul(5), 3);
         let scr = screen(10, 80);
         handle(&ev(Modifiers::empty(), Key::Char('h')), &mut s, &scr);
         assert_eq!(s.cursor.1, 2);
@@ -646,7 +673,7 @@ mod tests {
 
     #[test]
     fn l_moves_cursor_right_and_clamps_at_pane_width() {
-        let mut s = CopyMode::new(10, 5, 5, 78);
+        let mut s = CopyMode::new(10, 5, ul(5), 78);
         let scr = screen(10, 80);
         handle(&ev(Modifiers::empty(), Key::Char('l')), &mut s, &scr);
         handle(&ev(Modifiers::empty(), Key::Char('l')), &mut s, &scr);
@@ -655,59 +682,59 @@ mod tests {
 
     #[test]
     fn k_moves_up_and_scrolls_viewport() {
-        let mut s = CopyMode::new(20, 5, 18, 0);
+        let mut s = CopyMode::new(20, 5, ul(18), 0);
         assert_eq!(s.viewport_top, 15);
         let scr = screen(5, 80);
         for _ in 0..4 {
             handle(&ev(Modifiers::empty(), Key::Char('k')), &mut s, &scr);
         }
-        assert_eq!(s.cursor.0, 14);
+        assert_eq!(s.cursor.0.get(), 14);
         assert!(s.viewport_top <= 14);
     }
 
     #[test]
     fn j_moves_down_and_clamps_at_total_lines() {
-        let mut s = CopyMode::new(10, 5, 9, 0);
+        let mut s = CopyMode::new(10, 5, ul(9), 0);
         let scr = screen(5, 80);
         handle(&ev(Modifiers::empty(), Key::Char('j')), &mut s, &scr);
-        assert_eq!(s.cursor.0, 9);
+        assert_eq!(s.cursor.0.get(), 9);
     }
 
     #[test]
     fn page_up_jumps_by_pane_rows() {
-        let mut s = CopyMode::new(50, 10, 40, 0);
+        let mut s = CopyMode::new(50, 10, ul(40), 0);
         let scr = screen(10, 80);
         handle(&ev(Modifiers::empty(), Key::PageUp), &mut s, &scr);
-        assert_eq!(s.cursor.0, 30);
+        assert_eq!(s.cursor.0.get(), 30);
     }
 
     #[test]
     fn ctrl_d_jumps_by_half_pane() {
-        let mut s = CopyMode::new(50, 10, 20, 0);
+        let mut s = CopyMode::new(50, 10, ul(20), 0);
         let scr = screen(10, 80);
         handle(&ev(Modifiers::CTRL, Key::Char('d')), &mut s, &scr);
-        assert_eq!(s.cursor.0, 25);
+        assert_eq!(s.cursor.0.get(), 25);
     }
 
     #[test]
     fn g_jumps_to_top() {
-        let mut s = CopyMode::new(50, 10, 30, 5);
+        let mut s = CopyMode::new(50, 10, ul(30), 5);
         let scr = screen(10, 80);
         handle(&ev(Modifiers::empty(), Key::Char('g')), &mut s, &scr);
-        assert_eq!(s.cursor, (0, 0));
+        assert_eq!(s.cursor, (ul(0), 0));
     }
 
     #[test]
     fn shift_g_jumps_to_bottom() {
-        let mut s = CopyMode::new(50, 10, 10, 5);
+        let mut s = CopyMode::new(50, 10, ul(10), 5);
         let scr = screen(10, 80);
         handle(&ev(Modifiers::SHIFT, Key::Char('G')), &mut s, &scr);
-        assert_eq!(s.cursor, (49, 0));
+        assert_eq!(s.cursor, (ul(49), 0));
     }
 
     #[test]
     fn zero_jumps_to_col_zero() {
-        let mut s = CopyMode::new(50, 10, 10, 22);
+        let mut s = CopyMode::new(50, 10, ul(10), 22);
         let scr = screen(10, 80);
         handle(&ev(Modifiers::empty(), Key::Char('0')), &mut s, &scr);
         assert_eq!(s.cursor.1, 0);
@@ -715,7 +742,7 @@ mod tests {
 
     #[test]
     fn dollar_jumps_to_last_col() {
-        let mut s = CopyMode::new(50, 10, 10, 0);
+        let mut s = CopyMode::new(50, 10, ul(10), 0);
         let scr = screen(10, 80);
         handle(&ev(Modifiers::SHIFT, Key::Char('$')), &mut s, &scr);
         assert_eq!(s.cursor.1, 79);
@@ -725,15 +752,15 @@ mod tests {
     fn shift_g_jumps_to_bottom_with_empty_mods() {
         // Legacy / modifyOtherKeys clients deliver Shift+g as a bare 'G' byte
         // with empty mods, so the motion must still fire (regression guard).
-        let mut s = CopyMode::new(50, 10, 10, 5);
+        let mut s = CopyMode::new(50, 10, ul(10), 5);
         let scr = screen(10, 80);
         handle(&ev(Modifiers::empty(), Key::Char('G')), &mut s, &scr);
-        assert_eq!(s.cursor, (49, 0));
+        assert_eq!(s.cursor, (ul(49), 0));
     }
 
     #[test]
     fn dollar_jumps_to_last_col_with_empty_mods() {
-        let mut s = CopyMode::new(50, 10, 10, 0);
+        let mut s = CopyMode::new(50, 10, ul(10), 0);
         let scr = screen(10, 80);
         handle(&ev(Modifiers::empty(), Key::Char('$')), &mut s, &scr);
         assert_eq!(s.cursor.1, 79);
@@ -742,7 +769,7 @@ mod tests {
     #[test]
     fn capital_n_cycles_to_prev_match_with_wrap() {
         let scr = screen_with_lines(3, 30, &["foo", "foo bar foo", "foo baz"]);
-        let mut s = CopyMode::new(3, 3, 0, 0);
+        let mut s = CopyMode::new(3, 3, ul(0), 0);
         s.search.prompt_active = true;
         s.search.prompt_buf = "foo".into();
         handle(&ev(Modifiers::empty(), Key::Enter), &mut s, &scr);
@@ -754,7 +781,7 @@ mod tests {
         handle(&ev(Modifiers::empty(), Key::Char('N')), &mut s, &scr);
         assert_eq!(s.search.current, len - 1);
         let last = &s.search.matches[len - 1];
-        assert_eq!(s.cursor, (last.line_idx, last.col_start));
+        assert_eq!(s.cursor, (ul(last.line_idx), last.col_start));
         // Stepping back once more lands on the second-to-last (no wrap).
         handle(&ev(Modifiers::empty(), Key::Char('N')), &mut s, &scr);
         assert_eq!(s.search.current, len - 2);
@@ -762,10 +789,10 @@ mod tests {
 
     #[test]
     fn v_toggles_anchor() {
-        let mut s = CopyMode::new(10, 5, 3, 2);
+        let mut s = CopyMode::new(10, 5, ul(3), 2);
         let scr = screen(5, 80);
         handle(&ev(Modifiers::empty(), Key::Char('v')), &mut s, &scr);
-        assert_eq!(s.anchor, Some((3, 2)));
+        assert_eq!(s.anchor, Some((ul(3), 2)));
         handle(&ev(Modifiers::empty(), Key::Char('v')), &mut s, &scr);
         assert_eq!(s.anchor, None);
     }
@@ -773,9 +800,9 @@ mod tests {
     #[test]
     fn y_with_selection_yanks_text() {
         let scr = screen_with_lines(2, 10, &["hello", "world"]);
-        let mut s = CopyMode::new(2, 2, 0, 0);
-        s.anchor = Some((0, 0));
-        s.cursor = (0, 4);
+        let mut s = CopyMode::new(2, 2, ul(0), 0);
+        s.anchor = Some((ul(0), 0));
+        s.cursor = (ul(0), 4);
         let action = handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
         match action {
             CopyModeAction::Yank(text) => assert_eq!(text, "hello"),
@@ -786,7 +813,7 @@ mod tests {
     #[test]
     fn y_without_selection_yanks_current_line() {
         let scr = screen_with_lines(2, 10, &["hello", "world"]);
-        let mut s = CopyMode::new(2, 2, 1, 0);
+        let mut s = CopyMode::new(2, 2, ul(1), 0);
         let action = handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
         match action {
             CopyModeAction::Yank(text) => assert!(text.contains("world"), "got: {text:?}"),
@@ -796,7 +823,7 @@ mod tests {
 
     #[test]
     fn slash_opens_search_prompt() {
-        let mut s = CopyMode::new(10, 5, 0, 0);
+        let mut s = CopyMode::new(10, 5, ul(0), 0);
         let scr = screen(5, 80);
         handle(&ev(Modifiers::empty(), Key::Char('/')), &mut s, &scr);
         assert!(s.search.prompt_active);
@@ -804,7 +831,7 @@ mod tests {
 
     #[test]
     fn search_prompt_appends_typed_chars() {
-        let mut s = CopyMode::new(10, 5, 0, 0);
+        let mut s = CopyMode::new(10, 5, ul(0), 0);
         let scr = screen(5, 80);
         s.search.prompt_active = true;
         for c in ['f', 'o', 'o'] {
@@ -815,7 +842,7 @@ mod tests {
 
     #[test]
     fn search_prompt_backspace_deletes() {
-        let mut s = CopyMode::new(10, 5, 0, 0);
+        let mut s = CopyMode::new(10, 5, ul(0), 0);
         let scr = screen(5, 80);
         s.search.prompt_active = true;
         s.search.prompt_buf = "foo".into();
@@ -826,21 +853,21 @@ mod tests {
     #[test]
     fn search_submit_jumps_to_first_match_below_cursor() {
         let scr = screen_with_lines(3, 30, &["alpha", "beta passwd here", "gamma"]);
-        let mut s = CopyMode::new(3, 3, 0, 0);
+        let mut s = CopyMode::new(3, 3, ul(0), 0);
         s.search.prompt_active = true;
         s.search.prompt_buf = "passwd".into();
         handle(&ev(Modifiers::empty(), Key::Enter), &mut s, &scr);
         assert!(!s.search.prompt_active);
         assert_eq!(s.search.query, "passwd");
         assert_eq!(s.search.matches.len(), 1);
-        assert_eq!(s.cursor.0, 1);
+        assert_eq!(s.cursor.0.get(), 1);
         assert_eq!(s.cursor.1, 5);
     }
 
     #[test]
     fn n_cycles_to_next_match() {
         let scr = screen_with_lines(3, 30, &["foo", "foo bar foo", "foo baz"]);
-        let mut s = CopyMode::new(3, 3, 0, 0);
+        let mut s = CopyMode::new(3, 3, ul(0), 0);
         s.search.prompt_active = true;
         s.search.prompt_buf = "foo".into();
         handle(&ev(Modifiers::empty(), Key::Enter), &mut s, &scr);
@@ -853,7 +880,7 @@ mod tests {
     #[test]
     fn search_empty_query_clears_state() {
         let scr = screen_with_lines(3, 30, &["alpha", "beta", "gamma"]);
-        let mut s = CopyMode::new(3, 3, 0, 0);
+        let mut s = CopyMode::new(3, 3, ul(0), 0);
         s.search.prompt_active = true;
         s.search.prompt_buf = String::new();
         handle(&ev(Modifiers::empty(), Key::Enter), &mut s, &scr);
@@ -864,17 +891,17 @@ mod tests {
     #[test]
     fn search_no_match_leaves_cursor() {
         let scr = screen_with_lines(3, 30, &["alpha", "beta", "gamma"]);
-        let mut s = CopyMode::new(3, 3, 1, 0);
+        let mut s = CopyMode::new(3, 3, ul(1), 0);
         s.search.prompt_active = true;
         s.search.prompt_buf = "zzzzz".into();
         handle(&ev(Modifiers::empty(), Key::Enter), &mut s, &scr);
         assert!(s.search.matches.is_empty());
-        assert_eq!(s.cursor.0, 1);
+        assert_eq!(s.cursor.0.get(), 1);
     }
 
     #[test]
     fn escape_in_prompt_closes_prompt_only() {
-        let mut s = CopyMode::new(10, 5, 0, 0);
+        let mut s = CopyMode::new(10, 5, ul(0), 0);
         let scr = screen(5, 80);
         s.search.prompt_active = true;
         s.search.prompt_buf = "abc".into();
@@ -886,8 +913,8 @@ mod tests {
 
     #[test]
     fn escape_with_selection_clears_selection() {
-        let mut s = CopyMode::new(10, 5, 5, 3);
-        s.anchor = Some((0, 0));
+        let mut s = CopyMode::new(10, 5, ul(5), 3);
+        s.anchor = Some((ul(0), 0));
         let scr = screen(5, 80);
         let action = handle(&ev(Modifiers::empty(), Key::Escape), &mut s, &scr);
         assert!(matches!(action, CopyModeAction::Render));
@@ -896,7 +923,7 @@ mod tests {
 
     #[test]
     fn escape_in_normal_mode_exits() {
-        let mut s = CopyMode::new(10, 5, 5, 3);
+        let mut s = CopyMode::new(10, 5, ul(5), 3);
         let scr = screen(5, 80);
         let action = handle(&ev(Modifiers::empty(), Key::Escape), &mut s, &scr);
         assert!(matches!(action, CopyModeAction::Exit));
@@ -940,68 +967,68 @@ mod tests {
     #[test]
     fn open_bracket_jumps_to_prev_prompt_col_zero() {
         let scr = marked_screen();
-        let mut s = CopyMode::new(total(&scr), 8, 6, 5);
+        let mut s = CopyMode::new(total(&scr), 8, ul(6), 5);
         handle(&ev(Modifiers::empty(), Key::Char('[')), &mut s, &scr);
-        assert_eq!(s.cursor, (3, 0));
+        assert_eq!(s.cursor, (ul(3), 0));
         handle(&ev(Modifiers::empty(), Key::Char('[')), &mut s, &scr);
-        assert_eq!(s.cursor, (0, 0));
+        assert_eq!(s.cursor, (ul(0), 0));
     }
 
     #[test]
     fn open_bracket_at_oldest_prompt_is_a_noop() {
         let scr = marked_screen();
-        let mut s = CopyMode::new(total(&scr), 8, 0, 4);
+        let mut s = CopyMode::new(total(&scr), 8, ul(0), 4);
         handle(&ev(Modifiers::empty(), Key::Char('[')), &mut s, &scr);
-        assert_eq!(s.cursor, (0, 4), "no wrap, cursor untouched");
+        assert_eq!(s.cursor, (ul(0), 4), "no wrap, cursor untouched");
     }
 
     #[test]
     fn close_bracket_jumps_to_next_prompt_col_zero() {
         let scr = marked_screen();
-        let mut s = CopyMode::new(total(&scr), 8, 0, 5);
+        let mut s = CopyMode::new(total(&scr), 8, ul(0), 5);
         handle(&ev(Modifiers::empty(), Key::Char(']')), &mut s, &scr);
-        assert_eq!(s.cursor, (3, 0));
+        assert_eq!(s.cursor, (ul(3), 0));
     }
 
     #[test]
     fn close_bracket_at_newest_prompt_is_a_noop() {
         let scr = marked_screen();
-        let mut s = CopyMode::new(total(&scr), 8, 3, 2);
+        let mut s = CopyMode::new(total(&scr), 8, ul(3), 2);
         handle(&ev(Modifiers::empty(), Key::Char(']')), &mut s, &scr);
-        assert_eq!(s.cursor, (3, 2), "no wrap, cursor untouched");
+        assert_eq!(s.cursor, (ul(3), 2), "no wrap, cursor untouched");
     }
 
     #[test]
     fn brackets_cross_the_scrollback_boundary_and_scroll_the_viewport() {
         let scr = marked_screen_with_scrollback();
-        let mut s = CopyMode::new(total(&scr), 3, 5, 0);
+        let mut s = CopyMode::new(total(&scr), 3, ul(5), 0);
         assert_eq!(s.viewport_top, 3);
         // Grid prompt first, then the scrollback one.
         handle(&ev(Modifiers::empty(), Key::Char('[')), &mut s, &scr);
-        assert_eq!(s.cursor, (4, 0));
+        assert_eq!(s.cursor, (ul(4), 0));
         handle(&ev(Modifiers::empty(), Key::Char('[')), &mut s, &scr);
-        assert_eq!(s.cursor, (0, 0), "prompt found in scrollback");
+        assert_eq!(s.cursor, (ul(0), 0), "prompt found in scrollback");
         assert_eq!(s.viewport_top, 0, "ensure_visible scrolled up");
         // And back down across the boundary.
         handle(&ev(Modifiers::empty(), Key::Char(']')), &mut s, &scr);
-        assert_eq!(s.cursor, (4, 0));
+        assert_eq!(s.cursor, (ul(4), 0));
         assert!(s.viewport_top + 2 >= 4, "ensure_visible scrolled down");
     }
 
     #[test]
     fn o_selects_the_output_region_of_the_current_block() {
         let scr = marked_screen();
-        let mut s = CopyMode::new(total(&scr), 8, 2, 3);
+        let mut s = CopyMode::new(total(&scr), 8, ul(2), 3);
         handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
         // Output of block 1: C line 1 col 0 → block end line 2, last col.
-        assert_eq!(s.anchor, Some((1, 0)));
-        assert_eq!(s.cursor, (2, 19));
+        assert_eq!(s.anchor, Some((ul(1), 0)));
+        assert_eq!(s.cursor, (ul(2), 19));
     }
 
     #[test]
     fn o_is_idempotent_on_repress() {
         let scr = marked_screen();
-        let mut s = CopyMode::new(total(&scr), 8, 1, 0);
+        let mut s = CopyMode::new(total(&scr), 8, ul(1), 0);
         handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
         let (anchor, cursor) = (s.anchor, s.cursor);
         handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
@@ -1012,25 +1039,25 @@ mod tests {
     fn o_falls_back_to_the_prompt_line_without_output_start() {
         // No 133;C: selection starts at the prompt row itself.
         let scr = screen_from_bytes(6, 20, b"\x1b]133;A\x07$ a\r\nout\r\n\x1b]133;A\x07$ b");
-        let mut s = CopyMode::new(total(&scr), 6, 1, 0);
+        let mut s = CopyMode::new(total(&scr), 6, ul(1), 0);
         handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
-        assert_eq!(s.anchor, Some((0, 0)));
-        assert_eq!(s.cursor, (1, 19));
+        assert_eq!(s.anchor, Some((ul(0), 0)));
+        assert_eq!(s.cursor, (ul(1), 19));
     }
 
     #[test]
     fn o_is_a_noop_when_no_block_contains_the_cursor() {
         let scr = screen_from_bytes(6, 20, b"plain\r\n\x1b]133;A\x07$ a");
-        let mut s = CopyMode::new(total(&scr), 6, 0, 2);
+        let mut s = CopyMode::new(total(&scr), 6, ul(0), 2);
         handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
         assert_eq!(s.anchor, None);
-        assert_eq!(s.cursor, (0, 2));
+        assert_eq!(s.cursor, (ul(0), 2));
     }
 
     #[test]
     fn o_then_y_yanks_the_block_output_text() {
         let scr = marked_screen();
-        let mut s = CopyMode::new(total(&scr), 8, 2, 3);
+        let mut s = CopyMode::new(total(&scr), 8, ul(2), 3);
         handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
         let action = handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
         match action {
@@ -1043,10 +1070,10 @@ mod tests {
     fn o_then_y_spans_the_scrollback_boundary() {
         let scr = marked_screen_with_scrollback();
         // Cursor inside block 1 (lines 0..=3, no C → starts at the prompt).
-        let mut s = CopyMode::new(total(&scr), 3, 2, 0);
+        let mut s = CopyMode::new(total(&scr), 3, ul(2), 0);
         handle(&ev(Modifiers::empty(), Key::Char('o')), &mut s, &scr);
-        assert_eq!(s.anchor, Some((0, 0)));
-        assert_eq!(s.cursor, (3, 19));
+        assert_eq!(s.anchor, Some((ul(0), 0)));
+        assert_eq!(s.cursor, (ul(3), 19));
         let action = handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
         match action {
             CopyModeAction::Yank(text) => assert_eq!(text, "p1\no1\no2\no3"),
@@ -1056,7 +1083,7 @@ mod tests {
 
     #[test]
     fn q_in_normal_mode_exits() {
-        let mut s = CopyMode::new(10, 5, 5, 3);
+        let mut s = CopyMode::new(10, 5, ul(5), 3);
         let scr = screen(5, 80);
         let action = handle(&ev(Modifiers::empty(), Key::Char('q')), &mut s, &scr);
         assert!(matches!(action, CopyModeAction::Exit));
@@ -1077,27 +1104,27 @@ mod tests {
         // Kills: 227:67 → false (j arm guard), 229:46 `+ → *` (`cursor + 1` → `cursor * 1`).
         // The clamping test uses cursor at max; moving from mid-range exposes the bug.
         let scr = screen(5, 80);
-        let mut s = CopyMode::new(20, 5, 5, 0);
+        let mut s = CopyMode::new(20, 5, ul(5), 0);
         handle(&ev(Modifiers::empty(), Key::Char('j')), &mut s, &scr);
-        assert_eq!(s.cursor.0, 6);
+        assert_eq!(s.cursor.0.get(), 6);
     }
 
     #[test]
     fn page_down_jumps_by_pane_rows() {
         // Kills: 236:31 → false (PageDown guard), 238:46 `+ → -` / `+ → *`.
         let scr = screen(10, 80);
-        let mut s = CopyMode::new(50, 10, 30, 0);
+        let mut s = CopyMode::new(50, 10, ul(30), 0);
         handle(&ev(Modifiers::empty(), Key::PageDown), &mut s, &scr);
-        assert_eq!(s.cursor.0, 40);
+        assert_eq!(s.cursor.0.get(), 40);
     }
 
     #[test]
     fn ctrl_u_jumps_by_half_pane() {
         // Kills: 247:32 → false / → != (Ctrl+U guard), 248:50 `/ → %` / `/ → *`.
         let scr = screen(10, 80);
-        let mut s = CopyMode::new(50, 10, 30, 0);
+        let mut s = CopyMode::new(50, 10, ul(30), 0);
         handle(&ev(Modifiers::CTRL, Key::Char('u')), &mut s, &scr);
-        assert_eq!(s.cursor.0, 25);
+        assert_eq!(s.cursor.0.get(), 25);
     }
 
     #[test]
@@ -1107,10 +1134,10 @@ mod tests {
         // Mutation computes bottom = 5 * 4 = 20; cursor=10 ≤ 20 → no scroll (stays 5).
         // Original: cursor=10 > bottom=9 → viewport_top adjusted to 6.
         let scr = screen(5, 80);
-        let mut s = CopyMode::new(20, 5, 9, 0);
+        let mut s = CopyMode::new(20, 5, ul(9), 0);
         s.viewport_top = 5;
         handle(&ev(Modifiers::empty(), Key::Char('j')), &mut s, &scr);
-        assert_eq!(s.cursor.0, 10);
+        assert_eq!(s.cursor.0.get(), 10);
         assert_eq!(
             s.viewport_top, 6,
             "viewport must scroll down to keep cursor visible"
@@ -1122,23 +1149,23 @@ mod tests {
         // Kills: 77:13 (delete Press arm), the Press arm is the only path that
         // sets cursor from a mouse event.
         let scr = screen(10, 80);
-        let mut s = CopyMode::new(10, 10, 0, 0);
+        let mut s = CopyMode::new(10, 10, ul(0), 0);
         s.viewport_top = 0;
         let me = mouse_ev(MouseKind::Press, MouseButton::Left, 3, 20);
         s.handle_mouse(&me, 1, &scr);
-        assert_eq!(s.cursor, (3, 20));
-        assert_eq!(s.anchor, Some((3, 20)));
+        assert_eq!(s.cursor, (ul(3), 20));
+        assert_eq!(s.anchor, Some((ul(3), 20)));
     }
 
     #[test]
     fn mouse_move_updates_cursor_and_sets_anchor_when_none() {
         // Kills: 87:13 (delete Move arm).
         let scr = screen(10, 80);
-        let mut s = CopyMode::new(10, 10, 0, 0);
+        let mut s = CopyMode::new(10, 10, ul(0), 0);
         s.viewport_top = 0;
         let me = mouse_ev(MouseKind::Move, MouseButton::Left, 3, 15);
         s.handle_mouse(&me, 1, &scr);
-        assert_eq!(s.cursor, (3, 15));
+        assert_eq!(s.cursor, (ul(3), 15));
         assert!(s.anchor.is_some(), "Move with no anchor should set anchor");
     }
 
@@ -1147,11 +1174,11 @@ mod tests {
         // Kills: 77:13, 80:32 (>= → <), 82:39 (== → !=), 115:9, 118–143 (select_word).
         // "hello world": 'w' is at col 6. Double-click at col 6 expands to "world" (6–10).
         let scr = screen_with_lines(10, 30, &["hello world"]);
-        let mut s = CopyMode::new(10, 10, 0, 0);
+        let mut s = CopyMode::new(10, 10, ul(0), 0);
         s.viewport_top = 0;
         let me = mouse_ev(MouseKind::Press, MouseButton::Left, 0, 6);
         s.handle_mouse(&me, 2, &scr);
-        assert_eq!(s.anchor, Some((0, 6)), "anchor at word start");
+        assert_eq!(s.anchor, Some((ul(0), 6)), "anchor at word start");
         assert_eq!(s.cursor.1, 10, "cursor at word end");
     }
 
@@ -1161,13 +1188,13 @@ mod tests {
         // backward walk so anchor stays at the click column instead of the word start.
         // Click at col 8 ('r' in "world"): the backward walk must reach col 6 ('w').
         let scr = screen_with_lines(10, 30, &["hello world"]);
-        let mut s = CopyMode::new(10, 10, 0, 0);
+        let mut s = CopyMode::new(10, 10, ul(0), 0);
         s.viewport_top = 0;
         let me = mouse_ev(MouseKind::Press, MouseButton::Left, 0, 8);
         s.handle_mouse(&me, 2, &scr);
         assert_eq!(
             s.anchor,
-            Some((0, 6)),
+            Some((ul(0), 6)),
             "anchor must walk back to word start"
         );
         assert_eq!(s.cursor.1, 10, "cursor must reach word end");
@@ -1178,11 +1205,11 @@ mod tests {
         // "中文": col0='中', col1=spacer, col2='文', col3=spacer. A double-click
         // on col 1 (中's right half) must select the whole word, not nothing.
         let scr = screen_with_lines(10, 30, &["中文"]);
-        let mut s = CopyMode::new(10, 10, 0, 0);
+        let mut s = CopyMode::new(10, 10, ul(0), 0);
         s.viewport_top = 0;
         let me = mouse_ev(MouseKind::Press, MouseButton::Left, 0, 1);
         s.handle_mouse(&me, 2, &scr);
-        assert_eq!(s.anchor, Some((0, 0)), "anchor at word start");
+        assert_eq!(s.anchor, Some((ul(0), 0)), "anchor at word start");
         assert_eq!(s.cursor.1, 3, "cursor at word end (文's trailing spacer)");
         // …and `y` yanks the non-empty word.
         let action = handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
@@ -1196,11 +1223,11 @@ mod tests {
     fn mouse_double_click_on_wide_char_base_selects_word() {
         // Clicking the base half (col 2 = 文) must select the same word.
         let scr = screen_with_lines(10, 30, &["中文"]);
-        let mut s = CopyMode::new(10, 10, 0, 0);
+        let mut s = CopyMode::new(10, 10, ul(0), 0);
         s.viewport_top = 0;
         let me = mouse_ev(MouseKind::Press, MouseButton::Left, 0, 2);
         s.handle_mouse(&me, 2, &scr);
-        assert_eq!(s.anchor, Some((0, 0)));
+        assert_eq!(s.anchor, Some((ul(0), 0)));
         assert_eq!(s.cursor.1, 3);
     }
 
@@ -1209,13 +1236,13 @@ mod tests {
         // "ab中cd": a0 b1 中2 spacer3 c4 d5. Clicking 'd' (col 5) requires the
         // backward walk to STEP OVER 中's spacer (col 3) to reach the word start.
         let scr = screen_with_lines(10, 30, &["ab中cd"]);
-        let mut s = CopyMode::new(10, 10, 0, 0);
+        let mut s = CopyMode::new(10, 10, ul(0), 0);
         s.viewport_top = 0;
         let me = mouse_ev(MouseKind::Press, MouseButton::Left, 0, 5);
         s.handle_mouse(&me, 2, &scr);
         assert_eq!(
             s.anchor,
-            Some((0, 0)),
+            Some((ul(0), 0)),
             "left walk crosses 中's spacer to word start"
         );
         assert_eq!(s.cursor.1, 5, "cursor at 'd'");
@@ -1231,11 +1258,11 @@ mod tests {
         // Kills: 77:13, 80:32 (>= → <), 160:9, 164:16 (delete ! in select_line).
         // "hello world": last non-blank is col 10 ('d').
         let scr = screen_with_lines(10, 30, &["hello world"]);
-        let mut s = CopyMode::new(10, 10, 0, 0);
+        let mut s = CopyMode::new(10, 10, ul(0), 0);
         s.viewport_top = 0;
         let me = mouse_ev(MouseKind::Press, MouseButton::Left, 0, 3);
         s.handle_mouse(&me, 3, &scr);
-        assert_eq!(s.anchor, Some((0, 0)), "anchor at col 0");
+        assert_eq!(s.anchor, Some((ul(0), 0)), "anchor at col 0");
         assert_eq!(s.cursor.1, 10, "cursor at last non-blank col");
     }
 
@@ -1243,7 +1270,7 @@ mod tests {
     fn mouse_wheel_up_scrolls_viewport_up() {
         // Kills: 97:13 (delete Wheel arm), 98:26 (> → ==/<), 104:60/63 (arithmetic).
         let scr = screen(10, 80);
-        let mut s = CopyMode::new(20, 10, 0, 0);
+        let mut s = CopyMode::new(20, 10, ul(0), 0);
         s.viewport_top = 10;
         let me = mouse_ev(
             MouseKind::Wheel {
@@ -1262,7 +1289,7 @@ mod tests {
     fn mouse_wheel_down_scrolls_viewport_down() {
         // Kills: 97:13 (delete Wheel arm), 98:26 (> → ==/<), 104:60/63 (arithmetic).
         let scr = screen(10, 80);
-        let mut s = CopyMode::new(20, 10, 0, 0);
+        let mut s = CopyMode::new(20, 10, ul(0), 0);
         s.viewport_top = 5;
         let me = mouse_ev(
             MouseKind::Wheel {
@@ -1287,9 +1314,9 @@ mod tests {
         // Kills: 364:31 (== → !=), row_end becomes cols-1 instead of end.1,
         //   yielding "world" instead of "wo".
         let scr = screen_with_lines(2, 20, &["hello world", "more"]);
-        let mut s = CopyMode::new(2, 2, 0, 0);
-        s.anchor = Some((0, 6)); // 'w'
-        s.cursor = (0, 7); // 'o'
+        let mut s = CopyMode::new(2, 2, ul(0), 0);
+        s.anchor = Some((ul(0), 6)); // 'w'
+        s.cursor = (ul(0), 7); // 'o'
         let action = handle(&ev(Modifiers::empty(), Key::Char('y')), &mut s, &scr);
         match action {
             CopyModeAction::Yank(text) => assert_eq!(text, "wo"),
@@ -1308,7 +1335,7 @@ mod tests {
         // g/0/v/y//n arms. Without the guard, Ctrl+h decrements cursor.1, etc.
         // With the guard in place, cursor and anchor are untouched.
         let scr = screen(10, 80);
-        let mut s = CopyMode::new(50, 10, 20, 10);
+        let mut s = CopyMode::new(50, 10, ul(20), 10);
         let start = s.cursor;
 
         // Ctrl+h must NOT decrement cursor.1
@@ -1383,7 +1410,7 @@ mod tests {
         // With guard→true, Ctrl+G jumps cursor to bottom; Ctrl+$ to last col;
         // Ctrl+N cycles to the previous match. Real guard rejects CTRL.
         let scr = screen(10, 80);
-        let mut s = CopyMode::new(50, 10, 20, 10);
+        let mut s = CopyMode::new(50, 10, ul(20), 10);
         let start = s.cursor;
 
         // Ctrl+G must NOT jump to the last line
@@ -1421,7 +1448,7 @@ mod tests {
         let scr = marked_screen(); // has prompts at unified lines 0 and 3
         let total_lines = total(&scr);
         // Cursor at line 6, col 5, inside the second block's output.
-        let mut s = CopyMode::new(total_lines, 8, 6, 5);
+        let mut s = CopyMode::new(total_lines, 8, ul(6), 5);
         let start = s.cursor;
 
         // Ctrl+[ must NOT jump to prev prompt (line 3)
@@ -1430,13 +1457,13 @@ mod tests {
 
         // Ctrl+] must NOT jump to next prompt. From line 6 there is no prompt after line 3,
         // so it would be a no-op anyway; test from a position where a next prompt exists.
-        let mut s2 = CopyMode::new(total_lines, 8, 1, 5);
+        let mut s2 = CopyMode::new(total_lines, 8, ul(1), 5);
         let start2 = s2.cursor;
         handle(&ev(Modifiers::CTRL, Key::Char(']')), &mut s2, &scr);
         assert_eq!(s2.cursor, start2, "Ctrl+] must not jump to next prompt");
 
         // Ctrl+o must NOT select the block output range
-        let mut s3 = CopyMode::new(total_lines, 8, 2, 3);
+        let mut s3 = CopyMode::new(total_lines, 8, ul(2), 3);
         let start3 = s3.cursor;
         handle(&ev(Modifiers::CTRL, Key::Char('o')), &mut s3, &scr);
         assert_eq!(s3.anchor, None, "Ctrl+o must not set anchor");
@@ -1448,7 +1475,7 @@ mod tests {
         // Kills the `m == Modifiers::CTRL → true` mutants on d and u.
         // With guard→true, plain d does half-page-down; plain u does half-page-up.
         let scr = screen(10, 80);
-        let mut s = CopyMode::new(50, 10, 20, 0);
+        let mut s = CopyMode::new(50, 10, ul(20), 0);
         let start_line = s.cursor.0; // 20
 
         // Plain d (no mods): must NOT jump half-page-down
@@ -1468,7 +1495,7 @@ mod tests {
         // search; Ctrl+Backspace would pop a char; Ctrl+Char would push.
         // Real guards (`m.is_empty()`) reject all Ctrl-modified events.
         let scr = screen(5, 80);
-        let mut s = CopyMode::new(10, 5, 0, 0);
+        let mut s = CopyMode::new(10, 5, ul(0), 0);
         s.search.prompt_active = true;
         s.search.prompt_buf = "abc".into();
 
@@ -1505,7 +1532,7 @@ mod tests {
         // Char arm guard (`m.is_empty() || m == SHIFT`). The wrong guard would
         // accept Ctrl+Char but reject Shift+Char, the opposite of the real behavior.
         let scr = screen(5, 80);
-        let mut s = CopyMode::new(10, 5, 0, 0);
+        let mut s = CopyMode::new(10, 5, ul(0), 0);
         s.search.prompt_active = true;
 
         // Shift+F: must push 'F' (capital letters arrive as Shift+char under Kitty)
@@ -1531,12 +1558,13 @@ mod tests {
         // The match >= row 1 is row 2; with mutation (< row 1) the only candidate
         // is row 0 (index 0), and unwrap_or(0) also gives 0 → jumps to row 0 instead.
         let scr = screen_with_lines(4, 30, &["foo pre", "middle", "foo post", "end"]);
-        let mut s = CopyMode::new(4, 4, 1, 0);
+        let mut s = CopyMode::new(4, 4, ul(1), 0);
         s.search.prompt_active = true;
         s.search.prompt_buf = "foo".into();
         handle(&ev(Modifiers::empty(), Key::Enter), &mut s, &scr);
         assert_eq!(
-            s.cursor.0, 2,
+            s.cursor.0.get(),
+            2,
             "should jump to first match at/after cursor row (row 2 not row 0)"
         );
     }

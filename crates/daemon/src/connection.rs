@@ -9,8 +9,8 @@ use std::time::Duration;
 use std::{env, fs, future, mem};
 
 use plexy_glass_mux::{
-    Command, Keymap, KeymapAction, PaletteEntry, PromptCommand, VirtualScreen, block_mode, blocks,
-    command_prompt, copy_mode, hint, palette,
+    Command, Keymap, KeymapAction, PaletteEntry, PromptCommand, UnifiedLine, VirtualScreen,
+    block_mode, blocks, command_prompt, copy_mode, hint, palette,
 };
 use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
@@ -1252,7 +1252,9 @@ fn build_history_entries(
                     window: b.window,
                     window_idx: b.window_idx,
                     pane: b.pane,
-                    prompt_line: b.prompt_line,
+                    // The daemon-side snapshot DTO carries a raw unified index;
+                    // the mux `HistoryEntry` speaks `UnifiedLine`, so wrap here.
+                    prompt_line: UnifiedLine::new(b.prompt_line),
                     command: b.command.clone(),
                     exit: b.exit,
                     duration: b.duration,
@@ -1913,7 +1915,7 @@ where
         // Any PROMPT_START anywhere (scrollback + grid)? Without shell
         // integration no `D` will ever arrive, so refuse fast instead of
         // hanging. (`pane_at_prompt` alone can't distinguish this case.)
-        if plexy_glass_mux::prev_prompt_line(s, u32::MAX).is_none() {
+        if plexy_glass_mux::prev_prompt_line(s, UnifiedLine::new(u32::MAX)).is_none() {
             return ExecPre::NoMarks;
         }
         if !blocks::pane_at_prompt(s) {
@@ -3101,7 +3103,7 @@ mod tests {
             session: "h".into(),
             window: target_window,
             pane: target_pane,
-            prompt_line: 0,
+            prompt_line: plexy_glass_mux::UnifiedLine::new(0),
             command: "ls".into(),
         })
         .await;
@@ -6218,7 +6220,7 @@ mod tests {
 
     /// Whether any PROMPT_START exists anywhere in the unified line space.
     fn has_prompt(s: &plexy_glass_emulator::Screen) -> bool {
-        plexy_glass_mux::prev_prompt_line(s, u32::MAX).is_some()
+        plexy_glass_mux::prev_prompt_line(s, plexy_glass_mux::UnifiedLine::new(u32::MAX)).is_some()
     }
 
     /// Create a cat-backed session, seed a `133;A` prompt mark over the wire,

@@ -14,7 +14,7 @@ use bytes::Bytes;
 use nix::unistd::Pid;
 use plexy_glass_config::{Config, PaletteConfig};
 use plexy_glass_emulator::{ColorQuery, Emulator, Notification, Screen};
-use plexy_glass_mux::{PaneId, ScrollOffset};
+use plexy_glass_mux::{PaneId, ScrollOffset, UnifiedLine};
 use plexy_glass_protocol::{ExitStatus, PtySize, SpawnSpec};
 use plexy_glass_status::Rgb;
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize as PortablePtySize};
@@ -596,10 +596,12 @@ impl Pane {
         // Block mode and copy mode are mutually exclusive on a pane.
         *self.inner.block_mode.lock_recover() = None;
         let mut guard = self.inner.copy_mode.lock_recover();
+        // `start_line` is a raw unified index computed by the caller (scrollback
+        // rows + grid cursor row); wrap it at this boundary.
         *guard = Some(plexy_glass_mux::CopyMode::new(
             total_lines,
             pane_rows,
-            start_line,
+            UnifiedLine::new(start_line),
             start_col,
         ));
     }
@@ -757,7 +759,7 @@ fn wait_child(child: &mut Box<dyn Child + Send + Sync>) -> ExitStatus {
 #[cfg(test)]
 mod tests {
     use plexy_glass_emulator::coords::{Col, Row};
-    use plexy_glass_mux::{PaneId, ScrollOffset};
+    use plexy_glass_mux::{PaneId, ScrollOffset, UnifiedLine};
     use tokio::sync::Notify;
     use tokio::time::{self, Instant};
 
@@ -885,7 +887,7 @@ mod tests {
         assert!(!p.is_in_block_mode());
 
         let bm = plexy_glass_mux::BlockMode {
-            selected: 0,
+            selected: UnifiedLine::new(0),
             viewport_top: 0,
             pane_rows: 24,
             total_lines: 10,
@@ -1301,7 +1303,7 @@ mod tests {
         p.enter_copy_mode(100, 24, 99, 0);
         assert!(p.is_in_copy_mode());
         let cursor = p.with_copy_mode(|s| s.cursor).unwrap();
-        assert_eq!(cursor.0, 99);
+        assert_eq!(cursor.0.get(), 99);
         p.exit_copy_mode();
         assert!(!p.is_in_copy_mode());
         let _ = p.send_input(bytes::Bytes::from_static(&[0x04])).await;

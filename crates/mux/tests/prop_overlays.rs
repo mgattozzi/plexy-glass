@@ -9,8 +9,8 @@
 use hegel::{TestCase, generators as gs};
 use plexy_glass_mux::{
     Direction, HintKind, HintState, HintTarget, HistoryEntry, HistoryState, Key, KeyEvent,
-    Modifiers, PaneId, Point, TreeNode, TreeState, WindowId, handle_hint, handle_history,
-    handle_tree, pane_label, session_label, window_label,
+    Modifiers, PaneId, Point, TreeNode, TreeState, UnifiedLine, WindowId, handle_hint,
+    handle_history, handle_tree, pane_label, session_label, window_label,
 };
 
 /// A char biased toward the keys the overlays actually branch on (navigation,
@@ -122,7 +122,7 @@ fn draw_history(tc: &TestCase) -> Vec<HistoryEntry> {
                 window: WindowId(0),
                 window_idx: 0,
                 pane: PaneId(0),
-                prompt_line: i as u32,
+                prompt_line: UnifiedLine::new(i as u32),
                 command: command.clone(),
                 exit: Some(0),
                 duration: None,

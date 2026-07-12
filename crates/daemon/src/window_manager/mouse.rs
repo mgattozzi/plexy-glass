@@ -660,8 +660,7 @@ impl WindowManager {
                     // is_prompt is private; use the public prev_prompt_line:
                     // prev_prompt_line(s, abs_line + 1) == Some(abs_line) iff
                     // abs_line itself carries PROMPT_START.
-                    let is_prompt =
-                        prev_prompt_line(s, abs_line.advance(1).get()) == Some(abs_line.get());
+                    let is_prompt = prev_prompt_line(s, abs_line.advance(1)) == Some(abs_line);
                     if is_prompt {
                         // Put the prompt at the viewport top (visible-space offset;
                         // a line already in the live view saturates to 0).

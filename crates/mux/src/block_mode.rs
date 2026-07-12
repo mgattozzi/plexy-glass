@@ -7,6 +7,7 @@
 
 use plexy_glass_emulator::Screen;
 
+use crate::line::UnifiedLine;
 use crate::{Direction, Key, KeyEvent, Modifiers, blocks};
 
 /// Block-mode state. `selected` is the absolute line of the selected block's
@@ -21,12 +22,15 @@ use crate::{Direction, Key, KeyEvent, Modifiers, blocks};
 pub struct Filter {
     pub query: String,
     pub prompt_active: bool,
-    pub matches: Vec<u32>,
+    pub matches: Vec<UnifiedLine>,
 }
 
 #[derive(Debug, Clone)]
 pub struct BlockMode {
-    pub selected: u32,
+    /// Unified line of the selected block's `PROMPT_START`.
+    pub selected: UnifiedLine,
+    /// Unified line shown at viewport row 0. A raw `u32`: the compositor maps it
+    /// through the fold projection (converted at that seam).
     pub viewport_top: u32,
     pub pane_rows: u16,
     pub total_lines: u32,
@@ -46,7 +50,7 @@ pub enum BlockModeAction {
     ReRun(String),
     /// Toggle the fold on the block at this prompt line (daemon mutates the
     /// screen's `RowMark::FOLDED`); STAY in mode.
-    ToggleFold(u32),
+    ToggleFold(UnifiedLine),
     /// Fold every completed block; STAY in mode.
     FoldAll,
     /// Unfold every block and STAY in mode.
@@ -80,7 +84,7 @@ impl BlockMode {
     /// `prompt_line` is re-anchored to the nearest prompt at-or-above it (then the
     /// first prompt) for drift safety, then the viewport recenters on it. `None`
     /// when a full-screen app is active or the pane has no command blocks.
-    pub fn new_at(screen: &Screen, pane_rows: u16, prompt_line: u32) -> Option<Self> {
+    pub fn new_at(screen: &Screen, pane_rows: u16, prompt_line: UnifiedLine) -> Option<Self> {
         if screen.alt.is_some() {
             return None;
         }
@@ -101,15 +105,17 @@ impl BlockMode {
     /// scroll past the live bottom (matching the `NextPrompt` snap-to-live).
     fn recenter(&mut self) {
         let max_top = self.total_lines.saturating_sub(u32::from(self.pane_rows));
-        self.viewport_top = self.selected.min(max_top);
+        // `viewport_top` is raw-`u32` unified space; take the selected line's raw
+        // index at this seam.
+        self.viewport_top = self.selected.get().min(max_top);
     }
 
     /// Called by `Pane::on_size_changed` on resize / scrollback growth.
     pub fn set_pane_rows(&mut self, pane_rows: u16, total_lines: u32) {
         self.pane_rows = pane_rows;
         self.total_lines = total_lines;
-        if self.selected >= total_lines {
-            self.selected = total_lines.saturating_sub(1);
+        if self.selected.get() >= total_lines {
+            self.selected = UnifiedLine::new(total_lines.saturating_sub(1));
         }
         self.recenter();
     }
@@ -224,7 +230,7 @@ pub fn handle(event: &KeyEvent, state: &mut BlockMode, screen: &Screen) -> Block
 
 /// Apply a motion result: move + recenter + Render, or Ignore when there is no
 /// target (empty active set).
-fn move_to(state: &mut BlockMode, target: Option<u32>) -> BlockModeAction {
+fn move_to(state: &mut BlockMode, target: Option<UnifiedLine>) -> BlockModeAction {
     match target {
         Some(p) => {
             state.selected = p;
@@ -237,7 +243,7 @@ fn move_to(state: &mut BlockMode, target: Option<u32>) -> BlockModeAction {
 
 /// The ordered set of selectable prompt lines: the filter's matches when a
 /// committed filter has a non-empty query, otherwise every prompt.
-fn active_set(state: &BlockMode, screen: &Screen) -> Vec<u32> {
+fn active_set(state: &BlockMode, screen: &Screen) -> Vec<UnifiedLine> {
     match &state.filter {
         // Equivalent note (241:20, `!f.query.is_empty() → true`): when the filter is
         // Some, the query is always non-empty, since `handle_filter_prompt` clears the
@@ -251,7 +257,7 @@ fn active_set(state: &BlockMode, screen: &Screen) -> Vec<u32> {
 
 /// Next (`forward`) or previous prompt in `set` relative to `selected`, wrapping.
 /// `set` is ascending. Returns `None` only for an empty set.
-fn next_in(set: &[u32], selected: u32, forward: bool) -> Option<u32> {
+fn next_in(set: &[UnifiedLine], selected: UnifiedLine, forward: bool) -> Option<UnifiedLine> {
     if set.is_empty() {
         return None;
     }
@@ -271,8 +277,13 @@ fn next_in(set: &[u32], selected: u32, forward: bool) -> Option<u32> {
 
 /// Next/previous FAILED block (nonzero exit) within `set`, wrapping. `None` when
 /// the set has no failed members.
-fn next_failed(set: &[u32], screen: &Screen, selected: u32, forward: bool) -> Option<u32> {
-    let failed: Vec<u32> = set
+fn next_failed(
+    set: &[UnifiedLine],
+    screen: &Screen,
+    selected: UnifiedLine,
+    forward: bool,
+) -> Option<UnifiedLine> {
+    let failed: Vec<UnifiedLine> = set
         .iter()
         .copied()
         .filter(|&p| matches!(blocks::closing_exit(screen, p), Some(c) if c != 0))
@@ -285,7 +296,11 @@ fn next_failed(set: &[u32], screen: &Screen, selected: u32, forward: bool) -> Op
 /// longer query's matches are a subset, so this is the fast incremental path);
 /// when `None`, scan every block (first char, or a backspace that can grow the
 /// set).
-fn recompute_matches(screen: &Screen, query: &str, prior: Option<&[u32]>) -> Vec<u32> {
+fn recompute_matches(
+    screen: &Screen,
+    query: &str,
+    prior: Option<&[UnifiedLine]>,
+) -> Vec<UnifiedLine> {
     if query.is_empty() {
         return blocks::all_prompt_lines(screen);
     }
@@ -404,6 +419,11 @@ mod tests {
 
     use super::*;
 
+    /// Shorthand for a `UnifiedLine` in the block-selection assertions.
+    fn ul(n: u32) -> UnifiedLine {
+        UnifiedLine::new(n)
+    }
+
     fn screen_from(rows: u16, cols: u16, bytes: &[u8]) -> Screen {
         let mut e = Emulator::new(rows, cols);
         e.advance(bytes);
@@ -429,16 +449,16 @@ mod tests {
     fn new_at_selects_given_prompt_line() {
         let s = two_blocks();
         let lines = blocks::all_prompt_lines(&s);
-        assert_eq!(lines, vec![0, 3], "prompts at 0 and 3");
-        assert_eq!(BlockMode::new_at(&s, 8, lines[0]).unwrap().selected, 0);
-        assert_eq!(BlockMode::new_at(&s, 8, lines[1]).unwrap().selected, 3);
+        assert_eq!(lines, vec![ul(0), ul(3)], "prompts at 0 and 3");
+        assert_eq!(BlockMode::new_at(&s, 8, lines[0]).unwrap().selected, ul(0));
+        assert_eq!(BlockMode::new_at(&s, 8, lines[1]).unwrap().selected, ul(3));
     }
 
     #[test]
     fn new_at_reanchors_a_non_prompt_line() {
         let s = two_blocks();
         // line 1 is block 0's output (not a prompt) → re-anchors up to prompt 0.
-        assert_eq!(BlockMode::new_at(&s, 8, 1).unwrap().selected, 0);
+        assert_eq!(BlockMode::new_at(&s, 8, ul(1)).unwrap().selected, ul(0));
     }
 
     fn key(c: char) -> KeyEvent {
@@ -471,7 +491,7 @@ mod tests {
         let s = two_blocks();
         let bm = BlockMode::new_for(&s, 8).expect("opens");
         // Newest prompt is line 3 (the D+A row that starts block 2).
-        assert_eq!(bm.selected, 3);
+        assert_eq!(bm.selected, ul(3));
     }
 
     #[test]
@@ -496,13 +516,13 @@ mod tests {
         let mut bm = BlockMode::new_for(&s, 8).unwrap(); // selected = 3 (newest)
         // k from newest → older block.
         assert_eq!(handle(&key('k'), &mut bm, &s), BlockModeAction::Render);
-        assert_eq!(bm.selected, 0);
+        assert_eq!(bm.selected, ul(0));
         // k again wraps to the newest.
         assert_eq!(handle(&key('k'), &mut bm, &s), BlockModeAction::Render);
-        assert_eq!(bm.selected, 3, "k at oldest wraps to newest");
+        assert_eq!(bm.selected, ul(3), "k at oldest wraps to newest");
         // j from newest wraps to oldest.
         assert_eq!(handle(&key('j'), &mut bm, &s), BlockModeAction::Render);
-        assert_eq!(bm.selected, 0, "j at newest wraps to oldest");
+        assert_eq!(bm.selected, ul(0), "j at newest wraps to oldest");
     }
 
     #[test]
@@ -510,9 +530,9 @@ mod tests {
         let s = two_blocks();
         let mut bm = BlockMode::new_for(&s, 8).unwrap();
         handle(&key('g'), &mut bm, &s);
-        assert_eq!(bm.selected, 0);
+        assert_eq!(bm.selected, ul(0));
         handle(&key('G'), &mut bm, &s);
-        assert_eq!(bm.selected, 3);
+        assert_eq!(bm.selected, ul(3));
     }
 
     #[test]
@@ -520,10 +540,10 @@ mod tests {
         let s = two_blocks();
         let mut bm = BlockMode::new_for(&s, 8).unwrap();
         handle(&key('k'), &mut bm, &s); // select the older block (line 0)
-        assert_eq!(bm.selected, 0);
+        assert_eq!(bm.selected, ul(0));
         assert_eq!(
             handle(&KeyEvent::plain(Key::Tab), &mut bm, &s),
-            BlockModeAction::ToggleFold(0),
+            BlockModeAction::ToggleFold(ul(0)),
             "Tab toggles the selected block"
         );
         assert_eq!(
@@ -637,7 +657,7 @@ mod tests {
         // The selected prompt was evicted and no prompt survives anywhere.
         let s = screen_from(4, 20, b"plain text");
         let mut bm = BlockMode {
-            selected: 0,
+            selected: ul(0),
             viewport_top: 0,
             pane_rows: 4,
             total_lines: 1,
@@ -652,10 +672,10 @@ mod tests {
         // indices). handle re-anchors to the governing prompt before acting.
         let s = two_blocks(); // prompts at lines 0 and 3
         let mut bm = BlockMode::new_for(&s, 8).unwrap();
-        bm.selected = 5; // an output row inside block 2 (lines 3..=7)
+        bm.selected = ul(5); // an output row inside block 2 (lines 3..=7)
         match handle(&key('y'), &mut bm, &s) {
             BlockModeAction::Yank(t) => {
-                assert_eq!(bm.selected, 3, "re-anchored to governing prompt");
+                assert_eq!(bm.selected, ul(3), "re-anchored to governing prompt");
                 assert!(t.contains("two"), "yanked block 2: {t:?}");
             }
             other => panic!("expected Yank, got {other:?}"),
@@ -669,12 +689,12 @@ mod tests {
         bm.set_pane_rows(4, 6);
         assert_eq!(bm.pane_rows, 4);
         assert_eq!(bm.total_lines, 6);
-        assert_eq!(bm.selected, 3, "still valid, not clamped");
+        assert_eq!(bm.selected, ul(3), "still valid, not clamped");
         // recenter: viewport_top = selected.min(total - pane_rows) = 3.min(2) = 2
         assert_eq!(bm.viewport_top, 2);
         // Shrink total below the selection → clamp to total-1.
         bm.set_pane_rows(4, 2);
-        assert_eq!(bm.selected, 1, "selection clamped to total-1");
+        assert_eq!(bm.selected, ul(1), "selection clamped to total-1");
     }
 
     #[test]
@@ -684,13 +704,15 @@ mod tests {
         let mut bm = BlockMode::new_for(&s, 8).unwrap(); // selected = 3 (newest)
         assert_eq!(handle(&key('G'), &mut bm, &s), BlockModeAction::Render);
         assert_eq!(
-            bm.selected, 3,
+            bm.selected,
+            ul(3),
             "G at newest is a no-op move but still Render"
         );
         handle(&key('g'), &mut bm, &s); // → 0
         assert_eq!(handle(&key('g'), &mut bm, &s), BlockModeAction::Render);
         assert_eq!(
-            bm.selected, 0,
+            bm.selected,
+            ul(0),
             "g at oldest is a no-op move but still Render"
         );
     }
@@ -699,11 +721,11 @@ mod tests {
     fn recompute_matches_command_and_output_hits() {
         let s = three_blocks_ok_fail_ok();
         // "alpha" is a command → block at line 0.
-        assert_eq!(recompute_matches(&s, "alpha", None), vec![0]);
+        assert_eq!(recompute_matches(&s, "alpha", None), vec![ul(0)]);
         // "BOOM" is OUTPUT of the second block → block at line 2 (case-insensitive).
-        assert_eq!(recompute_matches(&s, "boom", None), vec![2]);
+        assert_eq!(recompute_matches(&s, "boom", None), vec![ul(2)]);
         // "out" appears in two blocks' output.
-        assert_eq!(recompute_matches(&s, "out", None), vec![0, 4]);
+        assert_eq!(recompute_matches(&s, "out", None), vec![ul(0), ul(4)]);
         // No match.
         assert!(recompute_matches(&s, "zzz", None).is_empty());
     }
@@ -713,7 +735,7 @@ mod tests {
         let s = three_blocks_ok_fail_ok();
         let prior = recompute_matches(&s, "out", None); // [0, 4]
         // Narrowing "out" → "out-c" re-checks only the prior set and keeps [4].
-        assert_eq!(recompute_matches(&s, "out-c", Some(&prior)), vec![4]);
+        assert_eq!(recompute_matches(&s, "out-c", Some(&prior)), vec![ul(4)]);
     }
 
     #[test]
@@ -725,8 +747,8 @@ mod tests {
         for ch in "alpha".chars() {
             handle(&key(ch), &mut bm, &s);
         }
-        assert_eq!(bm.filter.as_ref().unwrap().matches, vec![0]);
-        assert_eq!(bm.selected, 0, "selection snapped to the only match");
+        assert_eq!(bm.filter.as_ref().unwrap().matches, vec![ul(0)]);
+        assert_eq!(bm.selected, ul(0), "selection snapped to the only match");
         assert_eq!(
             handle(&KeyEvent::plain(Key::Enter), &mut bm, &s),
             BlockModeAction::Render
@@ -744,12 +766,16 @@ mod tests {
             handle(&key(ch), &mut bm, &s);
         }
         handle(&KeyEvent::plain(Key::Enter), &mut bm, &s);
-        assert_eq!(bm.filter.as_ref().unwrap().matches, vec![0, 4]);
-        bm.selected = 0;
+        assert_eq!(bm.filter.as_ref().unwrap().matches, vec![ul(0), ul(4)]);
+        bm.selected = ul(0);
         handle(&key('j'), &mut bm, &s);
-        assert_eq!(bm.selected, 4, "j skips the non-matching block at line 2");
+        assert_eq!(
+            bm.selected,
+            ul(4),
+            "j skips the non-matching block at line 2"
+        );
         handle(&key('j'), &mut bm, &s);
-        assert_eq!(bm.selected, 0, "j wraps within the filtered set");
+        assert_eq!(bm.selected, ul(0), "j wraps within the filtered set");
     }
 
     #[test]
@@ -760,13 +786,13 @@ mod tests {
             handle(&shift_key('J'), &mut bm, &s),
             BlockModeAction::Render
         );
-        assert_eq!(bm.selected, 2);
+        assert_eq!(bm.selected, ul(2));
         // Only one failed block → J wraps back to 2 (stays).
         assert_eq!(
             handle(&shift_key('J'), &mut bm, &s),
             BlockModeAction::Render
         );
-        assert_eq!(bm.selected, 2);
+        assert_eq!(bm.selected, ul(2));
     }
 
     #[test]
@@ -897,15 +923,16 @@ mod tests {
         let mut bm = BlockMode::new_for(&s, 12).unwrap(); // selected = 4 (newest ok)
         // Plain K (no modifier):
         assert_eq!(handle(&key('K'), &mut bm, &s), BlockModeAction::Render);
-        assert_eq!(bm.selected, 2, "K moves backward to failed block at 2");
+        assert_eq!(bm.selected, ul(2), "K moves backward to failed block at 2");
         // Reset to a non-fail block, then try Shift+K:
-        bm.selected = 4;
+        bm.selected = ul(4);
         assert_eq!(
             handle(&shift_key('K'), &mut bm, &s),
             BlockModeAction::Render
         );
         assert_eq!(
-            bm.selected, 2,
+            bm.selected,
+            ul(2),
             "Shift+K also moves backward to failed block"
         );
     }
@@ -917,13 +944,13 @@ mod tests {
         let s = two_blocks();
         let mut bm = BlockMode::new_for(&s, 8).unwrap();
         handle(&key('g'), &mut bm, &s); // go to first
-        assert_eq!(bm.selected, 0);
+        assert_eq!(bm.selected, ul(0));
         // Shift+G should jump to last:
         assert_eq!(
             handle(&shift_key('G'), &mut bm, &s),
             BlockModeAction::Render
         );
-        assert_eq!(bm.selected, 3, "Shift+G jumps to last block");
+        assert_eq!(bm.selected, ul(3), "Shift+G jumps to last block");
         // Shift+Z folds all:
         assert_eq!(
             handle(&shift_key('Z'), &mut bm, &s),
@@ -996,15 +1023,16 @@ mod tests {
         let s = three_blocks_ok_fail_ok(); // prompts at 0, 2, 4
         let mut bm = BlockMode::new_for(&s, 12).unwrap();
         // Force: matches = [0, 4], selection = 2 (between them, not in matches).
-        bm.selected = 2;
+        bm.selected = ul(2);
         bm.filter = Some(Filter {
             query: "out".into(),
-            matches: vec![0, 4],
+            matches: vec![ul(0), ul(4)],
             prompt_active: false,
         });
         snap_after_filter(&mut bm);
         assert_eq!(
-            bm.selected, 4,
+            bm.selected,
+            ul(4),
             "snap should go forward to 4, not backward to 0"
         );
     }

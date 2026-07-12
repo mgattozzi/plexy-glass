@@ -130,7 +130,7 @@ pub fn viewport_content_row(
     let idx = top + u32::from(vrow);
     (idx < visible_total)
         .then(|| proj.to_unified(VisibleLine::new(idx)))
-        .and_then(|u| blocks::row_at(screen, u.get()))
+        .and_then(|u| blocks::row_at(screen, u))
 }
 
 /// Return a `Word`-kind `Selection` covering the word at viewport (row, col), or
@@ -275,7 +275,7 @@ pub fn extract_text(
         let visible_idx = top_visible + u32::from(r);
         let row = (visible_idx < visible_total)
             .then(|| proj.to_unified(VisibleLine::new(visible_idx)))
-            .and_then(|u| blocks::row_at(screen, u.get()));
+            .and_then(|u| blocks::row_at(screen, u));
         if let Some(row) = row {
             let mut row_start = if r == start.row { start.col } else { 0 };
             // If a drag anchor landed on a wide grapheme's spacer half, back up

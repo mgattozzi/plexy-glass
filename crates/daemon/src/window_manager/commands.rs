@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use plexy_glass_mux::{Command, ScrollOffset, SplitDir, SwapTarget, UnifiedLine, WindowId, blocks};
+use plexy_glass_mux::{Command, ScrollOffset, SplitDir, SwapTarget, WindowId, blocks};
 
 use super::{Severity, WindowManager};
 use crate::error::DaemonError;
@@ -379,9 +379,9 @@ impl WindowManager {
                 let target = pane.with_screen(|s| {
                     let rows = s.active.num_rows();
                     let top = blocks::scroll_line_at(s, rows, offset, 0);
-                    plexy_glass_mux::prev_prompt_line(s, top.get()).map(|t| {
+                    plexy_glass_mux::prev_prompt_line(s, top).map(|t| {
                         (
-                            blocks::scroll_offset_for_top(s, rows, UnifiedLine::new(t)),
+                            blocks::scroll_offset_for_top(s, rows, t),
                             blocks::max_scroll_offset(s, rows),
                         )
                     })
@@ -399,9 +399,9 @@ impl WindowManager {
                     let top = blocks::scroll_line_at(s, rows, offset, 0);
                     // Past the newest prompt, or one already in the live view
                     // (offset_for_top saturates to 0), snaps to live.
-                    let off = plexy_glass_mux::next_prompt_line(s, top.get())
+                    let off = plexy_glass_mux::next_prompt_line(s, top)
                         .map_or(ScrollOffset::new(0), |t| {
-                            blocks::scroll_offset_for_top(s, rows, UnifiedLine::new(t))
+                            blocks::scroll_offset_for_top(s, rows, t)
                         });
                     (off, blocks::max_scroll_offset(s, rows))
                 });

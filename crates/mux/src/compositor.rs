@@ -80,11 +80,11 @@ impl FoldCtx {
     }
 
     /// Unified line shown at display row `r`, or `None` when `r` is past the
-    /// pane's visible content (paint blank). Returns the raw index: the paint
-    /// loop feeds it straight to the (unified-space) `blocks` row helpers.
-    fn line_at(&self, r: u16) -> Option<u32> {
+    /// pane's visible content (paint blank). The paint loop feeds it straight to
+    /// the (unified-space) `blocks` row helpers.
+    fn line_at(&self, r: u16) -> Option<UnifiedLine> {
         let v = self.top_visible.advance(u32::from(r));
-        (v.get() < self.proj.visible_total()).then(|| self.proj.to_unified(v).get())
+        (v.get() < self.proj.visible_total()).then(|| self.proj.to_unified(v))
     }
 
     /// Display row of unified `line`, or `None` when it's folded away or outside
@@ -386,9 +386,12 @@ pub fn compose(
         } else {
             (cm.cursor, anchor)
         };
+        // `viewport_top` and the cursor/anchor lines are unified space; drop to
+        // raw indices for the display-row arithmetic (identity projection here).
         let viewport_lo = cm.viewport_top;
         let viewport_hi = cm.viewport_top + u32::from(view.rect.rows());
-        for line in start.0..=end.0 {
+        let (start_line, end_line) = (start.0.get(), end.0.get());
+        for line in start_line..=end_line {
             if line < viewport_lo || line >= viewport_hi {
                 continue;
             }
@@ -401,8 +404,8 @@ pub fn compose(
             // host screen, so without this the REVERSE would bleed onto the pane
             // border / a neighbour (mirrors the search-highlight + content paths).
             let last = view.rect.cols().saturating_sub(1);
-            let row_start = if line == start.0 { start.1 } else { 0 }.min(last);
-            let row_end = if line == end.0 { end.1 } else { last }.min(last);
+            let row_start = if line == start_line { start.1 } else { 0 }.min(last);
+            let row_end = if line == end_line { end.1 } else { last }.min(last);
             for c in row_start..=row_end {
                 let host_c = view.rect.col() + c;
                 if host_c >= host_cols {
@@ -486,9 +489,12 @@ pub fn compose(
         for r in 0..view.rect.rows() {
             let Some(line) = ctx.line_at(r) else { continue };
             let host_r = pane_row_offset + view.rect.row() + r;
-            for (_, col_start, col_end) in
-                filter_match_spans(view.screen, &filter.query, line, line + 1)
-            {
+            for (_, col_start, col_end) in filter_match_spans(
+                view.screen,
+                &filter.query,
+                line.get(),
+                line.advance(1).get(),
+            ) {
                 let last_col = col_end.min(view.rect.cols().saturating_sub(1));
                 for c in col_start..=last_col {
                     let host_c = view.rect.col() + c;
@@ -555,13 +561,13 @@ pub fn compose(
                     blocks::row_at(v.screen, bm.selected).is_some_and(|r| r.mark.is_folded());
                 let u_end = if folded {
                     blocks::foldable_output(v.screen, bm.selected)
-                        .map_or(u_end_full, |(out_start, _)| out_start.saturating_sub(1))
+                        .map_or(u_end_full, |(out_start, _)| out_start.retreat(1))
                 } else {
                     u_end_full
                 };
                 // Map to visible display rows (prompt + command rows are never folded).
-                let vs = ctx.proj.from_unified(UnifiedLine::new(u_start))?;
-                let ve = ctx.proj.from_unified(UnifiedLine::new(u_end))?;
+                let vs = ctx.proj.from_unified(u_start)?;
+                let ve = ctx.proj.from_unified(u_end)?;
                 let vp_end = top.advance(u32::from(v.rect.rows())); // exclusive, visible
                 if ve < top || vs >= vp_end {
                     return None; // block entirely off-screen
@@ -622,7 +628,7 @@ pub fn compose(
             // Fold summary part: folded blocks only (unchanged logic).
             let summary = if folded {
                 blocks::foldable_output(v.screen, prompt_line).map(|(start, end)| {
-                    let n = end - start + 1;
+                    let n = end.saturating_delta(start) + 1;
                     let glyph = match status {
                         Some(BlockLineStatus::Ok) => " ✓",
                         Some(BlockLineStatus::Failed) => " ✗",
@@ -884,10 +890,13 @@ pub fn compose(
     // Cursor from the active pane, overridden by the copy-mode cursor when present.
     if let Some(active) = panes.iter().find(|v| v.is_active) {
         let cursor_pos = if let Some(cm) = active.copy_mode {
-            if cm.cursor.0 >= cm.viewport_top
-                && cm.cursor.0 < cm.viewport_top + u32::from(active.rect.rows())
+            // `viewport_top` is raw-`u32` unified space; take the cursor's raw
+            // index for the display-row math at this seam.
+            let cursor_line = cm.cursor.0.get();
+            if cursor_line >= cm.viewport_top
+                && cursor_line < cm.viewport_top + u32::from(active.rect.rows())
             {
-                let local_row = (cm.cursor.0 - cm.viewport_top) as u16;
+                let local_row = (cursor_line - cm.viewport_top) as u16;
                 let host_r = active.rect.row().saturating_add(local_row);
                 let host_c = active.rect.col().saturating_add(cm.cursor.1);
                 Some((host_r, host_c))
@@ -1163,7 +1172,7 @@ fn filter_match_spans(screen: &Screen, query: &str, lo: u32, hi: u32) -> Vec<(u3
     let total = screen.scrollback.rows().len() as u32 + u32::from(screen.active.num_rows());
     let span = display_width(&q).max(1);
     for line in lo..hi.min(total) {
-        let Some(row) = blocks::row_at(screen, line) else {
+        let Some(row) = blocks::row_at(screen, UnifiedLine::new(line)) else {
             continue;
         };
         // Build the line's lowercased text + a column map (byte offset → grid
@@ -2954,7 +2963,7 @@ mod tests {
         e.advance(b"hello");
         let screen = e.screen().clone();
         let cm = crate::CopyMode {
-            cursor: (3, 7),
+            cursor: (UnifiedLine::new(3), 7),
             anchor: None,
             search: crate::SearchState::default(),
             viewport_top: 0,
@@ -2996,8 +3005,8 @@ mod tests {
         e.advance(b"hello world");
         let screen = e.screen().clone();
         let cm = crate::CopyMode {
-            cursor: (0, 4),
-            anchor: Some((0, 0)),
+            cursor: (UnifiedLine::new(0), 4),
+            anchor: Some((UnifiedLine::new(0), 0)),
             search: crate::SearchState::default(),
             viewport_top: 0,
             pane_rows: 5,
@@ -3044,7 +3053,7 @@ mod tests {
         e.advance(b"hello world");
         let screen = e.screen().clone();
         let cm = crate::CopyMode {
-            cursor: (0, 0),
+            cursor: (UnifiedLine::new(0), 0),
             anchor: None,
             search: crate::SearchState {
                 query: "ell".into(),
@@ -3110,7 +3119,7 @@ mod tests {
         let screen = e.screen().clone();
         // viewport covers lines 2..=5; a match on line 0 is above it.
         let cm = crate::CopyMode {
-            cursor: (3, 0),
+            cursor: (UnifiedLine::new(3), 0),
             anchor: None,
             search: crate::SearchState {
                 query: "h".into(),
@@ -3170,7 +3179,7 @@ mod tests {
         e.advance(b"hello");
         let screen = e.screen().clone();
         let cm = crate::CopyMode {
-            cursor: (0, 0),
+            cursor: (UnifiedLine::new(0), 0),
             anchor: None,
             search: crate::SearchState {
                 query: String::new(),
@@ -4068,7 +4077,7 @@ mod tests {
                 window: crate::WindowId(0),
                 window_idx: 2,
                 pane: PaneId(0),
-                prompt_line: line,
+                prompt_line: UnifiedLine::new(line),
                 command: cmd.into(),
                 exit,
                 duration: dur,
@@ -4761,7 +4770,7 @@ mod tests {
         let screen = two_block_screen();
         // Select block 1 (prompt line 0, extent lines 0..=2), viewport at top.
         let bm = crate::BlockMode {
-            selected: 0,
+            selected: UnifiedLine::new(0),
             viewport_top: 0,
             pane_rows: 8,
             total_lines: 8,
@@ -4840,7 +4849,7 @@ mod tests {
         // Select block 1 (line 0); viewport_top = 1 so its top (line 0) is above
         // the viewport. effective_scroll = 6 - 1 - 3 = 2 → top = 3 - 2 = 1.
         let bm = crate::BlockMode {
-            selected: 0,
+            selected: UnifiedLine::new(0),
             viewport_top: 1,
             pane_rows: 3,
             total_lines: 6,
@@ -4894,7 +4903,7 @@ mod tests {
         let screen = e.screen().clone();
         assert!(screen.alt.is_some(), "setup: alt screen active");
         let bm = crate::BlockMode {
-            selected: 0,
+            selected: UnifiedLine::new(0),
             viewport_top: 0,
             pane_rows: 6,
             total_lines: 6,
@@ -4953,14 +4962,14 @@ mod tests {
         let screen = e.screen().clone();
         // Block 1 prompt at line 0, block 2 prompt at line 2 (D+A share a row).
         let bm = crate::BlockMode {
-            selected: 0,
+            selected: UnifiedLine::new(0),
             viewport_top: 0,
             pane_rows: 8,
             total_lines: 8,
             filter: Some(crate::Filter {
                 query: "alpha".into(),
                 prompt_active: false,
-                matches: vec![0],
+                matches: vec![UnifiedLine::new(0)],
             }),
         };
         let view = PaneView {
@@ -5016,14 +5025,14 @@ mod tests {
         let screen = e.screen().clone();
         assert!(screen.alt.is_some());
         let bm = crate::BlockMode {
-            selected: 0,
+            selected: UnifiedLine::new(0),
             viewport_top: 0,
             pane_rows: 6,
             total_lines: 6,
             filter: Some(crate::Filter {
                 query: "alpha".into(),
                 prompt_active: false,
-                matches: vec![0],
+                matches: vec![UnifiedLine::new(0)],
             }),
         };
         let view = PaneView {
@@ -5077,14 +5086,14 @@ mod tests {
         e.advance(b"\x1b[m");
         let screen = e.screen().clone();
         let bm = crate::BlockMode {
-            selected: 0,
+            selected: UnifiedLine::new(0),
             viewport_top: 0,
             pane_rows: 8,
             total_lines: 8,
             filter: Some(crate::Filter {
                 query: "alpha".into(),
                 prompt_active: true,
-                matches: vec![0],
+                matches: vec![UnifiedLine::new(0)],
             }),
         };
         let view = PaneView {
@@ -5210,7 +5219,7 @@ mod tests {
 
         // Copy-mode with viewport_top = 0: shows lines 0..2 (block 1, Failed).
         let cm = crate::CopyMode {
-            cursor: (0, 0),
+            cursor: (UnifiedLine::new(0), 0),
             anchor: None,
             search: crate::SearchState::default(),
             viewport_top: 0,
@@ -5643,7 +5652,7 @@ mod tests {
         assert_eq!(screen.scrollback.len(), 3, "expected 3 scrollback rows");
         assert_eq!(screen.active.num_rows(), 2);
         let cm = crate::CopyMode {
-            cursor: (0, 0),
+            cursor: (UnifiedLine::new(0), 0),
             anchor: None,
             search: crate::SearchState::default(),
             viewport_top: 0,
@@ -5848,7 +5857,7 @@ mod tests {
     fn image_visible_in_copy_mode() {
         let screen = screen_with_tall_image(4); // active rows == rect.rows → top = viewport_top
         let cm = crate::CopyMode {
-            cursor: (0, 0),
+            cursor: (UnifiedLine::new(0), 0),
             anchor: None,
             search: crate::SearchState::default(),
             viewport_top: 0,
@@ -5883,7 +5892,7 @@ mod tests {
     fn image_visible_in_block_mode() {
         let screen = screen_with_tall_image(4);
         let bm = crate::BlockMode {
-            selected: 0,
+            selected: UnifiedLine::new(0),
             viewport_top: 0,
             pane_rows: 4,
             total_lines: 4,
@@ -6322,7 +6331,7 @@ mod tests {
     fn duration_suppressed_in_copy_mode() {
         let screen = duration_block_screen("$ slow", 0, 3000);
         let cm = crate::CopyMode {
-            cursor: (0, 0),
+            cursor: (UnifiedLine::new(0), 0),
             anchor: None,
             search: crate::SearchState::default(),
             viewport_top: 0,
@@ -6560,7 +6569,7 @@ mod tests {
         );
         e.advance(b"\x1b[m");
         let mut screen = e.screen().clone();
-        blocks::set_block_folded(&mut screen, 0, true); // fold "$ one"'s output
+        blocks::set_block_folded(&mut screen, UnifiedLine::new(0), true); // fold "$ one"'s output
         let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs = compose(
             &[view],
@@ -6614,7 +6623,7 @@ mod tests {
         );
         assert_eq!(vs0.placements.len(), 1, "image visible before folding");
         // Fold the image's block → the image hides.
-        blocks::set_block_folded(&mut screen, 0, true);
+        blocks::set_block_folded(&mut screen, UnifiedLine::new(0), true);
         let v1 = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs1 = compose(
             &[v1],
@@ -6645,7 +6654,7 @@ mod tests {
         );
         e.advance(b"\x1b[m");
         let mut screen = e.screen().clone();
-        blocks::set_block_folded(&mut screen, 0, true);
+        blocks::set_block_folded(&mut screen, UnifiedLine::new(0), true);
         let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs = compose(
             &[view],
@@ -6676,7 +6685,7 @@ mod tests {
         );
         e.advance(b"\x1b[m");
         let mut s = e.screen().clone();
-        blocks::set_block_folded(&mut s, 0, true);
+        blocks::set_block_folded(&mut s, UnifiedLine::new(0), true);
         s
     }
 
@@ -6685,7 +6694,7 @@ mod tests {
         // Folding takes effect IN block mode (instant + persists on re-entry).
         let screen = two_block_fold_screen();
         let bm = crate::BlockMode {
-            selected: 0,
+            selected: UnifiedLine::new(0),
             viewport_top: 0,
             pane_rows: 8,
             total_lines: 8,
@@ -6756,7 +6765,7 @@ mod tests {
         e.advance(bytes.as_bytes());
         e.advance(b"\x1b[m");
         let mut screen = e.screen().clone();
-        blocks::set_block_folded(&mut screen, 0, true);
+        blocks::set_block_folded(&mut screen, UnifiedLine::new(0), true);
         let view = plain_view(&screen, Rect::new(Point::new(0, 0), Size::new(8, 40)));
         let vs = compose(
             &[view],
@@ -6806,7 +6815,7 @@ mod tests {
             ChromeColors::ansi_default(),
         );
         let mut folded = screen;
-        blocks::set_block_folded(&mut folded, 0, true);
+        blocks::set_block_folded(&mut folded, UnifiedLine::new(0), true);
         let vs1 = compose(
             &[plain_view(
                 &folded,
@@ -7178,7 +7187,7 @@ mod tests {
     fn snapshot_block_mode_folds_collapsed() {
         let screen = two_block_fold_screen();
         let bm = crate::BlockMode {
-            selected: 0,
+            selected: UnifiedLine::new(0),
             viewport_top: 0,
             pane_rows: 8,
             total_lines: 8,
@@ -7326,8 +7335,8 @@ mod tests {
         pane(&mut e, b"hello world ");
         let screen = e.screen().clone();
         let cm = crate::CopyMode {
-            cursor: (0, 4),
-            anchor: Some((0, 0)),
+            cursor: (UnifiedLine::new(0), 4),
+            anchor: Some((UnifiedLine::new(0), 0)),
             search: crate::SearchState::default(),
             viewport_top: 0,
             pane_rows: 5,
@@ -7362,7 +7371,7 @@ mod tests {
         pane(&mut e, b"hello world ");
         let screen = e.screen().clone();
         let cm = crate::CopyMode {
-            cursor: (0, 0),
+            cursor: (UnifiedLine::new(0), 0),
             anchor: None,
             search: crate::SearchState {
                 query: "ell".into(),

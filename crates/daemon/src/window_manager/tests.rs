@@ -1122,7 +1122,7 @@ async fn prev_prompt_lands_target_at_top_under_a_fold() {
             push(Some(RowMark::PROMPT_START)); // 3
             push(Some(RowMark::OUTPUT_START)); // 4
             push(Some(RowMark::PROMPT_START)); // 5
-            blocks::set_block_folded(s, 0, true); // hide unified 1,2
+            blocks::set_block_folded(s, UnifiedLine::new(0), true); // hide unified 1,2
         });
         // Scroll so block1's prompt (unified 3) is at the top.
         let (off, max) = pane.with_screen(|s| {
@@ -1181,7 +1181,7 @@ async fn fold_via_block_mode_dispatch_persists_after_exit() {
     let screen = pane.with_screen(Clone::clone);
     pane.enter_block_mode(plexy_glass_mux::BlockMode::new_for(&screen, 24).unwrap());
     // Apply the fold exactly as the connection dispatch does.
-    pane.with_screen_mut(|s| blocks::toggle_block_fold(s, 0));
+    pane.with_screen_mut(|s| blocks::toggle_block_fold(s, UnifiedLine::new(0)));
     assert!(
         pane.with_screen(|s| s.active.rows[0].mark.is_folded()),
         "block folded"

@@ -15,7 +15,8 @@ use plexy_glass_emulator::{Row, RowMark, Screen, WrapOrigin};
 use crate::line::{ScrollOffset, UnifiedLine, VisibleLine};
 
 /// Row at absolute `line` (scrollback rows first, then the active grid).
-pub(crate) fn row_at(screen: &Screen, line: u32) -> Option<&Row> {
+pub(crate) fn row_at(screen: &Screen, line: UnifiedLine) -> Option<&Row> {
+    let line = line.get();
     let scrollback = screen.scrollback.rows();
     let scrollback_len = scrollback.len() as u32;
     if line < scrollback_len {
@@ -25,26 +26,33 @@ pub(crate) fn row_at(screen: &Screen, line: u32) -> Option<&Row> {
     }
 }
 
-/// Total lines in the unified space (scrollback + active grid).
+/// Total lines in the unified space (scrollback + active grid). A count, not a
+/// line index, so it stays a plain `u32` (`UnifiedLine::new(total_lines(..))` is
+/// the one-past-the-end sentinel a few scans pass as `from`).
 pub(crate) fn total_lines(screen: &Screen) -> u32 {
     screen.scrollback.rows().len() as u32 + screen.active.rows.len() as u32
 }
 
-fn is_prompt(screen: &Screen, line: u32) -> bool {
+fn is_prompt(screen: &Screen, line: UnifiedLine) -> bool {
     row_at(screen, line).is_some_and(|r| r.mark.contains(RowMark::PROMPT_START))
 }
 
 /// Nearest `PROMPT_START` line strictly above `from`, scanning the unified
 /// scrollback + grid space. `None` when no prompt exists above.
-pub fn prev_prompt_line(screen: &Screen, from: u32) -> Option<u32> {
-    let upper = from.min(total_lines(screen));
-    (0..upper).rev().find(|&l| is_prompt(screen, l))
+pub fn prev_prompt_line(screen: &Screen, from: UnifiedLine) -> Option<UnifiedLine> {
+    let upper = from.get().min(total_lines(screen));
+    (0..upper)
+        .rev()
+        .find(|&l| is_prompt(screen, UnifiedLine::new(l)))
+        .map(UnifiedLine::new)
 }
 
 /// Nearest `PROMPT_START` line strictly below `from`. `None` when no prompt
 /// exists below.
-pub fn next_prompt_line(screen: &Screen, from: u32) -> Option<u32> {
-    (from.saturating_add(1)..total_lines(screen)).find(|&l| is_prompt(screen, l))
+pub fn next_prompt_line(screen: &Screen, from: UnifiedLine) -> Option<UnifiedLine> {
+    (from.advance(1).get()..total_lines(screen))
+        .find(|&l| is_prompt(screen, UnifiedLine::new(l)))
+        .map(UnifiedLine::new)
 }
 
 /// Output range `(start, end)` of the block containing `line`.
@@ -54,7 +62,10 @@ pub fn next_prompt_line(screen: &Screen, from: u32) -> Option<u32> {
 /// `start` is the block's first `OUTPUT_START` line, falling back to the
 /// prompt line itself when `133;C` never arrived. `None` when no block
 /// contains `line` (no `PROMPT_START` at or above it).
-pub fn block_output_range(screen: &Screen, line: u32) -> Option<(u32, u32)> {
+pub fn block_output_range(
+    screen: &Screen,
+    line: UnifiedLine,
+) -> Option<(UnifiedLine, UnifiedLine)> {
     let total = total_lines(screen);
     if total == 0 {
         return None;
@@ -62,41 +73,48 @@ pub fn block_output_range(screen: &Screen, line: u32) -> Option<(u32, u32)> {
     // Equivalent note (60:31 `- → +` and `- → /`): clamping only differs for
     // out-of-bounds `line`; prev_prompt_line scans the same range and finds
     // the same governing prompt regardless.
-    let line = line.min(total - 1);
+    let line = UnifiedLine::new(line.get().min(total - 1));
     let prompt = if is_prompt(screen, line) {
         line
     } else {
         prev_prompt_line(screen, line)?
     };
-    let end = next_prompt_line(screen, prompt).map_or(total - 1, |next| next - 1);
-    let start = (prompt..=end)
-        .find(|&l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::OUTPUT_START)))
-        .unwrap_or(prompt);
+    let end = next_prompt_line(screen, prompt)
+        .map_or_else(|| UnifiedLine::new(total - 1), |next| next.retreat(1));
+    let start = (prompt.get()..=end.get())
+        .find(|&l| {
+            row_at(screen, UnifiedLine::new(l))
+                .is_some_and(|r| r.mark.contains(RowMark::OUTPUT_START))
+        })
+        .map_or(prompt, UnifiedLine::new);
     Some((start, end))
 }
 
 /// First `PROMPT_START` line at or after line 0, the oldest block's prompt.
 /// `None` when no prompt exists anywhere.
-pub fn first_prompt_line(screen: &Screen) -> Option<u32> {
-    (0..total_lines(screen)).find(|&l| is_prompt(screen, l))
+pub fn first_prompt_line(screen: &Screen) -> Option<UnifiedLine> {
+    (0..total_lines(screen))
+        .find(|&l| is_prompt(screen, UnifiedLine::new(l)))
+        .map(UnifiedLine::new)
 }
 
 /// Newest `PROMPT_START` line, the last block's prompt. `None` when no prompt
 /// exists anywhere.
-pub fn last_prompt_line(screen: &Screen) -> Option<u32> {
-    prev_prompt_line(screen, total_lines(screen))
+pub fn last_prompt_line(screen: &Screen) -> Option<UnifiedLine> {
+    prev_prompt_line(screen, UnifiedLine::new(total_lines(screen)))
 }
 
 /// Every `PROMPT_START` line, ascending: the full block set in display order.
-pub fn all_prompt_lines(screen: &Screen) -> Vec<u32> {
+pub fn all_prompt_lines(screen: &Screen) -> Vec<UnifiedLine> {
     (0..total_lines(screen))
-        .filter(|&l| is_prompt(screen, l))
+        .filter(|&l| is_prompt(screen, UnifiedLine::new(l)))
+        .map(UnifiedLine::new)
         .collect()
 }
 
 /// The governing `PROMPT_START` at or above `line` (the block that contains
 /// `line`). `None` when no prompt exists at or above `line`.
-pub fn prompt_at_or_above(screen: &Screen, line: u32) -> Option<u32> {
+pub fn prompt_at_or_above(screen: &Screen, line: UnifiedLine) -> Option<UnifiedLine> {
     let total = total_lines(screen);
     if total == 0 {
         return None;
@@ -104,7 +122,7 @@ pub fn prompt_at_or_above(screen: &Screen, line: u32) -> Option<u32> {
     // Equivalent note (100:31 `- → +` and `- → /`): same as block_output_range
     // line 60, the clamp only differs for out-of-bounds input; prev_prompt_line
     // then scans 0..total and finds the same result.
-    let line = line.min(total - 1);
+    let line = UnifiedLine::new(line.get().min(total - 1));
     if is_prompt(screen, line) {
         Some(line)
     } else {
@@ -116,10 +134,12 @@ pub fn prompt_at_or_above(screen: &Screen, line: u32) -> Option<u32> {
 /// through the row before the next prompt (or the last line). Unlike
 /// [`block_output_range`], `start` is always the prompt row, so this is the
 /// extent the block-mode bracket spans and the "whole block" yank renders.
-pub fn block_extent(screen: &Screen, prompt_line: u32) -> (u32, u32) {
+pub fn block_extent(screen: &Screen, prompt_line: UnifiedLine) -> (UnifiedLine, UnifiedLine) {
     let total = total_lines(screen);
-    let end =
-        next_prompt_line(screen, prompt_line).map_or_else(|| total.saturating_sub(1), |n| n - 1);
+    let end = next_prompt_line(screen, prompt_line).map_or_else(
+        || UnifiedLine::new(total.saturating_sub(1)),
+        |n| n.retreat(1),
+    );
     (prompt_line, end)
 }
 
@@ -132,15 +152,18 @@ pub fn block_extent(screen: &Screen, prompt_line: u32) -> (u32, u32) {
 /// This is the canonical location of the attribution rule, and
 /// `viewport_block_status` and `last_completed_block` / `closing_exit` all
 /// delegate to it.
-fn closing_block_end_line(screen: &Screen, prompt_line: u32) -> Option<u32> {
+fn closing_block_end_line(screen: &Screen, prompt_line: UnifiedLine) -> Option<UnifiedLine> {
     let total = total_lines(screen);
     let next_p = next_prompt_line(screen, prompt_line);
     // Search range: (prompt_line, next_p], including the next prompt row so a
     // shared D+A row still counts.
     let last = total.saturating_sub(1);
-    let search_end = next_p.map_or(last, |np| np.min(last));
-    (prompt_line + 1..=search_end)
-        .find(|&l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::BLOCK_END)))
+    let search_end = next_p.map_or(last, |np| np.get().min(last));
+    (prompt_line.advance(1).get()..=search_end)
+        .find(|&l| {
+            row_at(screen, UnifiedLine::new(l)).is_some_and(|r| r.mark.contains(RowMark::BLOCK_END))
+        })
+        .map(UnifiedLine::new)
 }
 
 /// Prompt line of the most recent **completed** block (internal helper).
@@ -149,15 +172,15 @@ fn closing_block_end_line(screen: &Screen, prompt_line: u32) -> Option<u32> {
 /// (shared D+A), the block above is the one being closed (attributed above).
 /// Returns the governing `PROMPT_START` line for that block, or `None` when no
 /// completed block survives (no `D` seen, or its prompt was evicted).
-pub fn last_completed_prompt(screen: &Screen) -> Option<u32> {
-    let end_mark = (0..total_lines(screen))
-        .rev()
-        .find(|&l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::BLOCK_END)))?;
+pub fn last_completed_prompt(screen: &Screen) -> Option<UnifiedLine> {
+    let end_mark = (0..total_lines(screen)).rev().find(|&l| {
+        row_at(screen, UnifiedLine::new(l)).is_some_and(|r| r.mark.contains(RowMark::BLOCK_END))
+    })?;
     // Attribution: D on a PROMPT_START row closes the block ABOVE it.
-    let line_in_block = if is_prompt(screen, end_mark) {
-        end_mark.checked_sub(1)?
+    let line_in_block = if is_prompt(screen, UnifiedLine::new(end_mark)) {
+        UnifiedLine::new(end_mark.checked_sub(1)?)
     } else {
-        end_mark
+        UnifiedLine::new(end_mark)
     };
     // Find the governing PROMPT_START at or above `line_in_block`.
     if is_prompt(screen, line_in_block) {
@@ -176,14 +199,14 @@ pub fn last_completed_prompt(screen: &Screen) -> Option<u32> {
 /// emits `D`, then `A`, then redraws the prompt). A `BLOCK_END` on a
 /// `PROMPT_START` row therefore closes the block ABOVE that row, not the
 /// block the row starts.
-pub fn last_completed_block(screen: &Screen) -> Option<(u32, u32)> {
-    let end_mark = (0..total_lines(screen))
-        .rev()
-        .find(|&l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::BLOCK_END)))?;
-    let line_in_block = if is_prompt(screen, end_mark) {
-        end_mark.checked_sub(1)?
+pub fn last_completed_block(screen: &Screen) -> Option<(UnifiedLine, UnifiedLine)> {
+    let end_mark = (0..total_lines(screen)).rev().find(|&l| {
+        row_at(screen, UnifiedLine::new(l)).is_some_and(|r| r.mark.contains(RowMark::BLOCK_END))
+    })?;
+    let line_in_block = if is_prompt(screen, UnifiedLine::new(end_mark)) {
+        UnifiedLine::new(end_mark.checked_sub(1)?)
     } else {
-        end_mark
+        UnifiedLine::new(end_mark)
     };
     block_output_range(screen, line_in_block)
 }
@@ -196,7 +219,7 @@ pub fn last_completed_block(screen: &Screen) -> Option<(u32, u32)> {
 /// matches the specific block identified by `prompt_line`, which diverges from
 /// `Screen::last_block_exit` when the newest block's rows have been evicted
 /// from scrollback.
-pub fn closing_exit(screen: &Screen, prompt_line: u32) -> Option<i32> {
+pub fn closing_exit(screen: &Screen, prompt_line: UnifiedLine) -> Option<i32> {
     closing_block_end_line(screen, prompt_line).and_then(|d| row_at(screen, d)?.mark.exit())
 }
 
@@ -205,7 +228,7 @@ pub fn closing_exit(screen: &Screen, prompt_line: u32) -> Option<i32> {
 /// (prompt-start) row itself. This is where command-row annotations (duration /
 /// fold summary) anchor, so they land on the command line rather than the top of
 /// a multi-line prompt (e.g. starship's two-line prompt puts `A` a row above `B`).
-pub fn is_command_row(screen: &Screen, line: u32) -> bool {
+pub fn is_command_row(screen: &Screen, line: UnifiedLine) -> bool {
     let Some(mark) = row_at(screen, line).map(|r| r.mark) else {
         return false;
     };
@@ -216,26 +239,28 @@ pub fn is_command_row(screen: &Screen, line: u32) -> bool {
         return false;
     }
     // A prompt-start row is the command row only when its block has no `B` row.
-    let end = next_prompt_line(screen, line).unwrap_or_else(|| total_lines(screen));
-    !(line..end).any(|l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::PROMPT_END)))
+    let end = next_prompt_line(screen, line).map_or_else(|| total_lines(screen), UnifiedLine::get);
+    !(line.get()..end).any(|l| {
+        row_at(screen, UnifiedLine::new(l)).is_some_and(|r| r.mark.contains(RowMark::PROMPT_END))
+    })
 }
 
 /// Wall-clock duration (millis) of the block anchored at `prompt_line`, if its
 /// closing `OSC 133;D` recorded one. `None` when the block is unclosed, the row
 /// was evicted, or `C` never preceded `D`. Mirrors [`closing_exit`].
-pub fn closing_duration(screen: &Screen, prompt_line: u32) -> Option<u32> {
+pub fn closing_duration(screen: &Screen, prompt_line: UnifiedLine) -> Option<u32> {
     closing_block_end_line(screen, prompt_line).and_then(|d| row_at(screen, d)?.mark.duration_ms())
 }
 
 /// Lowercased "command\noutput" for the block at `prompt_line`, output soft-capped
 /// to ~`cap` bytes, the history-palette search haystack. Output is the block's
 /// rows from output-start through block end (the same region `o`/copy-output use).
-pub fn block_search_text(screen: &Screen, prompt_line: u32, cap: usize) -> String {
+pub fn block_search_text(screen: &Screen, prompt_line: UnifiedLine, cap: usize) -> String {
     let mut s = block_command_line(screen, prompt_line).unwrap_or_default();
     if let Some((start, end)) = block_output_range(screen, prompt_line) {
         let mut out = String::new();
-        'rows: for line in start..=end {
-            let Some(row) = row_at(screen, line) else {
+        'rows: for line in start.get()..=end.get() {
+            let Some(row) = row_at(screen, UnifiedLine::new(line)) else {
                 continue;
             };
             for cell in &row.cells {
@@ -261,11 +286,15 @@ pub fn block_search_text(screen: &Screen, prompt_line: u32, cap: usize) -> Strin
 /// Among blocks whose command line equals `command`, the prompt line minimizing
 /// `|line - near|`. `None` if none match. Disambiguates a repeated command at
 /// jump time when scrollback has drifted since the palette was built.
-pub fn find_block_by_command(screen: &Screen, command: &str, near: u32) -> Option<u32> {
+pub fn find_block_by_command(
+    screen: &Screen,
+    command: &str,
+    near: UnifiedLine,
+) -> Option<UnifiedLine> {
     all_prompt_lines(screen)
         .into_iter()
         .filter(|&l| block_command_line(screen, l).as_deref() == Some(command))
-        .min_by_key(|&l| l.abs_diff(near))
+        .min_by_key(|&l| l.get().abs_diff(near.get()))
 }
 
 /// Human-compact duration: `340ms` / `2.3s` / `45s` / `2m05s`.
@@ -313,34 +342,39 @@ pub fn format_duration(ms: u32) -> String {
 ///
 /// Trailing whitespace is trimmed per physical row before joining. A typed
 /// space at a soft-wrap boundary may be lost, which is rare and documented.
-pub fn block_command_line(screen: &Screen, prompt_line: u32) -> Option<String> {
+pub fn block_command_line(screen: &Screen, prompt_line: UnifiedLine) -> Option<String> {
     // Use block_output_range only for the block boundary (block_end), then find
     // the true OUTPUT_START row (C) ourselves with a mark scan. block_output_range
     // falls back to the prompt line when no C exists, so we can't trust the start
     // it returns.
     let (_fallback_start, block_end) = block_output_range(screen, prompt_line)?;
+    // Below this point we scan raw unified indices; wrap at the `row_at` boundary.
+    let prompt_line = prompt_line.get();
+    let block_end = block_end.get();
 
     // Find the OUTPUT_START row (C): first row with the flag at-or-after
     // prompt_line within the block. Returns None when no C mark exists.
-    let c_row = (prompt_line..=block_end)
-        .find(|&l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::OUTPUT_START)))?;
+    let c_row = (prompt_line..=block_end).find(|&l| {
+        row_at(screen, UnifiedLine::new(l)).is_some_and(|r| r.mark.contains(RowMark::OUTPUT_START))
+    })?;
 
     // Find the PROMPT_END row (B): first row at-or-after prompt_line with the
     // flag, strictly before the C row. The range excludes c_row, so b_row < c_row.
-    let b_row = (prompt_line..c_row)
-        .find(|&l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::PROMPT_END)))?;
+    let b_row = (prompt_line..c_row).find(|&l| {
+        row_at(screen, UnifiedLine::new(l)).is_some_and(|r| r.mark.contains(RowMark::PROMPT_END))
+    })?;
 
     // B col: the cell index at which command text begins on the B row.
     // Cell index == display column (invariant: each cell occupies one column,
     // wide chars are grapheme cell + spacer cell, so `cells[col]` == column col).
-    let b_col = row_at(screen, b_row)
+    let b_col = row_at(screen, UnifiedLine::new(b_row))
         .and_then(|r| r.mark.prompt_end_col())
         .unwrap_or(0) as usize;
 
     // Collect rows from `b_row` through `c_row - 1`.
     let mut parts: Vec<String> = Vec::new();
     for line in b_row..c_row {
-        let Some(row) = row_at(screen, line) else {
+        let Some(row) = row_at(screen, UnifiedLine::new(line)) else {
             continue;
         };
 
@@ -372,7 +406,7 @@ pub fn block_command_line(screen: &Screen, prompt_line: u32) -> Option<String> {
             // Equivalent note (361:40 `+ → -`): for all existing tests b_row=0
             // so `b_row - i = 0` for the only executed i=0; equivalent.
             let successor_line = b_row + i as u32 + 1;
-            let is_soft = row_at(screen, successor_line)
+            let is_soft = row_at(screen, UnifiedLine::new(successor_line))
                 .is_some_and(|r| matches!(r.wrap_origin, WrapOrigin::SoftFrom(_)));
             if !is_soft {
                 result.push('\n');
@@ -420,6 +454,9 @@ pub enum BlockLineStatus {
 /// on the same row). That row takes the status of the block it *starts*, not
 /// the block it closes.
 pub fn viewport_block_status(screen: &Screen, top: u32, rows: u16) -> Vec<Option<BlockLineStatus>> {
+    // `top` stays a raw unified index: this is a viewport boundary (the
+    // compositor hands in a display top) and the block scan below is raw
+    // unified-index arithmetic; wrap at each `blocks` helper / `row_at` call.
     let n = rows as usize;
     let mut result = vec![None; n];
 
@@ -443,10 +480,10 @@ pub fn viewport_block_status(screen: &Screen, top: u32, rows: u16) -> Vec<Option
     // the `else if` to top==total still find the correct `start_prompt` via the
     // forward scan in the None branch. The overlap computation then produces
     // identical results for all tested viewports.
-    let governing_prompt: Option<u32> = if top < total && is_prompt(screen, top) {
+    let governing_prompt: Option<u32> = if top < total && is_prompt(screen, UnifiedLine::new(top)) {
         Some(top)
     } else if top < total {
-        prev_prompt_line(screen, top)
+        prev_prompt_line(screen, UnifiedLine::new(top)).map(UnifiedLine::get)
     } else {
         None // top is at or beyond total; all None
     };
@@ -455,7 +492,7 @@ pub fn viewport_block_status(screen: &Screen, top: u32, rows: u16) -> Vec<Option
         Some(p) => p,
         None => {
             // No prompt at or above top, so find the first prompt in viewport.
-            match (top..total).find(|&l| is_prompt(screen, l)) {
+            match (top..total).find(|&l| is_prompt(screen, UnifiedLine::new(l))) {
                 Some(p) => p,
                 None => return result, // no prompts anywhere in viewport
             }
@@ -466,7 +503,7 @@ pub fn viewport_block_status(screen: &Screen, top: u32, rows: u16) -> Vec<Option
     let mut prompt = start_prompt;
     loop {
         // Block spans [prompt .. block_end_incl].
-        let next_p = next_prompt_line(screen, prompt);
+        let next_p = next_prompt_line(screen, UnifiedLine::new(prompt)).map(UnifiedLine::get);
         // Equivalent note (451:55 `total - 1 → + / /`; 451:68 `np - 1 → + / /`):
         // over-extending block_end_incl beyond total is clamped by vp_end in the
         // overlap calculation; including the next block's prompt row is overwritten
@@ -476,7 +513,7 @@ pub fn viewport_block_status(screen: &Screen, top: u32, rows: u16) -> Vec<Option
         // Delegate to closing_block_end_line for the attribution rule (first
         // BLOCK_END strictly after prompt, up to and including the next prompt row).
         let status: Option<BlockLineStatus> = {
-            match closing_block_end_line(screen, prompt) {
+            match closing_block_end_line(screen, UnifiedLine::new(prompt)) {
                 None => None, // no BLOCK_END → running
                 Some(d) => {
                     let exit = row_at(screen, d).and_then(|r| r.mark.exit());
@@ -531,7 +568,7 @@ pub fn viewport_block_status(screen: &Screen, top: u32, rows: u16) -> Vec<Option
 /// [`viewport_block_status`], called per *display* row (each mapped through the
 /// fold projection to its unified line). Same attribution rule: a prompt row
 /// takes the status of the block it *starts*.
-pub fn block_status_at(screen: &Screen, line: u32) -> Option<BlockLineStatus> {
+pub fn block_status_at(screen: &Screen, line: UnifiedLine) -> Option<BlockLineStatus> {
     if screen.alt.is_some() {
         return None;
     }
@@ -575,12 +612,16 @@ pub fn pane_at_prompt(screen: &Screen) -> bool {
         return false;
     }
     // Find the newest PROMPT_START by scanning backwards.
-    let Some(newest_prompt) = (0..total).rev().find(|&l| is_prompt(screen, l)) else {
+    let Some(newest_prompt) = (0..total)
+        .rev()
+        .find(|&l| is_prompt(screen, UnifiedLine::new(l)))
+    else {
         return false;
     };
     // The pane is at a prompt iff no OUTPUT_START exists strictly after it.
-    let has_output_after = (newest_prompt + 1..total)
-        .any(|l| row_at(screen, l).is_some_and(|r| r.mark.contains(RowMark::OUTPUT_START)));
+    let has_output_after = (newest_prompt + 1..total).any(|l| {
+        row_at(screen, UnifiedLine::new(l)).is_some_and(|r| r.mark.contains(RowMark::OUTPUT_START))
+    });
     !has_output_after
 }
 
@@ -598,7 +639,7 @@ pub fn running_command(screen: &Screen) -> Option<String> {
     }
     // The most recent prompt at/above the end of the line space owns the
     // in-flight command. `prev_prompt_line` from beyond total scans everything.
-    let prompt = prev_prompt_line(screen, total_lines(screen))?;
+    let prompt = prev_prompt_line(screen, UnifiedLine::new(total_lines(screen)))?;
     block_command_line(screen, prompt)
 }
 
@@ -608,10 +649,12 @@ pub fn running_command(screen: &Screen) -> Option<String> {
 /// would otherwise carry the unused rows below the output).
 /// Wide-spacer cells carry an empty grapheme, so `push_str("")` skips them
 /// naturally, same rendering rule as [`crate::selection::screen_text`].
-pub fn block_text(screen: &Screen, (start, end): (u32, u32)) -> String {
+pub fn block_text(screen: &Screen, (start, end): (UnifiedLine, UnifiedLine)) -> String {
+    let start = start.get();
+    let end = end.get();
     let mut lines: Vec<String> = Vec::with_capacity((end.saturating_sub(start) + 1) as usize);
     for line in start..=end {
-        let Some(row) = row_at(screen, line) else {
+        let Some(row) = row_at(screen, UnifiedLine::new(line)) else {
             continue;
         };
         let mut text = String::new();
@@ -634,7 +677,8 @@ pub fn block_text(screen: &Screen, (start, end): (u32, u32)) -> String {
 // blocks with a real output region fold; the command line stays visible.
 
 /// Row at absolute `line`, mutable (scrollback first, then the active grid).
-pub(crate) fn row_at_mut(screen: &mut Screen, line: u32) -> Option<&mut Row> {
+pub(crate) fn row_at_mut(screen: &mut Screen, line: UnifiedLine) -> Option<&mut Row> {
+    let line = line.get();
     let sb_len = screen.scrollback.rows().len() as u32;
     if line < sb_len {
         screen.scrollback.rows_mut().get_mut(line as usize)
@@ -646,7 +690,7 @@ pub(crate) fn row_at_mut(screen: &mut Screen, line: u32) -> Option<&mut Row> {
 /// True when `line` is a visible **command** row of a folded block (the prompt
 /// row through the row before its hidden output). Used to dim folded command
 /// rows so a fold reads as folded, not as a command with no output.
-pub fn is_folded_command_line(screen: &Screen, line: u32) -> bool {
+pub fn is_folded_command_line(screen: &Screen, line: UnifiedLine) -> bool {
     prompt_at_or_above(screen, line)
         .filter(|&p| row_at(screen, p).is_some_and(|r| r.mark.is_folded()))
         .and_then(|p| foldable_output(screen, p))
@@ -658,7 +702,10 @@ pub fn is_folded_command_line(screen: &Screen, line: u32) -> bool {
 /// completed (a later prompt exists, so never the active/running block), and it
 /// has a real output region below the command (`OUTPUT_START` strictly below the
 /// prompt). The command line itself is never hidden.
-pub fn foldable_output(screen: &Screen, prompt_line: u32) -> Option<(u32, u32)> {
+pub fn foldable_output(
+    screen: &Screen,
+    prompt_line: UnifiedLine,
+) -> Option<(UnifiedLine, UnifiedLine)> {
     if !is_prompt(screen, prompt_line) {
         return None;
     }
@@ -670,7 +717,7 @@ pub fn foldable_output(screen: &Screen, prompt_line: u32) -> Option<(u32, u32)> 
 /// Set or clear the fold on the block at `prompt_line`. Folding is a no-op
 /// unless [`foldable_output`] allows it; unfolding always clears the bit on a
 /// prompt row.
-pub fn set_block_folded(screen: &mut Screen, prompt_line: u32, folded: bool) {
+pub fn set_block_folded(screen: &mut Screen, prompt_line: UnifiedLine, folded: bool) {
     if folded && foldable_output(screen, prompt_line).is_none() {
         return;
     }
@@ -682,7 +729,7 @@ pub fn set_block_folded(screen: &mut Screen, prompt_line: u32, folded: bool) {
 }
 
 /// Toggle the fold on the block at `prompt_line`.
-pub fn toggle_block_fold(screen: &mut Screen, prompt_line: u32) {
+pub fn toggle_block_fold(screen: &mut Screen, prompt_line: UnifiedLine) {
     let folded = row_at(screen, prompt_line).is_some_and(|r| r.mark.is_folded());
     set_block_folded(screen, prompt_line, !folded);
 }
@@ -728,10 +775,13 @@ impl FoldProjection {
     /// Build from a screen's folded prompt rows.
     pub fn build(screen: &Screen) -> Self {
         let total = total_lines(screen);
+        // `hidden` stores the folded output ranges as raw unified indices (the
+        // projection's own arithmetic space); `foldable_output` hands back typed
+        // `UnifiedLine`s, so unwrap them at this storage boundary.
         let mut hidden: Vec<(u32, u32)> = all_prompt_lines(screen)
             .into_iter()
             .filter(|&p| row_at(screen, p).is_some_and(|r| r.mark.is_folded()))
-            .filter_map(|p| foldable_output(screen, p))
+            .filter_map(|p| foldable_output(screen, p).map(|(s, e)| (s.get(), e.get())))
             .collect();
         hidden.sort_unstable();
         // Blocks are disjoint, so ranges shouldn't overlap, but we coalesce
@@ -854,6 +904,12 @@ mod tests {
 
     use super::*;
 
+    /// Shorthand for a `UnifiedLine` in the example-based tests (the block helpers
+    /// now speak `UnifiedLine`, not bare `u32`).
+    fn ul(n: u32) -> UnifiedLine {
+        UnifiedLine::new(n)
+    }
+
     /// Feed raw bytes (text + OSC 133 sequences) through a real emulator.
     /// A trailing SGR-reset flushes the pending grapheme into the grid.
     fn screen_from(rows: u16, cols: u16, bytes: &[u8]) -> Screen {
@@ -899,15 +955,21 @@ mod tests {
             b"\x1b]133;A\x07p\r\n\x1b]133;B\x07ls\r\n\x1b]133;C\x07o\r\nx",
         );
         assert!(
-            !is_command_row(&s, 0),
+            !is_command_row(&s, ul(0)),
             "prompt-start row isn't the command row when a B exists"
         );
-        assert!(is_command_row(&s, 1), "the 133;B row is the command row");
-        assert!(!is_command_row(&s, 2), "an output row is not a command row");
+        assert!(
+            is_command_row(&s, ul(1)),
+            "the 133;B row is the command row"
+        );
+        assert!(
+            !is_command_row(&s, ul(2)),
+            "an output row is not a command row"
+        );
         // Single-line prompt with no B: the 133;A row IS the command row.
         let s2 = screen_from(8, 40, b"\x1b]133;A\x07$ ls\r\n\x1b]133;C\x07o\r\nx");
         assert!(
-            is_command_row(&s2, 0),
+            is_command_row(&s2, ul(0)),
             "a no-B prompt row is the command row"
         );
     }
@@ -917,14 +979,14 @@ mod tests {
         let mut s = two_blocks();
         // Block 1's closing D is on line 3; stamp a known duration there.
         s.active.rows[3].mark.set_duration(Some(2300));
-        assert_eq!(closing_duration(&s, 0), Some(2300));
+        assert_eq!(closing_duration(&s, ul(0)), Some(2300));
     }
 
     #[test]
     fn closing_duration_none_when_unclosed() {
         let s = two_blocks();
         // Block 2 (prompt at line 3) has no closing D in the grid.
-        assert_eq!(closing_duration(&s, 3), None);
+        assert_eq!(closing_duration(&s, ul(3)), None);
     }
 
     #[test]
@@ -935,7 +997,7 @@ mod tests {
             40,
             b"\x1b]133;A\x07$ \x1b]133;B\x07One\r\n\x1b]133;C\x07Out1\r\nOut2\r\nx",
         );
-        let t = block_search_text(&s, 0, 4096);
+        let t = block_search_text(&s, ul(0), 4096);
         assert!(t.contains("one"), "command, lowercased: {t:?}");
         assert!(
             t.contains("out1") && t.contains("out2"),
@@ -954,7 +1016,7 @@ mod tests {
             "\u{1b}]133;A\u{07}$ \u{1b}]133;B\u{07}c\r\n\u{1b}]133;C\u{07}\u{4e2d}\u{4e2d}\u{4e2d}\r\nx".as_bytes(),
         );
         // cap 5 lands inside a 3-byte grapheme run, and it must return, not panic.
-        let t = block_search_text(&s, 0, 5);
+        let t = block_search_text(&s, ul(0), 5);
         assert!(t.contains('\u{4e2d}'), "kept some output: {t:?}");
     }
 
@@ -965,7 +1027,7 @@ mod tests {
             40,
             b"\x1b]133;A\x07$ \x1b]133;B\x07c\r\n\x1b]133;C\x07aaaaaaaaaa\r\nbbbbbbbbbb\r\nx",
         );
-        let t = block_search_text(&s, 0, 8);
+        let t = block_search_text(&s, ul(0), 8);
         // command "c" + '\n' + at most 8 output bytes.
         assert!(t.len() <= "c\n".len() + 8, "output capped: {t:?}");
         assert!(t.starts_with("c\n"));
@@ -1004,90 +1066,94 @@ mod tests {
     #[test]
     fn prev_prompt_finds_nearest_above() {
         let s = two_blocks();
-        assert_eq!(prev_prompt_line(&s, 7), Some(3));
-        assert_eq!(prev_prompt_line(&s, 3), Some(0));
-        assert_eq!(prev_prompt_line(&s, 1), Some(0));
+        assert_eq!(prev_prompt_line(&s, ul(7)), Some(ul(3)));
+        assert_eq!(prev_prompt_line(&s, ul(3)), Some(ul(0)));
+        assert_eq!(prev_prompt_line(&s, ul(1)), Some(ul(0)));
     }
 
     #[test]
     fn prev_prompt_is_strictly_above_and_none_at_oldest() {
         let s = two_blocks();
         // Line 0 IS a prompt; strictly-above finds nothing.
-        assert_eq!(prev_prompt_line(&s, 0), None);
+        assert_eq!(prev_prompt_line(&s, ul(0)), None);
     }
 
     #[test]
     fn prev_prompt_from_beyond_total_scans_everything() {
         let s = two_blocks();
-        assert_eq!(prev_prompt_line(&s, 1000), Some(3));
+        assert_eq!(prev_prompt_line(&s, ul(1000)), Some(ul(3)));
     }
 
     #[test]
     fn next_prompt_finds_nearest_below() {
         let s = two_blocks();
-        assert_eq!(next_prompt_line(&s, 0), Some(3));
-        assert_eq!(next_prompt_line(&s, 2), Some(3));
+        assert_eq!(next_prompt_line(&s, ul(0)), Some(ul(3)));
+        assert_eq!(next_prompt_line(&s, ul(2)), Some(ul(3)));
     }
 
     #[test]
     fn next_prompt_none_at_newest() {
         let s = two_blocks();
-        assert_eq!(next_prompt_line(&s, 3), None);
-        assert_eq!(next_prompt_line(&s, 7), None);
+        assert_eq!(next_prompt_line(&s, ul(3)), None);
+        assert_eq!(next_prompt_line(&s, ul(7)), None);
     }
 
     #[test]
     fn prompt_scan_crosses_scrollback_boundary() {
         let s = across_boundary();
-        assert_eq!(prev_prompt_line(&s, 5), Some(4));
-        assert_eq!(prev_prompt_line(&s, 4), Some(0), "prompt in scrollback");
-        assert_eq!(next_prompt_line(&s, 0), Some(4), "prompt in grid");
+        assert_eq!(prev_prompt_line(&s, ul(5)), Some(ul(4)));
+        assert_eq!(
+            prev_prompt_line(&s, ul(4)),
+            Some(ul(0)),
+            "prompt in scrollback"
+        );
+        assert_eq!(next_prompt_line(&s, ul(0)), Some(ul(4)), "prompt in grid");
     }
 
     #[test]
     fn block_output_range_uses_output_start() {
         let s = two_blocks();
         // Block 1 = lines 0..=2; C at line 1.
-        assert_eq!(block_output_range(&s, 0), Some((1, 2)));
-        assert_eq!(block_output_range(&s, 1), Some((1, 2)));
-        assert_eq!(block_output_range(&s, 2), Some((1, 2)));
+        assert_eq!(block_output_range(&s, ul(0)), Some((ul(1), ul(2))));
+        assert_eq!(block_output_range(&s, ul(1)), Some((ul(1), ul(2))));
+        assert_eq!(block_output_range(&s, ul(2)), Some((ul(1), ul(2))));
         // Block 2 = lines 3..=7 (last line); C at line 4.
-        assert_eq!(block_output_range(&s, 3), Some((4, 7)));
-        assert_eq!(block_output_range(&s, 6), Some((4, 7)));
+        assert_eq!(block_output_range(&s, ul(3)), Some((ul(4), ul(7))));
+        assert_eq!(block_output_range(&s, ul(6)), Some((ul(4), ul(7))));
     }
 
     #[test]
     fn block_output_range_falls_back_to_prompt_line() {
         // No 133;C anywhere: output start = the prompt line itself.
         let s = screen_from(6, 20, b"\x1b]133;A\x07$ a\r\nout\r\n\x1b]133;A\x07$ b");
-        assert_eq!(block_output_range(&s, 1), Some((0, 1)));
+        assert_eq!(block_output_range(&s, ul(1)), Some((ul(0), ul(1))));
     }
 
     #[test]
     fn block_output_range_none_above_first_prompt() {
         // Line 0 has no prompt at or above it.
         let s = screen_from(6, 20, b"plain\r\n\x1b]133;A\x07$ a");
-        assert_eq!(block_output_range(&s, 0), None);
+        assert_eq!(block_output_range(&s, ul(0)), None);
     }
 
     #[test]
     fn block_output_range_none_without_any_prompt() {
         let s = screen_from(4, 20, b"just\r\ntext");
-        assert_eq!(block_output_range(&s, 1), None);
+        assert_eq!(block_output_range(&s, ul(1)), None);
     }
 
     #[test]
     fn block_output_range_spans_scrollback_boundary() {
         let s = across_boundary();
         // Block 1 = lines 0..=3 (no C → start at the prompt line 0).
-        assert_eq!(block_output_range(&s, 2), Some((0, 3)));
+        assert_eq!(block_output_range(&s, ul(2)), Some((ul(0), ul(3))));
     }
 
     #[test]
     fn last_completed_block_attributes_shared_d_a_row_to_block_above() {
         let s = two_blocks();
         // D landed on line 3 together with block 2's A; it closes block 1.
-        assert_eq!(last_completed_block(&s), Some((1, 2)));
+        assert_eq!(last_completed_block(&s), Some((ul(1), ul(2))));
     }
 
     #[test]
@@ -1099,7 +1165,7 @@ mod tests {
             b"\x1b]133;A\x07$ a\r\nout\r\n\x1b]133;D;0\x07done\r\n\x1b]133;A\x07$ b",
         );
         // Block = 0..=2, no C → start falls back to the prompt line.
-        assert_eq!(last_completed_block(&s), Some((0, 2)));
+        assert_eq!(last_completed_block(&s), Some((ul(0), ul(2))));
     }
 
     #[test]
@@ -1121,8 +1187,8 @@ mod tests {
         let s = two_blocks();
         // Block 2's range runs to the last grid line (4..=7); lines 5..7 are
         // the unused rows below "out3" and must not appear in the text.
-        assert_eq!(block_output_range(&s, 4), Some((4, 7)));
-        assert_eq!(block_text(&s, (4, 7)), "out3");
+        assert_eq!(block_output_range(&s, ul(4)), Some((ul(4), ul(7))));
+        assert_eq!(block_text(&s, (ul(4), ul(7))), "out3");
     }
 
     #[test]
@@ -1133,21 +1199,21 @@ mod tests {
             20,
             b"\x1b]133;A\x07$ a\r\n\x1b]133;C\x07one\r\n\r\ntwo\r\n\x1b]133;A\x07$ b",
         );
-        assert_eq!(block_text(&s, (1, 3)), "one\n\ntwo");
+        assert_eq!(block_text(&s, (ul(1), ul(3))), "one\n\ntwo");
     }
 
     #[test]
     fn block_text_spans_the_scrollback_boundary() {
         let s = across_boundary();
         // Block 1 = lines 0..=3: line 0 in scrollback, line 3 in the grid.
-        assert_eq!(block_text(&s, (0, 3)), "p1\no1\no2\no3");
+        assert_eq!(block_text(&s, (ul(0), ul(3))), "p1\no1\no2\no3");
     }
 
     #[test]
     fn block_text_emits_wide_graphemes_once() {
         let s = screen_from(4, 20, b"\x1b]133;A\x07$ a\r\n\x1b]133;C\x07\xe4\xb8\xad x");
         // 中 occupies two cells (grapheme + spacer); it must appear once.
-        assert_eq!(block_text(&s, (1, 1)), "中 x");
+        assert_eq!(block_text(&s, (ul(1), ul(1))), "中 x");
     }
 
     #[test]
@@ -1566,7 +1632,10 @@ mod tests {
             20,
             b"\x1b]133;A\x07$ \x1b]133;B\x07cargo test\r\n\x1b]133;C\x07output",
         );
-        assert_eq!(block_command_line(&s, 0), Some("cargo test".to_string()));
+        assert_eq!(
+            block_command_line(&s, ul(0)),
+            Some("cargo test".to_string())
+        );
     }
 
     /// Prompt prefix is excluded: text before the B col is not included.
@@ -1578,7 +1647,7 @@ mod tests {
             20,
             b"\x1b]133;A\x07>>>\x1b]133;B\x07cmd\r\n\x1b]133;C\x07out",
         );
-        let result = block_command_line(&s, 0);
+        let result = block_command_line(&s, ul(0));
         assert_eq!(
             result,
             Some("cmd".to_string()),
@@ -1600,7 +1669,7 @@ mod tests {
         );
         // The command wraps: row 0 has "$ abcdefgh" (10 cols), row 1 has "ijklmnop".
         // block_command_line should join them without \n.
-        let result = block_command_line(&s, 0);
+        let result = block_command_line(&s, ul(0));
         assert!(result.is_some(), "should extract wrapped command");
         let text = result.unwrap();
         assert!(
@@ -1623,7 +1692,7 @@ mod tests {
             20,
             b"\x1b]133;A\x07$ \x1b]133;B\x07line1\r\nline2\r\n\x1b]133;C\x07out",
         );
-        let result = block_command_line(&s, 0);
+        let result = block_command_line(&s, ul(0));
         assert_eq!(
             result,
             Some("line1\nline2".to_string()),
@@ -1636,7 +1705,7 @@ mod tests {
     fn bcl_no_b_row_is_none() {
         // A and C but no B: shell did not emit 133;B.
         let s = screen_from(4, 20, b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07out");
-        assert_eq!(block_command_line(&s, 0), None, "no B → None");
+        assert_eq!(block_command_line(&s, ul(0)), None, "no B → None");
     }
 
     /// No C row → None.
@@ -1644,7 +1713,7 @@ mod tests {
     fn bcl_no_c_row_is_none() {
         // A and B but no C.
         let s = screen_from(4, 20, b"\x1b]133;A\x07$ \x1b]133;B\x07cmd");
-        assert_eq!(block_command_line(&s, 0), None, "no C → None");
+        assert_eq!(block_command_line(&s, ul(0)), None, "no C → None");
     }
 
     /// B and C on the same row → None (command and output indistinguishable).
@@ -1669,7 +1738,11 @@ mod tests {
             b"\x1b]133;A\x07prompt\r\n\x1b]133;B\x07\x1b]133;C\x07out",
         );
         // B row == C row == 1 → None
-        assert_eq!(block_command_line(&s, 0), None, "B and C same row → None");
+        assert_eq!(
+            block_command_line(&s, ul(0)),
+            None,
+            "B and C same row → None"
+        );
     }
 
     /// Block in scrollback → still extracted.
@@ -1688,7 +1761,7 @@ mod tests {
         assert!(!s.scrollback.rows().is_empty(), "setup: rows in scrollback");
         // Find the prompt line for block 1 (should be line 0 in scrollback).
         assert_eq!(
-            block_command_line(&s, 0),
+            block_command_line(&s, ul(0)),
             Some("cmd1".to_string()),
             "command in scrollback must be extracted"
         );
@@ -1707,7 +1780,7 @@ mod tests {
             20,
             b"\x1b]133;A\x07\xe4\xb8\xad \x1b]133;B\x07hello\r\n\x1b]133;C\x07out",
         );
-        let result = block_command_line(&s, 0);
+        let result = block_command_line(&s, ul(0));
         assert_eq!(
             result,
             Some("hello".to_string()),
@@ -1726,7 +1799,7 @@ mod tests {
             20,
             b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07out\r\n\x1b]133;D;42\x07\r\n\x1b]133;A\x07$ b",
         );
-        assert_eq!(closing_exit(&s, 0), Some(42));
+        assert_eq!(closing_exit(&s, ul(0)), Some(42));
     }
 
     /// Shared D+A row: D on a PROMPT_START row still closes the block ABOVE.
@@ -1735,16 +1808,16 @@ mod tests {
         // two_blocks: D;0 on line 3 which also has A for block 2.
         // closing_exit for block 1 (prompt_line=0) should find D on line 3.
         let s = two_blocks();
-        assert_eq!(closing_exit(&s, 0), Some(0));
+        assert_eq!(closing_exit(&s, ul(0)), Some(0));
         // Block 2 (prompt_line=3) has no D yet → None.
-        assert_eq!(closing_exit(&s, 3), None);
+        assert_eq!(closing_exit(&s, ul(3)), None);
     }
 
     /// No D → None.
     #[test]
     fn ce_no_d_is_none() {
         let s = screen_from(4, 20, b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07out");
-        assert_eq!(closing_exit(&s, 0), None);
+        assert_eq!(closing_exit(&s, ul(0)), None);
     }
 
     /// Divergence case: two blocks; the FIRST block's D has a DIFFERENT exit
@@ -1764,9 +1837,9 @@ mod tests {
               \x1b]133;D;0\x07\x1b]133;A\x07$ three",
         );
         // Block 1's prompt is at line 0, D;7 is on line 2 (shared with block 2's A).
-        assert_eq!(closing_exit(&s, 0), Some(7), "block 1 exit must be 7");
+        assert_eq!(closing_exit(&s, ul(0)), Some(7), "block 1 exit must be 7");
         // Block 2's prompt is at line 2 (the D+A row), D;0 is on line 4.
-        assert_eq!(closing_exit(&s, 2), Some(0), "block 2 exit must be 0");
+        assert_eq!(closing_exit(&s, ul(2)), Some(0), "block 2 exit must be 0");
     }
 
     // ── last_completed_prompt tests ──────────────────────────────────────────
@@ -1776,7 +1849,7 @@ mod tests {
     fn lcp_returns_prompt_of_newest_completed() {
         // two_blocks: D on line 3 (shared with A for block 2) → block 1's prompt = 0.
         let s = two_blocks();
-        assert_eq!(last_completed_prompt(&s), Some(0));
+        assert_eq!(last_completed_prompt(&s), Some(ul(0)));
     }
 
     /// `last_completed_prompt` with `D` on its own row: the prompt is the
@@ -1789,7 +1862,7 @@ mod tests {
             20,
             b"\x1b]133;A\x07$ a\r\nout\r\n\x1b]133;D;0\x07done\r\n\x1b]133;A\x07$ b",
         );
-        assert_eq!(last_completed_prompt(&s), Some(0));
+        assert_eq!(last_completed_prompt(&s), Some(ul(0)));
     }
 
     /// `last_completed_prompt` returns `None` when no `D` has been seen.
@@ -1840,55 +1913,58 @@ mod tests {
     fn foldable_only_for_completed_blocks_with_output() {
         let s = two_blocks();
         // block 0: completed (next prompt at 3), output rows (1,2) → foldable.
-        assert_eq!(foldable_output(&s, 0), Some((1, 2)));
+        assert_eq!(foldable_output(&s, ul(0)), Some((ul(1), ul(2))));
         // block 3: active/running (no next prompt) → not foldable.
-        assert_eq!(foldable_output(&s, 3), None);
+        assert_eq!(foldable_output(&s, ul(3)), None);
         // a non-prompt line → not foldable.
-        assert_eq!(foldable_output(&s, 1), None);
+        assert_eq!(foldable_output(&s, ul(1)), None);
     }
 
     #[test]
     fn set_block_folded_respects_foldability() {
         let mut s = two_blocks();
-        set_block_folded(&mut s, 0, true);
-        assert!(row_at(&s, 0).unwrap().mark.is_folded());
+        set_block_folded(&mut s, ul(0), true);
+        assert!(row_at(&s, ul(0)).unwrap().mark.is_folded());
         // Active block can't be folded.
-        set_block_folded(&mut s, 3, true);
-        assert!(!row_at(&s, 3).unwrap().mark.is_folded());
+        set_block_folded(&mut s, ul(3), true);
+        assert!(!row_at(&s, ul(3)).unwrap().mark.is_folded());
         // Unfold clears it.
-        set_block_folded(&mut s, 0, false);
-        assert!(!row_at(&s, 0).unwrap().mark.is_folded());
+        set_block_folded(&mut s, ul(0), false);
+        assert!(!row_at(&s, ul(0)).unwrap().mark.is_folded());
     }
 
     #[test]
     fn toggle_fold_all_and_unfold_all() {
         let mut s = two_blocks();
-        toggle_block_fold(&mut s, 0);
-        assert!(row_at(&s, 0).unwrap().mark.is_folded());
-        toggle_block_fold(&mut s, 0);
-        assert!(!row_at(&s, 0).unwrap().mark.is_folded());
+        toggle_block_fold(&mut s, ul(0));
+        assert!(row_at(&s, ul(0)).unwrap().mark.is_folded());
+        toggle_block_fold(&mut s, ul(0));
+        assert!(!row_at(&s, ul(0)).unwrap().mark.is_folded());
 
         fold_all_completed(&mut s);
         assert!(
-            row_at(&s, 0).unwrap().mark.is_folded(),
+            row_at(&s, ul(0)).unwrap().mark.is_folded(),
             "completed block folded"
         );
         assert!(
-            !row_at(&s, 3).unwrap().mark.is_folded(),
+            !row_at(&s, ul(3)).unwrap().mark.is_folded(),
             "active block left open"
         );
 
         unfold_all(&mut s);
-        assert!(!row_at(&s, 0).unwrap().mark.is_folded());
+        assert!(!row_at(&s, ul(0)).unwrap().mark.is_folded());
     }
 
     #[test]
     fn zero_output_block_is_not_foldable() {
         // Two prompts back-to-back, no output between → nothing to fold.
         let mut s = screen_from(6, 20, b"\x1b]133;A\x07$ x\r\n\x1b]133;A\x07$ y\r\nz");
-        assert_eq!(foldable_output(&s, 0), None);
-        set_block_folded(&mut s, 0, true);
-        assert!(!row_at(&s, 0).unwrap().mark.is_folded(), "nothing to fold");
+        assert_eq!(foldable_output(&s, ul(0)), None);
+        set_block_folded(&mut s, ul(0), true);
+        assert!(
+            !row_at(&s, ul(0)).unwrap().mark.is_folded(),
+            "nothing to fold"
+        );
     }
 
     #[test]
@@ -1910,7 +1986,7 @@ mod tests {
     fn fold_projection_skips_a_folded_output_range() {
         // Fold block 0 (output rows 1..=2 hidden); total 8 → 6 visible: 0,3,4,5,6,7.
         let mut s = two_blocks();
-        set_block_folded(&mut s, 0, true);
+        set_block_folded(&mut s, ul(0), true);
         let p = FoldProjection::build(&s);
         assert!(!p.is_identity());
         assert_eq!(p.visible_total(), 6);
@@ -1947,7 +2023,7 @@ mod tests {
     fn visible_space_scroll_helpers_are_fold_exact() {
         // two_blocks: 8 unified lines, fold block 0 (hides output 1,2) → visible 6.
         let mut s = two_blocks();
-        set_block_folded(&mut s, 0, true);
+        set_block_folded(&mut s, ul(0), true);
         let rows = 4u16;
         // Max scroll = visible_total(6) - rows(4) = 2.
         assert_eq!(max_scroll_offset(&s, rows), ScrollOffset::new(2));
@@ -1998,8 +2074,8 @@ mod tests {
               \x1b]133;A\x07$d\r\n\x1b]133;C\x07o",
         );
         // Fold blocks at prompts 0 and 2 (each hides one output row: 1 and 3).
-        set_block_folded(&mut s, 0, true);
-        set_block_folded(&mut s, 2, true);
+        set_block_folded(&mut s, ul(0), true);
+        set_block_folded(&mut s, ul(2), true);
         let p = FoldProjection::build(&s);
         assert_eq!(p.visible_total(), 6, "8 − 2 hidden rows");
         // Visible unified sequence: 0,2,4,5,6,7.
@@ -2020,7 +2096,11 @@ mod tests {
     fn first_prompt_line_finds_oldest_and_none_when_absent() {
         // Kills: 76:5 replace first_prompt_line -> Option<u32> with None
         let s = two_blocks();
-        assert_eq!(first_prompt_line(&s), Some(0), "oldest prompt is at line 0");
+        assert_eq!(
+            first_prompt_line(&s),
+            Some(ul(0)),
+            "oldest prompt is at line 0"
+        );
         // Ensure None on a screen with no OSC 133 marks.
         let no_marks = screen_from(4, 20, b"just text");
         assert_eq!(first_prompt_line(&no_marks), None);
@@ -2062,7 +2142,7 @@ mod tests {
             10,
             b"\x1b]133;A\x07$ \r\n\x1b]133;B\x07abcdefghijk\r\n\x1b]133;C\x07out",
         );
-        let result = block_command_line(&s, 0);
+        let result = block_command_line(&s, ul(0));
         assert!(result.is_some(), "command must be extracted");
         let text = result.unwrap();
         // The soft-wrap between row 1 and row 2 must NOT become a '\n'.
@@ -2080,7 +2160,7 @@ mod tests {
         //   original: active.rows.get_mut(3 - 3) = active.rows.get_mut(0) → Some
         //   mutation: active.rows.get_mut(3 + 3) = active.rows.get_mut(6) → None
         let mut s = across_boundary(); // sb_len=3, active has 3 rows (lines 3,4,5)
-        let row = row_at_mut(&mut s, 3);
+        let row = row_at_mut(&mut s, ul(3));
         assert!(
             row.is_some(),
             "line 3 (active[0]) must be reachable via row_at_mut with sb_len=3"
@@ -2093,16 +2173,16 @@ mod tests {
         // (line < start → line <= start treats the OUTPUT_START row itself as a
         // folded command line, but it's the first hidden output row, not a command row).
         let mut s = two_blocks();
-        set_block_folded(&mut s, 0, true);
+        set_block_folded(&mut s, ul(0), true);
         // Block 0: prompt row=0, output rows=1..=2 (start=1, end=2, folded).
         assert!(
-            is_folded_command_line(&s, 0),
+            is_folded_command_line(&s, ul(0)),
             "prompt row is a folded command line"
         );
         // Row 1 IS the output_start row: original says line(1) < start(1) → false.
         // Mutation says 1 <= 1 → true (wrong).
         assert!(
-            !is_folded_command_line(&s, 1),
+            !is_folded_command_line(&s, ul(1)),
             "output-start row must NOT be classified as a folded command line"
         );
     }

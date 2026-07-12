@@ -404,7 +404,8 @@ impl Session {
                             window: w.id,
                             window_idx: wi as u32,
                             pane: pid,
-                            prompt_line: line,
+                            // `HistoryBlock` is a raw DTO; unwrap the unified line here.
+                            prompt_line: line.get(),
                             command,
                             exit: blocks::closing_exit(s, line),
                             duration: blocks::closing_duration(s, line),

@@ -7,6 +7,7 @@
 //! Ctrl-U clears, Enter jumps, Esc cancels.
 
 use crate::finder::{self, FilterList, FinderKey};
+use crate::line::UnifiedLine;
 use crate::{KeyEvent, PaneId, WindowId};
 
 /// One block in the palette.
@@ -16,7 +17,7 @@ pub struct HistoryEntry {
     pub window: WindowId,
     pub window_idx: u32,
     pub pane: PaneId,
-    pub prompt_line: u32,
+    pub prompt_line: UnifiedLine,
     pub command: String,
     pub exit: Option<i32>,
     pub duration: Option<u32>,
@@ -30,7 +31,7 @@ pub struct HistoryTarget {
     pub session: String,
     pub window: WindowId,
     pub pane: PaneId,
-    pub prompt_line: u32,
+    pub prompt_line: UnifiedLine,
     pub command: String,
 }
 
@@ -133,7 +134,7 @@ mod tests {
             window: WindowId(0),
             window_idx: 0,
             pane: PaneId(0),
-            prompt_line: line,
+            prompt_line: UnifiedLine::new(line),
             command: cmd.into(),
             exit: Some(0),
             duration: None,
