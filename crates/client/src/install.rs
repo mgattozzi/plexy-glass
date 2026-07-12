@@ -9,6 +9,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::error::ClientError;
+use crate::transport::Host;
 
 /// The `~/.cache` path `--install` writes to and the SSH bridge falls back to.
 pub const REMOTE_CACHE_BIN: &str = "~/.cache/plexy-glass/bin/plexy-glass";
@@ -60,7 +61,7 @@ pub fn parse_probe(output: &str) -> Option<(String, String, Option<String>)> {
 }
 
 /// Provision `REMOTE_CACHE_BIN` on `host` from the nightly release, idempotently.
-pub async fn install_remote(host: &str) -> Result<(), ClientError> {
+pub async fn install_remote(host: &Host) -> Result<(), ClientError> {
     // 1. One SSH call: uname + the cached binary's checksum (if any).
     // `cut -c1-64` (the sha256 hex is 64 chars) not `cut -d' '` — the script
     // must contain no single quote (see `remote_sh`).

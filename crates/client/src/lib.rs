@@ -34,8 +34,8 @@ use tokio::signal::unix;
 use tokio::sync::mpsc;
 use tracing::info;
 pub use transport::{
-    Connect, InstallPolicy, Target, Transport, connect_only, connect_or_spawn, default_socket_path,
-    open_transport, ssh_args,
+    Connect, Host, InstallPolicy, Target, Transport, connect_only, connect_or_spawn,
+    default_socket_path, open_transport, ssh_args,
 };
 pub use tty::{HostTty, current_size};
 
@@ -386,7 +386,7 @@ pub async fn client_kill_session(target: &Target, name: String) -> Result<(), Cl
 /// its own outcome (inherited stdio) and we propagate its exit status.
 pub async fn client_kill_remote(target: &Target, all: bool) -> Result<(), ClientError> {
     // invariant: only called for a remote target (main.rs guards on host).
-    let host = target.host.as_deref().expect("remote kill requires a host");
+    let host = target.host.as_ref().expect("remote kill requires a host");
     let cmd: &[&str] = if all { &["kill", "--all"] } else { &["kill"] };
     let status = Command::new("ssh")
         .args(transport::ssh_remote_args(host, target, cmd))

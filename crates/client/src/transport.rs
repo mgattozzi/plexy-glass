@@ -1,4 +1,6 @@
+use std::fmt;
 use std::fs::OpenOptions;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -14,6 +16,43 @@ use tracing::{debug, info};
 use crate::error::ClientError;
 use crate::install;
 use crate::install::remote_sh;
+
+/// An SSH target: an `ssh_config` alias or `user@host`, the routing key for a
+/// remote daemon. A newtype over `String` so a host can't be mixed up with any
+/// other string (a session name, a binary path) at a call site. `Deref<str>` +
+/// `Display` let it stand in wherever a `&str` host was read; `From` converts at
+/// the config/CLI boundary (`Config.remotes` / the `-H` flag are plain strings).
+/// Client-crate-contained: SSH targets never reach the postcard wire.
+///
+/// `Ord`/`PartialOrd` are derived (lexicographic, same as the `String` it wraps)
+/// so the roster's `assemble` can keep sorting hosts alphabetically.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Host(pub String);
+
+impl Deref for Host {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Host {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for Host {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for Host {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
 
 /// How a connection opens: auto-spawn the daemon (interactive/list) or fail if
 /// none is running (scripting verbs).
@@ -54,7 +93,7 @@ impl InstallPolicy {
 #[derive(Debug, Clone, Default)]
 pub struct Target {
     /// `Some(ssh-target)` routes over SSH; `None` uses the local socket.
-    pub host: Option<String>,
+    pub host: Option<Host>,
     /// Explicit remote `plexy-glass` path (`--remote-bin`).
     pub remote_bin: Option<String>,
     /// `--install`: provision the remote binary before connecting.
@@ -74,7 +113,7 @@ pub struct Target {
 /// chosen binary. If neither exists the final `exec` fails 127, which the client
 /// surfaces as [`ClientError::RemoteNotFound`]. `cmd` is the subcommand + flags,
 /// e.g. `["bridge"]`, `["bridge", "--no-spawn"]`, or `["kill", "--all"]`.
-pub fn ssh_remote_args(host: &str, target: &Target, cmd: &[&str]) -> Vec<String> {
+pub fn ssh_remote_args(host: &Host, target: &Target, cmd: &[&str]) -> Vec<String> {
     let mut args = vec!["-T".to_string(), host.to_string()];
     if let Some(bin) = &target.remote_bin {
         args.push(bin.clone());
@@ -93,7 +132,7 @@ pub fn ssh_remote_args(host: &str, target: &Target, cmd: &[&str]) -> Vec<String>
 /// The `ssh` argv to run the `bridge` for a connection verb (attach + every
 /// request/reply). `Connect::Only` appends `--no-spawn` so a scripting verb
 /// never starts a remote daemon.
-pub fn ssh_args(host: &str, target: &Target, connect: Connect) -> Vec<String> {
+pub fn ssh_args(host: &Host, target: &Target, connect: Connect) -> Vec<String> {
     let cmd: &[&str] = if connect == Connect::Only {
         &["bridge", "--no-spawn"]
     } else {
@@ -117,11 +156,15 @@ mod ssh_tests {
     #[test]
     fn ssh_args_explicit_bin_is_invoked_directly() {
         assert_eq!(
-            ssh_args("prod", &target(Some("/opt/pg")), Connect::Spawn),
+            ssh_args(
+                &Host::from("prod"),
+                &target(Some("/opt/pg")),
+                Connect::Spawn
+            ),
             vec!["-T", "prod", "/opt/pg", "bridge"]
         );
         assert_eq!(
-            ssh_args("u@h", &target(Some("/opt/pg")), Connect::Only),
+            ssh_args(&Host::from("u@h"), &target(Some("/opt/pg")), Connect::Only),
             vec!["-T", "u@h", "/opt/pg", "bridge", "--no-spawn"]
         );
     }
@@ -130,7 +173,7 @@ mod ssh_tests {
     fn ssh_args_default_falls_back_path_then_cache() {
         let cache = install::REMOTE_CACHE_BIN;
         // Spawn: try PATH, then the cache path.
-        let a = ssh_args("prod", &target(None), Connect::Spawn);
+        let a = ssh_args(&Host::from("prod"), &target(None), Connect::Spawn);
         assert_eq!(a[0], "-T");
         assert_eq!(a[1], "prod");
         assert_eq!(a.len(), 3);
@@ -141,7 +184,7 @@ mod ssh_tests {
             )
         );
         // Only: --no-spawn rides both branches.
-        let b = ssh_args("prod", &target(None), Connect::Only);
+        let b = ssh_args(&Host::from("prod"), &target(None), Connect::Only);
         assert_eq!(
             b[2],
             format!(
@@ -155,11 +198,15 @@ mod ssh_tests {
         let cache = install::REMOTE_CACHE_BIN;
         // Explicit bin: `kill --all` as direct argv.
         assert_eq!(
-            ssh_remote_args("prod", &target(Some("/opt/pg")), &["kill", "--all"]),
+            ssh_remote_args(
+                &Host::from("prod"),
+                &target(Some("/opt/pg")),
+                &["kill", "--all"]
+            ),
             vec!["-T", "prod", "/opt/pg", "kill", "--all"]
         );
         // Default: the same PATH-then-cache fallback, running `kill` remotely.
-        let k = ssh_remote_args("prod", &target(None), &["kill"]);
+        let k = ssh_remote_args(&Host::from("prod"), &target(None), &["kill"]);
         assert_eq!(
             k[2],
             format!(

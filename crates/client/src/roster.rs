@@ -17,6 +17,8 @@ use std::path::PathBuf;
 #[cfg(not(test))]
 use plexy_glass_daemon::RuntimePaths;
 
+use crate::transport::Host;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RosterSource {
     Configured,
@@ -25,19 +27,19 @@ pub enum RosterSource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RosterHost {
-    pub host: String,
+    pub host: Host,
     pub source: RosterSource,
 }
 
 /// Assemble the roster: every distinct `configured` host (sorted, source
 /// `Configured`) followed by every distinct `adhoc` host that isn't already
 /// configured (sorted, source `AdHoc`).
-pub fn assemble(configured: &[String], adhoc: &[String]) -> Vec<RosterHost> {
-    let mut cfg: Vec<String> = configured.to_vec();
+pub fn assemble(configured: &[Host], adhoc: &[Host]) -> Vec<RosterHost> {
+    let mut cfg: Vec<Host> = configured.to_vec();
     cfg.sort();
     cfg.dedup();
-    let cfgset: HashSet<&String> = cfg.iter().collect();
-    let mut ad: Vec<String> = adhoc
+    let cfgset: HashSet<&Host> = cfg.iter().collect();
+    let mut ad: Vec<Host> = adhoc
         .iter()
         .filter(|h| !cfgset.contains(*h))
         .cloned()
@@ -60,9 +62,11 @@ pub fn assemble(configured: &[String], adhoc: &[String]) -> Vec<RosterHost> {
 /// swallowed here (the picker still works from the ad-hoc file + this session's
 /// hosts); the daemon logs its own config error separately.
 #[cfg(not(test))]
-pub fn config_remotes() -> Vec<String> {
+pub fn config_remotes() -> Vec<Host> {
     let (cfg, _err) = plexy_glass_config::load_or_default();
-    cfg.remotes
+    // The config/roster boundary: `Config.remotes` is a plain `Vec<String>`;
+    // convert into `Host` here so the rest of the roster deals in `Host`.
+    cfg.remotes.into_iter().map(Host::from).collect()
 }
 
 /// The operator's LOCAL config palette, read from the same `load_or_default()`
@@ -89,18 +93,18 @@ pub fn config_palette() -> plexy_glass_config::PaletteConfig {
 // real query.
 #[cfg(test)]
 thread_local! {
-    static TEST_ROSTER: RefCell<(Vec<String>, Vec<String>)> =
+    static TEST_ROSTER: RefCell<(Vec<Host>, Vec<Host>)> =
         const { RefCell::new((Vec::new(), Vec::new())) };
 }
 
 /// Seed the per-thread roster override (configured, ad-hoc) for a test.
 #[cfg(test)]
-pub(crate) fn set_test_roster(configured: Vec<String>, adhoc: Vec<String>) {
+pub(crate) fn set_test_roster(configured: Vec<Host>, adhoc: Vec<Host>) {
     TEST_ROSTER.with(|c| *c.borrow_mut() = (configured, adhoc));
 }
 
 #[cfg(test)]
-pub fn config_remotes() -> Vec<String> {
+pub fn config_remotes() -> Vec<Host> {
     TEST_ROSTER.with(|c| c.borrow().0.clone())
 }
 
@@ -112,7 +116,7 @@ fn adhoc_path() -> Option<PathBuf> {
 }
 
 #[cfg(not(test))]
-pub fn load_adhoc() -> Vec<String> {
+pub fn load_adhoc() -> Vec<Host> {
     let Some(p) = adhoc_path() else {
         return Vec::new();
     };
@@ -122,18 +126,18 @@ pub fn load_adhoc() -> Vec<String> {
             s.lines()
                 .map(str::trim)
                 .filter(|l| !l.is_empty())
-                .map(str::to_string)
+                .map(Host::from)
                 .collect()
         })
         .unwrap_or_default()
 }
 
 #[cfg(test)]
-pub fn load_adhoc() -> Vec<String> {
+pub fn load_adhoc() -> Vec<Host> {
     TEST_ROSTER.with(|c| c.borrow().1.clone())
 }
 
-pub fn add_adhoc(host: &str) {
+pub fn add_adhoc(host: &Host) {
     // A host that's already a configured remote doesn't belong in the ad-hoc
     // file — `assemble` filters it out at read time anyway, but skipping the
     // append keeps the file from accumulating configured hosts (and lets one
@@ -145,21 +149,21 @@ pub fn add_adhoc(host: &str) {
     if cur.iter().any(|h| h == host) {
         return;
     }
-    cur.push(host.to_string());
+    cur.push(host.clone());
     if let Err(e) = write_adhoc(&cur) {
         tracing::warn!(%host, error=%e, "roster: add_adhoc write failed");
     }
 }
 
-pub fn forget_adhoc(host: &str) {
-    let cur: Vec<String> = load_adhoc().into_iter().filter(|h| h != host).collect();
+pub fn forget_adhoc(host: &Host) {
+    let cur: Vec<Host> = load_adhoc().into_iter().filter(|h| h != host).collect();
     if let Err(e) = write_adhoc(&cur) {
         tracing::warn!(%host, error=%e, "roster: forget_adhoc write failed");
     }
 }
 
 #[cfg(not(test))]
-fn write_adhoc(hosts: &[String]) -> io::Result<()> {
+fn write_adhoc(hosts: &[Host]) -> io::Result<()> {
     let Some(p) = adhoc_path() else {
         return Ok(());
     };
@@ -189,7 +193,7 @@ fn write_adhoc(hosts: &[String]) -> io::Result<()> {
     clippy::unnecessary_wraps,
     reason = "signature must match the #[cfg(not(test))] fallible version callers share"
 )]
-fn write_adhoc(hosts: &[String]) -> io::Result<()> {
+fn write_adhoc(hosts: &[Host]) -> io::Result<()> {
     TEST_ROSTER.with(|c| c.borrow_mut().1 = hosts.to_vec());
     Ok(())
 }
@@ -203,14 +207,14 @@ mod tests {
         // Task 6: `write_adhoc` is cfg(test)-gated to update `TEST_ROSTER`
         // instead of the real remotes file, so `add_adhoc`/`forget_adhoc` are
         // safe to call from a test without touching the operator's disk.
-        set_test_roster(vec![], vec!["existing".into()]);
-        add_adhoc("new-host");
+        set_test_roster(vec![], vec![Host::from("existing")]);
+        add_adhoc(&Host::from("new-host"));
         assert_eq!(
             load_adhoc(),
-            vec!["existing".to_string(), "new-host".to_string()]
+            vec![Host::from("existing"), Host::from("new-host")]
         );
-        forget_adhoc("existing");
-        assert_eq!(load_adhoc(), vec!["new-host".to_string()]);
+        forget_adhoc(&Host::from("existing"));
+        assert_eq!(load_adhoc(), vec![Host::from("new-host")]);
     }
 
     #[test]
@@ -218,11 +222,11 @@ mod tests {
         // Finding 3: `-H`'ing a host that's already a config `remotes` entry must
         // NOT append it to the ad-hoc file — `assemble` filters it at read time,
         // but keeping it out of the file lets it drop out on the next write.
-        set_test_roster(vec!["prod".into()], vec![]);
-        add_adhoc("prod");
+        set_test_roster(vec![Host::from("prod")], vec![]);
+        add_adhoc(&Host::from("prod"));
         assert_eq!(
             load_adhoc(),
-            Vec::<String>::new(),
+            Vec::<Host>::new(),
             "a configured host is not written into the ad-hoc roster"
         );
     }
@@ -238,10 +242,10 @@ mod tests {
     #[test]
     fn assemble_dedups_adhoc_against_configured_and_orders() {
         let hosts = assemble(
-            &["prod".into(), "wsl2".into()],
-            &["scratch".into(), "wsl2".into()],
+            &[Host::from("prod"), Host::from("wsl2")],
+            &[Host::from("scratch"), Host::from("wsl2")],
         );
-        let got: Vec<_> = hosts.iter().map(|h| (h.host.as_str(), h.source)).collect();
+        let got: Vec<_> = hosts.iter().map(|h| (&*h.host, h.source)).collect();
         assert_eq!(
             got,
             vec![

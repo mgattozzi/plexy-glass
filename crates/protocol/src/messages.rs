@@ -5,6 +5,28 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::ProtocolError;
 
+/// The wire protocol version. A transparent newtype over `u16` so a raw version
+/// number can't be mixed up with any other `u16` on a message, and the
+/// handshake version-gates compare `ProtocolVersion`s via the derived `Ord`
+/// (`server.version < PROTOCOL_VERSION`). postcard encodes a tuple-newtype
+/// transparently, so this serializes byte-identically to the `u16` it replaced —
+/// see `protocol_version_wire_matches_u16`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ProtocolVersion(pub u16);
+
+impl From<ProtocolVersion> for u16 {
+    fn from(v: ProtocolVersion) -> Self {
+        v.0
+    }
+}
+
+/// A client's per-session identity, minted by the session's `AtomicU64` at
+/// registration. A transparent newtype over `u64` so it can't be swapped with
+/// any other id; it rides `ServerMsg::Attached` on the wire and postcard encodes
+/// it identically to the `u64` it replaced (see `attached_client_id_wire`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ClientId(pub u64);
+
 /// Window dimensions, in cells and pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PtySize {
@@ -78,7 +100,7 @@ pub enum CreatePolicy {
 ///   daemon over `-H`/SSH
 /// - v12: `ServerMsg::OpenSessionPicker`, `ClientMsg::SwitchSession` /
 ///   `ClientMsg::Redraw`: the client-rendered multi-daemon session picker
-pub const PROTOCOL_VERSION: u16 = 12;
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(12);
 
 /// Inline-graphics protocols the client's *outer* terminal supports, probed at
 /// attach. The daemon renders images for a client only in a protocol its
@@ -110,7 +132,7 @@ pub enum ColorScheme {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientHello {
-    pub version: u16,
+    pub version: ProtocolVersion,
     /// The client's `$TERM`, advertised to panes via XTGETTCAP `TN`.
     pub term: String,
     /// The keyboard protocol the client negotiated with its outer terminal.
@@ -124,7 +146,7 @@ pub struct ClientHello {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerHello {
-    pub version: u16,
+    pub version: ProtocolVersion,
     pub daemon_pid: u32,
 }
 
@@ -211,7 +233,7 @@ pub enum ClientMsg {
 pub enum ServerMsg {
     Attached {
         session_name: String,
-        client_id: u64,
+        client_id: ClientId,
     },
     SessionList {
         entries: Vec<SessionEntry>,
@@ -298,7 +320,7 @@ mod tests {
             let bytes = postcard::to_allocvec(&hello).expect("serialize");
             let decoded: ClientHello = postcard::from_bytes(&bytes).expect("deserialize");
             assert_eq!(decoded.remote, remote);
-            assert_eq!(decoded.version, 12);
+            assert_eq!(decoded.version, ProtocolVersion(12));
         }
     }
 
@@ -344,6 +366,60 @@ mod tests {
             postcard::to_allocvec(&CreatePolicy::CreateIfMissing).unwrap(),
             t
         );
+    }
+
+    #[test]
+    fn protocol_version_wire_matches_u16() {
+        // A transparent tuple-newtype: postcard must encode `ProtocolVersion(n)`
+        // byte-for-byte like the bare `u16` it replaced, so bumping the type is
+        // NOT a wire break. Checked across the range boundaries + the live value.
+        for n in [0u16, 1, 12, 255, 256, u16::MAX] {
+            assert_eq!(
+                postcard::to_allocvec(&ProtocolVersion(n)).unwrap(),
+                postcard::to_allocvec(&n).unwrap(),
+                "ProtocolVersion({n}) must encode like u16 {n}"
+            );
+        }
+        // And ClientHello/ServerHello (which now carry ProtocolVersion) still
+        // round-trip and decode to the live version.
+        let ch = ClientHello {
+            version: PROTOCOL_VERSION,
+            term: "xterm-256color".into(),
+            kbd: NegotiatedKbd::Legacy,
+            graphics: GraphicsCaps::default(),
+            remote: false,
+        };
+        let sh = ServerHello {
+            version: PROTOCOL_VERSION,
+            daemon_pid: 7,
+        };
+        assert_eq!(
+            postcard::from_bytes::<ClientHello>(&postcard::to_allocvec(&ch).unwrap()).unwrap(),
+            ch
+        );
+        assert_eq!(
+            postcard::from_bytes::<ServerHello>(&postcard::to_allocvec(&sh).unwrap()).unwrap(),
+            sh
+        );
+    }
+
+    #[test]
+    fn attached_client_id_wire() {
+        // `ClientId(u64)` on `ServerMsg::Attached` must encode identically to the
+        // old bare `u64` field — the id byte-region equals a standalone `u64`.
+        for n in [0u64, 1, 42, u64::MAX] {
+            assert_eq!(
+                postcard::to_allocvec(&ClientId(n)).unwrap(),
+                postcard::to_allocvec(&n).unwrap(),
+                "ClientId({n}) must encode like u64 {n}"
+            );
+        }
+        let msg = ServerMsg::Attached {
+            session_name: "main".into(),
+            client_id: ClientId(42),
+        };
+        let bytes = postcard::to_allocvec(&msg).unwrap();
+        assert_eq!(postcard::from_bytes::<ServerMsg>(&bytes).unwrap(), msg);
     }
 
     #[test]
@@ -398,7 +474,7 @@ mod tests {
         let cases = vec![
             ServerMsg::Attached {
                 session_name: "main".into(),
-                client_id: 0,
+                client_id: ClientId(0),
             },
             ServerMsg::SessionList { entries: vec![] },
             ServerMsg::SessionKilled { name: "old".into() },
@@ -668,7 +744,7 @@ mod tests {
 
     #[test]
     fn v12_messages_round_trip() {
-        assert_eq!(PROTOCOL_VERSION, 12);
+        assert_eq!(PROTOCOL_VERSION, ProtocolVersion(12));
         let open = ServerMsg::OpenSessionPicker {
             sessions: vec![SessionEntry {
                 name: "main".into(),

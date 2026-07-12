@@ -7,13 +7,14 @@
 //! DefaultEngine: corpus/crash replay + bounded random generation); deep,
 //! coverage-guided runs use `cargo bolero test picker_replay --engine libfuzzer`.
 
+use plexy_glass_client::Host;
 use plexy_glass_client::picker::{PickerRow, PickerState, RowKind, RowStatus};
 
 fn row(name: &str, label: &str, host: Option<&str>, kind: RowKind, status: RowStatus) -> PickerRow {
     PickerRow {
         name: name.into(),
         label: label.into(),
-        host: host.map(str::to_string),
+        host: host.map(Host::from),
         kind,
         status,
     }

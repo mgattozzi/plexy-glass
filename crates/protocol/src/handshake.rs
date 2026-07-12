@@ -47,8 +47,8 @@ where
     // as HandshakeError::Codec, a clean failure, before this check.)
     if server.version < PROTOCOL_VERSION {
         return Err(HandshakeError::VersionMismatch {
-            ours: PROTOCOL_VERSION,
-            peer: server.version,
+            ours: u16::from(PROTOCOL_VERSION),
+            peer: u16::from(server.version),
         });
     }
     Ok(server)
@@ -114,15 +114,15 @@ where
 
         // Then surface the mismatch as a wire error.
         let err = crate::ServerMsg::Error(ProtocolError::VersionMismatch {
-            client: client.version,
-            server: PROTOCOL_VERSION,
+            client: u16::from(client.version),
+            server: u16::from(PROTOCOL_VERSION),
         });
         let bytes = postcard::to_allocvec(&err).map_err(|e| CodecError::Encode(e.to_string()))?;
         Codec::write_frame(writer, &bytes).await?;
 
         return Err(HandshakeError::VersionMismatch {
-            ours: PROTOCOL_VERSION,
-            peer: client.version,
+            ours: u16::from(PROTOCOL_VERSION),
+            peer: u16::from(client.version),
         });
     }
 
@@ -149,6 +149,7 @@ mod tests {
     use tokio::io::duplex;
 
     use super::*;
+    use crate::ProtocolVersion;
 
     #[tokio::test]
     async fn handshake_succeeds_when_versions_match() {
@@ -175,7 +176,7 @@ mod tests {
         // Write a bogus (NEWER) ClientHello: we cannot decode a newer wire
         // safely, so the server must still reject it.
         let bogus = ClientHello {
-            version: 999,
+            version: ProtocolVersion(999),
             term: "x".into(),
             kbd: NegotiatedKbd::Legacy,
             graphics: GraphicsCaps::default(),
@@ -187,7 +188,7 @@ mod tests {
         let err = server_handshake(&mut sr, &mut sw, 1).await.unwrap_err();
         match err {
             HandshakeError::VersionMismatch { ours, peer } => {
-                assert_eq!(ours, PROTOCOL_VERSION);
+                assert_eq!(ours, PROTOCOL_VERSION.0);
                 assert_eq!(peer, 999);
             }
             other => panic!("unexpected: {other:?}"),
@@ -202,7 +203,7 @@ mod tests {
         let (mut a, client_side) = duplex(1024);
         let (mut cr, mut cw) = io::split(client_side);
         let newer = ServerHello {
-            version: PROTOCOL_VERSION + 1,
+            version: ProtocolVersion(PROTOCOL_VERSION.0 + 1),
             daemon_pid: 7,
         };
         Codec::write_frame(&mut a, &postcard::to_allocvec(&newer).unwrap())
@@ -218,7 +219,7 @@ mod tests {
         let got = client_handshake_with(&mut cr, &mut cw, hello)
             .await
             .unwrap();
-        assert_eq!(got.version, PROTOCOL_VERSION + 1);
+        assert_eq!(got.version, ProtocolVersion(PROTOCOL_VERSION.0 + 1));
     }
 
     #[tokio::test]
@@ -227,7 +228,7 @@ mod tests {
         let (mut a, client_side) = duplex(1024);
         let (mut cr, mut cw) = io::split(client_side);
         let older = ServerHello {
-            version: PROTOCOL_VERSION - 1,
+            version: ProtocolVersion(PROTOCOL_VERSION.0 - 1),
             daemon_pid: 7,
         };
         Codec::write_frame(&mut a, &postcard::to_allocvec(&older).unwrap())
@@ -245,8 +246,8 @@ mod tests {
             .unwrap_err();
         match err {
             HandshakeError::VersionMismatch { ours, peer } => {
-                assert_eq!(ours, PROTOCOL_VERSION);
-                assert_eq!(peer, PROTOCOL_VERSION - 1);
+                assert_eq!(ours, PROTOCOL_VERSION.0);
+                assert_eq!(peer, PROTOCOL_VERSION.0 - 1);
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -261,7 +262,7 @@ mod tests {
         let (mut sr, mut sw) = io::split(server_side);
 
         let bogus = ClientHello {
-            version: PROTOCOL_VERSION - 1,
+            version: ProtocolVersion(PROTOCOL_VERSION.0 - 1),
             term: "vt100".into(),
             kbd: NegotiatedKbd::Kitty(31),
             graphics: GraphicsCaps::default(),
@@ -271,7 +272,7 @@ mod tests {
         Codec::write_frame(&mut a, &bytes).await.unwrap();
 
         let client = server_handshake(&mut sr, &mut sw, 1).await.unwrap();
-        assert_eq!(client.version, PROTOCOL_VERSION - 1);
+        assert_eq!(client.version, ProtocolVersion(PROTOCOL_VERSION.0 - 1));
         assert_eq!(
             client.kbd,
             NegotiatedKbd::Legacy,

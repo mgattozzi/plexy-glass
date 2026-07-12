@@ -6,11 +6,14 @@
 use std::collections::HashSet;
 
 use hegel::{TestCase, generators as gs};
+use plexy_glass_client::Host;
 use plexy_glass_client::roster::{RosterSource, assemble};
 
-fn draw_hosts(tc: &TestCase) -> Vec<String> {
+fn draw_hosts(tc: &TestCase) -> Vec<Host> {
     let n = tc.draw(gs::integers::<usize>().min_value(0).max_value(20));
-    (0..n).map(|_| tc.draw(gs::text().max_size(8))).collect()
+    (0..n)
+        .map(|_| Host::from(tc.draw(gs::text().max_size(8))))
+        .collect()
 }
 
 #[hegel::test(test_cases = 400)]
@@ -29,7 +32,7 @@ fn every_distinct_configured_host_present_exactly_once(tc: TestCase) {
     let configured = draw_hosts(&tc);
     let adhoc = draw_hosts(&tc);
     let hosts = assemble(&configured, &adhoc);
-    let distinct: HashSet<&String> = configured.iter().collect();
+    let distinct: HashSet<&Host> = configured.iter().collect();
     for host in distinct {
         let count = hosts
             .iter()
@@ -44,7 +47,7 @@ fn no_adhoc_host_is_also_configured(tc: TestCase) {
     let configured = draw_hosts(&tc);
     let adhoc = draw_hosts(&tc);
     let hosts = assemble(&configured, &adhoc);
-    let cfgset: HashSet<&String> = configured.iter().collect();
+    let cfgset: HashSet<&Host> = configured.iter().collect();
     for h in &hosts {
         if h.source == RosterSource::AdHoc {
             assert!(

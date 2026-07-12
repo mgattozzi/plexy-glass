@@ -9,7 +9,9 @@ use std::time::{Duration, SystemTime};
 
 use coordinator::render_coordinator;
 use plexy_glass_mux::{PaneId, VirtualScreen, WindowId};
-use plexy_glass_protocol::{NegotiatedKbd, ProtocolError, PtySize, SessionEntry, SpawnSpec};
+use plexy_glass_protocol::{
+    ClientId, NegotiatedKbd, ProtocolError, PtySize, SessionEntry, SpawnSpec,
+};
 use tokio::sync::{Mutex, Notify, mpsc, watch};
 use tokio::task::{self, JoinHandle};
 use tokio::time;
@@ -21,7 +23,7 @@ use crate::window_manager::{STATUS_TTL, Severity, WindowManager};
 use crate::{LockExt, osc_actions, pipe};
 
 pub struct ClientHandle {
-    pub client_id: u64,
+    pub client_id: ClientId,
     pub size: PtySize,
     pub frame_rx: watch::Receiver<Arc<VirtualScreen>>,
     /// Whether this client's outer terminal currently has focus (`\e[I`/`\e[O`).
@@ -433,7 +435,7 @@ impl Session {
                 name: self.name(),
             }));
         }
-        let client_id = self.next_client_id.fetch_add(1, Ordering::SeqCst);
+        let client_id = ClientId(self.next_client_id.fetch_add(1, Ordering::SeqCst));
         let frame_rx_for_caller = self.frame_rx_template.clone();
         let frame_rx_for_session = self.frame_rx_template.clone();
         {
@@ -460,7 +462,7 @@ impl Session {
         })
     }
 
-    pub fn deregister_client(&self, client_id: u64) {
+    pub fn deregister_client(&self, client_id: ClientId) {
         {
             let mut clients = self.clients.blocking_lock();
             clients.retain(|c| c.client_id != client_id);
@@ -671,7 +673,7 @@ impl Session {
     /// aggregate is unchanged (another client already held/lacked focus). A
     /// disconnected client simply drops from the set, so its focus naturally
     /// stops counting on the next transition.
-    pub async fn set_client_focus(&self, client_id: u64, focused: bool) -> Option<bool> {
+    pub async fn set_client_focus(&self, client_id: ClientId, focused: bool) -> Option<bool> {
         let mut clients = self.clients.lock().await;
         let any_before = clients.iter().any(|c| c.focused);
         if let Some(c) = clients.iter_mut().find(|c| c.client_id == client_id) {
@@ -1068,7 +1070,7 @@ impl Session {
         Ok(())
     }
 
-    pub fn handle_resize(&self, client_id: u64, new_size: PtySize) {
+    pub fn handle_resize(&self, client_id: ClientId, new_size: PtySize) {
         {
             let mut clients = self.clients.blocking_lock();
             if let Some(c) = clients.iter_mut().find(|c| c.client_id == client_id) {
@@ -2368,7 +2370,7 @@ mod tests {
         );
         // Client teardown (id need not exist, the retain is a no-op and the reset runs).
         let s2 = Arc::clone(&s);
-        task::spawn_blocking(move || s2.deregister_client(999))
+        task::spawn_blocking(move || s2.deregister_client(ClientId(999)))
             .await
             .unwrap();
         assert!(

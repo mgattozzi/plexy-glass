@@ -14,7 +14,8 @@ use plexy_glass_mux::{
 };
 use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
-    ClientMsg, Codec, CreatePolicy, ProtocolError, PtySize, ServerMsg, SpawnSpec, server_handshake,
+    ClientId, ClientMsg, Codec, CreatePolicy, ProtocolError, PtySize, ServerMsg, SpawnSpec,
+    server_handshake,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
@@ -275,7 +276,9 @@ where
     // client's key decode (deterministic, replacing the Permissive default).
     let client_kbd = client_hello.kbd;
     let client_remote = client_hello.remote;
-    let client_version = client_hello.version;
+    // The wire version is a `ProtocolVersion`; the daemon-internal feature gate
+    // (`ctx.version >= 12`) works on the raw number, so extract it once here.
+    let client_version = u16::from(client_hello.version);
 
     // Resolve or create the session. `session` is reassigned in place by
     // `switch_session` when the client switches to another session.
@@ -617,7 +620,7 @@ where
 
 async fn cleanup_and_exit(
     session: Arc<Session>,
-    client_id: u64,
+    client_id: ClientId,
     renderer_task: task::JoinHandle<()>,
 ) -> Result<(), DaemonError> {
     // A floating popup is transient: it does not survive detach (any client).
@@ -964,7 +967,7 @@ fn store_prefix_armed(flag: &Arc<AtomicBool>, keymap: &Keymap, session: &Arc<Ses
 /// `&mut` borrow would not check.
 struct ClientCtx<'a> {
     session: &'a mut Arc<Session>,
-    client_id: &'a mut u64,
+    client_id: &'a mut ClientId,
     size: PtySize,
     registry: &'a Arc<SessionRegistry>,
     switch_tx: &'a mpsc::UnboundedSender<watch::Receiver<Arc<VirtualScreen>>>,
@@ -2851,7 +2854,7 @@ mod tests {
                 .unwrap();
             let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
             let (inject_tx, mut inject_rx) = mpsc::unbounded_channel();
-            let mut client_id = 0u64;
+            let mut client_id = ClientId(0);
             let prefix_armed = Arc::new(AtomicBool::new(false));
             let mut ctx = ClientCtx {
                 session: &mut session,
@@ -2885,7 +2888,7 @@ mod tests {
                 .unwrap();
             let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
             let (inject_tx, mut inject_rx) = mpsc::unbounded_channel();
-            let mut client_id = 0u64;
+            let mut client_id = ClientId(0);
             let prefix_armed = Arc::new(AtomicBool::new(false));
             let mut ctx = ClientCtx {
                 session: &mut session,
@@ -3047,7 +3050,7 @@ mod tests {
 
         let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
         let (inject_tx, _inject_rx) = mpsc::unbounded_channel();
-        let mut client_id = 0u64;
+        let mut client_id = ClientId(0);
         let prefix_armed = Arc::new(AtomicBool::new(false));
         let mut ctx = ClientCtx {
             session: &mut session,
@@ -3575,7 +3578,7 @@ mod tests {
 
         let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
         let (inject_tx, _inject_rx) = mpsc::unbounded_channel();
-        let mut client_id = 0u64;
+        let mut client_id = ClientId(0);
         let prefix_armed = Arc::new(AtomicBool::new(false));
         let mut ctx = ClientCtx {
             session: &mut session,
@@ -3687,7 +3690,7 @@ mod tests {
 
         let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
         let (inject_tx, _inject_rx) = mpsc::unbounded_channel();
-        let mut client_id = 0u64;
+        let mut client_id = ClientId(0);
         let prefix_armed = Arc::new(AtomicBool::new(false));
         let mut ctx = ClientCtx {
             session: &mut session,
@@ -3762,7 +3765,7 @@ mod tests {
 
         let (switch_tx, _switch_rx) = mpsc::unbounded_channel();
         let (inject_tx, _inject_rx) = mpsc::unbounded_channel();
-        let mut client_id = 0u64;
+        let mut client_id = ClientId(0);
         let prefix_armed = Arc::new(AtomicBool::new(false));
         let mut ctx = ClientCtx {
             session: &mut session,

@@ -13,7 +13,7 @@ use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use crate::error::ClientError;
-use crate::transport::{Connect, InstallPolicy, Target};
+use crate::transport::{Connect, Host, InstallPolicy, Target};
 
 /// The outcome of querying one host for its session list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,9 +49,9 @@ pub fn classify(result: Result<ServerMsg, ClientError>) -> HostStatus {
 /// Returns immediately; the query runs on a detached task that owns `tx` and
 /// exits early if the receiver is dropped (the picker closed).
 pub fn spawn_query(
-    hosts: Vec<String>,
+    hosts: Vec<Host>,
     per_host: Duration,
-    tx: mpsc::UnboundedSender<(String, HostStatus)>,
+    tx: mpsc::UnboundedSender<(Host, HostStatus)>,
 ) {
     tokio::spawn(async move {
         let mut set = JoinSet::new();

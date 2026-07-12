@@ -15,7 +15,7 @@ use crate::error::ClientError;
 use crate::picker::{PickerOutcome, PickerRow, PickerState, PickerTheme, RowKind, RowStatus};
 use crate::query::{self, HostStatus};
 use crate::roster::{self, RosterSource};
-use crate::transport::{Connect, Target};
+use crate::transport::{Connect, Host, Target};
 
 const STDIN_CHUNK: usize = 4096;
 
@@ -153,7 +153,7 @@ where
     // (`Some` iff `picker` is `Some`). Each `(host, status)` fills the matching
     // host's rows in incrementally; `None` on the channel means every queried
     // daemon has resolved.
-    let mut picker_rx: Option<mpsc::UnboundedReceiver<(Option<String>, HostStatus)>> = None;
+    let mut picker_rx: Option<mpsc::UnboundedReceiver<(Option<Host>, HostStatus)>> = None;
     loop {
         stdin_buf.clear();
         stdin_buf.resize(STDIN_CHUNK, 0);
@@ -404,7 +404,7 @@ struct PickerAssembly {
     /// and the render-time divider).
     adhoc: Vec<String>,
     /// The OTHER daemons' remote hosts to stream-query (roster minus current).
-    remote_hosts: Vec<String>,
+    remote_hosts: Vec<Host>,
     /// Whether the local daemon is in the OTHER set (true only when we're
     /// attached to a REMOTE), so it gets queried on the local socket.
     query_local: bool,
@@ -412,7 +412,7 @@ struct PickerAssembly {
 
 /// Format one `SessionEntry` into a picker Session row tagged by `host`. The
 /// label matches the daemon's old overlay verbatim.
-fn session_row(e: SessionEntry, host: Option<String>) -> PickerRow {
+fn session_row(e: SessionEntry, host: Option<Host>) -> PickerRow {
     PickerRow {
         label: format!(
             "{} \u{2014} {} win, {} panes, {} clients",
@@ -439,12 +439,12 @@ fn build_picker_rows(sessions: Vec<SessionEntry>, current_host: Option<&str>) ->
     rows.push(PickerRow {
         name: anchor_name.clone(),
         label: anchor_name,
-        host: current_host.map(String::from),
+        host: current_host.map(Host::from),
         kind: RowKind::Host,
         status: RowStatus::Live,
     });
     for e in sessions {
-        rows.push(session_row(e, current_host.map(String::from)));
+        rows.push(session_row(e, current_host.map(Host::from)));
     }
 
     let mut roster_rows = build_roster_rows(current_host);
@@ -469,7 +469,7 @@ fn build_picker_rows(sessions: Vec<SessionEntry>, current_host: Option<&str>) ->
 struct RosterRows {
     rows: Vec<PickerRow>,
     adhoc: Vec<String>,
-    remote_hosts: Vec<String>,
+    remote_hosts: Vec<Host>,
     query_local: bool,
 }
 
@@ -491,15 +491,15 @@ fn build_roster_rows(current_host: Option<&str>) -> RosterRows {
     let mut remote_hosts = Vec::new();
     let mut adhoc = Vec::new();
     for h in roster {
-        if current_host == Some(h.host.as_str()) {
+        if current_host == Some(&*h.host) {
             continue; // this IS the current daemon
         }
         if h.source == RosterSource::AdHoc {
-            adhoc.push(h.host.clone());
+            adhoc.push(h.host.to_string());
         }
         rows.push(PickerRow {
-            name: h.host.clone(),
-            label: h.host.clone(),
+            name: h.host.to_string(),
+            label: h.host.to_string(),
             host: Some(h.host.clone()),
             kind: RowKind::Host,
             status: RowStatus::Pending,
@@ -536,7 +536,7 @@ fn resolve_status(host: Option<&str>, hs: HostStatus) -> (RowStatus, Vec<PickerR
             RowStatus::Live,
             entries
                 .into_iter()
-                .map(|e| session_row(e, host.map(String::from)))
+                .map(|e| session_row(e, host.map(Host::from)))
                 .collect(),
         ),
         HostStatus::Empty => (RowStatus::Empty, Vec::new()),
@@ -554,9 +554,9 @@ fn resolve_status(host: Option<&str>, hs: HostStatus) -> (RowStatus, Vec<PickerR
 /// so the drain updates rows uniformly. The original sender is dropped here so
 /// the channel closes once every producer finishes.
 fn spawn_picker_query(
-    remote_hosts: Vec<String>,
+    remote_hosts: Vec<Host>,
     query_local: bool,
-) -> mpsc::UnboundedReceiver<(Option<String>, HostStatus)> {
+) -> mpsc::UnboundedReceiver<(Option<Host>, HostStatus)> {
     const PER_HOST: Duration = Duration::from_millis(2500);
     let (tx, rx) = mpsc::unbounded_channel();
     if !remote_hosts.is_empty() {
@@ -597,8 +597,8 @@ fn spawn_picker_query(
 /// Await the next streaming query result, or pend forever when no picker query
 /// is live (`picker_rx` is `None`) so the drain `select!` arm stays inert.
 async fn next_status(
-    rx: &mut Option<mpsc::UnboundedReceiver<(Option<String>, HostStatus)>>,
-) -> Option<(Option<String>, HostStatus)> {
+    rx: &mut Option<mpsc::UnboundedReceiver<(Option<Host>, HostStatus)>>,
+) -> Option<(Option<Host>, HostStatus)> {
     match rx {
         Some(rx) => rx.recv().await,
         None => pending().await,
@@ -1061,7 +1061,7 @@ mod tests {
         assert!(!a.query_local, "attached-local does not query local again");
         assert_eq!(
             a.remote_hosts,
-            vec!["prod".to_string(), "scratch".to_string()]
+            vec![Host::from("prod"), Host::from("scratch")]
         );
         assert_eq!(a.adhoc, vec!["scratch".to_string()]);
         let prod = a
@@ -1090,7 +1090,7 @@ mod tests {
         assert!(a.query_local, "attached-remote queries the local daemon");
         assert_eq!(
             a.remote_hosts,
-            vec!["dev".to_string()],
+            vec![Host::from("dev")],
             "prod (current) excluded"
         );
         let locals: Vec<_> = a
@@ -1454,7 +1454,7 @@ mod tests {
         );
 
         // Confirm the roster hook itself is gone, not just the rendered row.
-        assert_eq!(roster::load_adhoc(), Vec::<String>::new());
+        assert_eq!(roster::load_adhoc(), Vec::<Host>::new());
 
         driver.await.unwrap();
     }

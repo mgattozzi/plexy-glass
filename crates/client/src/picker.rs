@@ -23,7 +23,7 @@ use plexy_glass_emulator::{display_width, truncate_to_width};
 use plexy_glass_protocol::PtySize;
 use plexy_glass_status::Rgb;
 
-use crate::transport::InstallPolicy;
+use crate::transport::{Host, InstallPolicy};
 
 /// The picker's resolved colors, mapped to the same palette roles the daemon's
 /// `chrome_colors` uses so the box matches every other overlay. Resolved once at
@@ -144,7 +144,7 @@ pub enum RowStatus {
 pub struct PickerRow {
     pub name: String,
     pub label: String,
-    pub host: Option<String>,
+    pub host: Option<Host>,
     pub kind: RowKind,
     pub status: RowStatus,
 }
@@ -160,7 +160,7 @@ pub enum PickerOutcome {
     /// `PumpExit::ReconnectTo` — is wired in Task 6). `install` carries the
     /// picker's persistent `i` toggle through to the reconnect `Target`.
     Reconnect {
-        host: Option<String>,
+        host: Option<Host>,
         name: String,
         install: InstallPolicy,
     },
@@ -168,12 +168,12 @@ pub enum PickerOutcome {
     /// `install` carries the picker's persistent `i` toggle through to the
     /// reconnect `Target`.
     New {
-        host: Option<String>,
+        host: Option<Host>,
         name: String,
         install: InstallPolicy,
     },
     /// Forget an ad-hoc host from the client-side roster file.
-    Forget { host: String },
+    Forget { host: Host },
 }
 
 /// The picker's input sub-mode. `Navigate` is **action-first**: letters are
@@ -192,7 +192,7 @@ pub enum PickerMode {
     /// and returns to `Navigate`.
     Filtering,
     Prompting {
-        host: Option<String>,
+        host: Option<Host>,
         buf: String,
     },
     /// Typing a brand-new ad-hoc ssh target (from the `＋` sentinel row). Enter
@@ -220,7 +220,7 @@ pub struct PickerState {
     /// while anything on a DIFFERENT daemon reconnects. Defaults to `None` for
     /// the `new` (local-only) path; the pump seeds the real value via
     /// `new_with_current`.
-    current_host: Option<String>,
+    current_host: Option<Host>,
     filter: String,
     cursor: usize,
     mode: PickerMode,
@@ -265,7 +265,7 @@ impl PickerState {
     /// anchor) when that session isn't present.
     pub fn new_with_current(
         rows: Vec<PickerRow>,
-        current_host: &Option<String>,
+        current_host: &Option<Host>,
         current_session: &str,
     ) -> Self {
         let cursor = rows
@@ -300,7 +300,7 @@ impl PickerState {
     /// prior session rows first — and re-clamps the cursor.
     pub fn resolve_host(
         &mut self,
-        host: &Option<String>,
+        host: &Option<Host>,
         status: RowStatus,
         mut sessions: Vec<PickerRow>,
     ) {
@@ -346,7 +346,7 @@ impl PickerState {
     /// re-clamps the cursor (mirrors `resolve_host`).
     pub fn replace_other_rows(
         &mut self,
-        current_host: &Option<String>,
+        current_host: &Option<Host>,
         rows: Vec<PickerRow>,
         adhoc: Vec<String>,
     ) {
@@ -573,7 +573,7 @@ impl PickerState {
                     return None; // refuse an empty host; stay prompting
                 }
                 let outcome = PickerOutcome::Reconnect {
-                    host: Some(buf.clone()),
+                    host: Some(Host::from(buf.clone())),
                     name: String::new(),
                     install: self.install,
                 };
@@ -1067,7 +1067,7 @@ mod tests {
         PickerRow {
             name: name.into(),
             label: format!("{name} \u{2014} 1 win"),
-            host: host.map(str::to_string),
+            host: host.map(Host::from),
             kind: RowKind::Session,
             status: RowStatus::Live,
         }
@@ -1637,7 +1637,7 @@ mod tests {
     /// picking a session on a DIFFERENT daemon must `Reconnect`.
     #[test]
     fn attached_remote_same_daemon_switches_other_reconnects() {
-        let host = Some("h".to_string());
+        let host = Some(Host::from("h"));
         let mut s = PickerState::new_with_current(
             vec![
                 host_row("h", RowStatus::Live), // current daemon's anchor (host Some("h"))

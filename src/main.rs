@@ -142,7 +142,8 @@ async fn main() -> anyhow::Result<()> {
         plexy_glass_client::InstallPolicy::UseExisting
     };
     let target = plexy_glass_client::Target {
-        host: cli.host,
+        // The CLI/config boundary: `-H` is a plain string; parse it into a `Host`.
+        host: cli.host.map(plexy_glass_client::Host::from),
         remote_bin: cli.remote_bin,
         install,
     };
