@@ -5171,3 +5171,164 @@ fn session_picker_esc_cancels_and_redraws_original_session() {
         sess.snapshot_str()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 7: wire e2e tests for surfaces the audit flagged as untested (hint
+// mode, history palette, sync-panes + `send` fan-out, choose-buffer, the
+// welcome modal, Alt-drag mouse gestures). The shipped session-picker bug
+// (letters doubling as both filter input and single-key action) lived in
+// exactly this seam, so these drive the REAL key/mouse wire sequences rather
+// than exercising the pure-core handlers directly.
+// ---------------------------------------------------------------------------
+
+/// Hint mode (`prefix f`): a real multi-char label (forced by a 2-char
+/// alphabet over 3 on-screen targets) copies the resolved span to the
+/// paste-buffer stack, and — the actual regression surface here — neither
+/// typed label key reaches the pane's child while the overlay owns input.
+#[test]
+fn hint_mode_multichar_label_copies_and_does_not_leak_to_pane() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    // A 2-char alphabet with 3 on-screen targets forces length-2 labels ("aa",
+    // "as", "sa" in scan order), so the picked label is a genuine multi-key
+    // sequence, not a single keystroke.
+    write_config(&env, "hints {\n    alphabet \"as\"\n}\n");
+    // Silence macOS bash's "default shell is now zsh" banner: it prints a real
+    // `https://support.apple.com/...` URL, an extra hint target that would
+    // throw off both the target count (label length) and the reading-order
+    // assumption below.
+    let mut sess = TestSession::builder(&env)
+        .env("BASH_SILENCE_DEPRECATION_WARNING", "1")
+        .start();
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+
+    // Three URL targets, one per row, in reading order. Row markers avoid the
+    // letters 'a'/'s' entirely so they can't be confused with the hint labels.
+    // `printf`'s format-reuse cycling (one %d/%s/%s/%d group per row) builds the
+    // URLs from separate space-separated args, and the `/` in the format is
+    // octal-escaped (`\057`) so the format string itself has no literal `/` —
+    // the TYPED/ECHOED command line is scanner-clean (no "http…" or path-like
+    // run for the scanner to pick up: `\057` alone isn't `/`, and a slash split
+    // across two `%s` substitutions can't form a `word/word` run either) and
+    // only the EXECUTED OUTPUT (where printf has decoded `\057` to `/`) is a
+    // real hint target, so the pane ends up with exactly 3, not more.
+    sess.send_str("printf 'ROW%d %s:\\057\\057%s\\057PICKME%d\\n' 1 https example.com 1 2 https example.com 2 3 https example.com 3\n");
+    assert!(
+        sess.wait_for(b"PICKME3", Duration::from_secs(10)),
+        "targets never rendered. raw: {}",
+        sess.snapshot_str()
+    );
+
+    let (_, capture_before, _) = run_cli(&env, &["capture"]);
+
+    sess.send_prefix(b'f');
+    // Label "as" targets ROW2 (scan order: aa=ROW1, as=ROW2, sa=ROW3).
+    sess.send(b"a");
+    thread::sleep(Duration::from_millis(150)); // let the daemon process + repaint
+    let (_, capture_mid, _) = run_cli(&env, &["capture"]);
+    assert_eq!(
+        capture_before,
+        capture_mid,
+        "the first hint-label key ('a') reached the pane's child — overlay \
+         input isolation is broken. raw: {}",
+        sess.snapshot_str()
+    );
+
+    sess.send(b"s"); // completes "as" -> Pick(PICKME2, Copy); overlay closes
+    thread::sleep(Duration::from_millis(150));
+    let (_, capture_after_pick, _) = run_cli(&env, &["capture"]);
+    assert_eq!(
+        capture_before,
+        capture_after_pick,
+        "the second hint-label key ('s') reached the pane's child — overlay \
+         input isolation is broken. raw: {}",
+        sess.snapshot_str()
+    );
+
+    // The Pick pushed the resolved span to the paste-buffer stack
+    // (`dispatch_hint` never touches the pane directly). Read it back via
+    // `save-buffer` — an exact byte comparison, not a screen-scrape (the pane
+    // still shows all three PICKME targets from the setup `printf`, so
+    // checking pane text couldn't tell "ROW2 was pasted" from "ROW2 was always
+    // on screen") — proving both that the copy landed and that the multi-char
+    // label resolved to the right (not first, not last) target.
+    let out_path = tmp.path().join("hint_pick.txt");
+    let (status, _, err) = run_cli(
+        &env,
+        &["cmd", &format!("save-buffer {}", out_path.display())],
+    );
+    assert!(status.success(), "save-buffer failed: {err}");
+    let saved = fs::read(&out_path).unwrap_or_default();
+    assert_eq!(
+        saved,
+        b"https://example.com/PICKME2",
+        "wrong (or no) target copied — expected ROW2/PICKME2 exactly, got {:?}",
+        String::from_utf8_lossy(&saved)
+    );
+}
+
+/// Hint mode's uppercase-label action opens the span via the system opener
+/// instead of copying it (`crates/mux/src/hint.rs::handle_hint`: lowercase
+/// final key = Copy, uppercase = Open). Stubs `open` (the same pattern as
+/// `osc8_hyperlink_click_invokes_opener`) to observe which path fired, and
+/// asserts the Path-specific `:line:col` stripping (dropped for Open, kept for
+/// Copy) as the copy-vs-open differentiator.
+#[test]
+#[cfg(target_os = "macos")]
+fn hint_mode_uppercase_label_opens_instead_of_copying() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let log = tmp.path().join("opened.log");
+
+    let stub_dir = tmp.path().join("stubs");
+    fs::create_dir_all(&stub_dir).unwrap();
+    let stub_path = stub_dir.join("open");
+    fs::write(
+        &stub_path,
+        format!("#!/bin/sh\nprintf '%s' \"$1\" >> {}\n", log.display()),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&stub_path, Permissions::from_mode(0o755)).unwrap();
+
+    // Silence macOS bash's "default shell is now zsh" banner: it prints a real
+    // URL and an absolute path, both scannable hint targets that would shift
+    // which target label "a" resolves to.
+    let mut sess = TestSession::builder(&env)
+        .path_prepend(&stub_dir)
+        .env("BASH_SILENCE_DEPRECATION_WARNING", "1")
+        .start();
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+
+    // A single path-with-line-col target -> the default alphabet gives it
+    // label "a" (only one target). Reconstructed via printf args (not a
+    // literal "src/main.rs:42:7" in the command text) so the TYPED/ECHOED
+    // command line itself isn't a second, identically-labeled match.
+    sess.send_str("printf 'err at %s/%s:%d:%d here\\n' src main.rs 42 7\n");
+    assert!(
+        sess.wait_for(b"src/main.rs", Duration::from_secs(10)),
+        "target never rendered. raw: {}",
+        sess.snapshot_str()
+    );
+
+    sess.send_prefix(b'f');
+    sess.send(b"A"); // uppercase -> Open, stripping the :line:col suffix
+
+    assert!(
+        wait_for_file_exists(&log, Duration::from_secs(3)),
+        "opener stub never invoked — the Open path did not fire. raw: {}",
+        sess.snapshot_str()
+    );
+    let opened = fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        opened, "src/main.rs",
+        "Open must pass the :line:col-stripped path (proves Open, not Copy, \
+         fired: Copy would keep the suffix). got: {opened:?}"
+    );
+}
