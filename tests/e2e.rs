@@ -5504,3 +5504,170 @@ fn sync_panes_fans_out_send_but_not_run() {
         sess.snapshot_str()
     );
 }
+
+/// Choose-buffer (`prefix =`): opens a picker over the paste-buffer stack;
+/// `Enter` pastes the selected buffer into the active pane.
+#[test]
+fn choose_buffer_overlay_selects_and_pastes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+
+    let (status, _, err) = run_cli(&env, &["cmd", "set-buffer CHOOSEME_TEXT"]);
+    assert!(status.success(), "set-buffer failed: {err}");
+
+    // Start `cat` so the paste echoes (probe until it's live).
+    sess.send_str("cat\n");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut cat_ready = false;
+    while Instant::now() < deadline {
+        sess.send_str("CATREADY\n");
+        if sess.wait_for(b"CATREADY", Duration::from_millis(500)) {
+            cat_ready = true;
+            break;
+        }
+    }
+    assert!(
+        cat_ready,
+        "cat child never came up: {}",
+        sess.snapshot_str()
+    );
+
+    sess.send_prefix(b'=');
+    assert!(
+        sess.wait_for(b"Paste buffers", Duration::from_secs(10)),
+        "choose-buffer overlay never opened. pane: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for(b"CHOOSEME_TEXT", Duration::from_secs(10)),
+        "buffer preview never rendered. pane: {}",
+        sess.snapshot_str()
+    );
+
+    sess.send_str("\r"); // Enter pastes the (only, so selected) buffer
+
+    // The emulator buffers the trailing grapheme until the next byte arrives,
+    // so `capture` right after a paste with nothing following it can miss the
+    // very last character; probe for all but the last ('T') like the
+    // `cli_buffer_set_save_load_paste_round_trips` e2e does.
+    let pasted = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (_, out, _) = run_cli(&env, &["capture"]);
+            if out.contains("CHOOSEME_TEX") || Instant::now() >= deadline {
+                break out;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    };
+    assert!(
+        pasted.contains("CHOOSEME_TEX"),
+        "buffer never pasted into the pane after Enter. raw: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// The welcome modal fires on the FIRST attach to a fresh daemon (gated by an
+/// in-memory once-per-daemon flag, see `SessionRegistry::take_welcome`).
+/// `isolate_dirs` sets `PLEXY_GLASS_NO_WELCOME=1` to suppress it for every
+/// other test in this file (it would otherwise intercept overlay/screen
+/// assertions); this is the one test that removes it, for this session only,
+/// so the modal actually fires and can be exercised end to end.
+#[test]
+fn welcome_modal_renders_on_first_attach_and_dismisses_on_any_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::builder(&env)
+        .env_remove("PLEXY_GLASS_NO_WELCOME")
+        .start();
+
+    assert!(
+        sess.wait_for(b"Welcome to plexy-glass", Duration::from_secs(20)),
+        "welcome modal never rendered on first attach. raw: {}",
+        sess.snapshot_str()
+    );
+
+    let mark = sess.buffer_len();
+    sess.send(b"x"); // any key dismisses
+
+    let live = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut ok = false;
+        while Instant::now() < deadline {
+            sess.send_str("echo WELCOME_DISMISSED\n");
+            if sess.wait_for_from(mark, b"WELCOME_DISMISSED", Duration::from_millis(500)) {
+                ok = true;
+                break;
+            }
+        }
+        ok
+    };
+    assert!(
+        live,
+        "shell never responded after dismissing the welcome modal — it may \
+         still be capturing input. raw: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// Alt-drag a status-bar window tab with the real SGR mouse encoding (Cb bit 3
+/// = Alt, per `crates/mux/src/mouse.rs`'s `alt: raw & 8 != 0`) and confirm the
+/// tabs actually reordered, not just that the daemon didn't panic.
+///
+/// Uses a minimal status config (`left`/`right` emptied) so the window-list
+/// tab columns are deterministic: the default middle zone keeps its lone
+/// `window-list` widget, which the render coordinator flows into the (now
+/// otherwise-empty) left powerline run, one window per padded group
+/// (`crates/daemon/src/session/coordinator.rs`). On the shipped `Unicode`
+/// glyph tier (powerline off) each group is its label text plus one padding
+/// column on each side, so with the default first window named "shell" (9
+/// cols: " 1 shell ") and a renamed second window "NEWWIN" (10 cols: " 2
+/// NEWWIN "), the two windows' CLICKABLE column ranges (padding carries no
+/// click_action) land at [1,10) and [12,22) on the bottom status row (row 24
+/// on the wire, 1-indexed, for this 24-row terminal).
+#[test]
+fn alt_drag_status_tab_reorders_windows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    write_config(&env, "status {\n    left {\n    }\n    right {\n    }\n}\n");
+    let mut sess = TestSession::spawn(&env);
+    // The custom config above strips the session-pill widget `wait_ready`
+    // normally looks for, so readiness is the window tab itself.
+    assert!(
+        sess.wait_for(b"1 shell", Duration::from_secs(20)),
+        "daemon never rendered (initial window tab never appeared). raw: {}",
+        sess.snapshot_str()
+    );
+
+    sess.send_prefix(b'c'); // new window (index 1, active)
+    let (status, _out, err) = run_cli(&env, &["cmd", "rename NEWWIN"]);
+    assert!(status.success(), "rename failed: {err}");
+    assert!(
+        sess.wait_for(b"2 NEWWIN", Duration::from_secs(10)),
+        "second window tab never rendered. raw: {}",
+        sess.snapshot_str()
+    );
+
+    let mark = sess.buffer_len();
+    // Alt+left-press on window 0's tab (wire col 6 = 0-indexed col 5, inside
+    // its [1,10) click range), a motion event with the button+Alt still held,
+    // then Alt+left-release on window 1's tab (wire col 17 = 0-indexed col 16,
+    // inside its [12,22) click range). Cb = button(0) | ALT(8) = 8; motion adds
+    // 32. Row 24 (wire) = the bottom status row of this 24x80 terminal.
+    sess.send(b"\x1b[<8;6;24M");
+    sess.send(b"\x1b[<40;10;24M");
+    sess.send(b"\x1b[<8;17;24m");
+
+    // The reorder moves NEWWIN to index 0: its label becomes "1 NEWWIN" (it
+    // was "2 NEWWIN"), text that never appeared before the drag.
+    assert!(
+        sess.wait_for_from(mark, b"1 NEWWIN", Duration::from_secs(10)),
+        "tab reorder never happened (Alt-drag). raw: {}",
+        sess.snapshot_str()
+    );
+}
