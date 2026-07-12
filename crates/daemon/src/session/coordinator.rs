@@ -23,7 +23,7 @@ struct OwnedPane {
     rect: plexy_glass_mux::Rect,
     screen: plexy_glass_emulator::Screen,
     is_active: bool,
-    scroll: u32,
+    scroll: plexy_glass_mux::ScrollOffset,
     copy_mode: Option<plexy_glass_mux::CopyMode>,
     block_mode: Option<plexy_glass_mux::BlockMode>,
     name: Option<String>,

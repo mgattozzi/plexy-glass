@@ -11,7 +11,8 @@
 use plexy_glass_emulator::{Color, Emulator};
 use plexy_glass_mux::compositor::compose;
 use plexy_glass_mux::{
-    ChromeColors, DiffRenderer, GraphicsCaps, PaneDragRole, PaneId, PaneView, Rect, StatusPlacement,
+    ChromeColors, DiffRenderer, GraphicsCaps, PaneDragRole, PaneId, PaneView, Rect, ScrollOffset,
+    StatusPlacement,
 };
 use plexy_glass_protocol::{Codec, MAX_FRAME_BYTES, ServerMsg};
 
@@ -42,7 +43,7 @@ async fn multi_megabyte_image_render_fits_in_one_frame() {
         rect: Rect::new(0, 0, rows, cols),
         screen,
         is_active: true,
-        scroll_offset: 0,
+        scroll_offset: ScrollOffset::new(0),
         copy_mode: None,
         block_mode: None,
         title: None,

@@ -13,6 +13,7 @@ use crate::borders::{self, BlockBorderColors};
 use crate::buffer::BufferPickerState;
 use crate::hint::HintState;
 use crate::history::HistoryState;
+use crate::line::{ScrollOffset, UnifiedLine, VisibleLine};
 use crate::overlay::{PickerEntry, picker_filtered_indices};
 use crate::palette::PaletteState;
 use crate::pane_id::PaneId;
@@ -36,7 +37,7 @@ pub struct HintColors {
 /// pane shows unified line `proj.to_unified(top_visible + r)`.
 struct FoldCtx {
     proj: FoldProjection,
-    top_visible: u32,
+    top_visible: VisibleLine,
 }
 
 impl FoldCtx {
@@ -47,10 +48,11 @@ impl FoldCtx {
         // Copy mode: identity projection, the prior viewport_top behavior.
         if view.copy_mode.is_some() {
             let proj = FoldProjection::identity(blocks::total_lines(view.screen));
-            let top_visible = proj
-                .visible_total()
-                .saturating_sub(rows)
-                .saturating_sub(effective_scroll_for(view));
+            let top_visible = VisibleLine::new(
+                proj.visible_total()
+                    .saturating_sub(rows)
+                    .saturating_sub(effective_scroll_for(view).get()),
+            );
             return Self { proj, top_visible };
         }
         let proj = FoldProjection::build(view.screen);
@@ -58,33 +60,41 @@ impl FoldCtx {
             // Block mode renders folds: show the selected block (recenter pins
             // `viewport_top` to it) at the top in visible space, clamped so we never
             // scroll past the bottom screenful.
-            proj.from_unified(bm.viewport_top)
-                .unwrap_or(0)
-                .min(proj.visible_total().saturating_sub(rows))
+            VisibleLine::new(
+                proj.from_unified(UnifiedLine::new(bm.viewport_top))
+                    .map_or(0, VisibleLine::get)
+                    .min(proj.visible_total().saturating_sub(rows)),
+            )
         } else {
             // Live + wheel: `scroll_offset` is VISIBLE-line space (the daemon's
             // wheel / prompt-jump produce visible offsets), so a plain bottom
             // anchor works: at offset 0 the prompt sits at the bottom, and
             // scrolling moves by visible lines (folds skipped).
-            proj.visible_total()
-                .saturating_sub(rows)
-                .saturating_sub(view.scroll_offset)
+            VisibleLine::new(
+                proj.visible_total()
+                    .saturating_sub(rows)
+                    .saturating_sub(view.scroll_offset.get()),
+            )
         };
         Self { proj, top_visible }
     }
 
     /// Unified line shown at display row `r`, or `None` when `r` is past the
-    /// pane's visible content (paint blank).
+    /// pane's visible content (paint blank). Returns the raw index: the paint
+    /// loop feeds it straight to the (unified-space) `blocks` row helpers.
     fn line_at(&self, r: u16) -> Option<u32> {
-        let v = self.top_visible + u32::from(r);
-        (v < self.proj.visible_total()).then(|| self.proj.to_unified(v))
+        let v = self.top_visible.advance(u32::from(r));
+        (v.get() < self.proj.visible_total()).then(|| self.proj.to_unified(v).get())
     }
 
     /// Display row of unified `line`, or `None` when it's folded away or outside
     /// the visible window.
     fn display_row(&self, line: u32, rows: u16) -> Option<u16> {
-        let v = self.proj.from_unified(line)?;
-        let r = v.checked_sub(self.top_visible)?;
+        let v = self.proj.from_unified(UnifiedLine::new(line))?;
+        if v < self.top_visible {
+            return None; // above the viewport top
+        }
+        let r = v.saturating_delta(self.top_visible);
         (r < u32::from(rows)).then_some(r as u16)
     }
 }
@@ -105,8 +115,9 @@ pub struct PaneView<'a> {
     pub screen: &'a Screen,
     pub is_active: bool,
     /// 0 = follow the live screen. N > 0 = show N rows of scrollback above
-    /// the active grid; the bottom rows of the active grid are clipped.
-    pub scroll_offset: u32,
+    /// the active grid; the bottom rows of the active grid are clipped. In
+    /// VISIBLE-line space (folds skipped).
+    pub scroll_offset: ScrollOffset,
     /// When Some, the pane is in copy-mode; the compositor uses the copy-mode
     /// viewport instead of `scroll_offset` and renders overlays.
     pub copy_mode: Option<&'a crate::CopyMode>,
@@ -510,8 +521,9 @@ pub fn compose(
             let block_rows: Vec<Option<BlockLineStatus>> = if blocks.is_none() {
                 vec![]
             } else if ctx.proj.is_identity() {
-                // No folds: the single-pass scan (display row r == unified top+r).
-                viewport_block_status(v.screen, top, v.rect.rows)
+                // No folds: the single-pass scan (display row r == unified top+r,
+                // and identity means visible top == unified top).
+                viewport_block_status(v.screen, top.get(), v.rect.rows)
             } else {
                 // Folded: status per display row through the projection.
                 (0..v.rect.rows)
@@ -542,16 +554,19 @@ pub fn compose(
                     u_end_full
                 };
                 // Map to visible display rows (prompt + command rows are never folded).
-                let vs = ctx.proj.from_unified(u_start)?;
-                let ve = ctx.proj.from_unified(u_end)?;
-                let vp_end = top + u32::from(v.rect.rows); // exclusive, visible
+                let vs = ctx.proj.from_unified(UnifiedLine::new(u_start))?;
+                let ve = ctx.proj.from_unified(UnifiedLine::new(u_end))?;
+                let vp_end = top.advance(u32::from(v.rect.rows)); // exclusive, visible
                 if ve < top || vs >= vp_end {
                     return None; // block entirely off-screen
                 }
                 let clip_start = vs.max(top);
-                let clip_end = ve.min(vp_end - 1);
+                let clip_end = ve.min(vp_end.retreat(1));
                 Some(borders::SelectedBlock {
-                    rows: ((clip_start - top) as u16, (clip_end - top) as u16),
+                    rows: (
+                        clip_start.saturating_delta(top) as u16,
+                        clip_end.saturating_delta(top) as u16,
+                    ),
                     cap_top: vs >= top,
                     cap_bottom: ve < vp_end,
                     color: block_select_color,
@@ -683,7 +698,7 @@ pub fn compose(
             if v.screen.alt.is_some()
                 || v.copy_mode.is_some()
                 || v.block_mode.is_some()
-                || v.scroll_offset == 0
+                || v.scroll_offset.get() == 0
             {
                 continue;
             }
@@ -765,25 +780,25 @@ pub fn compose(
                 // The image's top in visible space; `None` when it sits inside a
                 // folded block → hidden. An unfolded block's output is contiguous
                 // and fully visible, so its rows are [img_top, img_top + rows).
-                let Some(img_top) = ctx.proj.from_unified(p.anchor_line) else {
+                let Some(img_top) = ctx.proj.from_unified(UnifiedLine::new(p.anchor_line)) else {
                     continue;
                 };
-                let img_bot = img_top + u32::from(p.rows); // exclusive
+                let img_bot = img_top.advance(u32::from(p.rows)); // exclusive
                 // Vertical visible span, in visible viewport rows.
                 let vis_top = img_top.max(top);
-                let vis_bot = img_bot.min(top + vis_bottom_local);
+                let vis_bot = img_bot.min(top.advance(vis_bottom_local));
                 if vis_bot <= vis_top {
                     continue; // fully scrolled off / below the band
                 }
-                let rows_off = (vis_top - img_top) as u16; // image rows hidden above
-                let vis_rows = (vis_bot - vis_top) as u16;
+                let rows_off = vis_top.saturating_delta(img_top) as u16; // image rows hidden above
+                let vis_rows = vis_bot.saturating_delta(vis_top) as u16;
                 // Horizontal: clip the cell box to the pane's columns.
                 let avail_cols = v.rect.cols.saturating_sub(p.col);
                 let vis_cols = p.cols.min(avail_cols);
                 if vis_cols == 0 {
                     continue;
                 }
-                let local_row = (vis_top - top) as u16;
+                let local_row = vis_top.saturating_delta(top) as u16;
                 let host_row = pane_row_offset + v.rect.row + local_row;
                 let host_col = v.rect.col + p.col;
                 // Source pixel crop, proportional to the cell clip.
@@ -1105,7 +1120,7 @@ fn crop_axis(pixels: u32, cells: u16, off: u16, vis: u16) -> (u32, u32) {
 /// Compute the effective scroll offset for a pane view. This is the single
 /// source of truth used by both the content copy and the block-status scan so
 /// both always show the same viewport.
-fn effective_scroll_for(view: &PaneView<'_>) -> u32 {
+fn effective_scroll_for(view: &PaneView<'_>) -> ScrollOffset {
     // copy and block mode are mutually exclusive; both pin the viewport via an
     // absolute viewport_top, so derive the scroll offset the same way.
     let viewport_top = match (view.copy_mode, view.block_mode) {
@@ -1117,9 +1132,11 @@ fn effective_scroll_for(view: &PaneView<'_>) -> u32 {
         Some(vt) => {
             let total_lines =
                 view.screen.scrollback.len() as u32 + u32::from(view.screen.active.num_rows());
-            total_lines
-                .saturating_sub(vt)
-                .saturating_sub(u32::from(view.rect.rows))
+            ScrollOffset::new(
+                total_lines
+                    .saturating_sub(vt)
+                    .saturating_sub(u32::from(view.rect.rows)),
+            )
         }
         None => view.scroll_offset,
     }
@@ -2461,7 +2478,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 6),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -2495,7 +2512,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 6),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -2530,7 +2547,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 6),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -2595,7 +2612,7 @@ mod tests {
             rect: Rect::new(0, 0, 10, 40),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -2655,7 +2672,7 @@ mod tests {
             rect: Rect::new(0, 0, 9, 40),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -2705,7 +2722,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 6),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -2751,7 +2768,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 3),
             screen: left.screen(),
             is_active: false,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -2763,7 +2780,7 @@ mod tests {
             rect: Rect::new(0, 4, 4, 3),
             screen: right.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -2802,7 +2819,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 3),
             screen: left.screen(),
             is_active: false,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -2814,7 +2831,7 @@ mod tests {
             rect: Rect::new(0, 4, 4, 3),
             screen: right.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -2891,7 +2908,7 @@ mod tests {
             rect: Rect::new(0, 0, 2, 4),
             screen: &s,
             is_active: true,
-            scroll_offset: 1,
+            scroll_offset: ScrollOffset::new(1),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -2937,7 +2954,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 20),
             screen: &screen,
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: Some(&cm),
             block_mode: None,
             title: None,
@@ -2979,7 +2996,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 20),
             screen: &screen,
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: Some(&cm),
             block_mode: None,
             title: None,
@@ -3037,7 +3054,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 20),
             screen: &screen,
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: Some(&cm),
             block_mode: None,
             title: None,
@@ -3103,7 +3120,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 20),
             screen: &screen,
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: Some(&cm),
             block_mode: None,
             title: None,
@@ -3159,7 +3176,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 20),
             screen: &screen,
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: Some(&cm),
             block_mode: None,
             title: None,
@@ -3234,7 +3251,7 @@ mod tests {
             rect: Rect::new(0, 0, 2, 8),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -3274,7 +3291,7 @@ mod tests {
             rect: Rect::new(0, 0, 2, 4),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -3318,7 +3335,7 @@ mod tests {
             rect: Rect::new(0, 0, 2, 4),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -3361,7 +3378,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 20),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -3404,7 +3421,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 20),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -3444,7 +3461,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 20),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -3497,7 +3514,7 @@ mod tests {
             rect: Rect::new(0, 0, 4, 20),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -3541,7 +3558,7 @@ mod tests {
             rect: Rect::new(0, 0, 10, 40),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -3597,7 +3614,7 @@ mod tests {
             rect: Rect::new(0, 0, 10, 40),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -3650,7 +3667,7 @@ mod tests {
             rect: Rect::new(0, 0, 16, 60),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -3712,7 +3729,7 @@ mod tests {
             rect: Rect::new(0, 0, 10, 50),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -3771,7 +3788,7 @@ mod tests {
             rect: Rect::new(0, 0, 10, 50),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -3823,7 +3840,7 @@ mod tests {
             rect: Rect::new(0, 0, 10, 50),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -3873,7 +3890,7 @@ mod tests {
             rect: Rect::new(0, 0, 3, 40),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -3943,7 +3960,7 @@ mod tests {
             rect: Rect::new(0, 0, 12, 50),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -4026,7 +4043,7 @@ mod tests {
             rect: Rect::new(0, 0, 12, 60),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -4118,7 +4135,7 @@ mod tests {
             rect: Rect::new(0, 0, 12, 60),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -4190,7 +4207,7 @@ mod tests {
             rect: Rect::new(0, 0, 10, 50),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -4250,7 +4267,7 @@ mod tests {
             rect: Rect::new(0, 0, 10, 50),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -4295,7 +4312,7 @@ mod tests {
             rect: Rect::new(1, 1, 1, 6),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -4338,7 +4355,7 @@ mod tests {
             rect: Rect::new(0, 0, 12, 60),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -4386,7 +4403,7 @@ mod tests {
             rect: Rect::new(0, 0, rows, cols),
             screen: e.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -4512,7 +4529,7 @@ mod tests {
             rect: Rect::new(1, 1, 1, 18),
             screen: &screen,
             is_active: false,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -4561,7 +4578,7 @@ mod tests {
             rect: Rect::new(1, 1, 2, 4),
             screen: e.screen(),
             is_active: false,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -4640,7 +4657,7 @@ mod tests {
             rect: Rect::new(1, 1, 3, 18),
             screen: &screen,
             is_active: false,
-            scroll_offset: 3,
+            scroll_offset: ScrollOffset::new(3),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -4677,7 +4694,7 @@ mod tests {
             rect: Rect::new(1, 1, 3, 18),
             screen: &screen,
             is_active: false,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -4743,7 +4760,7 @@ mod tests {
             rect: Rect::new(1, 1, 8, 18),
             screen: &screen,
             is_active: false,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: Some(&bm),
             title: None,
@@ -4822,7 +4839,7 @@ mod tests {
             rect: Rect::new(1, 1, 3, 18),
             screen: &screen,
             is_active: false,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: Some(&bm),
             title: None,
@@ -4876,7 +4893,7 @@ mod tests {
             rect: Rect::new(1, 1, 6, 18),
             screen: &screen,
             is_active: false,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: Some(&bm),
             title: None,
@@ -4939,7 +4956,7 @@ mod tests {
             rect: Rect::new(1, 1, 8, 18),
             screen: &screen,
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: Some(&bm),
             title: None,
@@ -5002,7 +5019,7 @@ mod tests {
             rect: Rect::new(1, 1, 6, 18),
             screen: &screen,
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: Some(&bm),
             title: None,
@@ -5063,7 +5080,7 @@ mod tests {
             rect: Rect::new(1, 1, 8, 18),
             screen: &screen,
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: Some(&bm),
             title: None,
@@ -5120,7 +5137,7 @@ mod tests {
             rect: Rect::new(1, 1, 3, 18),
             screen: &screen,
             is_active: false,
-            scroll_offset: 3, // viewport = lines 0..2, all Failed
+            scroll_offset: ScrollOffset::new(3), // viewport = lines 0..2, all Failed
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -5193,7 +5210,7 @@ mod tests {
             rect: Rect::new(1, 1, 3, 18),
             screen: &screen,
             is_active: false,
-            scroll_offset: 0, // copy-mode overrides this
+            scroll_offset: ScrollOffset::new(0), // copy-mode overrides this
             copy_mode: Some(&cm),
             block_mode: None,
             title: None,
@@ -5249,7 +5266,7 @@ mod tests {
             rect: Rect::new(0, 0, 12, 40),
             screen: bg.screen(),
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -5481,7 +5498,7 @@ mod tests {
             rect: Rect::new(1, 1, 8, 38),
             screen: &screen,
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -5626,7 +5643,7 @@ mod tests {
             rect: Rect::new(0, 0, 2, 4),
             screen: &screen,
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: Some(&cm),
             block_mode: None,
             title: None,
@@ -5635,7 +5652,7 @@ mod tests {
         };
         // total_lines(5) - viewport_top(0) - rect.rows(2) = 3. A `+ → *` mutant
         // would compute total_lines=6 and get 4 instead.
-        assert_eq!(effective_scroll_for(&view), 3);
+        assert_eq!(effective_scroll_for(&view), ScrollOffset::new(3));
     }
 
     const TEST_COLOR: plexy_glass_emulator::Color =
@@ -5657,7 +5674,7 @@ mod tests {
             rect,
             screen,
             is_active: true,
-            scroll_offset: 0,
+            scroll_offset: ScrollOffset::new(0),
             copy_mode: None,
             block_mode: None,
             title: None,
@@ -5668,7 +5685,7 @@ mod tests {
 
     fn scrolled_view(screen: &Screen, rect: Rect, scroll_offset: u32) -> PaneView<'_> {
         PaneView {
-            scroll_offset,
+            scroll_offset: ScrollOffset::new(scroll_offset),
             ..plain_view(screen, rect)
         }
     }
@@ -7435,7 +7452,7 @@ mod tests {
         let proj = FoldProjection::identity(10);
         let ctx = FoldCtx {
             proj,
-            top_visible: 2,
+            top_visible: VisibleLine::new(2),
         };
         // Line at unified 4 → visible 4, r = 4 - 2 = 2.
         assert_eq!(ctx.display_row(4, 3), Some(2), "r=2 < rows=3 → in viewport");
@@ -7549,7 +7566,7 @@ mod tests {
         let proj = FoldProjection::identity(10);
         let ctx = FoldCtx {
             proj,
-            top_visible: 0,
+            top_visible: VisibleLine::new(0),
         };
         assert_eq!(
             ctx.display_row(4, 5),

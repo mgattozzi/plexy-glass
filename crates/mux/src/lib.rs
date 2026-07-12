@@ -20,6 +20,7 @@ pub mod history;
 pub mod key;
 pub mod keymap;
 pub mod layout;
+pub mod line;
 pub mod mouse;
 pub mod overlay;
 pub mod palette;
@@ -58,6 +59,7 @@ pub use keymap::{Chord, Command, Keymap, KeymapAction};
 pub use layout::{
     BorderHit, BorderSide, CloseOutcome, LayoutError, LayoutTree, Ratio, SplitPosition,
 };
+pub use line::{ScrollOffset, UnifiedLine, VisibleLine};
 pub use mouse::{
     MouseButton, MouseEncoding, MouseEvent, MouseKind, MouseModifiers, MouseParseAction,
     MouseParser, WheelAxis, encode_for_child,

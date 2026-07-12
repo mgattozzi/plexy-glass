@@ -2,6 +2,7 @@
 //! rect; extension past the border clamps.
 
 use crate::blocks::{self, FoldProjection};
+use crate::line::{ScrollOffset, VisibleLine};
 use crate::pane_id::PaneId;
 use crate::rect::Rect;
 
@@ -118,18 +119,18 @@ pub(crate) fn is_word_char(g: &str) -> bool {
 pub fn viewport_content_row(
     screen: &plexy_glass_emulator::Screen,
     pane_rows: u16,
-    scroll_offset: u32,
+    scroll_offset: ScrollOffset,
     vrow: u16,
 ) -> Option<&plexy_glass_emulator::Row> {
     let proj = FoldProjection::build(screen);
     let visible_total = proj.visible_total();
     let top = visible_total
         .saturating_sub(u32::from(pane_rows))
-        .saturating_sub(scroll_offset);
+        .saturating_sub(scroll_offset.get());
     let idx = top + u32::from(vrow);
     (idx < visible_total)
-        .then(|| proj.to_unified(idx))
-        .and_then(|u| blocks::row_at(screen, u))
+        .then(|| proj.to_unified(VisibleLine::new(idx)))
+        .and_then(|u| blocks::row_at(screen, u.get()))
 }
 
 /// Return a `Word`-kind `Selection` covering the word at viewport (row, col), or
@@ -139,7 +140,7 @@ pub fn word_at(
     source_pane: PaneId,
     screen: &plexy_glass_emulator::Screen,
     pane_rows: u16,
-    scroll_offset: u32,
+    scroll_offset: ScrollOffset,
     row: u16,
     col: u16,
 ) -> Option<Selection> {
@@ -219,7 +220,7 @@ pub fn line_at(
     source_pane: PaneId,
     screen: &plexy_glass_emulator::Screen,
     pane_rows: u16,
-    scroll_offset: u32,
+    scroll_offset: ScrollOffset,
     row: u16,
 ) -> Option<Selection> {
     let cols = screen.active.num_cols();
@@ -257,14 +258,14 @@ pub fn extract_text(
     selection: &Selection,
     screen: &plexy_glass_emulator::Screen,
     pane_rows: u16,
-    scroll_offset: u32,
+    scroll_offset: ScrollOffset,
 ) -> String {
     let proj = FoldProjection::build(screen);
     let visible_total = proj.visible_total();
     // Top visible line, matching the compositor's live-pane FoldCtx.
     let top_visible = visible_total
         .saturating_sub(u32::from(pane_rows))
-        .saturating_sub(scroll_offset);
+        .saturating_sub(scroll_offset.get());
     let (start, end) = selection.normalized();
     let cols = screen.active.num_cols();
     let mut out = String::new();
@@ -273,8 +274,8 @@ pub fn extract_text(
         // fold projection at the current scroll position.
         let visible_idx = top_visible + u32::from(r);
         let row = (visible_idx < visible_total)
-            .then(|| proj.to_unified(visible_idx))
-            .and_then(|u| blocks::row_at(screen, u));
+            .then(|| proj.to_unified(VisibleLine::new(visible_idx)))
+            .and_then(|u| blocks::row_at(screen, u.get()));
         if let Some(row) = row {
             let mut row_start = if r == start.0 { start.1 } else { 0 };
             // If a drag anchor landed on a wide grapheme's spacer half, back up
@@ -358,11 +359,11 @@ mod tests {
         emu.advance("ab中cd ".as_bytes()); // trailing space flushes the last grapheme
         let s = emu.screen();
         // Double-click 'a' (col 0): the word must not truncate at 中's spacer.
-        let sel = word_at(PaneId(0), s, 5, 0, 0, 0).expect("word");
-        assert_eq!(extract_text(&sel, s, 5, 0), "ab中cd");
+        let sel = word_at(PaneId(0), s, 5, ScrollOffset::new(0), 0, 0).expect("word");
+        assert_eq!(extract_text(&sel, s, 5, ScrollOffset::new(0)), "ab中cd");
         // Clicking the spacer half of 中 (col 3) targets the same word.
-        let sel2 = word_at(PaneId(0), s, 5, 0, 0, 3).expect("word from spacer");
-        assert_eq!(extract_text(&sel2, s, 5, 0), "ab中cd");
+        let sel2 = word_at(PaneId(0), s, 5, ScrollOffset::new(0), 0, 3).expect("word from spacer");
+        assert_eq!(extract_text(&sel2, s, 5, ScrollOffset::new(0)), "ab中cd");
     }
 
     #[test]
@@ -377,7 +378,7 @@ mod tests {
             anchor: (0, 1),
             head: (0, 5),
         };
-        assert_eq!(extract_text(&sel, s, 5, 0), "中文ab");
+        assert_eq!(extract_text(&sel, s, 5, ScrollOffset::new(0)), "中文ab");
     }
 
     #[test]
@@ -454,7 +455,7 @@ mod tests {
         let screen = screen_from(2, 10, &["hello", ""]);
         let mut s = Selection::start(PaneId(0), 0, 0);
         s.extend(0, 4, Rect::new(0, 0, 2, 10));
-        assert_eq!(extract_text(&s, &screen, 2, 0), "hello");
+        assert_eq!(extract_text(&s, &screen, 2, ScrollOffset::new(0)), "hello");
     }
 
     #[test]
@@ -462,7 +463,7 @@ mod tests {
         let screen = screen_from(2, 10, &["abc", "def"]);
         let mut s = Selection::start(PaneId(0), 0, 0);
         s.extend(1, 2, Rect::new(0, 0, 2, 10));
-        let txt = extract_text(&s, &screen, 2, 0);
+        let txt = extract_text(&s, &screen, 2, ScrollOffset::new(0));
         assert!(txt.starts_with("abc"));
         assert!(txt.contains('\n'));
         assert!(txt.ends_with("def"));
@@ -482,15 +483,23 @@ mod tests {
         let mut s = Selection::start(PaneId(0), 0, 0);
         s.extend(0, 2, Rect::new(0, 0, 2, 10)); // row 0, cols 0..=2
         // Live (scroll_offset 0): viewport row 0 is the grid's row 0 → "gri".
-        assert_eq!(extract_text(&s, &screen, 2, 0), "gri");
+        assert_eq!(extract_text(&s, &screen, 2, ScrollOffset::new(0)), "gri");
         // Scrolled back 2: viewport row 0 is scrollback's "sb0" (the bug).
-        assert_eq!(extract_text(&s, &screen, 2, 2), "sb0");
+        assert_eq!(extract_text(&s, &screen, 2, ScrollOffset::new(2)), "sb0");
     }
 
     #[test]
     fn word_at_returns_word_range() {
         let screen = screen_from(1, 20, &["hello world.foo"]);
-        let s = word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 2).expect("on 'hello'");
+        let s = word_at(
+            PaneId(0),
+            &screen,
+            screen.active.num_rows(),
+            ScrollOffset::new(0),
+            0,
+            2,
+        )
+        .expect("on 'hello'");
         assert_eq!(s.anchor, (0, 0));
         assert_eq!(s.head, (0, 4));
     }
@@ -498,21 +507,48 @@ mod tests {
     #[test]
     fn word_at_on_whitespace_returns_none() {
         let screen = screen_from(1, 10, &["foo  bar"]);
-        assert!(word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 3).is_none());
+        assert!(
+            word_at(
+                PaneId(0),
+                &screen,
+                screen.active.num_rows(),
+                ScrollOffset::new(0),
+                0,
+                3
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn word_at_on_punctuation_returns_none() {
         let screen = screen_from(1, 10, &["foo,bar"]);
-        assert!(word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 3).is_none());
+        assert!(
+            word_at(
+                PaneId(0),
+                &screen,
+                screen.active.num_rows(),
+                ScrollOffset::new(0),
+                0,
+                3
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn word_at_includes_underscore_and_dash() {
         // '=' breaks the word; underscore + dash do not.
         let screen = screen_from(1, 20, &["foo_bar-baz=junk"]);
-        let s = word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 2)
-            .expect("on 'foo_bar-baz'");
+        let s = word_at(
+            PaneId(0),
+            &screen,
+            screen.active.num_rows(),
+            ScrollOffset::new(0),
+            0,
+            2,
+        )
+        .expect("on 'foo_bar-baz'");
         assert_eq!(s.anchor, (0, 0));
         assert_eq!(s.head, (0, 10));
     }
@@ -520,8 +556,15 @@ mod tests {
     #[test]
     fn word_at_clamps_at_row_edge() {
         let screen = screen_from(1, 5, &["hello"]);
-        let s =
-            word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 4).expect("on last 'o'");
+        let s = word_at(
+            PaneId(0),
+            &screen,
+            screen.active.num_rows(),
+            ScrollOffset::new(0),
+            0,
+            4,
+        )
+        .expect("on last 'o'");
         assert_eq!(s.anchor, (0, 0));
         assert_eq!(s.head, (0, 4));
     }
@@ -529,7 +572,14 @@ mod tests {
     #[test]
     fn line_at_trims_trailing_blanks() {
         let screen = screen_from(1, 20, &["hello"]);
-        let s = line_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0).expect("non-blank row");
+        let s = line_at(
+            PaneId(0),
+            &screen,
+            screen.active.num_rows(),
+            ScrollOffset::new(0),
+            0,
+        )
+        .expect("non-blank row");
         assert_eq!(s.anchor, (0, 0));
         assert_eq!(s.head, (0, 4));
     }
@@ -537,7 +587,16 @@ mod tests {
     #[test]
     fn line_at_on_blank_row_returns_none() {
         let screen = screen_from(2, 10, &["hello", ""]);
-        assert!(line_at(PaneId(0), &screen, screen.active.num_rows(), 0, 1).is_none());
+        assert!(
+            line_at(
+                PaneId(0),
+                &screen,
+                screen.active.num_rows(),
+                ScrollOffset::new(0),
+                1
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -553,12 +612,12 @@ mod tests {
         );
 
         // Live (offset 0): viewport row 0 = grid's "grid0".
-        let w = word_at(PaneId(0), &screen, 2, 0, 0, 1).expect("word on grid0");
+        let w = word_at(PaneId(0), &screen, 2, ScrollOffset::new(0), 0, 1).expect("word on grid0");
         assert_eq!((w.anchor, w.head), ((0, 0), (0, 4)));
         // Scrolled back 2: viewport row 0 = scrollback's "sb0one".
-        let w = word_at(PaneId(0), &screen, 2, 2, 0, 1).expect("word on sb0one");
+        let w = word_at(PaneId(0), &screen, 2, ScrollOffset::new(2), 0, 1).expect("word on sb0one");
         assert_eq!((w.anchor, w.head), ((0, 0), (0, 5)));
-        let l = line_at(PaneId(0), &screen, 2, 2, 0).expect("line on sb0one");
+        let l = line_at(PaneId(0), &screen, 2, ScrollOffset::new(2), 0).expect("line on sb0one");
         assert_eq!((l.anchor, l.head), ((0, 0), (0, 5)));
     }
 
@@ -622,10 +681,10 @@ mod tests {
         let mut emu = Emulator::new(1, 10);
         emu.advance("好 ".as_bytes());
         let s = emu.screen();
-        let sel = word_at(PaneId(0), s, 1, 0, 0, 1)
+        let sel = word_at(PaneId(0), s, 1, ScrollOffset::new(0), 0, 1)
             .expect("spacer click must find the wide char to its left");
         assert_eq!(
-            extract_text(&sel, s, 1, 0),
+            extract_text(&sel, s, 1, ScrollOffset::new(0)),
             "好",
             "clicking 好's spacer must select 好, not jump right to space"
         );
@@ -652,9 +711,9 @@ mod tests {
         let mut emu = Emulator::new(5, 20);
         emu.advance("ab中cd ".as_bytes());
         let s = emu.screen();
-        let sel = word_at(PaneId(0), s, 5, 0, 0, 5).expect("word at 'd'");
+        let sel = word_at(PaneId(0), s, 5, ScrollOffset::new(0), 0, 5).expect("word at 'd'");
         assert_eq!(
-            extract_text(&sel, s, 5, 0),
+            extract_text(&sel, s, 5, ScrollOffset::new(0)),
             "ab中cd",
             "left-walk from 'd' must cross 中's spacer to include 中,b,a"
         );
@@ -672,9 +731,22 @@ mod tests {
         //   `col*1<cols`=`col<cols`, and the extra case (col=cols-1) still results in
         //   is_spacer(cols)=false → else, no difference in practice.
         let screen = screen_from(1, 10, &["abc def"]);
-        let sel = word_at(PaneId(0), &screen, screen.active.num_rows(), 0, 0, 2).expect("on 'c'");
+        let sel = word_at(
+            PaneId(0),
+            &screen,
+            screen.active.num_rows(),
+            ScrollOffset::new(0),
+            0,
+            2,
+        )
+        .expect("on 'c'");
         assert_eq!(
-            extract_text(&sel, &screen, screen.active.num_rows(), 0),
+            extract_text(
+                &sel,
+                &screen,
+                screen.active.num_rows(),
+                ScrollOffset::new(0)
+            ),
             "abc",
             "end init must require both bounds AND spacer; || extends into the space"
         );
@@ -689,9 +761,9 @@ mod tests {
         let mut emu = Emulator::new(1, 10);
         emu.advance("中abc ".as_bytes());
         let s = emu.screen();
-        let sel = word_at(PaneId(0), s, 1, 0, 0, 0).expect("word at col 0");
+        let sel = word_at(PaneId(0), s, 1, ScrollOffset::new(0), 0, 0).expect("word at col 0");
         assert_eq!(
-            extract_text(&sel, s, 1, 0),
+            extract_text(&sel, s, 1, ScrollOffset::new(0)),
             "中abc",
             "clicking wide char at col 0 must include its spacer in the selection"
         );
@@ -731,7 +803,12 @@ mod tests {
             head: (0, 10),
         };
         assert_eq!(
-            extract_text(&sel, &screen, screen.active.num_rows(), 0),
+            extract_text(
+                &sel,
+                &screen,
+                screen.active.num_rows(),
+                ScrollOffset::new(0)
+            ),
             "world",
             "extract_text must start at anchor col, not back up for non-spacer"
         );

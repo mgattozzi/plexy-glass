@@ -3,7 +3,8 @@ use std::env;
 use plexy_glass_emulator::Notification;
 use plexy_glass_mux::{
     Command, HintAction, HintKind, HintState, HintTarget, KeyEvent, MouseButton, MouseEvent,
-    MouseKind, PickerEntry, SwapTarget, TreeAction, TreeNode, WheelAxis, blocks, palette,
+    MouseKind, PickerEntry, ScrollOffset, SwapTarget, TreeAction, TreeNode, UnifiedLine, WheelAxis,
+    blocks, palette,
 };
 use tokio::sync::broadcast;
 use tokio::time;
@@ -993,7 +994,11 @@ fn inject_scrollback_prompts(m: &WindowManager, n: usize, prompts: &[usize]) {
 }
 
 fn active_scroll_offset(m: &WindowManager) -> u32 {
-    m.active_window().active_pane().unwrap().scroll_offset()
+    m.active_window()
+        .active_pane()
+        .unwrap()
+        .scroll_offset()
+        .get()
 }
 
 // Offset math, pinned: at offset N the compositor shows N scrollback rows
@@ -1046,7 +1051,7 @@ async fn next_prompt_walks_forward_then_snaps_to_live() {
     .unwrap();
     inject_scrollback_prompts(&m, 10, &[2, 6]);
     let pane = m.active_window().active_pane().unwrap();
-    pane.set_scroll_offset(8, 10); // top = 2 (the oldest prompt)
+    pane.set_scroll_offset(ScrollOffset::new(8), ScrollOffset::new(10)); // top = 2 (the oldest prompt)
     // Next prompt below 2 is 6 → offset 4.
     m.handle_command(Command::NextPrompt).unwrap();
     assert_eq!(active_scroll_offset(&m), 4);
@@ -1080,7 +1085,7 @@ async fn next_prompt_snaps_to_live_when_the_prompt_is_in_the_grid() {
     // A prompt on grid row 3 = absolute line 13 (> scrollback_len 10): the
     // target offset would be negative; it saturates to live.
     pane.with_screen_mut(|s| s.active.rows[3].mark.set(RowMark::PROMPT_START));
-    pane.set_scroll_offset(6, 10); // top = 4: next prompt is the grid one
+    pane.set_scroll_offset(ScrollOffset::new(6), ScrollOffset::new(10)); // top = 4: next prompt is the grid one
     m.handle_command(Command::NextPrompt).unwrap();
     assert_eq!(active_scroll_offset(&m), 0);
 }
@@ -1126,7 +1131,7 @@ async fn prev_prompt_lands_target_at_top_under_a_fold() {
         let (off, max) = pane.with_screen(|s| {
             let r = s.active.num_rows();
             (
-                blocks::scroll_offset_for_top(s, r, 3),
+                blocks::scroll_offset_for_top(s, r, UnifiedLine::new(3)),
                 blocks::max_scroll_offset(s, r),
             )
         });
@@ -1137,13 +1142,17 @@ async fn prev_prompt_lands_target_at_top_under_a_fold() {
         let off = p.scroll_offset();
         p.with_screen(|s| blocks::scroll_line_at(s, s.active.num_rows(), off, 0))
     };
-    assert_eq!(top_line(&m), 3, "setup: block1 prompt at the top");
+    assert_eq!(
+        top_line(&m),
+        UnifiedLine::new(3),
+        "setup: block1 prompt at the top"
+    );
     // Prev-prompt jumps to block0's prompt (unified 0), which must land at the
     // top exactly despite the fold (unified 1,2) below it.
     m.handle_command(Command::PrevPrompt).unwrap();
     assert_eq!(
         top_line(&m),
-        0,
+        UnifiedLine::new(0),
         "prev-prompt lands the target at the top under a fold"
     );
 }
@@ -1210,7 +1219,7 @@ async fn block_scroll_without_marks_prev_noops_and_next_goes_live() {
     m.active_window()
         .active_pane()
         .unwrap()
-        .set_scroll_offset(5, 10);
+        .set_scroll_offset(ScrollOffset::new(5), ScrollOffset::new(10));
     m.handle_command(Command::PrevPrompt).unwrap();
     assert_eq!(active_scroll_offset(&m), 5, "prev keeps a manual scroll");
     m.handle_command(Command::NextPrompt).unwrap();
@@ -3934,8 +3943,8 @@ async fn prompt_click_while_scrolled_jumps_to_viewport_top() {
     // Scroll so top visible absolute line = 2 (offset = 10 - 2 = 8).
     // Pane-local row 1 → abs line 3 (the prompt).
     let pane = m.active_window().active_pane().unwrap().clone();
-    pane.set_scroll_offset(8, 10);
-    assert_eq!(pane.scroll_offset(), 8);
+    pane.set_scroll_offset(ScrollOffset::new(8), ScrollOffset::new(10));
+    assert_eq!(pane.scroll_offset(), ScrollOffset::new(8));
 
     // Physical row 2 → pane-local row 1 → abs line 3 (the prompt).
     m.handle_mouse(plain_left_press(2, 5)).await.unwrap();
@@ -3943,7 +3952,7 @@ async fn prompt_click_while_scrolled_jumps_to_viewport_top() {
     // Expected new offset: sb - abs_line = 10 - 3 = 7.
     assert_eq!(
         pane.scroll_offset(),
-        7,
+        ScrollOffset::new(7),
         "prompt row should be at viewport top (offset 7)"
     );
 }
@@ -3971,7 +3980,7 @@ async fn non_prompt_click_while_scrolled_leaves_offset_unchanged() {
     // 10 scrollback rows; prompt at absolute line 3 only.
     inject_scrollback_prompts(&m, 10, &[3]);
     let pane = m.active_window().active_pane().unwrap().clone();
-    pane.set_scroll_offset(8, 10);
+    pane.set_scroll_offset(ScrollOffset::new(8), ScrollOffset::new(10));
 
     // Physical row 1 → pane-local row 0 → abs line 2 (NOT a prompt).
     m.handle_mouse(plain_left_press(1, 5)).await.unwrap();
@@ -3979,7 +3988,7 @@ async fn non_prompt_click_while_scrolled_leaves_offset_unchanged() {
     // Offset must be unchanged; a selection started instead.
     assert_eq!(
         pane.scroll_offset(),
-        8,
+        ScrollOffset::new(8),
         "offset unchanged on non-prompt click"
     );
     assert!(
@@ -4043,20 +4052,24 @@ async fn shift_click_on_scrolled_prompt_row_extends_selection_not_jumps() {
     .unwrap();
     inject_scrollback_prompts(&m, 10, &[3]);
     let pane = m.active_window().active_pane().unwrap().clone();
-    pane.set_scroll_offset(8, 10);
+    pane.set_scroll_offset(ScrollOffset::new(8), ScrollOffset::new(10));
 
     // Seed a selection with a plain click (physical row 1 → local row 0 →
     // abs line 2, non-prompt) so the selection starts.
     m.handle_mouse(plain_left_press(1, 2)).await.unwrap();
     assert!(m.selection().is_some(), "premise: selection seeded");
     // Reset the offset so we're still scrolled back for the next step.
-    pane.set_scroll_offset(8, 10);
+    pane.set_scroll_offset(ScrollOffset::new(8), ScrollOffset::new(10));
 
     // Shift+click on physical row 2 → local row 1 → abs line 3 (the prompt).
     m.handle_mouse(shift_left_press(2, 5)).await.unwrap();
 
     // Shift+click fires the extend branch BEFORE the prompt-jump rung.
-    assert_eq!(pane.scroll_offset(), 8, "shift+click: offset unchanged");
+    assert_eq!(
+        pane.scroll_offset(),
+        ScrollOffset::new(8),
+        "shift+click: offset unchanged"
+    );
     assert!(
         m.selection().is_some(),
         "shift+click: selection still active"
@@ -4095,7 +4108,7 @@ async fn prompt_click_on_grid_portion_snaps_to_live() {
     let pane = m.active_window().active_pane().unwrap().clone();
     // Scroll so top = abs line 3 (offset = 5 - 3 = 2).
     // Pane-local row 2 → abs line 5 (grid row 0, the prompt).
-    pane.set_scroll_offset(2, 5);
+    pane.set_scroll_offset(ScrollOffset::new(2), ScrollOffset::new(5));
 
     // Physical row 3 → pane-local row 2 → abs line 5.
     m.handle_mouse(plain_left_press(3, 5)).await.unwrap();
@@ -4103,7 +4116,7 @@ async fn prompt_click_on_grid_portion_snaps_to_live() {
     // sb.saturating_sub(5) = 0 → snaps to live.
     assert_eq!(
         pane.scroll_offset(),
-        0,
+        ScrollOffset::new(0),
         "grid-portion prompt click saturates to live"
     );
 }
@@ -4128,7 +4141,7 @@ async fn app_mouse_mode_passthrough_unaffected_by_prompt_jump() {
     .unwrap();
     inject_scrollback_prompts(&m, 10, &[3]);
     let pane = m.active_window().active_pane().unwrap().clone();
-    pane.set_scroll_offset(8, 10);
+    pane.set_scroll_offset(ScrollOffset::new(8), ScrollOffset::new(10));
 
     // Turn on app mouse mode so Rule 5 (passthrough) fires.
     pane.with_screen_mut(|s| s.modes.insert(plexy_glass_emulator::Modes::MOUSE_BTN));
@@ -4140,7 +4153,7 @@ async fn app_mouse_mode_passthrough_unaffected_by_prompt_jump() {
     // Rule 5 forwarded the event, so J4's rung never ran and the offset is unchanged.
     assert_eq!(
         pane.scroll_offset(),
-        8,
+        ScrollOffset::new(8),
         "app mouse mode: passthrough, no offset change"
     );
 }
@@ -4166,19 +4179,27 @@ async fn double_click_after_prompt_jump_does_not_panic() {
     .unwrap();
     inject_scrollback_prompts(&m, 10, &[3]);
     let pane = m.active_window().active_pane().unwrap().clone();
-    pane.set_scroll_offset(8, 10);
+    pane.set_scroll_offset(ScrollOffset::new(8), ScrollOffset::new(10));
 
     // First click: physical row 2 → local row 1 → abs line 3 (prompt) →
     // jumps to offset 7 (prompt at top).
     m.handle_mouse(plain_left_press(2, 5)).await.unwrap();
-    assert_eq!(pane.scroll_offset(), 7, "first click: offset updated to 7");
+    assert_eq!(
+        pane.scroll_offset(),
+        ScrollOffset::new(7),
+        "first click: offset updated to 7"
+    );
 
     // Second click at the same physical position: offset is now 7, top = 3,
     // local row 1 → abs line 4 (NOT a prompt) → falls through to selection.
     // Must not panic.
     m.handle_mouse(plain_left_press(2, 5)).await.unwrap();
     // State is sane (no panic). Offset unchanged from 7; selection started.
-    assert_eq!(pane.scroll_offset(), 7, "second click: offset unchanged");
+    assert_eq!(
+        pane.scroll_offset(),
+        ScrollOffset::new(7),
+        "second click: offset unchanged"
+    );
     assert!(m.selection().is_some(), "second click: selection started");
 }
 

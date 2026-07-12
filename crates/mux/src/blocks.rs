@@ -12,6 +12,8 @@
 
 use plexy_glass_emulator::{Row, RowMark, Screen, WrapOrigin};
 
+use crate::line::{ScrollOffset, UnifiedLine, VisibleLine};
+
 /// Row at absolute `line` (scrollback rows first, then the active grid).
 pub(crate) fn row_at(screen: &Screen, line: u32) -> Option<&Row> {
     let scrollback = screen.scrollback.rows();
@@ -765,8 +767,8 @@ impl FoldProjection {
 
     /// The unified line shown at visible position `visible_idx`, clamped to the
     /// last line when `visible_idx` is past the end.
-    pub fn to_unified(&self, visible_idx: u32) -> u32 {
-        let mut u = visible_idx;
+    pub fn to_unified(&self, visible_idx: VisibleLine) -> UnifiedLine {
+        let mut u = visible_idx.get();
         for &(s, e) in &self.hidden {
             if s <= u {
                 u += e - s + 1;
@@ -778,14 +780,15 @@ impl FoldProjection {
         // when u > total (visible_idx past visible_total), which never occurs
         // for valid callers, since u after the loop is always within [0, total-1].
         if self.total == 0 {
-            0
+            UnifiedLine::new(0)
         } else {
-            u.min(self.total - 1)
+            UnifiedLine::new(u.min(self.total - 1))
         }
     }
 
     /// The visible index of `unified`, or `None` when it falls inside a fold.
-    pub fn from_unified(&self, unified: u32) -> Option<u32> {
+    pub fn from_unified(&self, unified: UnifiedLine) -> Option<VisibleLine> {
+        let unified = unified.get();
         let mut vis = unified;
         for &(s, e) in &self.hidden {
             if e < unified {
@@ -796,7 +799,7 @@ impl FoldProjection {
                 break;
             }
         }
-        Some(vis)
+        Some(VisibleLine::new(vis))
     }
 }
 
@@ -809,31 +812,40 @@ impl FoldProjection {
 
 /// Max scroll offset for a pane of `rows` rows: scrolled all the way up, the
 /// oldest visible line sits at the top.
-pub fn max_scroll_offset(screen: &Screen, rows: u16) -> u32 {
-    FoldProjection::build(screen)
-        .visible_total()
-        .saturating_sub(u32::from(rows))
+pub fn max_scroll_offset(screen: &Screen, rows: u16) -> ScrollOffset {
+    ScrollOffset::new(
+        FoldProjection::build(screen)
+            .visible_total()
+            .saturating_sub(u32::from(rows)),
+    )
 }
 
 /// The unified line shown at display `row` for a pane of `rows` rows scrolled
 /// `offset` visible lines up. (`row` 0 = the top visible line.)
-pub fn scroll_line_at(screen: &Screen, rows: u16, offset: u32, row: u16) -> u32 {
+pub fn scroll_line_at(screen: &Screen, rows: u16, offset: ScrollOffset, row: u16) -> UnifiedLine {
     let p = FoldProjection::build(screen);
+    // Top VISIBLE line = visible page top minus the scroll offset (all counts).
     let top = p
         .visible_total()
         .saturating_sub(u32::from(rows))
-        .saturating_sub(offset);
-    p.to_unified(top + u32::from(row))
+        .saturating_sub(offset.get());
+    p.to_unified(VisibleLine::new(top + u32::from(row)))
 }
 
 /// The visible scroll offset that puts `target_unified` at the viewport top of a
 /// pane of `rows` rows. Saturates to 0 (live) when the target sits within the
 /// bottom `rows` visible lines.
-pub fn scroll_offset_for_top(screen: &Screen, rows: u16, target_unified: u32) -> u32 {
+pub fn scroll_offset_for_top(
+    screen: &Screen,
+    rows: u16,
+    target_unified: UnifiedLine,
+) -> ScrollOffset {
     let p = FoldProjection::build(screen);
+    // `max` is the max offset (max page top), `target_visible` the target's
+    // visible index; the offset that lands it at the top is `max − target_visible`.
     let max = p.visible_total().saturating_sub(u32::from(rows));
-    let target_visible = p.from_unified(target_unified).unwrap_or(0);
-    max.saturating_sub(target_visible)
+    let target_visible = p.from_unified(target_unified).map_or(0, VisibleLine::get);
+    ScrollOffset::new(max.saturating_sub(target_visible))
 }
 
 #[cfg(test)]
@@ -1886,8 +1898,11 @@ mod tests {
         assert!(p.is_identity());
         assert_eq!(p.visible_total(), total_lines(&s));
         for i in 0..total_lines(&s) {
-            assert_eq!(p.to_unified(i), i);
-            assert_eq!(p.from_unified(i), Some(i));
+            assert_eq!(p.to_unified(VisibleLine::new(i)), UnifiedLine::new(i));
+            assert_eq!(
+                p.from_unified(UnifiedLine::new(i)),
+                Some(VisibleLine::new(i))
+            );
         }
     }
 
@@ -1900,15 +1915,32 @@ mod tests {
         assert!(!p.is_identity());
         assert_eq!(p.visible_total(), 6);
         // Command row stays; output hidden; next prompt follows directly.
-        assert_eq!(p.to_unified(0), 0, "command row visible");
-        assert_eq!(p.to_unified(1), 3, "output 1,2 skipped → next prompt");
-        assert_eq!(p.to_unified(2), 4);
+        assert_eq!(
+            p.to_unified(VisibleLine::new(0)),
+            UnifiedLine::new(0),
+            "command row visible"
+        );
+        assert_eq!(
+            p.to_unified(VisibleLine::new(1)),
+            UnifiedLine::new(3),
+            "output 1,2 skipped → next prompt"
+        );
+        assert_eq!(p.to_unified(VisibleLine::new(2)), UnifiedLine::new(4));
         // Hidden lines map to None; visible lines round-trip.
-        assert_eq!(p.from_unified(0), Some(0));
-        assert_eq!(p.from_unified(1), None, "inside the fold");
-        assert_eq!(p.from_unified(2), None);
-        assert_eq!(p.from_unified(3), Some(1));
-        assert_eq!(p.from_unified(4), Some(2));
+        assert_eq!(
+            p.from_unified(UnifiedLine::new(0)),
+            Some(VisibleLine::new(0))
+        );
+        assert_eq!(p.from_unified(UnifiedLine::new(1)), None, "inside the fold");
+        assert_eq!(p.from_unified(UnifiedLine::new(2)), None);
+        assert_eq!(
+            p.from_unified(UnifiedLine::new(3)),
+            Some(VisibleLine::new(1))
+        );
+        assert_eq!(
+            p.from_unified(UnifiedLine::new(4)),
+            Some(VisibleLine::new(2))
+        );
     }
 
     #[test]
@@ -1918,24 +1950,39 @@ mod tests {
         set_block_folded(&mut s, 0, true);
         let rows = 4u16;
         // Max scroll = visible_total(6) - rows(4) = 2.
-        assert_eq!(max_scroll_offset(&s, rows), 2);
+        assert_eq!(max_scroll_offset(&s, rows), ScrollOffset::new(2));
         // At offset 0 the top display row is visible_total-rows = 2 → unified 4
         // (visible seq 0,3,4,5,6,7 → index 2 is unified 4).
-        assert_eq!(scroll_line_at(&s, rows, 0, 0), 4);
+        assert_eq!(
+            scroll_line_at(&s, rows, ScrollOffset::new(0), 0),
+            UnifiedLine::new(4)
+        );
         // Scrolled to the top (offset 2): top display row is unified 0 (the $a
         // prompt), display row 1 skips the fold → unified 3 ($two prompt).
-        assert_eq!(scroll_line_at(&s, rows, 2, 0), 0);
-        assert_eq!(scroll_line_at(&s, rows, 2, 1), 3);
+        assert_eq!(
+            scroll_line_at(&s, rows, ScrollOffset::new(2), 0),
+            UnifiedLine::new(0)
+        );
+        assert_eq!(
+            scroll_line_at(&s, rows, ScrollOffset::new(2), 1),
+            UnifiedLine::new(3)
+        );
         // Offset that lands the $two prompt (unified 3) at the top: from_unified(3)
         // = 1, max(2) - 1 = 1.
-        assert_eq!(scroll_offset_for_top(&s, rows, 3), 1);
         assert_eq!(
-            scroll_line_at(&s, rows, 1, 0),
-            3,
+            scroll_offset_for_top(&s, rows, UnifiedLine::new(3)),
+            ScrollOffset::new(1)
+        );
+        assert_eq!(
+            scroll_line_at(&s, rows, ScrollOffset::new(1), 0),
+            UnifiedLine::new(3),
             "the prompt is at the top"
         );
         // A target within the bottom `rows` visible lines snaps to live (0).
-        assert_eq!(scroll_offset_for_top(&s, rows, 7), 0);
+        assert_eq!(
+            scroll_offset_for_top(&s, rows, UnifiedLine::new(7)),
+            ScrollOffset::new(0)
+        );
     }
 
     #[test]
@@ -1956,12 +2003,15 @@ mod tests {
         let p = FoldProjection::build(&s);
         assert_eq!(p.visible_total(), 6, "8 − 2 hidden rows");
         // Visible unified sequence: 0,2,4,5,6,7.
-        assert_eq!(p.to_unified(0), 0);
-        assert_eq!(p.to_unified(1), 2);
-        assert_eq!(p.to_unified(2), 4);
-        assert_eq!(p.from_unified(1), None);
-        assert_eq!(p.from_unified(3), None);
-        assert_eq!(p.from_unified(4), Some(2));
+        assert_eq!(p.to_unified(VisibleLine::new(0)), UnifiedLine::new(0));
+        assert_eq!(p.to_unified(VisibleLine::new(1)), UnifiedLine::new(2));
+        assert_eq!(p.to_unified(VisibleLine::new(2)), UnifiedLine::new(4));
+        assert_eq!(p.from_unified(UnifiedLine::new(1)), None);
+        assert_eq!(p.from_unified(UnifiedLine::new(3)), None);
+        assert_eq!(
+            p.from_unified(UnifiedLine::new(4)),
+            Some(VisibleLine::new(2))
+        );
     }
 
     // ── Targeted mutation-kill tests ─────────────────────────────────────────

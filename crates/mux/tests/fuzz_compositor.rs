@@ -6,7 +6,7 @@
 
 use plexy_glass_emulator::Emulator;
 use plexy_glass_mux::compositor::compose;
-use plexy_glass_mux::{PaneDragRole, PaneId, PaneView, Rect, StatusPlacement};
+use plexy_glass_mux::{PaneDragRole, PaneId, PaneView, Rect, ScrollOffset, StatusPlacement};
 
 #[test]
 fn fuzz_compose_does_not_panic() {
@@ -31,7 +31,7 @@ fn fuzz_compose_does_not_panic() {
             rect: Rect::new(0, 0, rows, cols),
             screen,
             is_active: true,
-            scroll_offset: scroll,
+            scroll_offset: ScrollOffset::new(scroll),
             copy_mode: None,
             block_mode: None,
             title: None,

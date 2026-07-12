@@ -14,7 +14,7 @@ use bytes::Bytes;
 use nix::unistd::Pid;
 use plexy_glass_config::{Config, PaletteConfig};
 use plexy_glass_emulator::{ColorQuery, Emulator, Notification, Screen};
-use plexy_glass_mux::PaneId;
+use plexy_glass_mux::{PaneId, ScrollOffset};
 use plexy_glass_protocol::{ExitStatus, PtySize, SpawnSpec};
 use plexy_glass_status::Rgb;
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize as PortablePtySize};
@@ -549,21 +549,19 @@ impl Pane {
         f(emu.screen_mut())
     }
 
-    pub fn scroll_offset(&self) -> u32 {
-        self.inner.scroll_offset.load(Ordering::SeqCst)
+    pub fn scroll_offset(&self) -> ScrollOffset {
+        ScrollOffset::new(self.inner.scroll_offset.load(Ordering::SeqCst))
     }
 
     /// Adjust the scroll offset by `delta` rows (positive = up into
     /// scrollback, negative = down toward live). Clamps to `[0, max]`.
-    pub fn scroll_by(&self, delta: i32, max_offset: u32) {
+    pub fn scroll_by(&self, delta: i32, max_offset: ScrollOffset) {
+        let max = i64::from(max_offset.get());
         let _ =
             self.inner
                 .scroll_offset
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                    Some(
-                        (i64::from(current) + i64::from(delta)).clamp(0, i64::from(max_offset))
-                            as u32,
-                    )
+                    Some((i64::from(current) + i64::from(delta)).clamp(0, max) as u32)
                 });
     }
 
@@ -574,10 +572,10 @@ impl Pane {
     /// Set the absolute scroll offset (scrollback rows shown above the live
     /// grid), clamped to `[0, max_offset]`. The block-scroll verbs compute a
     /// target offset and need an absolute set; `scroll_by` is relative.
-    pub fn set_scroll_offset(&self, offset: u32, max_offset: u32) {
+    pub fn set_scroll_offset(&self, offset: ScrollOffset, max_offset: ScrollOffset) {
         self.inner
             .scroll_offset
-            .store(offset.min(max_offset), Ordering::SeqCst);
+            .store(offset.get().min(max_offset.get()), Ordering::SeqCst);
     }
 
     pub fn scrollback_len(&self) -> u32 {
@@ -758,7 +756,7 @@ fn wait_child(child: &mut Box<dyn Child + Send + Sync>) -> ExitStatus {
 
 #[cfg(test)]
 mod tests {
-    use plexy_glass_mux::PaneId;
+    use plexy_glass_mux::{PaneId, ScrollOffset};
     use tokio::sync::Notify;
     use tokio::time::{self, Instant};
 
@@ -1182,7 +1180,7 @@ mod tests {
             cfg(),
         )
         .expect("spawn");
-        assert_eq!(p.scroll_offset(), 0);
+        assert_eq!(p.scroll_offset(), ScrollOffset::new(0));
     }
 
     #[tokio::test]
@@ -1202,16 +1200,16 @@ mod tests {
             cfg(),
         )
         .expect("spawn");
-        p.scroll_by(-5, 100);
-        assert_eq!(p.scroll_offset(), 0);
-        p.scroll_by(3, 10);
-        assert_eq!(p.scroll_offset(), 3);
-        p.scroll_by(-1, 10);
-        assert_eq!(p.scroll_offset(), 2);
-        p.scroll_by(100, 10);
-        assert_eq!(p.scroll_offset(), 10);
+        p.scroll_by(-5, ScrollOffset::new(100));
+        assert_eq!(p.scroll_offset(), ScrollOffset::new(0));
+        p.scroll_by(3, ScrollOffset::new(10));
+        assert_eq!(p.scroll_offset(), ScrollOffset::new(3));
+        p.scroll_by(-1, ScrollOffset::new(10));
+        assert_eq!(p.scroll_offset(), ScrollOffset::new(2));
+        p.scroll_by(100, ScrollOffset::new(10));
+        assert_eq!(p.scroll_offset(), ScrollOffset::new(10));
         p.reset_scroll();
-        assert_eq!(p.scroll_offset(), 0);
+        assert_eq!(p.scroll_offset(), ScrollOffset::new(0));
         let _ = p.send_input(bytes::Bytes::from_static(&[0x04])).await;
     }
 
@@ -1232,15 +1230,19 @@ mod tests {
             cfg(),
         )
         .expect("spawn");
-        p.set_scroll_offset(7, 10);
-        assert_eq!(p.scroll_offset(), 7);
+        p.set_scroll_offset(ScrollOffset::new(7), ScrollOffset::new(10));
+        assert_eq!(p.scroll_offset(), ScrollOffset::new(7));
         // Absolute, not relative: setting 3 lands on 3, not 10.
-        p.set_scroll_offset(3, 10);
-        assert_eq!(p.scroll_offset(), 3);
-        p.set_scroll_offset(99, 10);
-        assert_eq!(p.scroll_offset(), 10, "clamped to max_offset");
-        p.set_scroll_offset(0, 10);
-        assert_eq!(p.scroll_offset(), 0);
+        p.set_scroll_offset(ScrollOffset::new(3), ScrollOffset::new(10));
+        assert_eq!(p.scroll_offset(), ScrollOffset::new(3));
+        p.set_scroll_offset(ScrollOffset::new(99), ScrollOffset::new(10));
+        assert_eq!(
+            p.scroll_offset(),
+            ScrollOffset::new(10),
+            "clamped to max_offset"
+        );
+        p.set_scroll_offset(ScrollOffset::new(0), ScrollOffset::new(10));
+        assert_eq!(p.scroll_offset(), ScrollOffset::new(0));
         let _ = p.send_input(bytes::Bytes::from_static(&[0x04])).await;
     }
 

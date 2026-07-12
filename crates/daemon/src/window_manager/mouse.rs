@@ -653,7 +653,7 @@ impl WindowManager {
             && let Some(pane) = self.active_window().pane(pane_id)
         {
             let scroll_offset = pane.scroll_offset();
-            if scroll_offset > 0 {
+            if scroll_offset.get() > 0 {
                 let jumped = pane.with_screen(|s| {
                     // Fold-aware: map the clicked display row to its unified line
                     // through the visible-space projection.
@@ -663,7 +663,7 @@ impl WindowManager {
                     // prev_prompt_line(s, abs_line + 1) == Some(abs_line) iff
                     // abs_line itself carries PROMPT_START.
                     let is_prompt =
-                        prev_prompt_line(s, abs_line.saturating_add(1)) == Some(abs_line);
+                        prev_prompt_line(s, abs_line.advance(1).get()) == Some(abs_line.get());
                     if is_prompt {
                         // Put the prompt at the viewport top (visible-space offset;
                         // a line already in the live view saturates to 0).
@@ -767,7 +767,7 @@ impl WindowManager {
         self.selection_press_scroll = self
             .active_window()
             .pane(pane_id)
-            .map_or(0, super::super::pane::Pane::scroll_offset);
+            .map_or(0, |p| p.scroll_offset().get());
         Ok(())
     }
 
@@ -806,7 +806,7 @@ impl WindowManager {
             // still injects arrows, exactly as a bare terminal would.
             if self.selection_press_scroll == 0
                 && let Some(pane) = self.active_window().pane(sel.source_pane).cloned()
-                && pane.scroll_offset() == 0
+                && pane.scroll_offset().get() == 0
             {
                 let (row, col) = sel.anchor;
                 if osc_actions::click_to_position(&pane, row, col).await? {
