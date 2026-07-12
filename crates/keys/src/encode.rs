@@ -4,6 +4,7 @@
 //! shell (e.g. click-to-position). Production pass-through preserves the
 //! original bytes from the parser, so this is NOT in the hot path.
 
+use bitflags::bitflags;
 use plexy_glass_mux::{Direction, Key, KeyEvent, KeyEventKind, Modifiers};
 
 fn legacy_bytes(event: KeyEvent) -> Vec<u8> {
@@ -111,13 +112,49 @@ fn f1_to_f4(n: u8, mods: Modifiers) -> Vec<u8> {
     }
 }
 
-/// Where a canonical `KeyEvent` is being re-encoded to. The `u8` is the
-/// modifyOtherKeys level (0/1/2) or the Kitty flag set.
+/// The modifyOtherKeys level a pane negotiated (`\e[>4;<Pv>m`). `Off` is the
+/// unnegotiated default (plain legacy encoding); `Level1` keeps the well-known
+/// legacy keys legacy and 27-forms the rest; `Level2` 27-forms every modified
+/// key that has a codepoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModifyOtherKeysLevel {
+    Off,
+    Level1,
+    Level2,
+}
+
+impl ModifyOtherKeysLevel {
+    /// Map the negotiated wire level to the enum. The emulator clamps the wire
+    /// value to `0..=2`, so any value `>= 2` is `Level2`.
+    pub const fn from_level(level: u8) -> Self {
+        match level {
+            0 => Self::Off,
+            1 => Self::Level1,
+            _ => Self::Level2,
+        }
+    }
+}
+
+bitflags! {
+    /// Kitty keyboard-protocol progressive-enhancement flags — the low byte of a
+    /// `\e[=<flags>u`. Bit 0 (disambiguate) is what selects the protocol at all;
+    /// the higher bits drive what the CSI-u encoder actually emits.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct KittyFlags: u8 {
+        const DISAMBIGUATE_ESCAPE_CODES = 0x01;
+        const REPORT_EVENT_TYPES = 0x02;
+        const REPORT_ALTERNATE_KEYS = 0x04;
+        const REPORT_ALL_KEYS = 0x08;
+        const REPORT_ASSOCIATED_TEXT = 0x10;
+    }
+}
+
+/// Where a canonical `KeyEvent` is being re-encoded to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyboardTarget {
     Legacy,
-    ModifyOtherKeys(u8),
-    Kitty(u8),
+    ModifyOtherKeys(ModifyOtherKeysLevel),
+    Kitty(KittyFlags),
 }
 
 /// Wire modifier param = `1 + (bits & 0xFF)`. Inverse of
@@ -134,7 +171,8 @@ pub fn encode(event: &KeyEvent, target: KeyboardTarget, app_cursor: bool) -> Vec
     // a release re-encodes to the same bytes as the press and DOUBLES every
     // keystroke (the exact garble seen when an outer terminal with event-type
     // reporting feeds a legacy pane).
-    let target_reports_events = matches!(target, KeyboardTarget::Kitty(f) if f & 0x02 != 0);
+    let target_reports_events =
+        matches!(target, KeyboardTarget::Kitty(f) if f.contains(KittyFlags::REPORT_EVENT_TYPES));
     if event.kind != KeyEventKind::Press && !target_reports_events {
         return Vec::new();
     }
@@ -238,14 +276,18 @@ fn is_well_known_legacy(event: &KeyEvent) -> bool {
 
 /// modifyOtherKeys 27-form: `\e[27;<mods>;<code>~` when the level encodes this
 /// key; otherwise legacy. Unmodified keys are always legacy.
-fn modify_other_keys_bytes(event: &KeyEvent, level: u8, app_cursor: bool) -> Vec<u8> {
-    if level == 0 || event.mods.is_empty() {
+fn modify_other_keys_bytes(
+    event: &KeyEvent,
+    level: ModifyOtherKeysLevel,
+    app_cursor: bool,
+) -> Vec<u8> {
+    if matches!(level, ModifyOtherKeysLevel::Off) || event.mods.is_empty() {
         return legacy_with_cursor(event, app_cursor);
     }
     let Some(code) = key_codepoint(event.key) else {
         return legacy_with_cursor(event, app_cursor);
     };
-    if level == 1 && is_well_known_legacy(event) {
+    if level == ModifyOtherKeysLevel::Level1 && is_well_known_legacy(event) {
         return legacy_with_cursor(event, app_cursor);
     }
     let m = mods_param(event.mods);
@@ -257,12 +299,12 @@ fn modify_other_keys_bytes(event: &KeyEvent, level: u8, app_cursor: bool) -> Vec
 /// - 0x04 report_alternate_keys: include `:<shifted>[:<base>]`
 /// - 0x08 report_all_keys: Enter/Tab/Backspace stay legacy unless set
 /// - 0x10 report_associated_text: include the text param only if set
-fn kitty_bytes(event: &KeyEvent, flags: u8, app_cursor: bool) -> Vec<u8> {
+fn kitty_bytes(event: &KeyEvent, flags: KittyFlags, app_cursor: bool) -> Vec<u8> {
     let Some(code) = key_codepoint(event.key) else {
         // Arrows / F-keys / nav have no CSI-u code: keep their legacy CSI forms.
         return legacy_with_cursor(event, app_cursor);
     };
-    let all_keys = flags & 0b1000 != 0;
+    let all_keys = flags.contains(KittyFlags::REPORT_ALL_KEYS);
     // Kitty's legacy exception for Enter/Tab/Backspace applies ONLY when no
     // modifiers (beyond locks) are held; verified against kitty's encoder
     // (key_encoding.c). Every MODIFIED form, including Shift+Tab (which has a
@@ -287,9 +329,9 @@ fn kitty_bytes(event: &KeyEvent, flags: u8, app_cursor: bool) -> Vec<u8> {
             KeyEventKind::Press | KeyEventKind::Repeat => text.into_bytes(),
         };
     }
-    let report_events = flags & 0b0010 != 0;
-    let report_alts = flags & 0b0100 != 0;
-    let report_text = flags & 0b1_0000 != 0;
+    let report_events = flags.contains(KittyFlags::REPORT_EVENT_TYPES);
+    let report_alts = flags.contains(KittyFlags::REPORT_ALTERNATE_KEYS);
+    let report_text = flags.contains(KittyFlags::REPORT_ASSOCIATED_TEXT);
 
     // Param 1: code[:shifted[:base]]
     let mut key_field = code.to_string();
@@ -411,7 +453,7 @@ mod tests {
         // Ctrl+Shift+i (code 105, mods 6) at level 2 -> 27-form.
         let e = KeyEvent::new(Key::Char('i'), Modifiers::CTRL | Modifiers::SHIFT);
         assert_eq!(
-            encode(&e, KeyboardTarget::ModifyOtherKeys(2), false),
+            encode(&e, KeyboardTarget::ModifyOtherKeys(ModifyOtherKeysLevel::Level2), false),
             b"\x1b[27;6;105~"
         );
     }
@@ -420,7 +462,7 @@ mod tests {
     fn modify_other_keys_level1_leaves_tab_legacy() {
         let e = KeyEvent::plain(Key::Tab);
         assert_eq!(
-            encode(&e, KeyboardTarget::ModifyOtherKeys(1), false),
+            encode(&e, KeyboardTarget::ModifyOtherKeys(ModifyOtherKeysLevel::Level1), false),
             vec![0x09]
         );
     }
@@ -428,7 +470,7 @@ mod tests {
     #[test]
     fn modify_other_keys_unmodified_char_is_legacy() {
         let e = KeyEvent::plain(Key::Char('a'));
-        assert_eq!(encode(&e, KeyboardTarget::ModifyOtherKeys(2), false), b"a");
+        assert_eq!(encode(&e, KeyboardTarget::ModifyOtherKeys(ModifyOtherKeysLevel::Level2), false), b"a");
     }
 
     #[test]
@@ -442,25 +484,25 @@ mod tests {
         // insert-at-line-start.
         // The hx bug exactly: capital from a legacy/text outer, flags 5.
         let cap = KeyEvent::plain(Key::Char('I'));
-        assert_eq!(encode(&cap, KeyboardTarget::Kitty(5), false), b"I");
+        assert_eq!(encode(&cap, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(5)), false), b"I");
         // Shift+i from a rich outer (shifted alternate populated).
         let mut shifted = KeyEvent::new(Key::Char('i'), Modifiers::SHIFT);
         shifted.shifted = Some('I');
-        assert_eq!(encode(&shifted, KeyboardTarget::Kitty(5), false), b"I");
+        assert_eq!(encode(&shifted, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(5)), false), b"I");
         // Plain lowercase at disambiguate-only.
         let a = KeyEvent::plain(Key::Char('a'));
-        assert_eq!(encode(&a, KeyboardTarget::Kitty(1), false), b"a");
+        assert_eq!(encode(&a, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1)), false), b"a");
         // Ctrl combos produce no text: still CSI-u.
         let ctrl = KeyEvent::new(Key::Char('i'), Modifiers::CTRL);
         assert_eq!(
-            encode(&ctrl, KeyboardTarget::Kitty(5), false),
+            encode(&ctrl, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(5)), false),
             b"\x1b[105;5u"
         );
         // With report-all-keys pushed, text keys DO become escape codes.
         let mut all = KeyEvent::new(Key::Char('i'), Modifiers::SHIFT);
         all.shifted = Some('I');
         assert_eq!(
-            encode(&all, KeyboardTarget::Kitty(0b1101), false),
+            encode(&all, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(0b1101)), false),
             b"\x1b[105:73;2u"
         );
     }
@@ -472,7 +514,7 @@ mod tests {
         // event types (0b10). Only escape-coded keys report releases.
         let mut e = KeyEvent::plain(Key::Char('a'));
         e.kind = plexy_glass_mux::KeyEventKind::Release;
-        assert!(encode(&e, KeyboardTarget::Kitty(1 | 2), false).is_empty());
+        assert!(encode(&e, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1 | 2)), false).is_empty());
     }
 
     #[test]
@@ -503,21 +545,21 @@ mod tests {
         let shift_enter = KeyEvent::new(Key::Enter, Modifiers::SHIFT);
         // Kitty pane (any flags): the CSI-u form.
         assert_eq!(
-            encode(&shift_enter, KeyboardTarget::Kitty(1), false),
+            encode(&shift_enter, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1)), false),
             b"\x1b[13;2u"
         );
         assert_eq!(
-            encode(&shift_enter, KeyboardTarget::Kitty(5), false),
+            encode(&shift_enter, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(5)), false),
             b"\x1b[13;2u"
         );
         // Plain Enter at the same flags stays legacy (exact form exists).
         let enter = KeyEvent::plain(Key::Enter);
-        assert_eq!(encode(&enter, KeyboardTarget::Kitty(1), false), vec![0x0d]);
+        assert_eq!(encode(&enter, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1)), false), vec![0x0d]);
         // Shift+Tab: kitty CSI-u's it under disambiguate (the legacy \e[Z is
         // used only in full legacy mode; verified against kitty's encoder).
         let shift_tab = KeyEvent::new(Key::Tab, Modifiers::SHIFT);
         assert_eq!(
-            encode(&shift_tab, KeyboardTarget::Kitty(1), false),
+            encode(&shift_tab, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1)), false),
             b"\x1b[9;2u"
         );
         // At a LEGACY pane the same event degrades to the faithful \e[Z.
@@ -525,17 +567,17 @@ mod tests {
         // Ctrl+Tab has no legacy form: CSI-u.
         let ctrl_tab = KeyEvent::new(Key::Tab, Modifiers::CTRL);
         assert_eq!(
-            encode(&ctrl_tab, KeyboardTarget::Kitty(1), false),
+            encode(&ctrl_tab, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1)), false),
             b"\x1b[9;5u"
         );
         // modifyOtherKeys level 1: modified Enter gets the 27-form (it is NOT
         // a "well-known legacy" key once modified); plain Enter stays \r.
         assert_eq!(
-            encode(&shift_enter, KeyboardTarget::ModifyOtherKeys(1), false),
+            encode(&shift_enter, KeyboardTarget::ModifyOtherKeys(ModifyOtherKeysLevel::Level1), false),
             b"\x1b[27;2;13~"
         );
         assert_eq!(
-            encode(&enter, KeyboardTarget::ModifyOtherKeys(1), false),
+            encode(&enter, KeyboardTarget::ModifyOtherKeys(ModifyOtherKeysLevel::Level1), false),
             vec![0x0d]
         );
         // Pure legacy pane: degrade to the base key (tmux strips the
@@ -555,7 +597,7 @@ mod tests {
     fn kitty_target_csi_u_basic() {
         // disambiguate(1): Ctrl+Shift+i -> \e[105;6u
         let e = KeyEvent::new(Key::Char('i'), Modifiers::CTRL | Modifiers::SHIFT);
-        assert_eq!(encode(&e, KeyboardTarget::Kitty(1), false), b"\x1b[105;6u");
+        assert_eq!(encode(&e, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1)), false), b"\x1b[105;6u");
     }
 
     #[test]
@@ -565,10 +607,10 @@ mod tests {
         // flags=1: no report_event_types -> the release is DROPPED entirely. A
         // pane that didn't request event types must never see a release, else the
         // re-encode would emit a second keystroke and double the input.
-        assert!(encode(&e, KeyboardTarget::Kitty(1), false).is_empty());
+        assert!(encode(&e, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1)), false).is_empty());
         // flags 1|2: report_event_types -> the release is forwarded with `:3`.
         assert_eq!(
-            encode(&e, KeyboardTarget::Kitty(1 | 2), false),
+            encode(&e, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1 | 2)), false),
             b"\x1b[97;5:3u"
         );
     }
@@ -578,7 +620,7 @@ mod tests {
         let mut e = KeyEvent::new(Key::Char('a'), Modifiers::empty());
         e.kind = plexy_glass_mux::KeyEventKind::Release;
         assert!(encode(&e, KeyboardTarget::Legacy, false).is_empty());
-        assert!(encode(&e, KeyboardTarget::ModifyOtherKeys(2), false).is_empty());
+        assert!(encode(&e, KeyboardTarget::ModifyOtherKeys(ModifyOtherKeysLevel::Level2), false).is_empty());
         // A Press of the same key is unaffected.
         let p = KeyEvent::new(Key::Char('a'), Modifiers::empty());
         assert_eq!(encode(&p, KeyboardTarget::Legacy, false), b"a");
@@ -587,8 +629,8 @@ mod tests {
     #[test]
     fn kitty_keeps_enter_legacy_unless_bit8() {
         let e = KeyEvent::plain(Key::Enter);
-        assert_eq!(encode(&e, KeyboardTarget::Kitty(1), false), vec![0x0d]);
-        assert_eq!(encode(&e, KeyboardTarget::Kitty(1 | 8), false), b"\x1b[13u");
+        assert_eq!(encode(&e, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1)), false), vec![0x0d]);
+        assert_eq!(encode(&e, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1 | 8)), false), b"\x1b[13u");
     }
 
     #[test]
@@ -606,7 +648,7 @@ mod tests {
     #[test]
     fn round_trip_kitty_ctrl_i() {
         let original = KeyEvent::new(Key::Char('i'), Modifiers::CTRL);
-        let bytes = encode(&original, KeyboardTarget::Kitty(1), false);
+        let bytes = encode(&original, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1)), false);
         let mut p = KeyParser::new().with_protocol(KeyboardProtocol::Kitty);
         let mut got = None;
         for &b in &bytes {
@@ -625,12 +667,12 @@ mod tests {
         // Legacy and modifyOtherKeys-level-1 panes both get NUL (was eaten).
         assert_eq!(encode(&e, KeyboardTarget::Legacy, false), vec![0x00]);
         assert_eq!(
-            encode(&e, KeyboardTarget::ModifyOtherKeys(1), false),
+            encode(&e, KeyboardTarget::ModifyOtherKeys(ModifyOtherKeysLevel::Level1), false),
             vec![0x00]
         );
         // Level 2 reports it in the canonical 27-form (codepoint 32, mods 5).
         assert_eq!(
-            encode(&e, KeyboardTarget::ModifyOtherKeys(2), false),
+            encode(&e, KeyboardTarget::ModifyOtherKeys(ModifyOtherKeysLevel::Level2), false),
             b"\x1b[27;5;32~"
         );
         // Round-trips: the parser decodes NUL back to Ctrl+Space.

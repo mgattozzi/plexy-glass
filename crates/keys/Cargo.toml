@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 plexy-glass-mux = { path = "../mux" }
 plexy-glass-config = { path = "../config" }
+bitflags = { workspace = true }
 smol_str = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

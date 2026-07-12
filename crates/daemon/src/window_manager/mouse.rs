@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use plexy_glass_mux::{
     BorderHit, BorderSide, Command, MouseButton, MouseEncoding, MouseEvent, MouseKind, PaneId,
-    Rect, Selection, WindowId, blocks, encode_for_child, extract_text, prev_prompt_line,
+    Rect, Selection, WheelAxis, WindowId, blocks, encode_for_child, extract_text, prev_prompt_line,
 };
 
 use super::{Severity, WindowManager};
@@ -568,7 +568,7 @@ impl WindowManager {
             // verbatim via Rule 5 / encode_for_child).
             MouseKind::Wheel {
                 delta,
-                horizontal: false,
+                axis: WheelAxis::Vertical,
             } => {
                 self.handle_wheel(pane_id, delta);
                 None

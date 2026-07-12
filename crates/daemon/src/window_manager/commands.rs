@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use plexy_glass_mux::{Command, SplitDir, WindowId, blocks};
+use plexy_glass_mux::{Command, SplitDir, SwapTarget, WindowId, blocks};
 
 use super::{Severity, WindowManager};
 use crate::error::DaemonError;
@@ -142,7 +142,8 @@ impl WindowManager {
                     self.active = self.windows.len() - 1;
                 }
             }
-            Command::SwapPane(next) => {
+            Command::SwapPane(target) => {
+                let next = matches!(target, SwapTarget::Next);
                 let active = self.active_window().active();
                 if let Some(other) = self.active_window().neighbor_leaf(next) {
                     let w = self.active_window_mut();

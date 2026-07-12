@@ -7,8 +7,8 @@ mod widget;
 mod widgets;
 
 pub use engine::{
-    ClickAction, EngineInner, EvalContext, SegmentSnapshot, SnapshotCtx, StatusEngine, StatusHit,
-    WindowSummary,
+    ClickAction, CompletionFlag, EngineInner, EvalContext, SegmentSnapshot, SnapshotCtx,
+    StatusEngine, StatusHit, WindowSummary,
 };
 pub use glyphs::{Cluster, GlyphSet, powerline_zone};
 pub use style::{ResolvedStyle, Rgb, resolve_color, resolve_style};

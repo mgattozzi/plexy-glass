@@ -19,7 +19,7 @@ use crate::graphics::{
 };
 use crate::grid::{Grid, Row, RowMark, WrapOrigin};
 use crate::hyperlinks::HyperlinkTable;
-use crate::keyboard::KeyboardState;
+use crate::keyboard::{KeyboardState, ScreenBuffer};
 use crate::modes::Modes;
 use crate::parser::ScreenOps;
 use crate::scrollback::Scrollback;
@@ -81,6 +81,24 @@ pub enum ColorQuery {
 enum Charset {
     Ascii,
     DecSpecialGraphics,
+}
+
+/// Which G-set GL currently maps to. `G0` is the SI / default mapping; `G1` is
+/// selected by SO. Toggled by the SI/SO C0 controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GSet {
+    G0,
+    G1,
+}
+
+/// The outer terminal's last-known color-scheme preference, tracked so the
+/// one-shot `\e[?996n` query answer agrees with the `?2031` subscription push.
+/// Mirrors the protocol's `ColorScheme`, minted locally because the emulator is
+/// a leaf crate and cannot depend on `protocol` (that would cycle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorScheme {
+    Dark,
+    Light,
 }
 
 /// VT100 DEC Special Graphics (line-drawing) set: maps a GL byte in
@@ -181,10 +199,10 @@ pub struct Screen {
     /// (a per-PANE value set at spawn, NOT a per-client handshake value, which
     /// would be wrong under multi-client). Defaults to a 256-color xterm.
     pub term: String,
-    /// Last known outer-terminal color scheme (true = dark), set by the daemon
-    /// from the client's `\e[?997;Xn` relay. Answered to a `\e[?996n` query so
-    /// the one-shot query agrees with the `?2031` subscription push. Default dark.
-    pub color_scheme_dark: bool,
+    /// Last known outer-terminal color scheme, set by the daemon from the
+    /// client's `\e[?997;Xn` relay. Answered to a `\e[?996n` query so the
+    /// one-shot query agrees with the `?2031` subscription push. Default dark.
+    pub color_scheme: ColorScheme,
     /// Monotonic count of completed blocks (`133;D` received on the main grid).
     /// Survives row eviction and `ED 2J` clears because it is not row state.
     /// Transient across daemon restart (like all block state). Reset to 0 by
@@ -237,9 +255,9 @@ pub struct Screen {
     charset_g0: Charset,
     /// Charset designated into G1 (`ESC ) 0` / `ESC ) B`). Default ASCII.
     charset_g1: Charset,
-    /// Which G-set GL currently maps to: `false` = G0 (SI / default),
-    /// `true` = G1 (SO). Toggled by the SI/SO C0 controls.
-    charset_shift_out: bool,
+    /// Which G-set GL currently maps to (`G0` = SI / default, `G1` = SO).
+    /// Toggled by the SI/SO C0 controls.
+    gl: GSet,
 }
 
 impl Screen {
@@ -264,7 +282,7 @@ impl Screen {
             pending_notifications: Vec::new(),
             kbd: KeyboardState::default(),
             term: String::from("xterm-256color"),
-            color_scheme_dark: true,
+            color_scheme: ColorScheme::Dark,
             blocks_completed: 0,
             last_block_exit: None,
             last_block_duration: None,
@@ -283,13 +301,13 @@ impl Screen {
             last_graphic: None,
             charset_g0: Charset::Ascii,
             charset_g1: Charset::Ascii,
-            charset_shift_out: false,
+            gl: GSet::G0,
         }
     }
 
     /// The charset GL currently maps to (G1 when shifted out, else G0).
     const fn active_charset(&self) -> Charset {
-        if self.charset_shift_out {
+        if matches!(self.gl, GSet::G1) {
             self.charset_g1
         } else {
             self.charset_g0
@@ -765,11 +783,11 @@ impl Screen {
         self.term = term;
     }
 
-    /// Record the outer-terminal color scheme (true = dark) so a `\e[?996n`
-    /// query answers the real preference. The daemon calls this when it relays a
-    /// `\e[?997;Xn` from the client.
-    pub const fn set_color_scheme_dark(&mut self, dark: bool) {
-        self.color_scheme_dark = dark;
+    /// Record the outer-terminal color scheme so a `\e[?996n` query answers the
+    /// real preference. The daemon calls this when it relays a `\e[?997;Xn` from
+    /// the client.
+    pub const fn set_color_scheme(&mut self, scheme: ColorScheme) {
+        self.color_scheme = scheme;
     }
 
     /// Drain queued replies. The daemon calls this after `Emulator::advance`
@@ -1047,8 +1065,8 @@ impl Screen {
                 self.cursor.col = 0;
                 self.cursor.pending_wrap = false;
             }
-            0x0E => self.charset_shift_out = true, // SO (shift out): GL → G1
-            0x0F => self.charset_shift_out = false, // SI (shift in): GL → G0
+            0x0E => self.gl = GSet::G1, // SO (shift out): GL → G1
+            0x0F => self.gl = GSet::G0, // SI (shift in): GL → G0
             _ => {
                 tracing::trace!(byte, "unhandled C0 control");
             }
@@ -1350,9 +1368,12 @@ impl Screen {
                     // regardless of the ?2031 subscription.
                     if mode == 996 {
                         // Pm: 1 = dark, 2 = light, from the daemon-tracked
-                        // preference (set via `set_color_scheme_dark`), not a
+                        // preference (set via `set_color_scheme`), not a
                         // hardcoded default, so it agrees with the ?2031 push.
-                        let pm = if self.color_scheme_dark { 1 } else { 2 };
+                        let pm = match self.color_scheme {
+                            ColorScheme::Dark => 1,
+                            ColorScheme::Light => 2,
+                        };
                         self.replies.push(format!("\x1b[?997;{pm}n").into_bytes());
                     } else {
                         tracing::trace!(mode, "unhandled private DSR");
@@ -1512,7 +1533,11 @@ impl Screen {
     /// `?` query → reply `\e[?<flags>u`; `=` set-in-place (mode 1/2/3);
     /// `>` push (default 0); `<` pop (default 1, empty-stack resets to 0).
     fn handle_kitty_kbd(&mut self, params: &vte::Params, intermediates: &[u8]) {
-        let alt = self.modes.contains(Modes::ALT_SCREEN);
+        let screen = if self.modes.contains(Modes::ALT_SCREEN) {
+            ScreenBuffer::Alt
+        } else {
+            ScreenBuffer::Main
+        };
         fn first_param(p: &vte::Params) -> Option<u16> {
             p.iter().next().and_then(|g| g.first().copied())
         }
@@ -1521,7 +1546,7 @@ impl Screen {
         }
         match intermediates.first() {
             Some(b'?') => {
-                let flags = self.kbd.kitty_flags(alt);
+                let flags = self.kbd.kitty_flags(screen);
                 self.replies.push(format!("\x1b[?{flags}u").into_bytes());
             }
             Some(b'=') => {
@@ -1530,16 +1555,16 @@ impl Screen {
                 // byte still yields a valid (if unusual) flag set.
                 let flags = first_param(params).unwrap_or(0) as u8;
                 let mode = second_param(params).unwrap_or(1) as u8;
-                self.kbd.kitty_set(alt, flags, mode);
+                self.kbd.kitty_set(screen, flags, mode);
             }
             Some(b'>') => {
                 // invariant: see the `=` arm, flags truncate to the low byte.
                 let flags = first_param(params).unwrap_or(0) as u8;
-                self.kbd.kitty_push(alt, flags);
+                self.kbd.kitty_push(screen, flags);
             }
             Some(b'<') => {
                 let n = first_param(params).unwrap_or(1);
-                self.kbd.kitty_pop(alt, n);
+                self.kbd.kitty_pop(screen, n);
             }
             _ => {
                 tracing::trace!(?intermediates, "unhandled CSI u");
@@ -1561,7 +1586,7 @@ impl Screen {
         self.saved_cursor = None;
         self.charset_g0 = Charset::Ascii;
         self.charset_g1 = Charset::Ascii;
-        self.charset_shift_out = false;
+        self.gl = GSet::G0;
     }
 
     /// DECRQM (`\e[?Ps$p` private / `\e[Ps$p` ANSI). Reply `\e[?Ps;Pm$y`
@@ -1892,10 +1917,10 @@ impl Screen {
                 // it was launched with for the rest of the pane's life.
                 let (rows, cols) = (self.rows(), self.cols());
                 let term = mem::take(&mut self.term);
-                let scheme_dark = self.color_scheme_dark;
+                let scheme = self.color_scheme;
                 *self = Self::new(rows, cols);
                 self.term = term;
-                self.color_scheme_dark = scheme_dark;
+                self.color_scheme = scheme;
             }
             b'M' => {
                 let (top, _) = self.scroll_region;
@@ -4234,19 +4259,19 @@ mod tests {
     fn kitty_push_then_query_reports_flags() {
         // \e[>15u pushes flags 15; \e[?u queries → \e[?15u.
         let s = parse(b"\x1b[>15u\x1b[?uX");
-        assert_eq!(s.kbd.kitty_flags(false), 15);
+        assert_eq!(s.kbd.kitty_flags(ScreenBuffer::Main), 15);
         assert_eq!(s.replies, vec![b"\x1b[?15u".to_vec()]);
     }
     #[test]
     fn kitty_set_clear_bits_mode_3() {
         // Set flags to 15 (mode 1 set-exactly), then \e[=4;3u clears bit 4 → 11.
         let s = parse(b"\x1b[=15;1u\x1b[=4;3uX");
-        assert_eq!(s.kbd.kitty_flags(false), 11);
+        assert_eq!(s.kbd.kitty_flags(ScreenBuffer::Main), 11);
     }
     #[test]
     fn kitty_pop_empty_stack_resets_to_zero() {
         let s = parse(b"\x1b[>7u\x1b[<u\x1b[<uX");
-        assert_eq!(s.kbd.kitty_flags(false), 0);
+        assert_eq!(s.kbd.kitty_flags(ScreenBuffer::Main), 0);
     }
     #[test]
     fn kitty_stacks_are_per_screen() {
@@ -4254,13 +4279,13 @@ mod tests {
         let mut s = Screen::new(8, 24);
         p.advance(&mut s, b"\x1b[>5u\x1b[?1049h\x1b[>9uX");
         p.flush(&mut s);
-        assert_eq!(s.kbd.kitty_flags(true), 9, "alt screen flags");
-        assert_eq!(s.kbd.kitty_flags(false), 5, "main screen flags unchanged");
+        assert_eq!(s.kbd.kitty_flags(ScreenBuffer::Alt), 9, "alt screen flags");
+        assert_eq!(s.kbd.kitty_flags(ScreenBuffer::Main), 5, "main screen flags unchanged");
     }
     #[test]
     fn kitty_flags_cleared_on_ris() {
         let s = parse(b"\x1b[>15u\x1bcX");
-        assert_eq!(s.kbd.kitty_flags(false), 0, "RIS clears Kitty flags");
+        assert_eq!(s.kbd.kitty_flags(ScreenBuffer::Main), 0, "RIS clears Kitty flags");
         assert_eq!(s.kbd.modify_other_keys(), 0);
     }
     #[test]
@@ -4268,7 +4293,7 @@ mod tests {
         // Also set an underline color so DECSTR's cursor-rendition reset is
         // covered (X is painted AFTER \e[!p, so it reflects the post-reset pen).
         let s = parse(b"\x1b[>4;2m\x1b[>15u\x1b[58:5:9m\x1b[!pX");
-        assert_eq!(s.kbd.kitty_flags(false), 0, "DECSTR clears Kitty flags");
+        assert_eq!(s.kbd.kitty_flags(ScreenBuffer::Main), 0, "DECSTR clears Kitty flags");
         assert_eq!(
             s.kbd.modify_other_keys(),
             0,
@@ -4335,17 +4360,26 @@ mod tests {
         // After the daemon records a light scheme, ?996n must answer light (;2n).
         let mut p = Parser::new();
         let mut s = Screen::new(4, 8);
-        s.set_color_scheme_dark(false);
+        s.set_color_scheme(ColorScheme::Light);
         p.advance(&mut s, b"\x1b[?996nX");
         p.flush(&mut s);
         assert_eq!(s.replies, vec![b"\x1b[?997;2n".to_vec()]);
         // And RIS preserves the daemon-set scheme.
         let mut s2 = Screen::new(4, 8);
-        s2.set_color_scheme_dark(false);
+        s2.set_color_scheme(ColorScheme::Light);
         let mut p2 = Parser::new();
         p2.advance(&mut s2, b"\x1bc\x1b[?996nX");
         p2.flush(&mut s2);
         assert_eq!(s2.replies, vec![b"\x1b[?997;2n".to_vec()]);
+    }
+
+    #[test]
+    fn so_shifts_gl_to_g1_and_si_shifts_back_to_g0() {
+        // Pins the GSet polarity: SO (0x0E) selects G1, SI (0x0F) selects G0.
+        // Designate DEC special graphics into G1 (`ESC ) 0`), then print `q` in
+        // each state: G0 (default/ASCII) → `q`, G1 (line-drawing) → `─`.
+        let s = parse(b"\x1b)0q\x0eq\x0fq");
+        assert_eq!(text_at(&s, 0).trim_end(), "q─q");
     }
 
     // ── blocks_completed / last_block_exit ────────────────────────────────────

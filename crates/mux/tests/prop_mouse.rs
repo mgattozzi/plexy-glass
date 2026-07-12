@@ -6,8 +6,16 @@
 use hegel::{TestCase, generators as gs};
 use plexy_glass_mux::{
     MouseButton, MouseEncoding, MouseEvent, MouseKind, MouseModifiers, MouseParseAction,
-    MouseParser, encode_for_child,
+    MouseParser, WheelAxis, encode_for_child,
 };
+
+fn draw_axis(tc: &TestCase) -> WheelAxis {
+    if tc.draw(gs::booleans()) {
+        WheelAxis::Horizontal
+    } else {
+        WheelAxis::Vertical
+    }
+}
 
 fn parse_one(bytes: &[u8]) -> Option<MouseEvent> {
     let mut p = MouseParser::new();
@@ -47,14 +55,14 @@ fn draw_event(tc: &TestCase) -> MouseEvent {
         3 => (
             MouseKind::Wheel {
                 delta: 3,
-                horizontal: tc.draw(gs::booleans()),
+                axis: draw_axis(tc),
             },
             MouseButton::None,
         ),
         _ => (
             MouseKind::Wheel {
                 delta: -3,
-                horizontal: tc.draw(gs::booleans()),
+                axis: draw_axis(tc),
             },
             MouseButton::None,
         ),

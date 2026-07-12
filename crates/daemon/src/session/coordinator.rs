@@ -164,6 +164,7 @@ pub(super) async fn render_coordinator(
             let session_name = session.name();
             let attached_clients = session.clients.lock().await.len() as u8;
             let auto_rename = session.config_snapshot().auto_rename;
+            use plexy_glass_status::CompletionFlag;
             let windows_data: Vec<plexy_glass_status::WindowSummary> = m
                 .windows()
                 .iter()
@@ -171,7 +172,7 @@ pub(super) async fn render_coordinator(
                     name: w.display_name(auto_rename),
                     activity: w.activity_flag(),
                     bell: w.bell_flag(),
-                    done: w.done_flag(),
+                    done: w.done_flag().map(CompletionFlag::from),
                     silence: w.silence_flag(),
                 })
                 .collect();

@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use crate::command_prompt::SwapTarget;
 use crate::preset::LayoutPreset;
 use crate::{Direction, Key, KeyEvent, KeyEventKind, Modifiers, SplitDir};
 
@@ -30,9 +31,9 @@ pub enum Command {
     MarkPane,
     /// Move the active pane into a new window of its own.
     BreakPane,
-    /// Swap the active pane with its next (`true`) or previous (`false`) DFS
-    /// neighbor in the same window.
-    SwapPane(bool),
+    /// Swap the active pane with its next or previous DFS neighbor in the same
+    /// window.
+    SwapPane(SwapTarget),
     /// Join the marked pane into the active window, splitting the active pane in
     /// the given direction.
     JoinPane(SplitDir),

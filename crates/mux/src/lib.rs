@@ -58,7 +58,7 @@ pub use keymap::{Chord, Command, Keymap, KeymapAction};
 pub use layout::{BorderHit, BorderSide, CloseOutcome, LayoutError, LayoutTree, Ratio, SplitPosition};
 pub use mouse::{
     MouseButton, MouseEncoding, MouseEvent, MouseKind, MouseModifiers, MouseParseAction,
-    MouseParser, encode_for_child,
+    MouseParser, WheelAxis, encode_for_child,
 };
 pub use overlay::{Overlay, OverlayAction, PickerEntry, RenameTarget, picker_filtered_indices};
 pub use palette::{PaletteAction, PaletteEntry, PaletteOutcome, PaletteState, handle_palette};

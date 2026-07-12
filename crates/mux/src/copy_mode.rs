@@ -6,7 +6,8 @@ use std::mem;
 use plexy_glass_emulator::Screen;
 
 use crate::{
-    Direction, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseKind, blocks, selection,
+    Direction, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseKind, WheelAxis, blocks,
+    selection,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +102,7 @@ impl CopyMode {
             (
                 MouseKind::Wheel {
                     delta,
-                    horizontal: false,
+                    axis: WheelAxis::Vertical,
                 },
                 _,
             ) => {
@@ -1247,7 +1248,7 @@ mod tests {
         let me = mouse_ev(
             MouseKind::Wheel {
                 delta: 3,
-                horizontal: false,
+                axis: WheelAxis::Vertical,
             },
             MouseButton::None,
             0,
@@ -1266,7 +1267,7 @@ mod tests {
         let me = mouse_ev(
             MouseKind::Wheel {
                 delta: -3,
-                horizontal: false,
+                axis: WheelAxis::Vertical,
             },
             MouseButton::None,
             0,

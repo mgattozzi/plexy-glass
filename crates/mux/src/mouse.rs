@@ -17,19 +17,28 @@ pub struct MouseModifiers {
     pub ctrl: bool,
 }
 
+/// Which axis a wheel notch scrolls. `Vertical` is the ordinary mouse wheel
+/// (up/down); `Horizontal` is a tilt-wheel / trackpad sideways scroll. Kept as
+/// a named type so a horizontal notch is never silently treated as vertical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelAxis {
+    Vertical,
+    Horizontal,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseKind {
     Press,
     Release,
     Move,
-    /// A wheel notch. For a vertical wheel (`horizontal == false`) positive
+    /// A wheel notch. For a vertical wheel (`WheelAxis::Vertical`) positive
     /// `delta` = up, negative = down; for a horizontal wheel positive = left,
     /// negative = right. The axis is kept distinct so a horizontal scroll isn't
     /// mistaken for a vertical one when scrolling scrollback or forwarding to a
     /// mouse-reporting child.
     Wheel {
         delta: i16,
-        horizontal: bool,
+        axis: WheelAxis,
     },
 }
 
@@ -239,9 +248,13 @@ impl MouseParser {
         let kind = if wheel {
             // Wheel codes 64=up, 65=down, 66=left, 67=right. Bit 1 of `buttons`
             // selects the axis (horizontal), bit 0 the direction (up/left = 0).
-            let horizontal = buttons & 2 != 0;
+            let axis = if buttons & 2 != 0 {
+                WheelAxis::Horizontal
+            } else {
+                WheelAxis::Vertical
+            };
             let delta = if buttons & 1 == 0 { 3 } else { -3 };
-            MouseKind::Wheel { delta, horizontal }
+            MouseKind::Wheel { delta, axis }
         } else if motion {
             MouseKind::Move
         } else if is_press {
@@ -292,10 +305,13 @@ pub fn encode_for_child(event: MouseEvent, mode: MouseEncoding) -> Vec<u8> {
         MouseKind::Move => {
             button_code |= 32;
         }
-        MouseKind::Wheel { delta, horizontal } => {
+        MouseKind::Wheel { delta, axis } => {
             // OR (not assign) so the modifier bits set above survive; base 64 =
             // vertical wheel, 66 = horizontal; bit 0 flips up→down / left→right.
-            button_code |= if horizontal { 66 } else { 64 };
+            button_code |= match axis {
+                WheelAxis::Horizontal => 66,
+                WheelAxis::Vertical => 64,
+            };
             // `delta < 0` and `delta <= 0` are observationally identical here
             // because the parser always assigns delta = ±3, never 0. Both
             // `prop_mouse` and the parser confirm delta ∈ {-3, +3}.
@@ -509,7 +525,7 @@ mod tests {
         let wheel = ev(
             MouseKind::Wheel {
                 delta: 3,
-                horizontal: false,
+                axis: WheelAxis::Vertical,
             },
             MouseButton::None,
             0,
@@ -527,7 +543,7 @@ mod tests {
         let wheel = ev(
             MouseKind::Wheel {
                 delta: -3,
-                horizontal: false,
+                axis: WheelAxis::Vertical,
             },
             MouseButton::None,
             0,
@@ -547,7 +563,7 @@ mod tests {
         let ev = MouseEvent {
             kind: MouseKind::Wheel {
                 delta: 3,
-                horizontal: false,
+                axis: WheelAxis::Vertical,
             },
             button: MouseButton::None,
             modifiers: MouseModifiers {
@@ -570,7 +586,7 @@ mod tests {
                     e.kind,
                     MouseKind::Wheel {
                         delta: 3,
-                        horizontal: true
+                        axis: WheelAxis::Horizontal
                     }
                 );
             }
@@ -579,7 +595,7 @@ mod tests {
         let l = ev(
             MouseKind::Wheel {
                 delta: 3,
-                horizontal: true,
+                axis: WheelAxis::Horizontal,
             },
             MouseButton::None,
             4,
@@ -589,7 +605,7 @@ mod tests {
         let r = ev(
             MouseKind::Wheel {
                 delta: -3,
-                horizontal: true,
+                axis: WheelAxis::Horizontal,
             },
             MouseButton::None,
             4,
@@ -660,7 +676,7 @@ mod tests {
         let wheel = ev(
             MouseKind::Wheel {
                 delta: 3,
-                horizontal: false,
+                axis: WheelAxis::Vertical,
             },
             MouseButton::None,
             0,

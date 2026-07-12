@@ -583,10 +583,16 @@ impl Session {
     /// Forward a color-scheme report (`\e[?997;1n` dark / `;2n` light) to EVERY
     /// pane in EVERY window that subscribed via ?2031.
     pub async fn forward_color_scheme(&self, dark: bool) {
+        use plexy_glass_emulator::ColorScheme;
         let seq: &[u8] = if dark {
             b"\x1b[?997;1n"
         } else {
             b"\x1b[?997;2n"
+        };
+        let scheme = if dark {
+            ColorScheme::Dark
+        } else {
+            ColorScheme::Light
         };
         // Record the scheme on EVERY pane under the lock so a later one-shot
         // `\e[?996n` query answers the real preference; collect the ?2031
@@ -597,7 +603,7 @@ impl Session {
             let mut subs = Vec::new();
             for win in manager.windows() {
                 for (_id, pane) in win.panes() {
-                    pane.with_screen_mut(|s| s.set_color_scheme_dark(dark));
+                    pane.with_screen_mut(|s| s.set_color_scheme(scheme));
                     let wants = pane.with_screen(|s| {
                         s.modes
                             .contains(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES)
@@ -608,7 +614,7 @@ impl Session {
                 }
             }
             if let Some(p) = manager.popup() {
-                p.pane.with_screen_mut(|s| s.set_color_scheme_dark(dark));
+                p.pane.with_screen_mut(|s| s.set_color_scheme(scheme));
                 let wants = p.pane.with_screen(|s| {
                     s.modes
                         .contains(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES)
@@ -835,9 +841,7 @@ impl Session {
             PromptCommand::ToggleMonitorCommand => Command::ToggleMonitorCommand,
             PromptCommand::MonitorSilence(secs) => Command::SetMonitorSilence(secs),
             PromptCommand::JoinPane(dir) => Command::JoinPane(dir),
-            PromptCommand::SwapPane(t) => {
-                Command::SwapPane(matches!(t, plexy_glass_mux::SwapTarget::Next))
-            }
+            PromptCommand::SwapPane(t) => Command::SwapPane(t),
             PromptCommand::SwapMarked => Command::SwapMarkedPane,
             PromptCommand::Focus(ft) => match ft {
                 FocusTarget::Dir(d) => Command::SelectPane(d),
@@ -1182,11 +1186,11 @@ pub(crate) const fn select_target(
     kitty_flags: u8,
     modify_other_keys: u8,
 ) -> plexy_glass_keys::KeyboardTarget {
-    use plexy_glass_keys::KeyboardTarget;
+    use plexy_glass_keys::{KeyboardTarget, KittyFlags, ModifyOtherKeysLevel};
     if kitty_flags != 0 {
-        KeyboardTarget::Kitty(kitty_flags)
+        KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(kitty_flags))
     } else if modify_other_keys != 0 {
-        KeyboardTarget::ModifyOtherKeys(modify_other_keys)
+        KeyboardTarget::ModifyOtherKeys(ModifyOtherKeysLevel::from_level(modify_other_keys))
     } else {
         KeyboardTarget::Legacy
     }
@@ -1241,9 +1245,13 @@ fn encode_for_pane(
     client_kbd: NegotiatedKbd,
 ) -> Vec<u8> {
     let (kitty_flags, modkeys, app_cursor) = pane.with_screen(|s| {
-        let alt = s.modes.contains(plexy_glass_emulator::Modes::ALT_SCREEN);
+        let screen = if s.modes.contains(plexy_glass_emulator::Modes::ALT_SCREEN) {
+            plexy_glass_emulator::ScreenBuffer::Alt
+        } else {
+            plexy_glass_emulator::ScreenBuffer::Main
+        };
         (
-            s.kbd.kitty_flags(alt),
+            s.kbd.kitty_flags(screen),
             s.kbd.modify_other_keys(),
             s.modes
                 .contains(plexy_glass_emulator::Modes::APP_CURSOR_KEYS),
@@ -1363,6 +1371,7 @@ async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::Snaps
     let attached_clients = session.clients.lock().await.len() as u8;
     let active_idx = manager.active_idx();
     let auto_rename = session.config_snapshot().auto_rename;
+    use plexy_glass_status::CompletionFlag;
     let windows: Vec<plexy_glass_status::WindowSummary> = manager
         .windows()
         .iter()
@@ -1372,7 +1381,7 @@ async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::Snaps
             // update_monitor_flags; the tick task is not the drainer.
             activity: w.activity_flag(),
             bell: w.bell_flag(),
-            done: w.done_flag(),
+            done: w.done_flag().map(CompletionFlag::from),
             silence: w.silence_flag(),
         })
         .collect();
@@ -3357,7 +3366,7 @@ mod tests {
 
 #[cfg(test)]
 mod reencode_tests {
-    use plexy_glass_keys::{KeyboardTarget, encode};
+    use plexy_glass_keys::{KeyboardTarget, KittyFlags, encode};
     use plexy_glass_mux::{Key, KeyEvent, Modifiers};
     use plexy_glass_protocol::NegotiatedKbd;
 
@@ -3468,7 +3477,7 @@ mod reencode_tests {
         // encode path.
         assert_eq!(
             reencode_input(NegotiatedKbd::Kitty(31), 1, 0, false, &e, b"\x1b[105;6u"),
-            encode(&e, KeyboardTarget::Kitty(1), false),
+            encode(&e, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1)), false),
         );
     }
 }

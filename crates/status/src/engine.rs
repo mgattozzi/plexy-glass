@@ -17,6 +17,23 @@ use crate::widgets::{
 };
 use crate::{GlyphSet, resolve_style};
 
+/// Sticky command-completion outcome for a background window: `Ok` renders `✓`
+/// (exit 0 / codeless), `Fail` renders `✗` (nonzero exit). `None` on the field
+/// means no completion flag at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionFlag {
+    Ok,
+    Fail,
+}
+
+impl From<bool> for CompletionFlag {
+    /// The historical `Some(true)` = ✓ / `Some(false)` = ✗ mapping: an exit-0 /
+    /// codeless completion is `Ok`, a nonzero exit is `Fail`.
+    fn from(ok: bool) -> Self {
+        if ok { Self::Ok } else { Self::Fail }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WindowSummary {
     pub name: String,
@@ -25,10 +42,11 @@ pub struct WindowSummary {
     /// so a marker never shows on it.
     pub activity: bool,
     pub bell: bool,
-    /// Sticky command-completion flag: `Some(true)` → `✓` (exit 0 / codeless),
-    /// `Some(false)` → `✗` (nonzero exit), `None` → no flag. Cleared upstream
-    /// when the window becomes current, like activity/bell.
-    pub done: Option<bool>,
+    /// Sticky command-completion flag: `Some(CompletionFlag::Ok)` → `✓` (exit 0
+    /// / codeless), `Some(CompletionFlag::Fail)` → `✗` (nonzero exit), `None` →
+    /// no flag. Cleared upstream when the window becomes current, like
+    /// activity/bell.
+    pub done: Option<CompletionFlag>,
     /// Sticky silence flag (`~`): set when a monitored background window
     /// produced no output for its silence threshold. Cleared on view.
     pub silence: bool,

@@ -3,7 +3,9 @@
 //! 27-form and functional keys round-trip via legacy CSI/SS3/tilde.
 
 use hegel::{TestCase, generators as gs};
-use plexy_glass_keys::{KeyParseOutput, KeyParser, KeyboardProtocol, KeyboardTarget, encode};
+use plexy_glass_keys::{
+    KeyParseOutput, KeyParser, KeyboardProtocol, KeyboardTarget, ModifyOtherKeysLevel, encode,
+};
 use plexy_glass_mux::{Direction, Key, KeyEvent, Modifiers};
 
 /// Drive bytes through the parser and return the last decoded event.
@@ -67,7 +69,7 @@ fn mok2_decode_encode_round_trips(tc: TestCase) {
     tc.note(&format!("event = {ev:?}"));
     let bytes = encode(
         &ev,
-        KeyboardTarget::ModifyOtherKeys(2),
+        KeyboardTarget::ModifyOtherKeys(ModifyOtherKeysLevel::Level2),
         /*app_cursor=*/ false,
     );
     assert!(

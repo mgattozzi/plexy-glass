@@ -8,7 +8,7 @@ mod paste;
 mod spec;
 
 pub use build::{build_keymap, build_keymap_with_skips};
-pub use encode::{KeyboardTarget, encode};
+pub use encode::{KeyboardTarget, KittyFlags, ModifyOtherKeysLevel, encode};
 pub use parser::{KeyParseOutput, KeyParser, KeyboardProtocol};
 pub use paste::{PasteParseOutput, PasteParser};
 pub use spec::{

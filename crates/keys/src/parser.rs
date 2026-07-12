@@ -871,14 +871,18 @@ mod tests {
     fn mok_27_form_round_trips_with_encoder() {
         // Symmetric with `encode::modify_other_keys_bytes`: encode a key to its
         // 27-form, parse it back, get the same KeyEvent shape.
-        use crate::encode::{KeyboardTarget, encode};
+        use crate::encode::{KeyboardTarget, ModifyOtherKeysLevel, encode};
         for (key, mods) in [
             (Key::Char('a'), Modifiers::CTRL),
             (Key::Enter, Modifiers::SHIFT),
             (Key::Char('i'), Modifiers::CTRL | Modifiers::SHIFT),
         ] {
             let original = KeyEvent::new(key, mods);
-            let bytes = encode(&original, KeyboardTarget::ModifyOtherKeys(2), false);
+            let bytes = encode(
+                &original,
+                KeyboardTarget::ModifyOtherKeys(ModifyOtherKeysLevel::Level2),
+                false,
+            );
             assert!(
                 bytes.starts_with(b"\x1b[27;"),
                 "expected 27-form for {key:?}/{mods:?}, got {bytes:?}"

@@ -3,7 +3,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use smol_str::SmolStr;
 
-use crate::{ClickAction, EvalContext, ResolvedStyle, Segment, StyledText, Widget};
+use crate::{ClickAction, CompletionFlag, EvalContext, ResolvedStyle, Segment, StyledText, Widget};
 
 pub struct WindowListWidget {
     pub active_style: ResolvedStyle,
@@ -42,8 +42,8 @@ impl Widget for WindowListWidget {
                 flags.push('~');
             }
             match w.done {
-                Some(true) => flags.push('✓'),
-                Some(false) => flags.push('✗'),
+                Some(CompletionFlag::Ok) => flags.push('✓'),
+                Some(CompletionFlag::Fail) => flags.push('✗'),
                 None => {}
             }
             let label = format!(" {} {}{} ", i + 1, w.name, flags);
@@ -60,7 +60,7 @@ impl Widget for WindowListWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::WindowSummary;
+    use crate::{CompletionFlag, WindowSummary};
 
     #[tokio::test]
     async fn window_list_emits_one_segment_per_window() {
@@ -216,14 +216,14 @@ mod tests {
                 name: "ok".into(),
                 activity: false,
                 bell: false,
-                done: Some(true),
+                done: Some(CompletionFlag::Ok),
                 silence: false,
             },
             WindowSummary {
                 name: "bad".into(),
                 activity: false,
                 bell: false,
-                done: Some(false),
+                done: Some(CompletionFlag::Fail),
                 silence: false,
             },
         ];

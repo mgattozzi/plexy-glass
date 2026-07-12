@@ -1205,6 +1205,7 @@ dependencies = [
 name = "plexy-glass-keys"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.11.1",
  "bolero",
  "hegeltest",
  "plexy-glass-config",
