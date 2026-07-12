@@ -2207,6 +2207,16 @@ impl Screen {
         if !matches!(selection, b'c' | b's') {
             return;
         }
+        // Gate on the ENCODED length before decoding: base64 inflates ~4/3, so a
+        // payload that could only decode past the cap never allocates a decode
+        // buffer. The post-decode check below still guards the exact bound.
+        if payload.len() > Self::OSC52_MAX_BYTES.saturating_mul(4) / 3 + 4 {
+            tracing::warn!(
+                bytes = payload.len(),
+                "OSC 52 encoded payload exceeds cap; dropping before decode"
+            );
+            return;
+        }
         let Ok(decoded) = STANDARD.decode(payload) else {
             tracing::trace!("OSC 52 base64 decode failed; ignoring");
             return;
@@ -4222,6 +4232,22 @@ mod tests {
     }
 
     #[test]
+    fn osc_52_gates_on_encoded_length_before_decoding() {
+        // An over-cap base64 payload must be rejected on its ENCODED length, so a
+        // hostile child never allocates the (larger) decode buffer. Drive the
+        // handler directly: through the parser the pre-scan OSC cap would truncate
+        // first, so this pins the gate itself.
+        let mut s = Screen::new(8, 24);
+        let over = Screen::OSC52_MAX_BYTES * 4 / 3 + 8; // just past the encoded gate
+        let payload = vec![b'A'; over];
+        s.handle_osc_52(&[b"52", b"c", &payload]);
+        assert!(
+            s.clipboard_writes.is_empty(),
+            "over-cap payload must not decode or write"
+        );
+    }
+
+    #[test]
     fn osc_52_read_request_ignored() {
         // The selection char is followed by `?`, which is a READ request.
         // Phase 4 set-only: drop these silently.
@@ -4294,6 +4320,27 @@ mod tests {
         s.bell_pending = true;
         assert!(s.take_bell());
         assert!(!s.take_bell(), "second take is false");
+    }
+
+    #[test]
+    fn hostile_osc_flood_is_bounded_and_next_sequence_lands() {
+        // A 5 MiB OSC 0 (set-title) body must be truncated by the pre-scan cap
+        // before it reaches vte's unbounded OSC Vec, and a clean OSC after the
+        // flood must still be processed (the parser didn't stay parked mid-OSC).
+        let mut input = Vec::new();
+        input.extend_from_slice(b"\x1b]0;");
+        input.extend(iter::repeat_n(b'A', 5 * 1024 * 1024)); // > OSC_CAP
+        input.extend_from_slice(b"\x07"); // terminate the flood
+        let flooded = parse(&input);
+        assert!(
+            flooded.title.len() <= 4 * 1024 * 1024,
+            "flood title must be capped; got {}",
+            flooded.title.len()
+        );
+
+        input.extend_from_slice(b"\x1b]2;after\x07"); // a clean OSC after the flood
+        let s = parse(&input);
+        assert_eq!(s.title, "after", "the sequence after the flood must land");
     }
 
     #[test]

@@ -21,14 +21,20 @@ pub trait ScreenOps {
     fn handle_graphics(&mut self, framed: &[u8]);
 }
 
-/// APC pre-scan state. `vte` 0.15 drops APC, so we intercept `ESC _ … ST` ahead
-/// of it; graphics APCs (`G…`) are diverted, everything else is forwarded.
+/// Pre-scan state ahead of `vte`. `vte` 0.15 drops APC, so we intercept
+/// `ESC _ … ST` (graphics APCs `G…` are diverted, other APCs dropped); and
+/// under the `std` feature `vte` accumulates OSC into an unbounded `Vec`, so we
+/// also track `ESC ] … ST` / `0x9d … ST` to truncate a hostile OSC body at a
+/// fixed cap before it reaches `vte` (the bytes are still forwarded, just
+/// bounded). Everything else is forwarded untouched.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ApcState {
+enum ScanState {
     Ground,
     Esc,
     Apc,
     ApcEsc,
+    /// Inside an OSC body; forwarding bytes to `vte` but capping the count.
+    Osc,
 }
 
 /// One ordered pre-scan segment: bytes for `vte`, or a re-framed graphics APC.
@@ -45,8 +51,12 @@ pub struct Parser {
     dcs_params: Vec<Vec<u16>>,
     dcs_payload: Vec<u8>,
     in_dcs: bool,
-    apc_state: ApcState,
+    apc_state: ScanState,
     apc_buf: Vec<u8>,
+    /// OSC body bytes forwarded to `vte` for the OSC currently being scanned.
+    /// Persists across `advance` calls so a sequence split across reads is
+    /// capped as a whole, not per read. Reset when a new OSC begins.
+    osc_len: usize,
 }
 
 impl Parser {
@@ -59,8 +69,9 @@ impl Parser {
             dcs_params: Vec::new(),
             dcs_payload: Vec::new(),
             in_dcs: false,
-            apc_state: ApcState::Ground,
+            apc_state: ScanState::Ground,
             apc_buf: Vec::new(),
+            osc_len: 0,
         }
     }
 
@@ -94,6 +105,10 @@ impl Parser {
     /// state persists across calls so a sequence split across reads is captured.
     fn prescan(&mut self, bytes: &[u8]) -> Vec<Seg> {
         const APC_CAP: usize = 16 * 1024 * 1024;
+        // Cap the OSC body forwarded to `vte` (same order as DCS_CAP). Past this
+        // the body bytes are dropped, so `vte`'s unbounded (std-feature) OSC Vec
+        // can't grow without bound on a hostile/unterminated OSC.
+        const OSC_CAP: usize = 4 * 1024 * 1024;
         let mut segs: Vec<Seg> = Vec::new();
         let mut run: Vec<u8> = Vec::new();
         let push = |buf: &mut Vec<u8>, b: u8| {
@@ -106,50 +121,81 @@ impl Parser {
         };
         for &b in bytes {
             match self.apc_state {
-                ApcState::Ground => {
+                ScanState::Ground => {
                     if b == 0x1b {
-                        self.apc_state = ApcState::Esc;
+                        self.apc_state = ScanState::Esc;
+                    } else if b == 0x9d {
+                        // C1 OSC introducer: forward it and start capping the body.
+                        run.push(b);
+                        self.apc_state = ScanState::Osc;
+                        self.osc_len = 0;
                     } else {
                         run.push(b);
                     }
                 }
-                ApcState::Esc => {
+                ScanState::Esc => {
                     if b == 0x5f {
-                        self.apc_state = ApcState::Apc;
+                        self.apc_state = ScanState::Apc;
                         self.apc_buf.clear();
+                    } else if b == 0x5d {
+                        // `ESC ]` OSC introducer: forward it, cap the body.
+                        run.push(0x1b);
+                        run.push(0x5d);
+                        self.apc_state = ScanState::Osc;
+                        self.osc_len = 0;
                     } else {
                         run.push(0x1b);
                         if b == 0x1b {
-                            self.apc_state = ApcState::Esc;
+                            self.apc_state = ScanState::Esc;
                         } else {
                             run.push(b);
-                            self.apc_state = ApcState::Ground;
+                            self.apc_state = ScanState::Ground;
                         }
                     }
                 }
-                ApcState::Apc => {
+                ScanState::Osc => {
+                    // `vte` leaves OSC on BEL, ST (C1 0x9c), CAN/SUB, or ESC. On
+                    // ESC we defer to the Esc arm (which also re-enters Osc on a
+                    // chained `ESC ]`, so each OSC is capped independently). Every
+                    // terminator is forwarded so `vte` still dispatches. Body
+                    // bytes are forwarded only up to the cap, then dropped.
+                    match b {
+                        0x1b => self.apc_state = ScanState::Esc,
+                        0x07 | 0x9c | 0x18 | 0x1a => {
+                            run.push(b);
+                            self.apc_state = ScanState::Ground;
+                        }
+                        _ => {
+                            if self.osc_len < OSC_CAP {
+                                run.push(b);
+                                self.osc_len += 1;
+                            }
+                        }
+                    }
+                }
+                ScanState::Apc => {
                     if b == 0x9c {
                         flush_run(&mut segs, &mut run);
                         push_graphics(&mut segs, &mut self.apc_buf);
-                        self.apc_state = ApcState::Ground;
+                        self.apc_state = ScanState::Ground;
                     } else if b == 0x1b {
-                        self.apc_state = ApcState::ApcEsc;
+                        self.apc_state = ScanState::ApcEsc;
                     } else {
                         push(&mut self.apc_buf, b);
                     }
                 }
-                ApcState::ApcEsc => {
+                ScanState::ApcEsc => {
                     if b == 0x5c {
                         flush_run(&mut segs, &mut run);
                         push_graphics(&mut segs, &mut self.apc_buf);
-                        self.apc_state = ApcState::Ground;
+                        self.apc_state = ScanState::Ground;
                     } else {
                         push(&mut self.apc_buf, 0x1b);
                         if b == 0x1b {
-                            self.apc_state = ApcState::ApcEsc;
+                            self.apc_state = ScanState::ApcEsc;
                         } else {
                             push(&mut self.apc_buf, b);
-                            self.apc_state = ApcState::Apc;
+                            self.apc_state = ScanState::Apc;
                         }
                     }
                 }
@@ -567,6 +613,54 @@ mod tests {
             s.graphics[0], b"\x1b_Gdata\x1b\x1b\\",
             "inner ESC must be part of payload; only the second ESC is the terminator prefix"
         );
+    }
+
+    #[test]
+    fn osc_body_is_capped_in_the_prescan() {
+        // vte 0.15 under the std feature accumulates OSC into an unbounded Vec,
+        // so a child streaming a giant OSC could OOM the daemon. The pre-scan
+        // truncates the body at OSC_CAP (4 MiB) before vte sees it; the OSC still
+        // dispatches once (terminator forwarded), just with a bounded body.
+        let mut input = Vec::from(&b"\x1b]0;"[..]);
+        input.extend(iter::repeat_n(b'A', 5 * 1024 * 1024)); // 5 MiB > OSC_CAP
+        input.extend_from_slice(b"\x07");
+        let s = drive(&input);
+        assert_eq!(s.osc.len(), 1, "one OSC dispatched");
+        // params[0] = "0", params[1] = the (capped) body. Without the cap the
+        // body would be the full 5 MiB.
+        assert!(
+            s.osc[0][1].len() <= 4 * 1024 * 1024,
+            "OSC body must be capped; got {}",
+            s.osc[0][1].len()
+        );
+        assert!(!s.osc[0][1].is_empty(), "the capped body still reaches vte");
+    }
+
+    #[test]
+    fn osc_st_terminator_leaves_osc_and_following_csi_dispatches() {
+        // `ESC \` (ST) ends the OSC via the Esc arm; a CSI right after must still
+        // dispatch, proving the pre-scan left the Osc state cleanly.
+        let s = drive(b"\x1b]0;hi\x1b\\\x1b[31m");
+        assert_eq!(s.osc.len(), 1);
+        assert_eq!(s.osc[0][1], b"hi");
+        assert_eq!(s.csi.len(), 1, "the CSI after the OSC must dispatch");
+        assert_eq!(s.csi[0].2, 'm');
+    }
+
+    #[test]
+    fn unterminated_osc_does_not_swallow_the_next_osc() {
+        // An unterminated giant OSC must not park the parser forever: the ESC
+        // that starts the next sequence ends the flood, and the next OSC lands
+        // (a chained `ESC ]` re-enters the Osc state, capping it independently).
+        let mut input = Vec::from(&b"\x1b]0;"[..]);
+        input.extend(iter::repeat_n(b'A', 5 * 1024 * 1024)); // no terminator
+        input.extend_from_slice(b"\x1b]2;after\x07");
+        let s = drive(&input);
+        // The following OSC must land whether or not vte also dispatched the
+        // aborted flood, so assert on the LAST dispatch, which is "after" either way.
+        let last = s.osc.last().expect("the following OSC must dispatch");
+        assert_eq!(last[0], b"2");
+        assert_eq!(last[1], b"after");
     }
 
     #[test]
