@@ -654,7 +654,9 @@ async fn dispatch_input_event(
 ) -> bool {
     match event {
         InputEvent::Mouse(me) => {
-            let _ = ctx.session.handle_mouse(me).await;
+            if let Err(e) = ctx.session.handle_mouse(me).await {
+                tracing::warn!(error = %e, "mouse action failed");
+            }
             // Status-bar Detach click sets WindowManager.detach_requested.
             // Propagate it so this connection exits.
             let mut mgr = ctx.session.window_manager.lock().await;
@@ -823,7 +825,9 @@ async fn dispatch_input_event(
                                 };
                                 let mut bytes = cmd.into_bytes();
                                 bytes.push(b'\r');
-                                let _ = pane.send_input(bytes::Bytes::from(bytes)).await;
+                                if let Err(e) = pane.send_input(bytes::Bytes::from(bytes)).await {
+                                    tracing::warn!(error = %e, "run-command send failed");
+                                }
                                 pane.exit_block_mode();
                                 pane.reset_scroll();
                                 ctx.session.notify.notify_one();
@@ -910,8 +914,8 @@ async fn dispatch_input_event(
                 let m = ctx.session.window_manager.lock().await;
                 m.overlay().is_some()
             };
-            if !overlay_active {
-                let _ = ctx.session.handle_input_bytes(&bs, false).await;
+            if !overlay_active && let Err(e) = ctx.session.handle_input_bytes(&bs, false).await {
+                tracing::warn!(error = %e, "passthrough bytes failed");
             }
         }
     }
@@ -2314,7 +2318,9 @@ async fn load_buffer(registry: &Arc<SessionRegistry>, path: &Path) -> Result<Str
 /// once from the active one. Shared by `InputEvent::Paste`, `Ctrl+a ]`, and the
 /// choose-buffer paste action.
 async fn paste_bytes(session: &Arc<Session>, content: Vec<u8>) {
-    let _ = session.handle_input_bytes(&content, true).await;
+    if let Err(e) = session.handle_input_bytes(&content, true).await {
+        tracing::warn!(error = %e, "paste failed");
+    }
 }
 
 fn default_spawn_spec() -> SpawnSpec {

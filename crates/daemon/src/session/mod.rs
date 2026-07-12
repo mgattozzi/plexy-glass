@@ -198,7 +198,13 @@ impl Session {
             let mut death_rx = death_rx;
             while let Some(pane_id) = death_rx.recv().await {
                 let mut m = session_for_death.window_manager.lock().await;
-                let _ = m.handle_pane_death(pane_id);
+                if let Err(e) = m.handle_pane_death(pane_id) {
+                    tracing::error!(
+                        error = %e,
+                        ?pane_id,
+                        "handle_pane_death failed; pane may be stale in layout"
+                    );
+                }
                 let now_empty = m.is_empty();
                 // Read the silence arm-state under the same lock window: an
                 // organic pane death can remove a silence-monitored window, and
@@ -558,7 +564,9 @@ impl Session {
             } else {
                 bytes::Bytes::copy_from_slice(bytes)
             };
-            pane.send_input(payload).await.ok();
+            if let Err(e) = pane.send_input(payload).await {
+                tracing::warn!(error = %e, "sync fan-out send failed");
+            }
         }
         self.notify.notify_one();
         Ok(())
