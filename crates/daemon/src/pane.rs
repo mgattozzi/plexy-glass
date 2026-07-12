@@ -145,6 +145,20 @@ impl Pane {
         // (Styled underlines etc. are handled correctly by the emulator's SGR
         // decoder regardless of TERM, see emulator::screen::handle_sgr.)
 
+        // Obtain the master-side reader/writer BEFORE spawning the child: once
+        // spawn_command succeeds, a live child process exists and must be
+        // reaped, so no fallible `?` after that point may early-return without
+        // a child on the other end orphaning it. Neither clone touches the
+        // slave side, so this reorder doesn't change spawn_command's behavior.
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| DaemonError::Io(Error::other(format!("clone reader: {e}"))))?;
+        let mut writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| DaemonError::Io(Error::other(format!("take writer: {e}"))))?;
+
         let mut child = pair
             .slave
             .spawn_command(cmd)
@@ -161,14 +175,6 @@ impl Pane {
         let (output_tx, _) = broadcast::channel::<Bytes>(256);
         let (exit_tx, exit_rx) = watch::channel::<Option<ExitStatus>>(None);
 
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| DaemonError::Io(Error::other(format!("clone reader: {e}"))))?;
-        let mut writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| DaemonError::Io(Error::other(format!("take writer: {e}"))))?;
         let master = pair.master;
 
         // XTGETTCAP `TN` must report the `$TERM` the child actually inherits.
