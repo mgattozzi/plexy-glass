@@ -154,14 +154,24 @@ impl Parser {
                     }
                 }
                 ScanState::Osc => {
-                    // `vte` leaves OSC on BEL, ST (C1 0x9c), CAN/SUB, or ESC. On
-                    // ESC we defer to the Esc arm (which also re-enters Osc on a
-                    // chained `ESC ]`, so each OSC is capped independently). Every
-                    // terminator is forwarded so `vte` still dispatches. Body
-                    // bytes are forwarded only up to the cap, then dropped.
+                    // `vte`'s `advance_osc_string` leaves OSC ONLY on BEL
+                    // (0x07), CAN/SUB (0x18/0x1a), or ESC (0x1b, for ST =
+                    // `ESC \`) -- see vte 0.15.0 src/lib.rs `advance_osc_string`.
+                    // 0x9c (C1 ST) is NOT one of those arms: `vte` falls through
+                    // to `action_osc_put` and keeps collecting body bytes, so it
+                    // must NOT be treated as a terminator here either, or a
+                    // hostile OSC that plants a bare 0x9c mid-body would make
+                    // this pre-scan stop counting/capping while `vte` keeps
+                    // growing its unbounded (std-feature) Vec underneath us --
+                    // exactly the OOM this cap exists to prevent. On ESC we
+                    // defer to the Esc arm (which also re-enters Osc on a
+                    // chained `ESC ]`, so each OSC is capped independently).
+                    // Every real terminator is forwarded so `vte` still
+                    // dispatches. Body bytes (including 0x9c) are forwarded
+                    // only up to the cap, then dropped.
                     match b {
                         0x1b => self.apc_state = ScanState::Esc,
-                        0x07 | 0x9c | 0x18 | 0x1a => {
+                        0x07 | 0x18 | 0x1a => {
                             run.push(b);
                             self.apc_state = ScanState::Ground;
                         }
@@ -631,6 +641,29 @@ mod tests {
         assert!(
             s.osc[0][1].len() <= 4 * 1024 * 1024,
             "OSC body must be capped; got {}",
+            s.osc[0][1].len()
+        );
+        assert!(!s.osc[0][1].is_empty(), "the capped body still reaches vte");
+    }
+
+    #[test]
+    fn osc_0x9c_mid_body_does_not_disable_the_cap() {
+        // 0x9c is the C1 form of ST, but `vte` 0.15's `advance_osc_string` does
+        // NOT treat it as a terminator (only 0x07/0x18/0x1a/0x1b are), so `vte`
+        // just keeps collecting it as a body byte. If the pre-scan mistakenly
+        // treated a bare 0x9c as "OSC over", it would stop counting/capping
+        // right there and return to Ground, while `vte` stayed in OscString and
+        // kept pushing every following byte into its unbounded Vec -- a DoS
+        // bypass of the cap. Plant a 0x9c mid-body, then flood past OSC_CAP:
+        // the body `vte` sees must still be bounded.
+        let mut input = Vec::from(&b"\x1b]0;\x9c"[..]);
+        input.extend(iter::repeat_n(b'A', 5 * 1024 * 1024)); // 5 MiB > OSC_CAP
+        input.extend_from_slice(b"\x07");
+        let s = drive(&input);
+        assert_eq!(s.osc.len(), 1, "one OSC dispatched");
+        assert!(
+            s.osc[0][1].len() <= 4 * 1024 * 1024,
+            "OSC body must stay capped even with a 0x9c byte inside it; got {}",
             s.osc[0][1].len()
         );
         assert!(!s.osc[0][1].is_empty(), "the capped body still reaches vte");
