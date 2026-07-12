@@ -395,9 +395,7 @@ pub async fn client_reload_config(target: &Target) -> Result<(), ClientError> {
         // message is carried, not swallowed to stderr-with-exit-0.
         ServerMsg::ConfigReloaded { error: Some(e) } => Err(ClientError::Reload(e)),
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(io::Error::other(format!(
-            "unexpected reply from daemon: {other:?}"
-        )))),
+        _ => Err(ClientError::UnexpectedReply),
     }
 }
 
@@ -421,9 +419,7 @@ pub async fn client_kill_session(target: &Target, name: String) -> Result<(), Cl
             Ok(())
         }
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(io::Error::other(format!(
-            "unexpected reply from daemon: {other:?}"
-        )))),
+        _ => Err(ClientError::UnexpectedReply),
     }
 }
 
@@ -485,9 +481,7 @@ async fn list_sessions_inline(
     match reply {
         ServerMsg::SessionList { entries } => Ok(entries),
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(io::Error::other(format!(
-            "unexpected reply from daemon: {other:?}"
-        )))),
+        _ => Err(ClientError::UnexpectedReply),
     }
 }
 
@@ -553,11 +547,7 @@ pub async fn client_run_commands(
                 return Ok(false);
             }
             ServerMsg::Error(e) => return Err(ClientError::DaemonError(e)),
-            other => {
-                return Err(ClientError::Io(io::Error::other(format!(
-                    "unexpected reply from daemon: {other:?}"
-                ))));
-            }
+            _ => return Err(ClientError::UnexpectedReply),
         }
     }
     Ok(true)
@@ -592,9 +582,7 @@ pub async fn client_send_input(
             Ok(false)
         }
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(io::Error::other(format!(
-            "unexpected reply from daemon: {other:?}"
-        )))),
+        _ => Err(ClientError::UnexpectedReply),
     }
 }
 
@@ -631,9 +619,7 @@ pub async fn client_capture(
             Ok(false)
         }
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(io::Error::other(format!(
-            "unexpected reply from daemon: {other:?}"
-        )))),
+        _ => Err(ClientError::UnexpectedReply),
     }
 }
 
@@ -682,9 +668,7 @@ pub async fn client_capture_block(
             Ok(false)
         }
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(io::Error::other(format!(
-            "unexpected reply from daemon: {other:?}"
-        )))),
+        _ => Err(ClientError::UnexpectedReply),
     }
 }
 
@@ -762,9 +746,7 @@ pub async fn client_exec(
             Ok(1)
         }
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
-        other => Err(ClientError::Io(io::Error::other(format!(
-            "unexpected reply from daemon: {other:?}"
-        )))),
+        _ => Err(ClientError::UnexpectedReply),
     }
 }
 

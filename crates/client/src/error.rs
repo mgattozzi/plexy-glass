@@ -23,6 +23,8 @@ pub enum ClientError {
     Codec(#[from] CodecError),
     #[error("daemon reported error: {0}")]
     DaemonError(ProtocolError),
+    #[error("daemon sent an unexpected reply")]
+    UnexpectedReply,
     #[error("config reload error: {0}")]
     Reload(String),
     #[error(
