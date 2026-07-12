@@ -5332,3 +5332,58 @@ fn hint_mode_uppercase_label_opens_instead_of_copying() {
          fired: Copy would keep the suffix). got: {opened:?}"
     );
 }
+
+/// History palette (`prefix /`): a fuzzy filter over the corpus of command
+/// blocks (command + output), `Enter` jumps — switching to the found block's
+/// window/pane and entering block mode there (`dispatch_history_jump`).
+#[test]
+fn history_palette_filters_and_jumps_to_block() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    let mut sess = TestSession::spawn(&env);
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+
+    plant_three_blocks(&env, &sess);
+
+    sess.send_prefix(b'/');
+    assert!(
+        sess.wait_for(b"History", Duration::from_secs(10)),
+        "history overlay never opened. pane: {}",
+        sess.snapshot_str()
+    );
+
+    // Only the middle block's command ("expr 40 + 2") contains "expr" — a
+    // deterministic single-match filter.
+    sess.send(b"expr");
+    assert!(
+        sess.wait_for(b"expr 40", Duration::from_secs(10)),
+        "filtered row never rendered. pane: {}",
+        sess.snapshot_str()
+    );
+
+    let mark = sess.buffer_len();
+    sess.send_str("\r"); // Enter jumps
+
+    // \u{250f} (e2 94 8f) is block mode's selection bracket, proving the jump
+    // landed us in block mode, not just closed the overlay.
+    assert!(
+        sess.wait_for_from(mark, b"\xe2\x94\x8f", Duration::from_secs(10)),
+        "block mode never entered after the history jump. pane: {}",
+        sess.snapshot_str()
+    );
+
+    // Prove the jump selected the EXPR block specifically, not just the newest
+    // block (`echo ccc`, the default block-mode entry point): re-run it ('r')
+    // and look for "42", a marker that appears nowhere else in the planted
+    // blocks — only a REAL execution of `expr 40 + 2` prints it.
+    sess.send(b"r");
+    assert!(
+        sess.wait_for_from(mark, b"42", Duration::from_secs(10)),
+        "rerun after the history jump did not land on the expr block \
+         (jumped to the wrong block). pane: {}",
+        sess.snapshot_str()
+    );
+}
