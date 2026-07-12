@@ -248,9 +248,7 @@ impl WindowManager {
                 self.handle_command(Command::ToggleSyncPanes)?;
             }
             ClickAction::ExitCopyMode => {
-                if let Some(pane) = self.active_window().active_pane().cloned() {
-                    pane.exit_copy_mode();
-                }
+                self.active_window().active_pane().exit_copy_mode();
                 self.notify.notify_one();
             }
             ClickAction::Detach => {

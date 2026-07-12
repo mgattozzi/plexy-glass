@@ -179,11 +179,8 @@ pub(super) async fn render_coordinator(
             let active_pane_cwd = m
                 .active_window()
                 .active_pane()
-                .and_then(|p| p.with_screen(|s| s.cwd.clone()));
-            let copy_mode_active = m
-                .active_window()
-                .active_pane()
-                .is_some_and(super::super::pane::Pane::is_in_copy_mode);
+                .with_screen(|s| s.cwd.clone());
+            let copy_mode_active = m.active_window().active_pane().is_in_copy_mode();
             let sync_active = m.active_window().sync_input;
             let zoom_active = m.active_window().is_zoomed();
             // Any-client-armed aggregate; same WM→clients lock order as the

@@ -640,9 +640,9 @@ async fn split_cwd_is_window_home_base_not_active_pane_cwd() {
     m.set_default_program("/bin/sh"); // spawns must not depend on `$SHELL`
     m.set_window_home_cwd(0, Some("/home/base".into()));
     // The active pane reports a DIFFERENT live cwd via OSC 7, and it must be ignored.
-    if let Some(pane) = m.active_window().active_pane() {
-        pane.with_screen_mut(|s| s.cwd = Some("file:///somewhere/else".to_string()));
-    }
+    m.active_window()
+        .active_pane()
+        .with_screen_mut(|s| s.cwd = Some("file:///somewhere/else".to_string()));
     // A split spawns at the window home base, never the active pane's cd location.
     assert_eq!(m.split_cwd().as_deref(), Some("/home/base"));
     // And the split still succeeds structurally.
@@ -980,7 +980,7 @@ async fn select_layout_single_pane_is_noop_but_remembers() {
 /// the real OSC 133 path feeds.
 fn inject_scrollback_prompts(m: &WindowManager, n: usize, prompts: &[usize]) {
     use plexy_glass_emulator::{Row, RowMark};
-    let pane = m.active_window().active_pane().unwrap();
+    let pane = m.active_window().active_pane();
     pane.with_screen_mut(|s| {
         let cols = s.active.num_cols();
         for i in 0..n {
@@ -994,11 +994,7 @@ fn inject_scrollback_prompts(m: &WindowManager, n: usize, prompts: &[usize]) {
 }
 
 fn active_scroll_offset(m: &WindowManager) -> u32 {
-    m.active_window()
-        .active_pane()
-        .unwrap()
-        .scroll_offset()
-        .get()
+    m.active_window().active_pane().scroll_offset().get()
 }
 
 // Offset math, pinned: at offset N the compositor shows N scrollback rows
@@ -1050,7 +1046,7 @@ async fn next_prompt_walks_forward_then_snaps_to_live() {
     )
     .unwrap();
     inject_scrollback_prompts(&m, 10, &[2, 6]);
-    let pane = m.active_window().active_pane().unwrap();
+    let pane = m.active_window().active_pane();
     pane.set_scroll_offset(ScrollOffset::new(8), ScrollOffset::new(10)); // top = 2 (the oldest prompt)
     // Next prompt below 2 is 6 → offset 4.
     m.handle_command(Command::NextPrompt).unwrap();
@@ -1081,7 +1077,7 @@ async fn next_prompt_snaps_to_live_when_the_prompt_is_in_the_grid() {
     )
     .unwrap();
     inject_scrollback_prompts(&m, 10, &[2]);
-    let pane = m.active_window().active_pane().unwrap();
+    let pane = m.active_window().active_pane();
     // A prompt on grid row 3 = absolute line 13 (> scrollback_len 10): the
     // target offset would be negative; it saturates to live.
     pane.with_screen_mut(|s| s.active.rows[3].mark.set(RowMark::PROMPT_START));
@@ -1109,7 +1105,7 @@ async fn prev_prompt_lands_target_at_top_under_a_fold() {
     .unwrap();
     // Scrollback: block0 (p@0, out@1,2), block1 (p@3, out@4), block2 (p@5).
     {
-        let pane = m.active_window().active_pane().unwrap();
+        let pane = m.active_window().active_pane();
         pane.with_screen_mut(|s| {
             let cols = s.active.num_cols();
             let mut push = |flag: Option<u8>| {
@@ -1138,7 +1134,7 @@ async fn prev_prompt_lands_target_at_top_under_a_fold() {
         pane.set_scroll_offset(off, max);
     }
     let top_line = |m: &WindowManager| {
-        let p = m.active_window().active_pane().unwrap();
+        let p = m.active_window().active_pane();
         let off = p.scroll_offset();
         p.with_screen(|s| blocks::scroll_line_at(s, s.active.num_rows(), off, 0))
     };
@@ -1173,7 +1169,7 @@ async fn fold_via_block_mode_dispatch_persists_after_exit() {
         cfg(),
     )
     .unwrap();
-    let pane = m.active_window().active_pane().unwrap();
+    let pane = m.active_window().active_pane();
     // Two blocks so block 0 (prompt 0 + output 1) is completed/foldable.
     pane.with_screen_mut(|s| {
         use plexy_glass_emulator::RowMark;
@@ -1218,7 +1214,6 @@ async fn block_scroll_without_marks_prev_noops_and_next_goes_live() {
     assert_eq!(active_scroll_offset(&m), 0, "prev with no marks is a no-op");
     m.active_window()
         .active_pane()
-        .unwrap()
         .set_scroll_offset(ScrollOffset::new(5), ScrollOffset::new(10));
     m.handle_command(Command::PrevPrompt).unwrap();
     assert_eq!(active_scroll_offset(&m), 5, "prev keeps a manual scroll");
@@ -1851,10 +1846,7 @@ async fn command_pane_death_respawns_shell_in_place() {
     .unwrap();
     m.set_default_program("/bin/sh"); // fallback shell must not depend on `$SHELL`
     assert!(
-        m.active_window()
-            .active_pane()
-            .unwrap()
-            .respawn_shell_on_exit(),
+        m.active_window().active_pane().respawn_shell_on_exit(),
         "the command pane is flagged to respawn a shell on exit",
     );
     let windows_before = m.windows().len();
@@ -1872,10 +1864,7 @@ async fn command_pane_death_respawns_shell_in_place() {
         PaneId(0),
         "the slot holds a fresh pane with a new id"
     );
-    let new_pane = m
-        .active_window()
-        .active_pane()
-        .expect("slot still occupied by a live pane");
+    let new_pane = m.active_window().active_pane();
     assert!(
         !new_pane.respawn_shell_on_exit(),
         "the fallback shell has empty args → it closes normally when the user exits it",
@@ -1908,10 +1897,7 @@ async fn shell_pane_death_still_closes_window() {
     .unwrap();
     m.set_default_program("/bin/sh");
     assert!(
-        !m.active_window()
-            .active_pane()
-            .unwrap()
-            .respawn_shell_on_exit(),
+        !m.active_window().active_pane().respawn_shell_on_exit(),
         "an empty-args pane is not flagged for respawn",
     );
     m.handle_pane_death(PaneId(0)).unwrap();
@@ -2035,7 +2021,7 @@ async fn command_session_survives_command_exit() {
         !m.is_empty(),
         "the session's last window survives the command exit"
     );
-    m.active_window().active_pane().unwrap().kill_child();
+    m.active_window().active_pane().kill_child();
 }
 
 /// The session-wide mark follows the slot across a respawn: marking a command
@@ -2070,7 +2056,7 @@ async fn respawn_repoints_marked_pane_to_new_shell() {
         Some(new_id),
         "mark follows the slot to the fresh shell"
     );
-    m.active_window().active_pane().unwrap().kill_child();
+    m.active_window().active_pane().kill_child();
 }
 
 #[tokio::test]
@@ -3623,7 +3609,7 @@ async fn paste_gate_reads_the_popup_pane_mode_not_the_layout_pane() {
     m.popup().unwrap().pane.with_screen_mut(|s| {
         s.modes.insert(plexy_glass_emulator::Modes::BRACKETED_PASTE);
     });
-    let layout = m.active_window().active_pane().unwrap();
+    let layout = m.active_window().active_pane();
     assert!(!layout.wants_bracketed_paste(), "layout pane: mode off");
     assert!(
         m.input_target_pane().unwrap().wants_bracketed_paste(),
@@ -3656,9 +3642,9 @@ async fn popup_cwd_prefers_live_osc7_then_home_base() {
     // No live OSC-7 cwd → home base.
     assert_eq!(m.popup_cwd().as_deref(), Some("/home/base"));
     // Live OSC-7 cwd wins (documented divergence from split_cwd).
-    if let Some(pane) = m.active_window().active_pane() {
-        pane.with_screen_mut(|s| s.cwd = Some("file:///live/here".to_string()));
-    }
+    m.active_window()
+        .active_pane()
+        .with_screen_mut(|s| s.cwd = Some("file:///live/here".to_string()));
     assert_eq!(m.popup_cwd().as_deref(), Some("/live/here"));
     assert_eq!(
         m.split_cwd().as_deref(),
@@ -3942,7 +3928,7 @@ async fn prompt_click_while_scrolled_jumps_to_viewport_top() {
     inject_scrollback_prompts(&m, 10, &[3]);
     // Scroll so top visible absolute line = 2 (offset = 10 - 2 = 8).
     // Pane-local row 1 → abs line 3 (the prompt).
-    let pane = m.active_window().active_pane().unwrap().clone();
+    let pane = m.active_window().active_pane().clone();
     pane.set_scroll_offset(ScrollOffset::new(8), ScrollOffset::new(10));
     assert_eq!(pane.scroll_offset(), ScrollOffset::new(8));
 
@@ -3979,7 +3965,7 @@ async fn non_prompt_click_while_scrolled_leaves_offset_unchanged() {
     .unwrap();
     // 10 scrollback rows; prompt at absolute line 3 only.
     inject_scrollback_prompts(&m, 10, &[3]);
-    let pane = m.active_window().active_pane().unwrap().clone();
+    let pane = m.active_window().active_pane().clone();
     pane.set_scroll_offset(ScrollOffset::new(8), ScrollOffset::new(10));
 
     // Physical row 1 → pane-local row 0 → abs line 2 (NOT a prompt).
@@ -4019,7 +4005,6 @@ async fn prompt_click_at_live_view_does_not_change_offset() {
     // Set PROMPT_START on active grid row 0 (= abs line scrollback_len + 0).
     m.active_window()
         .active_pane()
-        .unwrap()
         .with_screen_mut(|s| s.active.rows[0].mark.set(RowMark::PROMPT_START));
     // offset is already 0 (live view).
     assert_eq!(active_scroll_offset(&m), 0);
@@ -4051,7 +4036,7 @@ async fn shift_click_on_scrolled_prompt_row_extends_selection_not_jumps() {
     )
     .unwrap();
     inject_scrollback_prompts(&m, 10, &[3]);
-    let pane = m.active_window().active_pane().unwrap().clone();
+    let pane = m.active_window().active_pane().clone();
     pane.set_scroll_offset(ScrollOffset::new(8), ScrollOffset::new(10));
 
     // Seed a selection with a plain click (physical row 1 → local row 0 →
@@ -4103,9 +4088,8 @@ async fn prompt_click_on_grid_portion_snaps_to_live() {
     inject_scrollback_prompts(&m, 5, &[]);
     m.active_window()
         .active_pane()
-        .unwrap()
         .with_screen_mut(|s| s.active.rows[0].mark.set(RowMark::PROMPT_START));
-    let pane = m.active_window().active_pane().unwrap().clone();
+    let pane = m.active_window().active_pane().clone();
     // Scroll so top = abs line 3 (offset = 5 - 3 = 2).
     // Pane-local row 2 → abs line 5 (grid row 0, the prompt).
     pane.set_scroll_offset(ScrollOffset::new(2), ScrollOffset::new(5));
@@ -4140,7 +4124,7 @@ async fn app_mouse_mode_passthrough_unaffected_by_prompt_jump() {
     )
     .unwrap();
     inject_scrollback_prompts(&m, 10, &[3]);
-    let pane = m.active_window().active_pane().unwrap().clone();
+    let pane = m.active_window().active_pane().clone();
     pane.set_scroll_offset(ScrollOffset::new(8), ScrollOffset::new(10));
 
     // Turn on app mouse mode so Rule 5 (passthrough) fires.
@@ -4178,7 +4162,7 @@ async fn double_click_after_prompt_jump_does_not_panic() {
     )
     .unwrap();
     inject_scrollback_prompts(&m, 10, &[3]);
-    let pane = m.active_window().active_pane().unwrap().clone();
+    let pane = m.active_window().active_pane().clone();
     pane.set_scroll_offset(ScrollOffset::new(8), ScrollOffset::new(10));
 
     // First click: physical row 2 → local row 1 → abs line 3 (prompt) →

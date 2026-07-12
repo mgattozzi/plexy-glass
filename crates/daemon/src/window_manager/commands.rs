@@ -334,18 +334,17 @@ impl WindowManager {
             | Command::EnterBlockMode
             | Command::CopyOutput => {}
             Command::EnterCopyMode => {
-                if let Some(pane) = self.active_window().active_pane() {
-                    let (total_lines, pane_rows, start_line, start_col) = pane.with_screen(|s| {
-                        let scrollback_len = s.scrollback.len() as u32;
-                        let active_rows = u32::from(s.active.num_rows());
-                        let total = scrollback_len + active_rows;
-                        let start_line = scrollback_len + u32::from(s.cursor.row);
-                        let start_col = s.cursor.col;
-                        let pane_rows = s.active.num_rows();
-                        (total, pane_rows, start_line, start_col)
-                    });
-                    pane.enter_copy_mode(total_lines, pane_rows, start_line, start_col);
-                }
+                let pane = self.active_window().active_pane();
+                let (total_lines, pane_rows, start_line, start_col) = pane.with_screen(|s| {
+                    let scrollback_len = s.scrollback.len() as u32;
+                    let active_rows = u32::from(s.active.num_rows());
+                    let total = scrollback_len + active_rows;
+                    let start_line = scrollback_len + u32::from(s.cursor.row);
+                    let start_col = s.cursor.col;
+                    let pane_rows = s.active.num_rows();
+                    (total, pane_rows, start_line, start_col)
+                });
+                pane.enter_copy_mode(total_lines, pane_rows, start_line, start_col);
             }
             Command::OpenPopup { command } => {
                 self.open_popup(command)?;
@@ -373,42 +372,40 @@ impl WindowManager {
             // absolute line is `scrollback_len - N` (N=0 → grid row 0, i.e.
             // line `scrollback_len`).
             Command::PrevPrompt => {
-                if let Some(pane) = self.active_window().active_pane() {
-                    let offset = pane.scroll_offset();
-                    // Fold-aware, visible-space: find the prompt above the current
-                    // top line and the offset that lands it exactly at the top.
-                    let target = pane.with_screen(|s| {
-                        let rows = s.active.num_rows();
-                        let top = blocks::scroll_line_at(s, rows, offset, 0);
-                        plexy_glass_mux::prev_prompt_line(s, top.get()).map(|t| {
-                            (
-                                blocks::scroll_offset_for_top(s, rows, UnifiedLine::new(t)),
-                                blocks::max_scroll_offset(s, rows),
-                            )
-                        })
-                    });
-                    // No prompt above → no-op (no wraparound).
-                    if let Some((off, max)) = target {
-                        pane.set_scroll_offset(off, max);
-                    }
+                let pane = self.active_window().active_pane();
+                let offset = pane.scroll_offset();
+                // Fold-aware, visible-space: find the prompt above the current
+                // top line and the offset that lands it exactly at the top.
+                let target = pane.with_screen(|s| {
+                    let rows = s.active.num_rows();
+                    let top = blocks::scroll_line_at(s, rows, offset, 0);
+                    plexy_glass_mux::prev_prompt_line(s, top.get()).map(|t| {
+                        (
+                            blocks::scroll_offset_for_top(s, rows, UnifiedLine::new(t)),
+                            blocks::max_scroll_offset(s, rows),
+                        )
+                    })
+                });
+                // No prompt above → no-op (no wraparound).
+                if let Some((off, max)) = target {
+                    pane.set_scroll_offset(off, max);
                 }
             }
             Command::NextPrompt => {
-                if let Some(pane) = self.active_window().active_pane() {
-                    let offset = pane.scroll_offset();
-                    let (off, max) = pane.with_screen(|s| {
-                        let rows = s.active.num_rows();
-                        let top = blocks::scroll_line_at(s, rows, offset, 0);
-                        // Past the newest prompt, or one already in the live view
-                        // (offset_for_top saturates to 0), snaps to live.
-                        let off = plexy_glass_mux::next_prompt_line(s, top.get())
-                            .map_or(ScrollOffset::new(0), |t| {
-                                blocks::scroll_offset_for_top(s, rows, UnifiedLine::new(t))
-                            });
-                        (off, blocks::max_scroll_offset(s, rows))
-                    });
-                    pane.set_scroll_offset(off, max);
-                }
+                let pane = self.active_window().active_pane();
+                let offset = pane.scroll_offset();
+                let (off, max) = pane.with_screen(|s| {
+                    let rows = s.active.num_rows();
+                    let top = blocks::scroll_line_at(s, rows, offset, 0);
+                    // Past the newest prompt, or one already in the live view
+                    // (offset_for_top saturates to 0), snaps to live.
+                    let off = plexy_glass_mux::next_prompt_line(s, top.get())
+                        .map_or(ScrollOffset::new(0), |t| {
+                            blocks::scroll_offset_for_top(s, rows, UnifiedLine::new(t))
+                        });
+                    (off, blocks::max_scroll_offset(s, rows))
+                });
+                pane.set_scroll_offset(off, max);
             }
         }
         self.notify.notify_one();

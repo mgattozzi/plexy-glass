@@ -748,11 +748,10 @@ impl Session {
                         (pane.clone(), bytes)
                     })
                     .collect()
-            } else if let Some(pane) = win.active_pane() {
+            } else {
+                let pane = win.active_pane();
                 let bytes = encode_for_pane(pane, event, raw_bytes, client_kbd);
                 vec![(pane.clone(), bytes)]
-            } else {
-                Vec::new()
             }
         };
         for (pane, bytes) in sends {
@@ -1390,11 +1389,8 @@ async fn build_snapshot_ctx(session: &Arc<Session>) -> plexy_glass_status::Snaps
     let active_pane_cwd = manager
         .active_window()
         .active_pane()
-        .and_then(|p| p.with_screen(|s| s.cwd.clone()));
-    let copy_mode_active = manager
-        .active_window()
-        .active_pane()
-        .is_some_and(super::pane::Pane::is_in_copy_mode);
+        .with_screen(|s| s.cwd.clone());
+    let copy_mode_active = manager.active_window().active_pane().is_in_copy_mode();
     let sync_active = manager.active_window().sync_input;
     let zoom_active = manager.active_window().is_zoomed();
     let prefix_active = session.any_prefix_armed().await;
@@ -2186,7 +2182,7 @@ mod tests {
         s.handle_input_bytes(b"hello\n", false).await.unwrap();
         time::sleep(Duration::from_millis(200)).await;
         let m = s.window_manager.lock().await;
-        let pane = m.active_window().active_pane().unwrap();
+        let pane = m.active_window().active_pane();
         let saw = pane.with_screen(|screen| {
             (0..screen.active.num_cols())
                 .filter_map(|c| {
@@ -2957,10 +2953,7 @@ mod tests {
 
     async fn active_pane(s: &Arc<Session>) -> Pane {
         let m = s.window_manager.lock().await;
-        m.active_window()
-            .active_pane()
-            .cloned()
-            .expect("active pane")
+        m.active_window().active_pane().clone()
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3325,12 +3318,9 @@ mod tests {
         {
             let m = s.window_manager.lock().await;
             // Distinct OSC-7 cwds: layout pane vs popup pane.
-            m.active_window()
-                .active_pane()
-                .unwrap()
-                .with_screen_mut(|scr| {
-                    scr.cwd = Some(format!("file://localhost{}", active_dir.path().display()));
-                });
+            m.active_window().active_pane().with_screen_mut(|scr| {
+                scr.cwd = Some(format!("file://localhost{}", active_dir.path().display()));
+            });
             m.popup().unwrap().pane.with_screen_mut(|scr| {
                 scr.cwd = Some(format!("file://localhost{}", popup_dir.path().display()));
             });

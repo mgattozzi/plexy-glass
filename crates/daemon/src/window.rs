@@ -253,8 +253,18 @@ impl Window {
             .copied()
     }
 
-    pub fn active_pane(&self) -> Option<&Pane> {
-        self.panes.get(&self.active)
+    /// The active pane. Total: `active` is guaranteed to be a live key for any
+    /// LIVE (non-empty) window — every mutation that could invalidate it either
+    /// sets `active` to a just-inserted pane (`set_active`) or, on removal,
+    /// repoints it to a still-live pane (`fixup_active_after_removal`). The only
+    /// moment `active` is stale is the synchronous window between a removal that
+    /// empties the window and the caller closing that window, during which no
+    /// code reads `active_pane` (see the close/detach paths in `WindowManager`).
+    pub fn active_pane(&self) -> &Pane {
+        // invariant: active is always a live pane for a live window (see above).
+        self.panes
+            .get(&self.active)
+            .expect("invariant: active is always a live pane")
     }
 
     /// Pin the window name: set it and disable auto-naming. The path for every
@@ -291,7 +301,7 @@ impl Window {
     /// basename → OSC-7 cwd basename → shell basename. `None` only when there
     /// is no active pane.
     fn compute_auto_name(&self) -> Option<String> {
-        let pane = self.active_pane()?;
+        let pane = self.active_pane();
         if let Some(cmd) = pane.with_screen(blocks::running_command)
             && let Some(tok) = cmd.split_whitespace().next()
         {
@@ -394,7 +404,7 @@ impl Window {
         };
         self.panes.insert(new_pane_id, pane);
         self.record_focus(self.active);
-        self.active = new_pane_id;
+        self.set_active(new_pane_id);
         self.resize(viewport)?;
         Ok(())
     }
@@ -432,11 +442,18 @@ impl Window {
                 .filter(|p| self.panes.contains_key(p))
                 .copied()
                 .collect();
-            self.active = alive_history
+            // Focus follows the MRU still-live pane, else any live layout pane —
+            // the exact target this always used, minus the fabricated `PaneId(0)`.
+            // When NO live pane remains the window is now empty and the caller
+            // tears it down before it is observed again (see `active_pane`), so
+            // we leave `active` untouched rather than fabricate a dangling id.
+            if let Some(next) = alive_history
                 .first()
                 .copied()
                 .or_else(|| self.layout.panes().into_iter().next())
-                .unwrap_or(PaneId(0));
+            {
+                self.active = next;
+            }
         }
         self.focus_history.retain(|p| self.panes.contains_key(p));
     }
@@ -508,7 +525,7 @@ impl Window {
         self.panes.insert(new_id, pane);
         self.block_baselines.insert(new_id, incoming_blocks);
         if self.active == old_slot {
-            self.active = new_id;
+            self.set_active(new_id);
         }
         for p in &mut self.focus_history {
             if *p == old_slot {
@@ -541,7 +558,7 @@ impl Window {
         self.panes.insert(id, pane);
         self.block_baselines.insert(id, incoming_blocks);
         self.record_focus(self.active);
-        self.active = id;
+        self.set_active(id);
         self.resize(viewport)?;
         Ok(())
     }
@@ -604,7 +621,7 @@ impl Window {
         // Rewrite every reference to the dead id → the new one (focus/zoom
         // follow the slot, exactly as install_in_slot does for a swap).
         if self.active == dead_id {
-            self.active = new_pane_id;
+            self.set_active(new_pane_id);
         }
         for p in &mut self.focus_history {
             if *p == dead_id {
@@ -874,6 +891,20 @@ impl Window {
         self.layout.is_empty()
     }
 
+    /// The single sanctioned writer for `active` on the create/adopt/focus
+    /// paths (removal repoints go through `fixup_active_after_removal`). Debug-
+    /// asserts the target is a live pane so a future edit that points `active`
+    /// at an absent pane trips a test rather than panicking later in
+    /// `active_pane`. Keeping every `self.active = …` behind this one method is
+    /// what makes the always-live invariant hold by construction.
+    fn set_active(&mut self, id: PaneId) {
+        debug_assert!(
+            self.panes.contains_key(&id),
+            "set_active: {id:?} is not a live pane"
+        );
+        self.active = id;
+    }
+
     /// Push `prev` onto the focus history, bounding it. Without the bound the
     /// deque grew one entry per focus switch for the window's whole lifetime
     /// (never pop_front'd, only retain-pruned of dead panes on close), which also
@@ -898,7 +929,7 @@ impl Window {
         };
         if let Some(next) = panes.get((idx + 1) % panes.len()) {
             self.record_focus(self.active);
-            self.active = *next;
+            self.set_active(*next);
         }
     }
 
@@ -913,7 +944,7 @@ impl Window {
         let prev_idx = if idx == 0 { panes.len() - 1 } else { idx - 1 };
         if let Some(prev) = panes.get(prev_idx) {
             self.record_focus(self.active);
-            self.active = *prev;
+            self.set_active(*prev);
         }
     }
 
@@ -924,7 +955,7 @@ impl Window {
     pub fn focus(&mut self, target: PaneId) {
         if self.panes.contains_key(&target) && target != self.active {
             self.record_focus(self.active);
-            self.active = target;
+            self.set_active(target);
         }
     }
 
@@ -935,7 +966,7 @@ impl Window {
     ) -> Result<(), LayoutError> {
         if let Some(target) = self.layout.next_in_direction(self.active, viewport, dir) {
             self.record_focus(self.active);
-            self.active = target;
+            self.set_active(target);
         }
         Ok(())
     }

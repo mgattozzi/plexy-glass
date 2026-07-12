@@ -726,9 +726,7 @@ async fn dispatch_input_event(
             );
             if !keeps_scroll {
                 let manager = ctx.session.window_manager.lock().await;
-                if let Some(p) = manager.active_window().active_pane() {
-                    p.reset_scroll();
-                }
+                manager.active_window().active_pane().reset_scroll();
             }
             match action {
                 KeymapAction::PassThrough(event_ke, bytes_back) => {
@@ -736,25 +734,19 @@ async fn dispatch_input_event(
                     // to the CopyModeHandler instead of the shell.
                     let active_in_copy_mode = {
                         let m = ctx.session.window_manager.lock().await;
-                        m.active_window()
-                            .active_pane()
-                            .is_some_and(super::pane::Pane::is_in_copy_mode)
+                        m.active_window().active_pane().is_in_copy_mode()
                     };
                     let active_in_block_mode = {
                         let m = ctx.session.window_manager.lock().await;
-                        m.active_window()
-                            .active_pane()
-                            .is_some_and(super::pane::Pane::is_in_block_mode)
+                        m.active_window().active_pane().is_in_block_mode()
                     };
                     if active_in_copy_mode {
                         let action = {
                             let m = ctx.session.window_manager.lock().await;
-                            let pane_opt = m.active_window().active_pane();
-                            pane_opt.and_then(|p| {
-                                let screen = p.with_screen(Clone::clone);
-                                p.with_copy_mode_mut(|state| {
-                                    copy_mode::handle(&event_ke, state, &screen)
-                                })
+                            let pane = m.active_window().active_pane();
+                            let screen = pane.with_screen(Clone::clone);
+                            pane.with_copy_mode_mut(|state| {
+                                copy_mode::handle(&event_ke, state, &screen)
                             })
                         };
                         match action {
@@ -763,9 +755,7 @@ async fn dispatch_input_event(
                             }
                             Some(plexy_glass_mux::CopyModeAction::Exit) => {
                                 let m = ctx.session.window_manager.lock().await;
-                                if let Some(p) = m.active_window().active_pane() {
-                                    p.exit_copy_mode();
-                                }
+                                m.active_window().active_pane().exit_copy_mode();
                                 ctx.session.notify.notify_one();
                             }
                             Some(plexy_glass_mux::CopyModeAction::Yank(text)) => {
@@ -784,9 +774,7 @@ async fn dispatch_input_event(
                                 ctx.registry.push_paste_buffer(text.into_bytes()).await;
                                 {
                                     let m = ctx.session.window_manager.lock().await;
-                                    if let Some(p) = m.active_window().active_pane() {
-                                        p.exit_copy_mode();
-                                    }
+                                    m.active_window().active_pane().exit_copy_mode();
                                 }
                                 // `set_status_message` notifies + schedules the TTL wake.
                                 ctx.session.set_status_message(msg, sev).await;
@@ -796,12 +784,10 @@ async fn dispatch_input_event(
                     } else if active_in_block_mode {
                         let action = {
                             let m = ctx.session.window_manager.lock().await;
-                            let pane_opt = m.active_window().active_pane();
-                            pane_opt.and_then(|p| {
-                                let screen = p.with_screen(Clone::clone);
-                                p.with_block_mode_mut(|state| {
-                                    block_mode::handle(&event_ke, state, &screen)
-                                })
+                            let pane = m.active_window().active_pane();
+                            let screen = pane.with_screen(Clone::clone);
+                            pane.with_block_mode_mut(|state| {
+                                block_mode::handle(&event_ke, state, &screen)
                             })
                         };
                         match action {
@@ -810,9 +796,7 @@ async fn dispatch_input_event(
                             }
                             Some(plexy_glass_mux::BlockModeAction::Exit) => {
                                 let m = ctx.session.window_manager.lock().await;
-                                if let Some(p) = m.active_window().active_pane() {
-                                    p.exit_block_mode();
-                                }
+                                m.active_window().active_pane().exit_block_mode();
                                 ctx.session.notify.notify_one();
                             }
                             Some(plexy_glass_mux::BlockModeAction::Yank(text)) => {
@@ -835,38 +819,34 @@ async fn dispatch_input_event(
                                 // exit and snap to live to watch it run.
                                 let pane = {
                                     let m = ctx.session.window_manager.lock().await;
-                                    m.active_window().active_pane().cloned()
+                                    m.active_window().active_pane().clone()
                                 };
-                                if let Some(p) = pane {
-                                    let mut bytes = cmd.into_bytes();
-                                    bytes.push(b'\r');
-                                    let _ = p.send_input(bytes::Bytes::from(bytes)).await;
-                                    p.exit_block_mode();
-                                    p.reset_scroll();
-                                }
+                                let mut bytes = cmd.into_bytes();
+                                bytes.push(b'\r');
+                                let _ = pane.send_input(bytes::Bytes::from(bytes)).await;
+                                pane.exit_block_mode();
+                                pane.reset_scroll();
                                 ctx.session.notify.notify_one();
                             }
                             Some(plexy_glass_mux::BlockModeAction::ToggleFold(line)) => {
                                 let m = ctx.session.window_manager.lock().await;
-                                if let Some(p) = m.active_window().active_pane() {
-                                    p.with_screen_mut(|s| {
-                                        blocks::toggle_block_fold(s, line);
-                                    });
-                                }
+                                m.active_window().active_pane().with_screen_mut(|s| {
+                                    blocks::toggle_block_fold(s, line);
+                                });
                                 ctx.session.notify.notify_one();
                             }
                             Some(plexy_glass_mux::BlockModeAction::FoldAll) => {
                                 let m = ctx.session.window_manager.lock().await;
-                                if let Some(p) = m.active_window().active_pane() {
-                                    p.with_screen_mut(blocks::fold_all_completed);
-                                }
+                                m.active_window()
+                                    .active_pane()
+                                    .with_screen_mut(blocks::fold_all_completed);
                                 ctx.session.notify.notify_one();
                             }
                             Some(plexy_glass_mux::BlockModeAction::UnfoldAll) => {
                                 let m = ctx.session.window_manager.lock().await;
-                                if let Some(p) = m.active_window().active_pane() {
-                                    p.with_screen_mut(blocks::unfold_all);
-                                }
+                                m.active_window()
+                                    .active_pane()
+                                    .with_screen_mut(blocks::unfold_all);
                                 ctx.session.notify.notify_one();
                             }
                             Some(plexy_glass_mux::BlockModeAction::Ignore) | None => {}
@@ -1204,10 +1184,9 @@ async fn open_hints_overlay(session: &Arc<Session>) {
     let alphabet = hint::effective_alphabet(&cfg.hints.alphabet);
     let targets = {
         let m = session.window_manager.lock().await;
-        match m.active_window().active_pane() {
-            Some(pane) => pane.with_screen(plexy_glass_mux::scan_hints),
-            None => Vec::new(),
-        }
+        m.active_window()
+            .active_pane()
+            .with_screen(plexy_glass_mux::scan_hints)
     };
     if targets.is_empty() {
         session.set_status_info("no hint targets".into()).await;
@@ -2162,17 +2141,13 @@ async fn copy_last_output(session: &Arc<Session>, registry: &Arc<SessionRegistry
 async fn enter_block_mode(session: &Arc<Session>) {
     let opened = {
         let manager = session.window_manager.lock().await;
-        match manager.active_window().active_pane() {
-            Some(pane) => {
-                let state = pane
-                    .with_screen(|s| plexy_glass_mux::BlockMode::new_for(s, s.active.num_rows()));
-                match state {
-                    Some(state) => {
-                        pane.enter_block_mode(state);
-                        true
-                    }
-                    None => false,
-                }
+        let pane = manager.active_window().active_pane();
+        let state =
+            pane.with_screen(|s| plexy_glass_mux::BlockMode::new_for(s, s.active.num_rows()));
+        match state {
+            Some(state) => {
+                pane.enter_block_mode(state);
+                true
             }
             None => false,
         }
@@ -4042,18 +4017,16 @@ mod tests {
                 loop {
                     if let Some(s) = registry.get("main").await {
                         let m = s.window_manager.lock().await;
-                        let hit = m.active_window().active_pane().map(|p| {
-                            p.with_screen(|sc| {
-                                let mut t = String::new();
-                                for row in &sc.active.rows {
-                                    for cell in &row.cells {
-                                        t.push_str(cell.grapheme.as_str());
-                                    }
+                        let hit = m.active_window().active_pane().with_screen(|sc| {
+                            let mut t = String::new();
+                            for row in &sc.active.rows {
+                                for cell in &row.cells {
+                                    t.push_str(cell.grapheme.as_str());
                                 }
-                                t.contains(needle)
-                            })
+                            }
+                            t.contains(needle)
                         });
-                        if hit == Some(true) {
+                        if hit {
                             return;
                         }
                     }
@@ -4467,12 +4440,10 @@ mod tests {
         loop {
             if let Some(s) = registry.get("focusrt").await {
                 let m = s.window_manager.lock().await;
-                if let Some(p) = m.active_window().active_pane() {
-                    p.with_screen_mut(|sc| {
-                        sc.modes.insert(plexy_glass_emulator::Modes::FOCUS_EVENTS);
-                    });
-                    break;
-                }
+                m.active_window().active_pane().with_screen_mut(|sc| {
+                    sc.modes.insert(plexy_glass_emulator::Modes::FOCUS_EVENTS);
+                });
+                break;
             }
             assert!(Instant::now() < deadline, "pane never appeared");
             time::sleep(Duration::from_millis(20)).await;
@@ -4488,7 +4459,7 @@ mod tests {
             let s = registry.get("focusrt").await.unwrap();
             let mut rx = {
                 let m = s.window_manager.lock().await;
-                m.active_window().active_pane().unwrap().subscribe_output()
+                m.active_window().active_pane().subscribe_output()
             };
             // Send FocusIn now that we're subscribed so the echo is deterministic.
             Codec::write_frame(
@@ -4577,9 +4548,7 @@ mod tests {
         let mut rx = loop {
             if let Some(s) = registry.get("nofocus").await {
                 let m = s.window_manager.lock().await;
-                if let Some(p) = m.active_window().active_pane() {
-                    break p.subscribe_output();
-                }
+                break m.active_window().active_pane().subscribe_output();
             }
             assert!(Instant::now() < deadline, "pane never appeared");
             time::sleep(Duration::from_millis(20)).await;
@@ -4673,13 +4642,11 @@ mod tests {
         loop {
             if let Some(s) = registry.get("themert").await {
                 let m = s.window_manager.lock().await;
-                if let Some(p) = m.active_window().active_pane() {
-                    p.with_screen_mut(|sc| {
-                        sc.modes
-                            .insert(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES);
-                    });
-                    break;
-                }
+                m.active_window().active_pane().with_screen_mut(|sc| {
+                    sc.modes
+                        .insert(plexy_glass_emulator::Modes::COLOR_SCHEME_UPDATES);
+                });
+                break;
             }
             assert!(Instant::now() < deadline, "pane never appeared");
             time::sleep(Duration::from_millis(20)).await;
@@ -4692,7 +4659,7 @@ mod tests {
             let s = registry.get("themert").await.unwrap();
             let mut rx = {
                 let m = s.window_manager.lock().await;
-                m.active_window().active_pane().unwrap().subscribe_output()
+                m.active_window().active_pane().subscribe_output()
             };
             Codec::write_frame(
                 &mut cw,
@@ -4777,9 +4744,7 @@ mod tests {
         let mut rx = loop {
             if let Some(s) = registry.get("notheme").await {
                 let m = s.window_manager.lock().await;
-                if let Some(p) = m.active_window().active_pane() {
-                    break p.subscribe_output();
-                }
+                break m.active_window().active_pane().subscribe_output();
             }
             assert!(Instant::now() < deadline, "pane never appeared");
             time::sleep(Duration::from_millis(20)).await;
@@ -4870,11 +4835,8 @@ mod tests {
         // Wait for the first pane to exist.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if let Some(s) = registry.get("focusswap").await {
-                let m = s.window_manager.lock().await;
-                if m.active_window().active_pane().is_some() {
-                    break;
-                }
+            if registry.get("focusswap").await.is_some() {
+                break;
             }
             assert!(Instant::now() < deadline, "first pane never appeared");
             time::sleep(Duration::from_millis(20)).await;
@@ -5554,7 +5516,7 @@ mod tests {
             .unwrap();
         {
             let m = session.window_manager.lock().await;
-            let pane = m.active_window().active_pane().unwrap();
+            let pane = m.active_window().active_pane();
             pane.with_screen_mut(|s| {
                 // Block 1: prompt row 0, output "ok" on row 1; row 2 carries
                 // the D (closing block 1) plus the next prompt's A, the
@@ -5997,7 +5959,7 @@ mod tests {
         // row 2: PROMPT_START + BLOCK_END ("$ next"), the common D+A flow
         {
             let m = session.window_manager.lock().await;
-            let pane = m.active_window().active_pane().unwrap();
+            let pane = m.active_window().active_pane();
             pane.with_screen_mut(|s| {
                 write_grid_row(s, 0, "$ echo hi");
                 s.active.rows[0].mark.set(RowMark::PROMPT_START);

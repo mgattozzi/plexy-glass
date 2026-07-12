@@ -736,7 +736,7 @@ impl WindowManager {
     pub fn input_target_pane(&self) -> Option<&Pane> {
         match &self.popup {
             Some(p) => Some(&p.pane),
-            None => self.active_window().active_pane(),
+            None => Some(self.active_window().active_pane()),
         }
     }
 
@@ -755,10 +755,7 @@ impl WindowManager {
     /// falling back to the window home base. This intentionally diverges from
     /// `split_cwd` (home base only): a popup acts on the current context.
     pub fn popup_cwd(&self) -> Option<String> {
-        match self.active_window().active_pane() {
-            Some(p) => self.pane_cwd(p),
-            None => self.active_window().home_cwd.clone(),
-        }
+        self.pane_cwd(self.active_window().active_pane())
     }
 
     /// The program new panes, windows, popups, and pipe-pane consumers run
