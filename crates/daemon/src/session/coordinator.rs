@@ -5,6 +5,7 @@ use std::panic;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use plexy_glass_mux::{VirtualScreen, compositor};
 use tokio::process::Command;
@@ -411,12 +412,7 @@ pub(super) async fn render_coordinator(
                 let title = format!("plexy-glass: {}", session.name());
                 for p in &monitor_drain.notifications {
                     let attended = attached > 0 && p.is_active_window && terminal_focused;
-                    if should_notify(
-                        nt.enabled,
-                        nt.min_duration_ms,
-                        p.event.duration_ms,
-                        attended,
-                    ) {
+                    if should_notify(nt.enabled, nt.min_duration, p.event.duration_ms, attended) {
                         notify_desktop(title.clone(), notification_body(p));
                     }
                 }
@@ -456,8 +452,8 @@ pub(super) async fn render_coordinator(
 /// Pure desktop-notification policy: notify only for an enabled, **unattended**
 /// completion whose duration is known and ≥ the threshold. `attended` means a
 /// client is attached AND the completing window is the active one.
-fn should_notify(enabled: bool, min_ms: u32, duration_ms: Option<u32>, attended: bool) -> bool {
-    enabled && !attended && duration_ms.is_some_and(|d| d >= min_ms)
+fn should_notify(enabled: bool, min: Duration, duration_ms: Option<u32>, attended: bool) -> bool {
+    enabled && !attended && duration_ms.is_some_and(|d| Duration::from_millis(d.into()) >= min)
 }
 
 /// Pure in-band (OSC 9 / OSC 777) notification policy: fire unless you're
@@ -891,10 +887,7 @@ pub(super) fn block_border_colors(
     Some(plexy_glass_mux::BlockBorderColors {
         ok: plexy_glass_emulator::Color::Rgb(ok_rgb.r, ok_rgb.g, ok_rgb.b),
         fail: plexy_glass_emulator::Color::Rgb(fail_rgb.r, fail_rgb.g, fail_rgb.b),
-        duration_threshold_ms: cfg
-            .blocks
-            .duration
-            .then_some(cfg.blocks.duration_threshold_ms),
+        duration_threshold: cfg.blocks.duration.then_some(cfg.blocks.duration_threshold),
         sticky_header: cfg.blocks.sticky_header,
     })
 }
@@ -929,27 +922,31 @@ mod tests {
 
     #[test]
     fn should_notify_policy_matrix() {
-        // enabled, min_ms, duration, attended
+        let min_30s = Duration::from_secs(30);
+        // enabled, min, duration, attended
         assert!(
-            should_notify(true, 30_000, Some(30_000), false),
+            should_notify(true, min_30s, Some(30_000), false),
             "long + unattended → notify"
         );
-        assert!(should_notify(true, 30_000, Some(45_000), false));
+        assert!(should_notify(true, min_30s, Some(45_000), false));
         assert!(
-            !should_notify(true, 30_000, Some(29_999), false),
+            !should_notify(true, min_30s, Some(29_999), false),
             "below threshold"
         );
         assert!(
-            !should_notify(true, 30_000, Some(60_000), true),
+            !should_notify(true, min_30s, Some(60_000), true),
             "attended → suppress"
         );
-        assert!(!should_notify(false, 0, Some(99_999), false), "disabled");
         assert!(
-            !should_notify(true, 30_000, None, false),
+            !should_notify(false, Duration::ZERO, Some(99_999), false),
+            "disabled"
+        );
+        assert!(
+            !should_notify(true, min_30s, None, false),
             "no duration → never"
         );
         assert!(
-            should_notify(true, 0, Some(1), false),
+            should_notify(true, Duration::ZERO, Some(1), false),
             "min 0 notifies any unattended"
         );
     }

@@ -373,6 +373,7 @@ fn validate_name(name: &str) -> Result<(), DaemonError> {
 #[cfg(test)]
 mod tests {
     use std::ptr;
+    use std::time::Duration;
 
     use super::*;
     use crate::test_env;
@@ -561,11 +562,11 @@ mod tests {
         assert_eq!(cfg_after.status.left.len(), expected.status.left.len());
         assert_eq!(cfg_after.status.right.len(), expected.status.right.len());
     }
-    /// A custom config marked with a recognizable `duration_threshold_ms`, so a
+    /// A custom config marked with a recognizable `duration_threshold`, so a
     /// test can tell "kept my config" from "reverted to built-in default".
     fn custom_cfg(threshold_ms: u32) -> Arc<plexy_glass_config::Config> {
         let mut c = plexy_glass_config::built_in_default();
-        c.blocks.duration_threshold_ms = threshold_ms;
+        c.blocks.duration_threshold = Duration::from_millis(threshold_ms.into());
         Arc::new(c)
     }
 
@@ -589,8 +590,8 @@ mod tests {
             .await;
         assert!(result.is_err(), "a broken reload reports failure");
         assert_eq!(
-            s.config_snapshot().blocks.duration_threshold_ms,
-            999_999,
+            s.config_snapshot().blocks.duration_threshold,
+            Duration::from_millis(999_999),
             "custom config must survive a failed reload (not revert to default)"
         );
         assert!(
@@ -609,11 +610,11 @@ mod tests {
             .unwrap();
         // A legitimate reload (no error) must still apply the new config.
         let mut good = plexy_glass_config::built_in_default();
-        good.blocks.duration_threshold_ms = 12_345;
+        good.blocks.duration_threshold = Duration::from_millis(12_345);
         r.apply_reload(good, None).await.unwrap();
         assert_eq!(
-            s.config_snapshot().blocks.duration_threshold_ms,
-            12_345,
+            s.config_snapshot().blocks.duration_threshold,
+            Duration::from_millis(12_345),
             "a clean reload swaps in the new config"
         );
         assert!(

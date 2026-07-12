@@ -55,8 +55,8 @@ pub struct BlocksConfig {
     pub sticky_header: bool,
     /// Show a block's wall-clock duration inline (right-aligned on the command row).
     pub duration: bool,
-    /// Minimum duration (millis) to display; `0` shows every completed block.
-    pub duration_threshold_ms: u32,
+    /// Minimum duration to display; `Duration::ZERO` shows every completed block.
+    pub duration_threshold: Duration,
 }
 
 impl Default for BlocksConfig {
@@ -68,7 +68,7 @@ impl Default for BlocksConfig {
             select_color: ColorSource::Literal(Rgb { r: 0xdc, g: 0xa5, b: 0x61 }),
             sticky_header: true,
             duration: true,
-            duration_threshold_ms: 2000,
+            duration_threshold: Duration::from_secs(2),
         }
     }
 }
@@ -127,8 +127,8 @@ impl Default for MouseConfig {
 pub struct NotificationsConfig {
     /// Master switch.
     pub enabled: bool,
-    /// Only notify for commands that ran at least this long (millis).
-    pub min_duration_ms: u32,
+    /// Only notify for commands that ran at least this long.
+    pub min_duration: Duration,
     /// Raise a toast for OSC 9 / OSC 777 requests from child programs, unless
     /// you're looking right at the firing pane. Under `enabled`.
     pub in_band: bool,
@@ -138,7 +138,7 @@ impl Default for NotificationsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            min_duration_ms: 30_000,
+            min_duration: Duration::from_secs(30),
             in_band: true,
         }
     }

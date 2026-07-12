@@ -2,6 +2,7 @@
 //! and an optional status-bar row.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use plexy_glass_emulator::{Attrs, Cell, Color, Screen, display_width};
 
@@ -582,7 +583,7 @@ pub fn compose(
             continue;
         }
         let ctx = &fold_ctx[&v.id];
-        let threshold = blocks.and_then(|b| b.duration_threshold_ms);
+        let threshold = blocks.and_then(|b| b.duration_threshold);
         let duration_on = threshold.is_some() && v.copy_mode.is_none();
         for r in 0..v.rect.rows {
             if v.rect.row.saturating_add(r) >= pane_area_rows {
@@ -615,7 +616,7 @@ pub fn compose(
             let dur = duration_on
                 .then(|| blocks::closing_duration(v.screen, prompt_line))
                 .flatten()
-                .filter(|&ms| ms >= threshold.unwrap_or(u32::MAX))
+                .filter(|&ms| Duration::from_millis(ms.into()) >= threshold.unwrap_or(Duration::MAX))
                 .map(blocks::format_duration);
             let annotation = match (summary, dur) {
                 (Some(s), Some(d)) => format!("{s} · {d}"),
@@ -718,10 +719,10 @@ pub fn compose(
                 pane_right,
             );
             // Right-aligned duration on the header (same overlap guard as inline).
-            if let Some(ms) = blocks
-                .and_then(|b| b.duration_threshold_ms)
-                .and_then(|t| blocks::closing_duration(v.screen, prompt).filter(|&ms| ms >= t))
-            {
+            if let Some(ms) = blocks.and_then(|b| b.duration_threshold).and_then(|t| {
+                blocks::closing_duration(v.screen, prompt)
+                    .filter(|&ms| Duration::from_millis(ms.into()) >= t)
+            }) {
                 let d = blocks::format_duration(ms);
                 let dw = display_width(&d);
                 if pane_right > v.rect.col + dw {
@@ -4482,7 +4483,7 @@ mod tests {
         BlockBorderColors {
             ok: plexy_glass_emulator::Color::Rgb(135, 169, 135),
             fail: plexy_glass_emulator::Color::Rgb(196, 116, 110),
-            duration_threshold_ms: None,
+            duration_threshold: None,
             sticky_header: false,
         }
     }
@@ -6104,7 +6105,7 @@ mod tests {
         sticky_header: bool,
     ) -> BlockBorderColors {
         BlockBorderColors {
-            duration_threshold_ms,
+            duration_threshold: duration_threshold_ms.map(|ms| Duration::from_millis(ms.into())),
             sticky_header,
             ..block_colors()
         }

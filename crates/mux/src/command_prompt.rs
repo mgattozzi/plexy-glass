@@ -7,6 +7,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::path::PathBuf;
 
 use crate::{Direction, SplitDir};
 
@@ -72,11 +73,11 @@ pub enum PromptCommand {
     /// Write a buffer (named, or the newest with `None`) to a file.
     SaveBuffer {
         name: Option<String>,
-        path: String,
+        path: PathBuf,
     },
     /// Read a file into a new paste buffer.
     LoadBuffer {
-        path: String,
+        path: PathBuf,
     },
     ToggleMonitorActivity,
     ToggleMonitorBell,
@@ -249,18 +250,18 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
             match rest.split_once(char::is_whitespace) {
                 Some((first, tail)) if is_buffer_name(first) => Ok(PromptCommand::SaveBuffer {
                     name: Some(first.to_string()),
-                    path: tail.trim_start().to_string(),
+                    path: PathBuf::from(tail.trim_start()),
                 }),
                 Some(_) => Ok(PromptCommand::SaveBuffer {
                     name: None,
-                    path: rest.to_string(),
+                    path: PathBuf::from(rest),
                 }),
                 // A lone `bufferN` is a missing path; a lone anything else is
                 // the path. Empty rest is a missing path either way.
                 None if !rest.is_empty() && !is_buffer_name(rest) => {
                     Ok(PromptCommand::SaveBuffer {
                         name: None,
-                        path: rest.to_string(),
+                        path: PathBuf::from(rest),
                     })
                 }
                 None => Err(err("save-buffer: expected a path")),
@@ -271,7 +272,7 @@ pub fn parse(line: &str) -> Result<PromptCommand, ParseError> {
                 Err(err("load-buffer: expected a path"))
             } else {
                 Ok(PromptCommand::LoadBuffer {
-                    path: rest.to_string(),
+                    path: PathBuf::from(rest),
                 })
             }
         }

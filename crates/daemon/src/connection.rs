@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering as CmpOrdering;
 use std::io::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -1532,8 +1532,8 @@ enum ConnVerb {
     CopyOutput,
     EnterBlockMode,
     SetBuffer(String),
-    SaveBuffer { name: Option<String>, path: String },
-    LoadBuffer(String),
+    SaveBuffer { name: Option<String>, path: PathBuf },
+    LoadBuffer(PathBuf),
 }
 
 impl ConnVerb {
@@ -2209,9 +2209,11 @@ const LOAD_BUFFER_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// whatever directory the first auto-spawning client happened to be in
 /// (undiscoverable from any plexy-glass surface), so relative resolution
 /// would be a silent footgun.
-fn resolve_buffer_path(verb: &str, path: &str) -> Result<PathBuf, String> {
+fn resolve_buffer_path(verb: &str, path: &Path) -> Result<PathBuf, String> {
     let home = env::var("HOME").ok();
-    let resolved = PathBuf::from(expand_tilde(path, home.as_deref()));
+    // `expand_tilde` works on `&str`; the path always originated from a UTF-8
+    // command-prompt token, so this is lossless in practice.
+    let resolved = PathBuf::from(expand_tilde(&path.to_string_lossy(), home.as_deref()));
     if resolved.is_relative() {
         return Err(format!(
             "{verb}: relative paths are not supported — the daemon's working \
@@ -2237,7 +2239,7 @@ async fn set_buffer(registry: &Arc<SessionRegistry>, text: String) -> String {
 async fn save_buffer(
     registry: &Arc<SessionRegistry>,
     name: Option<String>,
-    path: &str,
+    path: &Path,
 ) -> Result<String, String> {
     let resolved = resolve_buffer_path("save-buffer", path)?;
     let (buf_name, content) = match name {
@@ -2269,7 +2271,7 @@ async fn save_buffer(
 /// OOM); symlinks to regular files are followed deliberately. The size cap
 /// guards resident memory (buffers are resident and cloned per paste).
 /// Empty files load as an empty buffer.
-async fn load_buffer(registry: &Arc<SessionRegistry>, path: &str) -> Result<String, String> {
+async fn load_buffer(registry: &Arc<SessionRegistry>, path: &Path) -> Result<String, String> {
     let resolved = resolve_buffer_path("load-buffer", path)?;
     let disp = resolved.display();
     let meta = fs::metadata(&resolved).map_err(|e| format!("load-buffer: {disp}: {e}"))?;

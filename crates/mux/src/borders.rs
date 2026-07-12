@@ -8,6 +8,8 @@
 //! neighbours are also border cells, which yields correct corners, tees, and
 //! crosses uniformly for the frame and the separators.
 
+use std::time::Duration;
+
 use plexy_glass_emulator::{Attrs, Cell, Color, graphemes_with_width};
 use smol_str::SmolStr;
 
@@ -55,9 +57,9 @@ pub struct BlockBorderColors {
     /// Foreground color for a failed block row (nonzero exit code). Also
     /// triggers a `│` → `▐` glyph replacement on plain vertical segments.
     pub fail: Color,
-    /// Minimum duration (millis) to show the inline/header duration annotation;
-    /// `None` disables the duration feature.
-    pub duration_threshold_ms: Option<u32>,
+    /// Minimum duration to show the inline/header duration annotation; `None`
+    /// disables the duration feature.
+    pub duration_threshold: Option<Duration>,
     /// Pin the command line at the pane top when its block's output has scrolled
     /// above the viewport (live view only).
     pub sticky_header: bool,
@@ -535,7 +537,7 @@ mod tests {
         BlockBorderColors {
             ok: Color::Rgb(135, 169, 135),   // #87a987
             fail: Color::Rgb(196, 116, 110), // #c4746e
-            duration_threshold_ms: None,
+            duration_threshold: None,
             sticky_header: false,
         }
     }

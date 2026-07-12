@@ -292,22 +292,23 @@ fn decode_keymap(node: &KdlNode, src: &str) -> Result<KeymapConfig, ConfigError>
 
 // --- blocks ---
 
-/// Parse a duration threshold: `"<int>ms"`, `"<float>s"`, or `"0"` → millis.
+/// Parse a duration threshold: `"<int>ms"`, `"<float>s"`, or `"0"`.
 /// Returns `None` for unparseable or negative values (caller maps to an error).
-fn parse_duration_threshold(s: &str) -> Option<u32> {
+fn parse_duration_threshold(s: &str) -> Option<Duration> {
     let s = s.trim();
     if s == "0" {
-        return Some(0);
+        return Some(Duration::ZERO);
     }
     if let Some(ms) = s.strip_suffix("ms") {
-        return ms.trim().parse::<u32>().ok();
+        return ms.trim().parse::<u32>().ok().map(|ms| Duration::from_millis(ms.into()));
     }
     if let Some(secs) = s.strip_suffix('s') {
         let secs: f64 = secs.trim().parse().ok()?;
         if secs < 0.0 || !secs.is_finite() {
             return None;
         }
-        return Some((secs * 1000.0).round() as u32);
+        let millis = (secs * 1000.0).round() as u32; // ponytail: same round-to-millis as the ms path, just wrapped in Duration
+        return Some(Duration::from_millis(millis.into()));
     }
     None
 }
@@ -322,7 +323,7 @@ fn decode_notifications(node: &KdlNode, src: &str) -> Result<NotificationsConfig
                 "in-band" => n.in_band = bool_arg(child, 0, src, "in-band")?,
                 "min-duration" => {
                     let s = string_arg(child, 0, src, "min-duration")?;
-                    n.min_duration_ms = parse_duration_threshold(s).ok_or_else(|| {
+                    n.min_duration = parse_duration_threshold(s).ok_or_else(|| {
                         decode_err(
                             src,
                             child,
@@ -369,14 +370,13 @@ fn decode_blocks(node: &KdlNode, src: &str) -> Result<BlocksConfig, ConfigError>
                 "duration" => blocks.duration = bool_arg(child, 0, src, "duration")?,
                 "duration-threshold" => {
                     let s = string_arg(child, 0, src, "duration-threshold")?;
-                    blocks.duration_threshold_ms =
-                        parse_duration_threshold(s).ok_or_else(|| {
-                            decode_err(
-                                src,
-                                child,
-                                "invalid duration-threshold (use e.g. \"2s\", \"500ms\", or \"0\")",
-                            )
-                        })?;
+                    blocks.duration_threshold = parse_duration_threshold(s).ok_or_else(|| {
+                        decode_err(
+                            src,
+                            child,
+                            "invalid duration-threshold (use e.g. \"2s\", \"500ms\", or \"0\")",
+                        )
+                    })?;
                 }
                 other => {
                     return Err(decode_err(
@@ -2182,7 +2182,7 @@ session "dev" cwd="~/projects/app" {
     fn notifications_defaults() {
         let d = NotificationsConfig::default();
         assert!(d.enabled);
-        assert_eq!(d.min_duration_ms, 30_000);
+        assert_eq!(d.min_duration, Duration::from_secs(30));
         // Absent node keeps the defaults.
         let cfg = parse_config("").unwrap();
         assert_eq!(cfg.notifications, d);
@@ -2192,7 +2192,7 @@ session "dev" cwd="~/projects/app" {
     fn notifications_round_trip() {
         let cfg = parse_config(r#"notifications { enabled #false; min-duration "60s" }"#).unwrap();
         assert!(!cfg.notifications.enabled);
-        assert_eq!(cfg.notifications.min_duration_ms, 60_000);
+        assert_eq!(cfg.notifications.min_duration, Duration::from_mins(1));
     }
 
     #[test]
@@ -2224,7 +2224,7 @@ session "dev" cwd="~/projects/app" {
         let d = BlocksConfig::default();
         assert!(d.sticky_header);
         assert!(d.duration);
-        assert_eq!(d.duration_threshold_ms, 2000);
+        assert_eq!(d.duration_threshold, Duration::from_secs(2));
     }
 
     #[test]
@@ -2235,15 +2235,15 @@ session "dev" cwd="~/projects/app" {
         .unwrap();
         assert!(!cfg.blocks.sticky_header);
         assert!(!cfg.blocks.duration);
-        assert_eq!(cfg.blocks.duration_threshold_ms, 500);
+        assert_eq!(cfg.blocks.duration_threshold, Duration::from_millis(500));
     }
 
     #[test]
     fn blocks_duration_threshold_seconds_and_zero() {
         let a = parse_config(r#"blocks { duration-threshold "1.5s" }"#).unwrap();
-        assert_eq!(a.blocks.duration_threshold_ms, 1500);
+        assert_eq!(a.blocks.duration_threshold, Duration::from_millis(1500));
         let b = parse_config(r#"blocks { duration-threshold "0" }"#).unwrap();
-        assert_eq!(b.blocks.duration_threshold_ms, 0);
+        assert_eq!(b.blocks.duration_threshold, Duration::ZERO);
     }
 
     #[test]
