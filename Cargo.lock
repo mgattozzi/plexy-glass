@@ -1259,6 +1259,7 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

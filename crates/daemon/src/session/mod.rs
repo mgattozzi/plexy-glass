@@ -1433,13 +1433,30 @@ async fn silence_tick_loop(weak: Weak<Session>) {
         if session.closing.load(Ordering::SeqCst) {
             return;
         }
-        let edge = {
-            let mut m = session.window_manager.lock().await;
-            m.check_silence_alerts()
-        };
-        if edge {
-            session.notify.notify_one();
-            session.schedule_status_expiry_wake();
+        // Run this tick's WM-lock check as its own task: a panic inside
+        // check_silence_alerts (or the notify/schedule follow-up) must not
+        // silently kill this loop forever — log and skip the tick instead
+        // (self-heal), mirroring guard_thread's log-and-continue in pane.rs.
+        // A real `std::panic::catch_unwind` can't span the `.await` inside;
+        // tokio's own task boundary already catches a panic while polling a
+        // spawned task, so awaiting the JoinHandle is what turns that into
+        // an `Err` we can react to here.
+        let tick = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move {
+                let edge = {
+                    let mut m = session.window_manager.lock().await;
+                    m.check_silence_alerts()
+                };
+                if edge {
+                    session.notify.notify_one();
+                    session.schedule_status_expiry_wake();
+                }
+            }
+        })
+        .await;
+        if let Err(e) = tick {
+            tracing::error!(error = %e, "silence tick task panicked; skipping this tick");
         }
     }
 }

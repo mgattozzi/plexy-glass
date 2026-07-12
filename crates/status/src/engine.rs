@@ -270,12 +270,39 @@ impl StatusEngine {
         let snapshot_ctx = Arc::new(snapshot_ctx);
         tokio::spawn(async move {
             loop {
-                // Awaited (not a blocking call): the snapshot closure may take
-                // async locks, and this task runs on a runtime worker thread
-                // where blocking would panic.
-                let owned = (snapshot_ctx)().await;
-                let ctx = owned.as_eval_context();
-                let next_deadline = inner.refresh_due_intervals(&ctx).await;
+                // Run this tick's snapshot+refresh as its own task: after
+                // Phase 3 this loop is the SOLE evaluator of interval-driven
+                // status widgets, so a panicking widget's evaluate() must not
+                // silently kill the loop forever — log and skip the tick
+                // instead (self-heal), mirroring guard_thread's
+                // log-and-continue in pane.rs. A real
+                // `std::panic::catch_unwind` can't span the `.await` calls
+                // below; tokio's own task boundary already catches a panic
+                // while polling a spawned task, so awaiting the JoinHandle is
+                // what turns that into an `Err` we can react to here.
+                let tick = {
+                    let inner = Arc::clone(&inner);
+                    let snapshot_ctx = Arc::clone(&snapshot_ctx);
+                    tokio::spawn(async move {
+                        // Awaited (not a blocking call): the snapshot closure may take
+                        // async locks, and this task runs on a runtime worker thread
+                        // where blocking would panic.
+                        let owned = (snapshot_ctx)().await;
+                        let ctx = owned.as_eval_context();
+                        inner.refresh_due_intervals(&ctx).await
+                    })
+                    .await
+                };
+                let next_deadline = match tick {
+                    Ok(deadline) => deadline,
+                    Err(e) => {
+                        tracing::error!(error = %e, "status tick task panicked; skipping this tick");
+                        // Back off on the default refresh so a persistently
+                        // panicking widget doesn't spin this loop hot.
+                        time::sleep(inner.refresh()).await;
+                        continue;
+                    }
+                };
                 notify.notify_one();
                 match next_deadline {
                     Some(deadline) => {
@@ -435,6 +462,8 @@ pub struct StatusHit {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use plexy_glass_config::{StyleConfig, built_in_default};
 
     use super::*;
@@ -453,8 +482,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn tick_task_notifies_periodically() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
         let mut cfg = built_in_default();
         // Force a fast interval on an interval-driven widget so the tick fires
         // often (the default right cluster has CpuLoad, which carries one).
@@ -494,6 +521,54 @@ mod tests {
             counter.load(Ordering::SeqCst) >= 3,
             "expected at least 3 ticks, got {}",
             counter.load(Ordering::SeqCst)
+        );
+    }
+
+    // Regression for the tick loop's self-heal: after Phase 3 this task is
+    // the sole evaluator of interval-driven widgets, so a single panicking
+    // widget must not silently freeze it forever. No widgets are configured
+    // here (refresh is forced short, left/middle/right cleared) so every
+    // tick's next_deadline is None and the loop sleeps on `refresh` alone;
+    // the panic comes from the snapshot_ctx closure itself, standing in for
+    // "the per-iteration body panicked" generically.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tick_task_survives_a_panicking_tick_and_keeps_going() {
+        let mut cfg = built_in_default();
+        cfg.status.refresh = Duration::from_millis(20);
+        cfg.status.left.clear();
+        cfg.status.middle.clear();
+        cfg.status.right.clear();
+        let engine = StatusEngine::new(&cfg.status, &cfg.palette, &GlyphSet::UNICODE);
+        let notify = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_ctx = Arc::clone(&calls);
+        let snapshot_ctx = move || {
+            let calls = Arc::clone(&calls_for_ctx);
+            async move {
+                assert!(
+                    calls.fetch_add(1, Ordering::SeqCst) != 0,
+                    "simulated panic on the first tick"
+                );
+                SnapshotCtx {
+                    session_name: "test".into(),
+                    windows: vec![],
+                    active_window: 0,
+                    attached_clients: 1,
+                    prefix_active: false,
+                    active_pane_cwd: None,
+                    copy_mode_active: false,
+                    sync_active: false,
+                    zoom_active: false,
+                }
+            }
+        };
+        let handle = engine.spawn_tick_task(notify, snapshot_ctx);
+        time::sleep(Duration::from_millis(300)).await;
+        handle.abort();
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "the tick loop must keep calling snapshot_ctx after the first tick panics, got {} calls",
+            calls.load(Ordering::SeqCst)
         );
     }
 

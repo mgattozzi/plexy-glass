@@ -15,6 +15,7 @@ nix = { workspace = true, features = ["hostname"] }
 battery = "0.7.8"
 smol_str = { workspace = true }
 tokio = { workspace = true, features = ["sync", "process", "time", "macros"] }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
