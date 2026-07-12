@@ -1093,6 +1093,20 @@ impl Session {
                     }
                 }
             }
+            OffLockAction::OpenUrl(url) => {
+                // Spawn the system opener off-lock: even the spawn can stall on
+                // a wedged opener / exhausted process table, and this must not
+                // freeze the compose lock. Set the honest status on re-lock,
+                // mirroring the hint-mode Open action.
+                let (msg, sev) = match osc_actions::open_url(&url).await {
+                    Ok(()) => (format!("opening {url}"), Severity::Info),
+                    Err(_) => (
+                        "couldn't open (no system opener)".to_string(),
+                        Severity::Error,
+                    ),
+                };
+                self.set_status_message(msg, sev).await;
+            }
         }
         Ok(())
     }
@@ -2457,6 +2471,49 @@ mod tests {
         assert!(
             msg.starts_with("copied") || msg == "clipboard unavailable",
             "message must be an honest yank_status result (success or honest failure), got: {msg:?}"
+        );
+    }
+
+    // Finding #13 (open off-lock) regression: clicking an OSC 8 hyperlink
+    // resolves the URL UNDER the WM lock but opens it (and flashes the honest
+    // status) OFF the lock, since even spawning the opener can stall and this
+    // lock gates the whole session's compose + input. With no opener on PATH the
+    // spawn fails, and the honest error message must still land — proving the
+    // off-lock open + re-lock status set, not a status set under the lock.
+    #[tokio::test]
+    async fn osc8_click_reports_open_error_off_lock() {
+        use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
+        let _g = test_env::isolate();
+        let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
+        let pane = {
+            let m = s.window_manager.lock().await;
+            m.active_window().pane(PaneId(0)).cloned().unwrap()
+        };
+        // Paint a hyperlinked cell at pane-local (0,0).
+        pane.with_screen_mut(|sc| {
+            let id = sc.hyperlinks.intern("https://example.com");
+            sc.active.rows[0].cells[0].hyperlink_id = id;
+        });
+        // Stub PATH empty so `open`/`xdg-open` can't spawn → open_url returns Err.
+        let old = env::var("PATH").unwrap_or_default();
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { env::set_var("PATH", dir.path()) };
+        // Physical (1,1) → pane-local (0,0) (viewport frame inset, no status bar).
+        let ev = MouseEvent {
+            kind: MouseKind::Press,
+            button: MouseButton::Left,
+            modifiers: MouseModifiers::default(),
+            row: 1,
+            col: 1,
+        };
+        s.handle_mouse(ev).await.unwrap();
+        unsafe { env::set_var("PATH", old) };
+        let mut m = s.window_manager.lock().await;
+        assert_eq!(m.active_severity(), Severity::Error);
+        assert_eq!(
+            m.take_active_message(),
+            Some("couldn't open (no system opener)")
         );
     }
 

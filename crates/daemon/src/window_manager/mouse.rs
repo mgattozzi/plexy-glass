@@ -5,7 +5,7 @@ use plexy_glass_mux::{
     Rect, Selection, WheelAxis, WindowId, blocks, encode_for_child, extract_text, prev_prompt_line,
 };
 
-use super::{OffLockAction, Severity, WindowManager};
+use super::{OffLockAction, WindowManager};
 use crate::error::DaemonError;
 use crate::osc_actions;
 
@@ -550,8 +550,7 @@ impl WindowManager {
     ) -> Result<OffLockAction, DaemonError> {
         let action = match event.kind {
             MouseKind::Press if event.button == MouseButton::Left => {
-                self.handle_left_press(pane_id, event, viewport).await?;
-                OffLockAction::Nothing
+                self.handle_left_press(pane_id, event, viewport).await?
             }
             MouseKind::Release if event.button == MouseButton::Left => {
                 self.handle_left_release().await?
@@ -602,11 +601,11 @@ impl WindowManager {
         pane_id: PaneId,
         event: MouseEvent,
         viewport: Rect,
-    ) -> Result<(), DaemonError> {
+    ) -> Result<OffLockAction, DaemonError> {
         // Click in a non-active pane → focus only.
         if pane_id != self.active_window().active() {
             self.active_window_mut().focus(pane_id);
-            return Ok(());
+            return Ok(OffLockAction::Nothing);
         }
 
         let pane_rect = self
@@ -628,7 +627,7 @@ impl WindowManager {
             if let Some(sel) = self.selection.as_mut() {
                 sel.extend(local_row, local_col, pane_rect);
             }
-            return Ok(());
+            return Ok(OffLockAction::Nothing);
         }
 
         // Block-aware prompt jump: plain (unmodified) left press on a scrolled
@@ -664,7 +663,7 @@ impl WindowManager {
                 if let Some((new_offset, max)) = jumped {
                     pane.set_scroll_offset(new_offset, max);
                     self.notify.notify_one();
-                    return Ok(());
+                    return Ok(OffLockAction::Nothing);
                 }
             }
         }
@@ -696,20 +695,14 @@ impl WindowManager {
             })
         });
         if let Some(url) = url {
-            // Await the opener (not fire-and-forget) so a missing system opener
-            // becomes a visible message instead of a silent no-op, mirroring the
-            // hint-mode Open action (connection.rs dispatch_hint). `open_url` only
-            // spawns the opener (it doesn't wait for it to finish), so this stays
-            // cheap under the WM lock.
-            match osc_actions::open_url(&url).await {
-                Ok(()) => self.set_status_message(format!("opening {url}"), Severity::Info),
-                Err(_) => self.set_status_message(
-                    "couldn't open (no system opener)".to_string(),
-                    Severity::Error,
-                ),
-            }
+            // Bubble the open up as an OffLockAction rather than awaiting it
+            // here: `open_url` spawns the system opener, and even a spawn can
+            // stall (a wedged opener, an exhausted process table), while this
+            // lock gates the whole session's compose + input. The caller opens
+            // it off-lock and flashes the honest open/failure status on re-lock,
+            // uniform with the paste/yank rule. Suppresses selection start.
             self.notify.notify_one();
-            return Ok(());
+            return Ok(OffLockAction::OpenUrl(url));
         }
 
         // NOTE: cursor-click-to-move (click_to_position) is handled on RELEASE,
@@ -755,7 +748,7 @@ impl WindowManager {
             .active_window()
             .pane(pane_id)
             .map_or(0, |p| p.scroll_offset().get());
-        Ok(())
+        Ok(OffLockAction::Nothing)
     }
 
     fn handle_left_drag(&mut self, event: MouseEvent, viewport: Rect) {

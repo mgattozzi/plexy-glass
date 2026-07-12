@@ -1,5 +1,3 @@
-use std::env;
-
 use plexy_glass_emulator::Notification;
 use plexy_glass_emulator::coords::{Col, Row};
 use plexy_glass_mux::{
@@ -5051,10 +5049,14 @@ async fn motion_forwarded_to_motion_tracking_child() {
     let _ = pane.send_input(Bytes::from_static(&[0x04])).await;
 }
 
-// #20: clicking an OSC 8 hyperlink with no system opener sets a visible error
-// message instead of a silent no-op.
+// #13/#20: clicking an OSC 8 hyperlink resolves the URL UNDER the lock but
+// returns it as an OffLockAction::OpenUrl rather than spawning the opener (or
+// setting a status) under the lock — even the opener spawn can stall and this
+// lock gates the whole session's compose. Session::handle_mouse opens it and
+// flashes the honest status off-lock (see the session-level test below). The WM
+// must set NO message here.
 #[tokio::test]
-async fn osc8_click_without_opener_reports_error() {
+async fn osc8_click_returns_open_url_action_off_lock() {
     let notify = Arc::new(Notify::new());
     let mut m = WindowManager::new(
         spec(),
@@ -5075,20 +5077,18 @@ async fn osc8_click_without_opener_reports_error() {
         let id = s.hyperlinks.intern("https://example.com");
         s.active.rows[0].cells[0].hyperlink_id = id;
     });
-    // Stub PATH empty so `open`/`xdg-open` can't spawn → open_url returns Err.
-    let old = env::var("PATH").unwrap_or_default();
-    let dir = tempfile::tempdir().unwrap();
-    // SAFETY: nextest runs each test in its own process.
-    unsafe { env::set_var("PATH", dir.path()) };
     // Physical (1,1) → pane-local (0,0) (viewport frame inset, no status bar).
-    m.handle_mouse(mev(MouseKind::Press, 1, 1, false))
+    let action = m
+        .handle_mouse(mev(MouseKind::Press, 1, 1, false))
         .await
         .unwrap();
-    unsafe { env::set_var("PATH", old) };
-    assert_eq!(m.active_severity(), Severity::Error);
-    assert_eq!(
-        m.take_active_message(),
-        Some("couldn't open (no system opener)")
+    assert!(
+        matches!(&action, OffLockAction::OpenUrl(u) if u == "https://example.com"),
+        "an OSC 8 click must resolve to an OpenUrl action off-lock, got {action:?}"
+    );
+    assert!(
+        !m.has_active_message(),
+        "the WM must NOT set the status under the lock — the caller does it off-lock"
     );
 }
 

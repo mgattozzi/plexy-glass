@@ -116,6 +116,10 @@ pub(crate) enum OffLockAction {
     /// Middle-click paste: read the system clipboard off-lock and send it to
     /// `pane`, wrapping in bracketed-paste markers when `bracketed`.
     Paste { pane: Pane, bracketed: bool },
+    /// Open this OSC 8 hyperlink URL with the system opener off-lock, then flash
+    /// the honest open/failure status. `open_url` only spawns the opener, but a
+    /// missing/wedged opener process should still not stall the compose lock.
+    OpenUrl(String),
 }
 
 // `Pane` is not `Debug` (it holds PTY handles), so derive isn't available;
@@ -129,6 +133,7 @@ impl fmt::Debug for OffLockAction {
                 .debug_struct("Paste")
                 .field("bracketed", bracketed)
                 .finish_non_exhaustive(),
+            Self::OpenUrl(u) => f.debug_tuple("OpenUrl").field(u).finish(),
         }
     }
 }
