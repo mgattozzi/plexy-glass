@@ -34,8 +34,8 @@ use tokio::signal::unix;
 use tokio::sync::mpsc;
 use tracing::info;
 pub use transport::{
-    Connect, InstallPolicy, Target, Transport, connect_only, connect_or_spawn,
-    default_socket_path, open_transport, ssh_args,
+    Connect, InstallPolicy, Target, Transport, connect_only, connect_or_spawn, default_socket_path,
+    open_transport, ssh_args,
 };
 pub use tty::{HostTty, current_size};
 

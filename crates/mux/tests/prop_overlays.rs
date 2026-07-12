@@ -9,7 +9,7 @@
 use hegel::{TestCase, generators as gs};
 use plexy_glass_mux::{
     Direction, HintKind, HintState, HintTarget, HistoryEntry, HistoryState, Key, KeyEvent,
-    Modifiers, PaneId, TreeNode, TreeState, WindowId, handle_history, handle_hint, handle_tree,
+    Modifiers, PaneId, TreeNode, TreeState, WindowId, handle_hint, handle_history, handle_tree,
     pane_label, session_label, window_label,
 };
 
@@ -170,7 +170,10 @@ fn history_selection_stays_visible(tc: TestCase) {
         let vis = state.visible_indices();
         match state.selected() {
             None => assert!(vis.is_empty(), "history: None only when nothing matches"),
-            Some(i) => assert!(vis.contains(&i), "history: selected must be a filtered index"),
+            Some(i) => assert!(
+                vis.contains(&i),
+                "history: selected must be a filtered index"
+            ),
         }
     }
 }

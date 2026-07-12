@@ -55,7 +55,9 @@ pub use hint::{
 pub use history::{HistoryEntry, HistoryOutcome, HistoryState, HistoryTarget, handle_history};
 pub use key::{Key, KeyEvent, KeyEventKind, Modifiers};
 pub use keymap::{Chord, Command, Keymap, KeymapAction};
-pub use layout::{BorderHit, BorderSide, CloseOutcome, LayoutError, LayoutTree, Ratio, SplitPosition};
+pub use layout::{
+    BorderHit, BorderSide, CloseOutcome, LayoutError, LayoutTree, Ratio, SplitPosition,
+};
 pub use mouse::{
     MouseButton, MouseEncoding, MouseEvent, MouseKind, MouseModifiers, MouseParseAction,
     MouseParser, WheelAxis, encode_for_child,

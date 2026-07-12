@@ -28,8 +28,14 @@ pub fn resolve_style(style: &StyleConfig, palette: &PaletteConfig) -> ResolvedSt
         attrs |= Attrs::REVERSE;
     }
     ResolvedStyle {
-        fg: style.fg.as_ref().and_then(|src| resolve_color(src, palette)),
-        bg: style.bg.as_ref().and_then(|src| resolve_color(src, palette)),
+        fg: style
+            .fg
+            .as_ref()
+            .and_then(|src| resolve_color(src, palette)),
+        bg: style
+            .bg
+            .as_ref()
+            .and_then(|src| resolve_color(src, palette)),
         attrs,
     }
 }
@@ -54,8 +60,22 @@ mod tests {
 
     fn palette() -> PaletteConfig {
         let mut e = HashMap::new();
-        e.insert("accent".to_string(), Rgb { r: 0x7e, g: 0x9c, b: 0xd8 });
-        e.insert("bg".to_string(), Rgb { r: 0x1f, g: 0x1f, b: 0x28 });
+        e.insert(
+            "accent".to_string(),
+            Rgb {
+                r: 0x7e,
+                g: 0x9c,
+                b: 0xd8,
+            },
+        );
+        e.insert(
+            "bg".to_string(),
+            Rgb {
+                r: 0x1f,
+                g: 0x1f,
+                b: 0x28,
+            },
+        );
         PaletteConfig { entries: e }
     }
 
@@ -70,17 +90,35 @@ mod tests {
             ..Default::default()
         };
         let r = resolve_style(&s, &palette());
-        assert_eq!(r.fg, Some(Rgb { r: 0x7e, g: 0x9c, b: 0xd8 }));
+        assert_eq!(
+            r.fg,
+            Some(Rgb {
+                r: 0x7e,
+                g: 0x9c,
+                b: 0xd8
+            })
+        );
     }
 
     #[test]
     fn resolves_hex_literal() {
         let s = StyleConfig {
-            fg: Some(ColorSource::Literal(Rgb { r: 0xab, g: 0xcd, b: 0xef })),
+            fg: Some(ColorSource::Literal(Rgb {
+                r: 0xab,
+                g: 0xcd,
+                b: 0xef,
+            })),
             ..Default::default()
         };
         let r = resolve_style(&s, &PaletteConfig::default());
-        assert_eq!(r.fg, Some(Rgb { r: 0xab, g: 0xcd, b: 0xef }));
+        assert_eq!(
+            r.fg,
+            Some(Rgb {
+                r: 0xab,
+                g: 0xcd,
+                b: 0xef
+            })
+        );
     }
 
     #[test]
@@ -106,16 +144,34 @@ mod tests {
     #[test]
     fn resolve_color_literal() {
         let result = resolve_color(
-            &ColorSource::Literal(Rgb { r: 0xff, g: 0, b: 0 }),
+            &ColorSource::Literal(Rgb {
+                r: 0xff,
+                g: 0,
+                b: 0,
+            }),
             &PaletteConfig::default(),
         );
-        assert_eq!(result, Some(Rgb { r: 0xff, g: 0, b: 0 }));
+        assert_eq!(
+            result,
+            Some(Rgb {
+                r: 0xff,
+                g: 0,
+                b: 0
+            })
+        );
     }
 
     #[test]
     fn resolve_color_palette_name() {
         let result = resolve_color(&ColorSource::Name("accent".to_string()), &palette());
-        assert_eq!(result, Some(Rgb { r: 0x7e, g: 0x9c, b: 0xd8 }));
+        assert_eq!(
+            result,
+            Some(Rgb {
+                r: 0x7e,
+                g: 0x9c,
+                b: 0xd8
+            })
+        );
     }
 
     #[test]

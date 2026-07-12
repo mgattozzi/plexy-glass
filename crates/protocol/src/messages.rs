@@ -336,8 +336,14 @@ mod tests {
         // == false == 0x00, CreateIfMissing == true == 0x01.
         let f = postcard::to_allocvec(&false).unwrap();
         let t = postcard::to_allocvec(&true).unwrap();
-        assert_eq!(postcard::to_allocvec(&CreatePolicy::RequireExisting).unwrap(), f);
-        assert_eq!(postcard::to_allocvec(&CreatePolicy::CreateIfMissing).unwrap(), t);
+        assert_eq!(
+            postcard::to_allocvec(&CreatePolicy::RequireExisting).unwrap(),
+            f
+        );
+        assert_eq!(
+            postcard::to_allocvec(&CreatePolicy::CreateIfMissing).unwrap(),
+            t
+        );
     }
 
     #[test]

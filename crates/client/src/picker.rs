@@ -45,13 +45,41 @@ pub struct PickerTheme {
 }
 
 impl PickerTheme {
-    const ACCENT: Rgb = Rgb { r: 0x73, g: 0x7c, b: 0x73 };
-    const HIGHLIGHT: Rgb = Rgb { r: 0xb6, g: 0x92, b: 0x7b };
-    const MUTED: Rgb = Rgb { r: 0xb6, g: 0x92, b: 0x7b };
-    const BG_BAR: Rgb = Rgb { r: 0x28, g: 0x27, b: 0x27 };
-    const ALERT: Rgb = Rgb { r: 0xc4, g: 0x74, b: 0x6e };
-    const WARN: Rgb = Rgb { r: 0xc4, g: 0xb2, b: 0x8a };
-    const OK: Rgb = Rgb { r: 0x87, g: 0xa9, b: 0x87 };
+    const ACCENT: Rgb = Rgb {
+        r: 0x73,
+        g: 0x7c,
+        b: 0x73,
+    };
+    const HIGHLIGHT: Rgb = Rgb {
+        r: 0xb6,
+        g: 0x92,
+        b: 0x7b,
+    };
+    const MUTED: Rgb = Rgb {
+        r: 0xb6,
+        g: 0x92,
+        b: 0x7b,
+    };
+    const BG_BAR: Rgb = Rgb {
+        r: 0x28,
+        g: 0x27,
+        b: 0x27,
+    };
+    const ALERT: Rgb = Rgb {
+        r: 0xc4,
+        g: 0x74,
+        b: 0x6e,
+    };
+    const WARN: Rgb = Rgb {
+        r: 0xc4,
+        g: 0xb2,
+        b: 0x8a,
+    };
+    const OK: Rgb = Rgb {
+        r: 0x87,
+        g: 0xa9,
+        b: 0x87,
+    };
 
     fn role(palette: &PaletteConfig, name: &str, default: Rgb) -> Rgb {
         // Palette entries are pre-parsed `Rgb`; a role absent from a custom
@@ -163,11 +191,16 @@ pub enum PickerMode {
     /// arrow returns to `Navigate` and moves the cursor; `Esc` clears the filter
     /// and returns to `Navigate`.
     Filtering,
-    Prompting { host: Option<String>, buf: String },
+    Prompting {
+        host: Option<String>,
+        buf: String,
+    },
     /// Typing a brand-new ad-hoc ssh target (from the `＋` sentinel row). Enter
     /// with a non-empty `buf` commits `Reconnect`; empty is refused; Esc returns
     /// to `Navigate`. Distinct from `Prompting`, which names a new session.
-    PromptingHost { buf: String },
+    PromptingHost {
+        buf: String,
+    },
 }
 
 /// Filter + cursor over a fixed row list, plus the input sub-mode and the set of
@@ -702,7 +735,10 @@ impl PickerState {
         let footer = self.footer_hint();
         let prompt = match &self.mode {
             PickerMode::Prompting { host, buf } => {
-                format!("new session on {}: {buf}", host.as_deref().unwrap_or("local"))
+                format!(
+                    "new session on {}: {buf}",
+                    host.as_deref().unwrap_or("local")
+                )
             }
             PickerMode::PromptingHost { buf } => format!("connect to host: {buf}"),
             PickerMode::Filtering => format!("filter: {}", self.filter),
@@ -806,7 +842,11 @@ impl PickerState {
             RowKind::Session => (format!("  {glyph}"), color, row.label.clone()),
             // No status glyph — the empty glyph is dropped by `frame_interior`;
             // the footer color is arbitrary (it won't be drawn).
-            RowKind::NewHost => (String::new(), self.theme.footer, "\u{ff0b} Connect to a host\u{2026}".into()),
+            RowKind::NewHost => (
+                String::new(),
+                self.theme.footer,
+                "\u{ff0b} Connect to a host\u{2026}".into(),
+            ),
         }
     }
 
@@ -858,7 +898,11 @@ impl PickerState {
                 " \u{23ce} confirm \u{00b7} esc cancel ".into()
             }
             PickerMode::Navigate => {
-                let ins = if self.install.provisions() { "on" } else { "off" };
+                let ins = if self.install.provisions() {
+                    "on"
+                } else {
+                    "off"
+                };
                 format!(
                     " \u{2191}/\u{2193} move \u{00b7} \u{23ce} connect \u{00b7} / filter \u{00b7} n new \u{00b7} i install: {ins} \u{00b7} x forget \u{00b7} esc "
                 )
@@ -1002,7 +1046,14 @@ mod tests {
         // Empty palette → every role is the fixed default.
         let d = PickerTheme::resolve(&PaletteConfig::default());
         assert_eq!(d, PickerTheme::default());
-        assert_eq!(d.border, Rgb { r: 0x73, g: 0x7c, b: 0x73 }); // accent default
+        assert_eq!(
+            d.border,
+            Rgb {
+                r: 0x73,
+                g: 0x7c,
+                b: 0x73
+            }
+        ); // accent default
 
         // A palette that overrides `accent` moves only the border.
         let mut e = HashMap::new();
@@ -1113,7 +1164,11 @@ mod tests {
         s.handle_key(b'/'); // enter Filtering — typing is filter input now
         s.handle_key(b'b'); // filter "b" → only "build"
         assert_eq!(s.visible().len(), 1);
-        assert_eq!(s.handle_key(b'\r'), None, "Enter ends filter mode, keeps filter");
+        assert_eq!(
+            s.handle_key(b'\r'),
+            None,
+            "Enter ends filter mode, keeps filter"
+        );
         assert_eq!(s.mode, PickerMode::Navigate);
         assert_eq!(s.visible().len(), 1, "filter is still applied");
         assert_eq!(
@@ -1127,7 +1182,10 @@ mod tests {
         let s = roster_state();
         let out = s.render();
         // Cursor hidden every frame.
-        assert!(out.windows(6).any(|w| w == b"\x1b[?25l"), "hides the cursor");
+        assert!(
+            out.windows(6).any(|w| w == b"\x1b[?25l"),
+            "hides the cursor"
+        );
         let text = visible_text(&out);
         assert!(text.contains("plexy-glass"), "title present");
         assert!(text.contains('\u{2502}'), "box has a vertical border │");
@@ -1734,11 +1792,18 @@ mod tests {
             s.handle_key(0x0e);
         }
         s.handle_key(b'\r'); // into PromptingHost
-        assert_eq!(s.handle_key(b'\r'), None, "empty host refused, stays prompting");
+        assert_eq!(
+            s.handle_key(b'\r'),
+            None,
+            "empty host refused, stays prompting"
+        );
         for c in "box".chars() {
             s.handle_key(c as u8);
         }
-        assert!(matches!(s.handle_key(b'\r'), Some(PickerOutcome::Reconnect { .. })));
+        assert!(matches!(
+            s.handle_key(b'\r'),
+            Some(PickerOutcome::Reconnect { .. })
+        ));
     }
 
     // --- (j) explicit-filter input model: Navigate is action-first, `/` enters
@@ -1827,7 +1892,11 @@ mod tests {
     fn bare_unbound_letter_is_a_no_op() {
         let mut s = roster_state();
         let before = s.selected().map(|r| r.name.clone());
-        assert_eq!(s.handle_key(b'z'), None, "an unbound letter produces no outcome");
+        assert_eq!(
+            s.handle_key(b'z'),
+            None,
+            "an unbound letter produces no outcome"
+        );
         assert_eq!(s.filter(), "", "and does not filter");
         assert_eq!(s.mode, PickerMode::Navigate);
         assert_eq!(
@@ -1844,7 +1913,11 @@ mod tests {
         let mut s = roster_state();
         assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Session));
         assert_eq!(s.handle_key(b'n'), None);
-        assert_eq!(s.mode, PickerMode::Navigate, "n on a session row is a no-op");
+        assert_eq!(
+            s.mode,
+            PickerMode::Navigate,
+            "n on a session row is a no-op"
+        );
         assert_eq!(s.filter(), "");
         // Host row: opens the new-session prompt.
         s.handle_key(0x0e); // build
@@ -1930,7 +2003,10 @@ mod tests {
     #[test]
     fn install_on_then_filter_then_connect_carries_install() {
         let mut s = PickerState::new_with_current(
-            vec![host_row("prod", RowStatus::Live), session("api", Some("prod"))],
+            vec![
+                host_row("prod", RowStatus::Live),
+                session("api", Some("prod")),
+            ],
             &None,
             "main",
         );
@@ -1966,7 +2042,11 @@ mod tests {
         s.handle_key(b'\r'); // end filter mode
         assert_eq!(s.mode, PickerMode::Navigate);
         assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::NewHost));
-        assert_eq!(s.handle_key(b'\r'), None, "Enter on ＋ opens the host prompt");
+        assert_eq!(
+            s.handle_key(b'\r'),
+            None,
+            "Enter on ＋ opens the host prompt"
+        );
         assert_eq!(
             s.mode,
             PickerMode::PromptingHost { buf: String::new() },

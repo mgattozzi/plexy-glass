@@ -72,7 +72,14 @@ mod tests {
 
     #[test]
     fn parse_hex_valid() {
-        assert_eq!(Rgb::parse_hex("#abcdef"), Some(Rgb { r: 0xab, g: 0xcd, b: 0xef }));
+        assert_eq!(
+            Rgb::parse_hex("#abcdef"),
+            Some(Rgb {
+                r: 0xab,
+                g: 0xcd,
+                b: 0xef
+            })
+        );
         assert_eq!(Rgb::parse_hex("#000000"), Some(Rgb { r: 0, g: 0, b: 0 }));
     }
 
@@ -96,7 +103,11 @@ mod tests {
     fn color_source_parse_literal_name_and_bad_hex() {
         assert_eq!(
             ColorSource::parse("#7e9cd8").unwrap(),
-            ColorSource::Literal(Rgb { r: 0x7e, g: 0x9c, b: 0xd8 })
+            ColorSource::Literal(Rgb {
+                r: 0x7e,
+                g: 0x9c,
+                b: 0xd8
+            })
         );
         assert_eq!(
             ColorSource::parse("accent").unwrap(),

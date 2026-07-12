@@ -41,7 +41,12 @@ pub fn kanagawa_dragon_palette() -> PaletteConfig {
     ]
     .iter()
     // invariant: the built-in palette values are valid `#rrggbb` literals.
-    .map(|(k, v)| ((*k).to_string(), Rgb::parse_hex(v).expect("built-in palette hex")))
+    .map(|(k, v)| {
+        (
+            (*k).to_string(),
+            Rgb::parse_hex(v).expect("built-in palette hex"),
+        )
+    })
     .collect();
     PaletteConfig { entries }
 }

@@ -992,7 +992,10 @@ mod tests {
     fn inband_should_fire_gate() {
         use Attention::{Attended, Unattended};
         assert!(inband_should_fire(Unattended), "unattended → fire");
-        assert!(!inband_should_fire(Attended), "looking right at it → suppress");
+        assert!(
+            !inband_should_fire(Attended),
+            "looking right at it → suppress"
+        );
     }
 
     #[test]
@@ -1262,8 +1265,16 @@ mod tests {
     #[test]
     fn block_border_colors_custom_hex_resolves() {
         let mut cfg = built_in_default();
-        cfg.blocks.ok_color = ColorSource::Literal(plexy_glass_status::Rgb { r: 0xaa, g: 0xbb, b: 0xcc });
-        cfg.blocks.fail_color = ColorSource::Literal(plexy_glass_status::Rgb { r: 0x00, g: 0x11, b: 0x22 });
+        cfg.blocks.ok_color = ColorSource::Literal(plexy_glass_status::Rgb {
+            r: 0xaa,
+            g: 0xbb,
+            b: 0xcc,
+        });
+        cfg.blocks.fail_color = ColorSource::Literal(plexy_glass_status::Rgb {
+            r: 0x00,
+            g: 0x11,
+            b: 0x22,
+        });
         let colors = block_border_colors(&cfg).expect("expected Some with valid hex colors");
         assert_eq!(
             colors.ok,
@@ -1282,9 +1293,14 @@ mod tests {
     fn block_border_colors_custom_palette_name_resolves() {
         let mut cfg = built_in_default();
         // Add a custom palette entry.
-        cfg.palette
-            .entries
-            .insert("my_green".to_string(), plexy_glass_status::Rgb { r: 0x00, g: 0xff, b: 0x00 });
+        cfg.palette.entries.insert(
+            "my_green".to_string(),
+            plexy_glass_status::Rgb {
+                r: 0x00,
+                g: 0xff,
+                b: 0x00,
+            },
+        );
         cfg.blocks.ok_color = ColorSource::Name("my_green".to_string());
         let colors = block_border_colors(&cfg).expect("expected Some with custom palette name");
         assert_eq!(

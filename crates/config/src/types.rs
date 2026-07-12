@@ -65,7 +65,11 @@ impl Default for BlocksConfig {
             enabled: true,
             ok_color: ColorSource::Name("ok".to_string()),
             fail_color: ColorSource::Name("alert".to_string()),
-            select_color: ColorSource::Literal(Rgb { r: 0xdc, g: 0xa5, b: 0x61 }),
+            select_color: ColorSource::Literal(Rgb {
+                r: 0xdc,
+                g: 0xa5,
+                b: 0x61,
+            }),
             sticky_header: true,
             duration: true,
             duration_threshold: Duration::from_secs(2),

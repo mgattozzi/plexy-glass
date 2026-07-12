@@ -15,9 +15,9 @@ use tokio::task::{self, JoinHandle};
 use tokio::time;
 
 use crate::error::DaemonError;
+use crate::osc_actions::{PasteFallback, Wrote};
 use crate::pane::Pane;
 use crate::window_manager::{STATUS_TTL, Severity, WindowManager};
-use crate::osc_actions::{PasteFallback, Wrote};
 use crate::{LockExt, osc_actions, pipe};
 
 pub struct ClientHandle {
@@ -3477,7 +3477,11 @@ mod reencode_tests {
         // encode path.
         assert_eq!(
             reencode_input(NegotiatedKbd::Kitty(31), 1, 0, false, &e, b"\x1b[105;6u"),
-            encode(&e, KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1)), false),
+            encode(
+                &e,
+                KeyboardTarget::Kitty(KittyFlags::from_bits_truncate(1)),
+                false
+            ),
         );
     }
 }

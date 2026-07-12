@@ -4280,12 +4280,20 @@ mod tests {
         p.advance(&mut s, b"\x1b[>5u\x1b[?1049h\x1b[>9uX");
         p.flush(&mut s);
         assert_eq!(s.kbd.kitty_flags(ScreenBuffer::Alt), 9, "alt screen flags");
-        assert_eq!(s.kbd.kitty_flags(ScreenBuffer::Main), 5, "main screen flags unchanged");
+        assert_eq!(
+            s.kbd.kitty_flags(ScreenBuffer::Main),
+            5,
+            "main screen flags unchanged"
+        );
     }
     #[test]
     fn kitty_flags_cleared_on_ris() {
         let s = parse(b"\x1b[>15u\x1bcX");
-        assert_eq!(s.kbd.kitty_flags(ScreenBuffer::Main), 0, "RIS clears Kitty flags");
+        assert_eq!(
+            s.kbd.kitty_flags(ScreenBuffer::Main),
+            0,
+            "RIS clears Kitty flags"
+        );
         assert_eq!(s.kbd.modify_other_keys(), 0);
     }
     #[test]
@@ -4293,7 +4301,11 @@ mod tests {
         // Also set an underline color so DECSTR's cursor-rendition reset is
         // covered (X is painted AFTER \e[!p, so it reflects the post-reset pen).
         let s = parse(b"\x1b[>4;2m\x1b[>15u\x1b[58:5:9m\x1b[!pX");
-        assert_eq!(s.kbd.kitty_flags(ScreenBuffer::Main), 0, "DECSTR clears Kitty flags");
+        assert_eq!(
+            s.kbd.kitty_flags(ScreenBuffer::Main),
+            0,
+            "DECSTR clears Kitty flags"
+        );
         assert_eq!(
             s.kbd.modify_other_keys(),
             0,

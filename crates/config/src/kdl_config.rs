@@ -9,9 +9,9 @@ use kdl::{KdlDocument, KdlNode, KdlValue};
 
 use crate::{
     BlocksConfig, ColorSource, Config, ConfigError, DragModifier, GlyphTier, HintsConfig,
-    KeymapBinding, KeymapConfig, MouseConfig, NotificationsConfig, Padding, PaletteConfig, PaneNode,
-    PaneTemplate, Position, Rgb, SessionTemplate, SplitChild, SplitDirection, StatusConfig,
-    StyleConfig, WidgetSpec, WindowTemplate,
+    KeymapBinding, KeymapConfig, MouseConfig, NotificationsConfig, Padding, PaletteConfig,
+    PaneNode, PaneTemplate, Position, Rgb, SessionTemplate, SplitChild, SplitDirection,
+    StatusConfig, StyleConfig, WidgetSpec, WindowTemplate,
 };
 
 /// Parse a KDL v2 document into a `Config`. Syntax errors and decode errors both
@@ -300,7 +300,11 @@ fn parse_duration_threshold(s: &str) -> Option<Duration> {
         return Some(Duration::ZERO);
     }
     if let Some(ms) = s.strip_suffix("ms") {
-        return ms.trim().parse::<u32>().ok().map(|ms| Duration::from_millis(ms.into()));
+        return ms
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .map(|ms| Duration::from_millis(ms.into()));
     }
     if let Some(secs) = s.strip_suffix('s') {
         let secs: f64 = secs.trim().parse().ok()?;
@@ -1230,7 +1234,11 @@ mod tests {
         let cfg = parse_config(r##"palette { accent "#ff0000" }"##).unwrap();
         assert_eq!(
             cfg.palette.entries.get("accent").copied(),
-            Some(Rgb { r: 0xff, g: 0, b: 0 }),
+            Some(Rgb {
+                r: 0xff,
+                g: 0,
+                b: 0
+            }),
             "override applied"
         );
         assert_eq!(
@@ -1343,15 +1351,18 @@ mod tests {
     fn style_bad_hex_is_a_located_decode_error() {
         // A `#`-prefixed spec that isn't valid hex fails loud in a style too; a
         // plain (non-`#`) name is always accepted (resolved late as a role).
-        let err =
-            parse_config(r##"status { left { text value="x" { style fg="#nothex" } } }"##)
-                .unwrap_err();
+        let err = parse_config(r##"status { left { text value="x" { style fg="#nothex" } } }"##)
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("invalid hex"), "explains the failure: {msg}");
         assert!(msg.contains("line"), "carries a location: {msg}");
         // The same config with a valid literal (or a role name) parses fine.
-        assert!(parse_config(r##"status { left { text value="x" { style fg="#abcdef" } } }"##).is_ok());
-        assert!(parse_config(r#"status { left { text value="x" { style fg="accent" } } }"#).is_ok());
+        assert!(
+            parse_config(r##"status { left { text value="x" { style fg="#abcdef" } } }"##).is_ok()
+        );
+        assert!(
+            parse_config(r#"status { left { text value="x" { style fg="accent" } } }"#).is_ok()
+        );
     }
 
     use crate::built_in_default;
@@ -2216,7 +2227,10 @@ session "dev" cwd="~/projects/app" {
         assert_eq!(cfg.blocks, d);
         assert!(cfg.blocks.enabled);
         assert_eq!(cfg.blocks.ok_color, ColorSource::Name("ok".to_string()));
-        assert_eq!(cfg.blocks.fail_color, ColorSource::Name("alert".to_string()));
+        assert_eq!(
+            cfg.blocks.fail_color,
+            ColorSource::Name("alert".to_string())
+        );
     }
 
     #[test]
@@ -2258,21 +2272,30 @@ session "dev" cwd="~/projects/app" {
                 .unwrap();
         assert!(cfg.blocks.enabled);
         assert_eq!(cfg.blocks.ok_color, ColorSource::parse("#87a987").unwrap());
-        assert_eq!(cfg.blocks.fail_color, ColorSource::parse("#c4746e").unwrap());
+        assert_eq!(
+            cfg.blocks.fail_color,
+            ColorSource::parse("#c4746e").unwrap()
+        );
     }
 
     #[test]
     fn blocks_round_trip_hex_literal() {
         let cfg = parse_config(r##"blocks { ok-color "#ff0000"; fail-color "#0000ff" }"##).unwrap();
         assert_eq!(cfg.blocks.ok_color, ColorSource::parse("#ff0000").unwrap());
-        assert_eq!(cfg.blocks.fail_color, ColorSource::parse("#0000ff").unwrap());
+        assert_eq!(
+            cfg.blocks.fail_color,
+            ColorSource::parse("#0000ff").unwrap()
+        );
     }
 
     #[test]
     fn blocks_round_trip_palette_names() {
         let cfg = parse_config(r#"blocks { ok-color "ok"; fail-color "alert" }"#).unwrap();
         assert_eq!(cfg.blocks.ok_color, ColorSource::Name("ok".to_string()));
-        assert_eq!(cfg.blocks.fail_color, ColorSource::Name("alert".to_string()));
+        assert_eq!(
+            cfg.blocks.fail_color,
+            ColorSource::Name("alert".to_string())
+        );
     }
 
     #[test]
@@ -2285,7 +2308,10 @@ session "dev" cwd="~/projects/app" {
             ColorSource::Name("ok".to_string()),
             "ok_color defaults to ok"
         );
-        assert_eq!(cfg.blocks.fail_color, ColorSource::parse("#ff0000").unwrap());
+        assert_eq!(
+            cfg.blocks.fail_color,
+            ColorSource::parse("#ff0000").unwrap()
+        );
     }
 
     #[test]
@@ -2297,10 +2323,16 @@ session "dev" cwd="~/projects/app" {
     #[test]
     fn blocks_select_color_decodes() {
         let cfg = parse_config(r##"blocks { select-color "#112233" }"##).unwrap();
-        assert_eq!(cfg.blocks.select_color, ColorSource::parse("#112233").unwrap());
+        assert_eq!(
+            cfg.blocks.select_color,
+            ColorSource::parse("#112233").unwrap()
+        );
         // Unspecified means the default.
         let d = parse_config(r##"blocks { ok-color "#ff0000" }"##).unwrap();
-        assert_eq!(d.blocks.select_color, ColorSource::parse("#dca561").unwrap());
+        assert_eq!(
+            d.blocks.select_color,
+            ColorSource::parse("#dca561").unwrap()
+        );
     }
 
     #[test]

@@ -2330,7 +2330,8 @@ async fn swap_pane_exchanges_with_neighbor() {
     m.handle_command(Command::SplitV).unwrap(); // panes 0,1; active 1
     let vp = m.viewport();
     let before = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
-    m.handle_command(Command::SwapPane(SwapTarget::Prev)).unwrap(); // swap with previous (pane 0)
+    m.handle_command(Command::SwapPane(SwapTarget::Prev))
+        .unwrap(); // swap with previous (pane 0)
     assert_eq!(m.active_window().active(), PaneId(1), "active id unchanged");
     let after = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
     assert_ne!(
@@ -2689,7 +2690,8 @@ async fn swap_pane_next_and_prev_are_directional() {
     let mut m = setup();
     let vp = m.viewport();
     let r1 = m.active_window().layout().rect_of(PaneId(1), vp).unwrap();
-    m.handle_command(Command::SwapPane(SwapTarget::Prev)).unwrap();
+    m.handle_command(Command::SwapPane(SwapTarget::Prev))
+        .unwrap();
     assert_eq!(
         m.active_window().layout().rect_of(PaneId(2), vp).unwrap(),
         r1,
@@ -2698,7 +2700,8 @@ async fn swap_pane_next_and_prev_are_directional() {
     // next: active 2 wraps to pane 0.
     let mut m = setup();
     let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
-    m.handle_command(Command::SwapPane(SwapTarget::Next)).unwrap();
+    m.handle_command(Command::SwapPane(SwapTarget::Next))
+        .unwrap();
     assert_eq!(
         m.active_window().layout().rect_of(PaneId(2), vp).unwrap(),
         r0,
@@ -2709,7 +2712,8 @@ async fn swap_pane_next_and_prev_are_directional() {
 #[tokio::test]
 async fn swap_pane_single_pane_is_noop() {
     let mut m = mk_mgr();
-    m.handle_command(Command::SwapPane(SwapTarget::Next)).unwrap();
+    m.handle_command(Command::SwapPane(SwapTarget::Next))
+        .unwrap();
     assert_eq!(m.active_window().layout().panes(), vec![PaneId(0)]);
     assert_eq!(m.active_window().active(), PaneId(0));
 }

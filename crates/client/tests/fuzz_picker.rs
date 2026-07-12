@@ -24,10 +24,28 @@ fn row(name: &str, label: &str, host: Option<&str>, kind: RowKind, status: RowSt
 fn roster_rows() -> Vec<PickerRow> {
     vec![
         row("local", "local", None, RowKind::Host, RowStatus::Live),
-        row("main", "main - 1 win", None, RowKind::Session, RowStatus::Live),
-        row("build", "build - 2 win", None, RowKind::Session, RowStatus::Live),
+        row(
+            "main",
+            "main - 1 win",
+            None,
+            RowKind::Session,
+            RowStatus::Live,
+        ),
+        row(
+            "build",
+            "build - 2 win",
+            None,
+            RowKind::Session,
+            RowStatus::Live,
+        ),
         row("prod", "prod", Some("prod"), RowKind::Host, RowStatus::Live),
-        row("api", "api - 1 win", Some("prod"), RowKind::Session, RowStatus::Live),
+        row(
+            "api",
+            "api - 1 win",
+            Some("prod"),
+            RowKind::Session,
+            RowStatus::Live,
+        ),
         row(
             "scratch",
             "scratch",
@@ -52,7 +70,11 @@ fn check(p: &PickerState) {
         !p.visible().is_empty(),
         "selected iff a row is visible (cursor stays in bounds)"
     );
-    assert!(p.filter().is_ascii(), "filter holds only ASCII: {:?}", p.filter());
+    assert!(
+        p.filter().is_ascii(),
+        "filter holds only ASCII: {:?}",
+        p.filter()
+    );
     assert!(
         String::from_utf8(p.render()).is_ok(),
         "render output is valid UTF-8"

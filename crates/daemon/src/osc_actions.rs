@@ -68,9 +68,7 @@ pub(crate) fn yank_status(
             "clipboard unavailable — paste with Ctrl+a ]".to_string(),
             Severity::Warn,
         ),
-        (Wrote::No, PasteFallback::No) => {
-            ("clipboard unavailable".to_string(), Severity::Warn)
-        }
+        (Wrote::No, PasteFallback::No) => ("clipboard unavailable".to_string(), Severity::Warn),
     }
 }
 

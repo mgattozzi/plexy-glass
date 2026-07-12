@@ -616,7 +616,9 @@ pub fn compose(
             let dur = duration_on
                 .then(|| blocks::closing_duration(v.screen, prompt_line))
                 .flatten()
-                .filter(|&ms| Duration::from_millis(ms.into()) >= threshold.unwrap_or(Duration::MAX))
+                .filter(|&ms| {
+                    Duration::from_millis(ms.into()) >= threshold.unwrap_or(Duration::MAX)
+                })
                 .map(blocks::format_duration);
             let annotation = match (summary, dur) {
                 (Some(s), Some(d)) => format!("{s} · {d}"),
