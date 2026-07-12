@@ -4750,6 +4750,38 @@ async fn alt_drag_swaps_panes_and_focuses_source() {
 }
 
 #[tokio::test]
+async fn pane_death_clears_in_flight_gestures() {
+    // A drag or selection whose source pane then dies must not linger. Pane
+    // death is a structural event, so handle_pane_death clears every mouse
+    // gesture, symmetric with the marked-pane clear, keeping a stale gesture
+    // from cross-firing a swap/reorder on the next click.
+    let mut m = make_two_pane_manager().await; // PaneId(0), PaneId(1); active 1
+    let vp = m.viewport();
+    let r0 = m.active_window().layout().rect_of(PaneId(0), vp).unwrap();
+    let (cr, cc) = (r0.row() + r0.rows() / 2, r0.col() + r0.cols() / 2);
+    // Real Alt-drag sourced on pane 0.
+    m.handle_mouse(mev(MouseKind::Press, cr, cc, true))
+        .await
+        .unwrap();
+    assert_eq!(
+        m.pane_drag_roles(),
+        Some((PaneId(0), None)),
+        "drag armed on P"
+    );
+    // Plant a selection and a tab drag too, so all three gesture fields are live.
+    m.selection = Some(Selection::start(PaneId(0), cr, cc));
+    m.tab_drag = Some(TabDrag {
+        source: m.active_window().id,
+    });
+
+    m.handle_pane_death(PaneId(0)).unwrap();
+
+    assert!(m.pane_drag.is_none(), "pane drag cleared on pane death");
+    assert!(m.selection.is_none(), "selection cleared on pane death");
+    assert!(m.tab_drag.is_none(), "tab drag cleared on pane death");
+}
+
+#[tokio::test]
 async fn plain_press_in_pane_does_not_start_drag() {
     let mut m = make_two_pane_manager().await; // active = 1
     let vp = m.viewport();

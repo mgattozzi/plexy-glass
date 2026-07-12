@@ -401,6 +401,12 @@ impl WindowManager {
             self.notify.notify_one();
             return Ok(());
         }
+        // A pane dying is a structural event: any in-flight selection or drag
+        // could be sourced on it (or on the layout it's about to collapse), and
+        // it will never see its Release. Clear the gestures here the same way
+        // popup-open and client-teardown do, symmetric with the `marked_pane`
+        // clear below, so a stale drag can't cross-fire on the next click.
+        self.reset_mouse_gestures();
         let viewport = self.viewport();
         // Locate the window holding the dead pane. If it is already gone
         // (raced with a synchronous close), just clear a stale mark + notify.
