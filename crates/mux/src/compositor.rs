@@ -1987,10 +1987,10 @@ fn paint_tree(
         }
         TreeMode::ConfirmKill => match state.nodes.get(state.selected) {
             Some(n) => {
-                let kind = match n.kind() {
+                let kind = match n.kind {
                     TreeKind::Session => "session",
-                    TreeKind::Window => "window",
-                    TreeKind::Pane => "pane",
+                    TreeKind::Window { .. } => "window",
+                    TreeKind::Pane { .. } => "pane",
                 };
                 format!(" Kill {kind} '{}'?  y / n ", n.name)
             }
@@ -2481,7 +2481,7 @@ mod tests {
     use crate::finder::FilterList;
     use crate::history::HistoryEntry;
     use crate::palette::{PaletteAction, PaletteEntry};
-    use crate::tree::{NodeKey, TreeMode, TreeNode};
+    use crate::tree::{NodeKey, TreeKind, TreeMode, TreeNode};
 
     fn pane(emu: &mut Emulator, bytes: &[u8]) {
         emu.advance(bytes);
@@ -3959,10 +3959,20 @@ mod tests {
         label: &str,
         is_current: bool,
     ) -> TreeNode {
+        let kind = match (window, pane) {
+            (Some(w), Some(p)) => TreeKind::Pane {
+                window: crate::WindowId(w),
+                pane: crate::PaneId(p),
+            },
+            (Some(w), None) => TreeKind::Window {
+                window: crate::WindowId(w),
+            },
+            (None, None) => TreeKind::Session,
+            (None, Some(_)) => unreachable!("a pane row needs a parent window"),
+        };
         TreeNode {
             session: session.into(),
-            window: window.map(crate::WindowId),
-            pane: pane.map(crate::PaneId),
+            kind,
             depth,
             label: label.into(),
             name: label.into(),

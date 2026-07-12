@@ -9,7 +9,7 @@
 use hegel::{TestCase, generators as gs};
 use plexy_glass_mux::{
     Direction, HintKind, HintState, HintTarget, HistoryEntry, HistoryState, Key, KeyEvent,
-    Modifiers, PaneId, Point, TreeNode, TreeState, UnifiedLine, WindowId, handle_hint,
+    Modifiers, PaneId, Point, TreeKind, TreeNode, TreeState, UnifiedLine, WindowId, handle_hint,
     handle_history, handle_tree, pane_label, session_label, window_label,
 };
 
@@ -72,8 +72,7 @@ fn draw_tree(tc: &TestCase) -> Vec<TreeNode> {
         let session = format!("s{si}");
         nodes.push(TreeNode {
             session: session.clone(),
-            window: None,
-            pane: None,
+            kind: TreeKind::Session,
             depth: 0,
             label: session_label(&session, 1, 1),
             name: session.clone(),
@@ -85,8 +84,9 @@ fn draw_tree(tc: &TestCase) -> Vec<TreeNode> {
             let wname = format!("w{wi}");
             nodes.push(TreeNode {
                 session: session.clone(),
-                window: Some(WindowId(wi)),
-                pane: None,
+                kind: TreeKind::Window {
+                    window: WindowId(wi),
+                },
                 depth: 1,
                 label: window_label(wi + 1, &wname),
                 name: wname,
@@ -97,8 +97,10 @@ fn draw_tree(tc: &TestCase) -> Vec<TreeNode> {
             for pi in 0..n_panes {
                 nodes.push(TreeNode {
                     session: session.clone(),
-                    window: Some(WindowId(wi)),
-                    pane: Some(PaneId(pi)),
+                    kind: TreeKind::Pane {
+                        window: WindowId(wi),
+                        pane: PaneId(pi),
+                    },
                     depth: 2,
                     label: pane_label(pi + 1, ""),
                     name: String::new(),

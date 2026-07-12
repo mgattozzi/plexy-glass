@@ -10,24 +10,29 @@ use std::collections::HashSet;
 
 use crate::{Direction, Key, KeyEvent, Modifiers, PaneId, WindowId};
 
+/// What a [`TreeNode`] points at, carrying exactly the ids that kind needs. A
+/// `Session` carries neither id, a `Window` its `WindowId`, a `Pane` both its
+/// parent `WindowId` and its own `PaneId` — so a pane row without a window, or a
+/// session row that somehow carries a pane id, is unconstructable rather than
+/// caught by a hand-maintained `Option` invariant at every read site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreeKind {
     Session,
-    Window,
-    Pane,
+    Window { window: WindowId },
+    Pane { window: WindowId, pane: PaneId },
 }
 
 /// One node in the snapshot. Pre-order DFS: session, then its windows, then each
-/// window's panes. `label` is the full display text (no indent, no marker);
-/// `name` is the bare editable name; `index` is the window's 1-based index or the
-/// pane's 1-based DFS index (0 for a session). Rename mutates `name` and rebuilds
-/// `label` via [`window_label`]/[`pane_label`] so the optimistic row text matches
-/// what a reopen would show. `is_current` marks the current session's path only.
+/// window's panes. `kind` carries the ids the row points at (see [`TreeKind`]).
+/// `label` is the full display text (no indent, no marker); `name` is the bare
+/// editable name; `index` is the window's 1-based index or the pane's 1-based DFS
+/// index (0 for a session). Rename mutates `name` and rebuilds `label` via
+/// [`window_label`]/[`pane_label`] so the optimistic row text matches what a
+/// reopen would show. `is_current` marks the current session's path only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeNode {
     pub session: String,
-    pub window: Option<WindowId>,
-    pub pane: Option<PaneId>,
+    pub kind: TreeKind,
     pub depth: u8,
     pub label: String,
     pub name: String,
@@ -36,24 +41,16 @@ pub struct TreeNode {
 }
 
 impl TreeNode {
-    pub const fn kind(&self) -> TreeKind {
-        match (self.window, self.pane) {
-            (_, Some(_)) => TreeKind::Pane,
-            (Some(_), None) => TreeKind::Window,
-            (None, None) => TreeKind::Session,
-        }
-    }
-
     /// The node's collapse identity. Sessions and windows are collapsible;
     /// panes have no children and therefore no key.
     pub fn key(&self) -> Option<NodeKey> {
-        match self.kind() {
+        match self.kind {
             TreeKind::Session => Some(NodeKey::Session(self.session.clone())),
-            TreeKind::Window => self.window.map(|window| NodeKey::Window {
+            TreeKind::Window { window } => Some(NodeKey::Window {
                 session: self.session.clone(),
                 window,
             }),
-            TreeKind::Pane => None,
+            TreeKind::Pane { .. } => None,
         }
     }
 }
@@ -280,10 +277,15 @@ fn handle_navigate(event: &KeyEvent, state: &mut TreeState) -> TreeOutcome {
         }
         (_, Key::Enter | Key::KeypadEnter) if pos.is_some() => {
             let n = &state.nodes[state.selected];
+            let (window, pane) = match n.kind {
+                TreeKind::Session => (None, None),
+                TreeKind::Window { window } => (Some(window), None),
+                TreeKind::Pane { window, pane } => (Some(window), Some(pane)),
+            };
             TreeOutcome::Act(TreeAction::Switch {
                 session: n.session.clone(),
-                window: n.window,
-                pane: n.pane,
+                window,
+                pane,
             })
         }
         (m, Key::Char('x')) if m.is_empty() && pos.is_some() => {
@@ -308,20 +310,21 @@ fn handle_navigate(event: &KeyEvent, state: &mut TreeState) -> TreeOutcome {
 /// Collapsing an already-collapsed node is a no-op.
 fn collapse_selected(state: &mut TreeState) -> TreeOutcome {
     let n = &state.nodes[state.selected];
-    match n.kind() {
-        TreeKind::Session | TreeKind::Window => {
-            // invariant: session/window nodes always have a key.
-            let key = n.key().expect("session/window node has a NodeKey");
+    match n.kind {
+        TreeKind::Session | TreeKind::Window { .. } => {
+            // Both kinds carry a NodeKey; key() is None only for panes, which
+            // this arm never matches, so the else is unreachable-but-safe.
+            let Some(key) = n.key() else {
+                return TreeOutcome::None;
+            };
             if state.collapsed.insert(key) {
                 TreeOutcome::Redraw
             } else {
                 TreeOutcome::None
             }
         }
-        TreeKind::Pane => {
+        TreeKind::Pane { window, .. } => {
             let session = n.session.clone();
-            // invariant: a Pane node always carries its parent WindowId.
-            let window = n.window.expect("pane node has WindowId");
             state.collapsed.insert(NodeKey::Window {
                 session: session.clone(),
                 window,
@@ -329,7 +332,8 @@ fn collapse_selected(state: &mut TreeState) -> TreeOutcome {
             // Land on the window row: the nearest preceding row of that window.
             let parent = (0..state.selected).rev().find(|&i| {
                 let p = &state.nodes[i];
-                p.kind() == TreeKind::Window && p.window == Some(window) && p.session == session
+                matches!(p.kind, TreeKind::Window { window: w } if w == window)
+                    && p.session == session
             });
             match parent {
                 Some(p) => state.selected = p,
@@ -385,17 +389,15 @@ fn handle_confirm_kill(event: &KeyEvent, state: &mut TreeState) -> TreeOutcome {
     match (event.mods, event.key) {
         (m, Key::Char('y')) if m.is_empty() => {
             let n = &state.nodes[state.selected];
-            let action = match n.kind() {
+            let action = match n.kind {
                 TreeKind::Session => TreeAction::KillSession(n.session.clone()),
-                TreeKind::Window => TreeAction::KillWindow {
+                TreeKind::Window { window } => TreeAction::KillWindow {
                     session: n.session.clone(),
-                    // invariant: a Window node always carries a WindowId.
-                    window: n.window.expect("window node has WindowId"),
+                    window,
                 },
-                TreeKind::Pane => TreeAction::KillPane {
+                TreeKind::Pane { pane, .. } => TreeAction::KillPane {
                     session: n.session.clone(),
-                    // invariant: a Pane node always carries a PaneId.
-                    pane: n.pane.expect("pane node has PaneId"),
+                    pane,
                 },
             };
             prune_subtree(&mut state.nodes, state.selected);
@@ -431,24 +433,22 @@ fn handle_rename(event: &KeyEvent, state: &mut TreeState) -> TreeOutcome {
                 return TreeOutcome::Redraw;
             }
             let n = &mut state.nodes[state.selected];
-            match n.kind() {
-                TreeKind::Window => {
+            match n.kind {
+                TreeKind::Window { window } => {
                     n.name.clone_from(&trimmed);
                     n.label = window_label(n.index, &trimmed);
                     TreeOutcome::Act(TreeAction::RenameWindow {
                         session: n.session.clone(),
-                        // invariant: a Window node always carries a WindowId.
-                        window: n.window.expect("window node has WindowId"),
+                        window,
                         name: trimmed,
                     })
                 }
-                TreeKind::Pane => {
+                TreeKind::Pane { pane, .. } => {
                     n.name.clone_from(&trimmed);
                     n.label = pane_label(n.index, &trimmed);
                     TreeOutcome::Act(TreeAction::RenamePane {
                         session: n.session.clone(),
-                        // invariant: a Pane node always carries a PaneId.
-                        pane: n.pane.expect("pane node has PaneId"),
+                        pane,
                         name: trimmed,
                     })
                 }
@@ -549,15 +549,26 @@ mod tests {
         name: &str,
         index: u32,
     ) -> TreeNode {
-        let label = match (window, pane) {
-            (_, Some(_)) => pane_label(index, name),
-            (Some(_), None) => window_label(index, name),
-            (None, None) => session_label(name, 1, 1),
+        let (kind, label) = match (window, pane) {
+            (Some(w), Some(p)) => (
+                TreeKind::Pane {
+                    window: WindowId(w),
+                    pane: PaneId(p),
+                },
+                pane_label(index, name),
+            ),
+            (Some(w), None) => (
+                TreeKind::Window {
+                    window: WindowId(w),
+                },
+                window_label(index, name),
+            ),
+            (None, None) => (TreeKind::Session, session_label(name, 1, 1)),
+            (None, Some(_)) => unreachable!("a pane row needs a parent window"),
         };
         TreeNode {
             session: session.into(),
-            window: window.map(WindowId),
-            pane: pane.map(PaneId),
+            kind,
             depth,
             label,
             name: name.into(),
@@ -925,6 +936,43 @@ mod tests {
                 pane: Some(PaneId(1))
             })
         );
+    }
+
+    #[test]
+    fn kind_carries_exactly_its_ids_and_keys_match() {
+        // A data-carrying TreeKind makes the id set a property of the variant,
+        // not a hand-checked pair of Options: a Pane node HAS both ids, a Window
+        // node HAS a WindowId and no pane, a Session node carries neither — the
+        // illegal combinations are unconstructable. key() is Some for the
+        // collapsible kinds and None for panes.
+        let sess = node("A", None, None, 0, "A", 0);
+        assert_eq!(sess.kind, TreeKind::Session);
+        assert_eq!(sess.key(), Some(NodeKey::Session("A".into())));
+
+        let win = node("A", Some(3), None, 1, "w", 1);
+        assert_eq!(
+            win.kind,
+            TreeKind::Window {
+                window: WindowId(3)
+            }
+        );
+        assert_eq!(
+            win.key(),
+            Some(NodeKey::Window {
+                session: "A".into(),
+                window: WindowId(3),
+            })
+        );
+
+        let pane = node("A", Some(3), Some(7), 2, "p", 1);
+        assert_eq!(
+            pane.kind,
+            TreeKind::Pane {
+                window: WindowId(3),
+                pane: PaneId(7),
+            }
+        );
+        assert_eq!(pane.key(), None, "panes have no collapse key");
     }
 
     #[test]

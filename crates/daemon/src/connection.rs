@@ -1102,14 +1102,13 @@ async fn open_tree_overlay(session: &Arc<Session>, registry: &Arc<SessionRegistr
 /// unit-testable. Only the current session's path is marked `is_current`: the
 /// session itself, its active window, and that window's active pane.
 fn build_tree_nodes(snaps: &[SessionTree], current: &str) -> Vec<plexy_glass_mux::TreeNode> {
-    use plexy_glass_mux::{TreeNode, pane_label, session_label, window_label};
+    use plexy_glass_mux::{TreeKind, TreeNode, pane_label, session_label, window_label};
     let mut nodes: Vec<TreeNode> = Vec::new();
     for st in snaps {
         let is_cur = st.name == current;
         nodes.push(TreeNode {
             session: st.name.clone(),
-            window: None,
-            pane: None,
+            kind: TreeKind::Session,
             depth: 0,
             label: session_label(&st.name, st.windows.len(), st.total_panes),
             name: st.name.clone(),
@@ -1120,8 +1119,7 @@ fn build_tree_nodes(snaps: &[SessionTree], current: &str) -> Vec<plexy_glass_mux
             let widx = (wi as u32) + 1;
             nodes.push(TreeNode {
                 session: st.name.clone(),
-                window: Some(w.id),
-                pane: None,
+                kind: TreeKind::Window { window: w.id },
                 depth: 1,
                 label: window_label(widx, &w.name),
                 name: w.name.clone(),
@@ -1133,8 +1131,10 @@ fn build_tree_nodes(snaps: &[SessionTree], current: &str) -> Vec<plexy_glass_mux
                 let nm = pname.clone().unwrap_or_default();
                 nodes.push(TreeNode {
                     session: st.name.clone(),
-                    window: Some(w.id),
-                    pane: Some(*pid),
+                    kind: TreeKind::Pane {
+                        window: w.id,
+                        pane: *pid,
+                    },
                     depth: 2,
                     label: pane_label(pidx, &nm),
                     name: nm,
@@ -3417,7 +3417,7 @@ mod tests {
 
     #[test]
     fn build_tree_nodes_marks_only_current_path() {
-        use plexy_glass_mux::{PaneId, WindowId};
+        use plexy_glass_mux::{PaneId, TreeKind, WindowId};
 
         use crate::session::{SessionTree, WindowTree};
         let snaps = vec![
@@ -3456,24 +3456,20 @@ mod tests {
         let find = |pred: &dyn Fn(&plexy_glass_mux::TreeNode) -> bool| {
             nodes.iter().find(|n| pred(n)).expect("node present")
         };
+        let is_session = |n: &plexy_glass_mux::TreeNode| n.kind == TreeKind::Session;
+        let is_window = |n: &plexy_glass_mux::TreeNode, id: WindowId| matches!(n.kind, TreeKind::Window { window } if window == id);
+        let is_pane = |n: &plexy_glass_mux::TreeNode, id: PaneId| matches!(n.kind, TreeKind::Pane { pane, .. } if pane == id);
         // Current session node + its active window (index 1 → WindowId(1)) + that
         // window's active pane (PaneId(2)) are the only marked nodes in "cur".
-        assert!(find(&|n| n.session == "cur" && n.window.is_none()).is_current);
-        assert!(
-            find(&|n| n.session == "cur" && n.window == Some(WindowId(1)) && n.pane.is_none())
-                .is_current
-        );
-        assert!(
-            !find(&|n| n.session == "cur" && n.window == Some(WindowId(0)) && n.pane.is_none())
-                .is_current
-        );
-        assert!(find(&|n| n.pane == Some(PaneId(2))).is_current);
-        assert!(!find(&|n| n.session == "cur" && n.pane == Some(PaneId(1))).is_current);
+        assert!(find(&|n| n.session == "cur" && is_session(n)).is_current);
+        assert!(find(&|n| n.session == "cur" && is_window(n, WindowId(1))).is_current);
+        assert!(!find(&|n| n.session == "cur" && is_window(n, WindowId(0))).is_current);
+        assert!(find(&|n| is_pane(n, PaneId(2))).is_current);
+        assert!(!find(&|n| n.session == "cur" && is_pane(n, PaneId(1))).is_current);
         // Label formats.
-        assert_eq!(find(&|n| n.pane == Some(PaneId(2))).label, "pane 2: p");
+        assert_eq!(find(&|n| is_pane(n, PaneId(2))).label, "pane 2: p");
         assert_eq!(
-            find(&|n| n.session == "cur" && n.window == Some(WindowId(1)) && n.pane.is_none())
-                .label,
+            find(&|n| n.session == "cur" && is_window(n, WindowId(1))).label,
             "2: w1"
         );
         // The other (non-current) session's whole subtree is unmarked.
@@ -3674,7 +3670,7 @@ mod tests {
         let row = state
             .nodes
             .iter()
-            .find(|n| n.kind() == TreeKind::Session && n.session == "gamma")
+            .find(|n| n.kind == TreeKind::Session && n.session == "gamma")
             .expect("renamed session row present");
         assert_eq!(row.name, "gamma");
         assert_eq!(row.label, session_label("gamma", 1, 1));

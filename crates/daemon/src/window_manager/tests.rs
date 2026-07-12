@@ -2,8 +2,8 @@ use plexy_glass_emulator::Notification;
 use plexy_glass_emulator::coords::{Col, Row};
 use plexy_glass_mux::{
     Command, HintAction, HintKind, HintState, HintTarget, KeyEvent, MouseButton, MouseEvent,
-    MouseKind, MouseModifiers, PickerEntry, Point, ScrollOffset, SwapTarget, TreeAction, TreeNode,
-    UnifiedLine, WheelAxis, blocks, palette,
+    MouseKind, MouseModifiers, PickerEntry, Point, ScrollOffset, SwapTarget, TreeAction, TreeKind,
+    TreeNode, UnifiedLine, WheelAxis, blocks, palette,
 };
 use tokio::sync::broadcast;
 use tokio::time;
@@ -2165,10 +2165,20 @@ fn mk_mgr() -> WindowManager {
 }
 
 fn tnode(session: &str, window: Option<u32>, pane: Option<u32>, depth: u8) -> TreeNode {
+    let kind = match (window, pane) {
+        (Some(w), Some(p)) => TreeKind::Pane {
+            window: WindowId(w),
+            pane: PaneId(p),
+        },
+        (Some(w), None) => TreeKind::Window {
+            window: WindowId(w),
+        },
+        (None, None) => TreeKind::Session,
+        (None, Some(_)) => unreachable!("a pane row needs a parent window"),
+    };
     TreeNode {
         session: session.into(),
-        window: window.map(WindowId),
-        pane: pane.map(PaneId),
+        kind,
         depth,
         label: String::new(),
         name: String::new(),

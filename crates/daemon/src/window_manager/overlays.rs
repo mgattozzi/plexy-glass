@@ -195,7 +195,7 @@ impl WindowManager {
         let Some(start) = state
             .nodes
             .iter()
-            .position(|n| n.kind() == TreeKind::Session && n.session == old)
+            .position(|n| n.kind == TreeKind::Session && n.session == old)
         else {
             return;
         };
@@ -204,9 +204,9 @@ impl WindowManager {
         let (mut windows, mut panes) = (0usize, 0usize);
         let mut i = start + 1;
         while i < state.nodes.len() && state.nodes[i].depth > 0 {
-            match state.nodes[i].kind() {
-                TreeKind::Window => windows += 1,
-                TreeKind::Pane => panes += 1,
+            match state.nodes[i].kind {
+                TreeKind::Window { .. } => windows += 1,
+                TreeKind::Pane { .. } => panes += 1,
                 TreeKind::Session => {}
             }
             state.nodes[i].session = new.to_string();
