@@ -4,8 +4,8 @@ use plexy_glass_emulator::Notification;
 use plexy_glass_emulator::coords::{Col, Row};
 use plexy_glass_mux::{
     Command, HintAction, HintKind, HintState, HintTarget, KeyEvent, MouseButton, MouseEvent,
-    MouseKind, PickerEntry, Point, ScrollOffset, SwapTarget, TreeAction, TreeNode, UnifiedLine,
-    WheelAxis, blocks, palette,
+    MouseKind, MouseModifiers, PickerEntry, Point, ScrollOffset, SwapTarget, TreeAction, TreeNode,
+    UnifiedLine, WheelAxis, blocks, palette,
 };
 use tokio::sync::broadcast;
 use tokio::time;
@@ -407,24 +407,72 @@ async fn double_click_on_a_two_char_word_still_copies() {
     // Double-click 'l' at physical (6,3) → pane-local (5,2). Two press/release
     // pairs in quick succession → the second press classifies as count==2 →
     // word_at selects "ls".
-    let mut yanked = None;
+    let mut yanked = OffLockAction::Nothing;
     for _ in 0..2 {
         m.handle_mouse(ev(MouseKind::Press, 6, 3)).await.unwrap();
         yanked = m.handle_mouse(ev(MouseKind::Release, 6, 3)).await.unwrap();
     }
-    // The yank text is BUBBLED UP, not written to the clipboard under the WM
-    // lock (`write_clipboard` can block up to 2s and the render coordinator
-    // composes under this lock). So the WM sets NO message here; the caller
-    // (`Session::handle_mouse`) writes off-lock and sets the honest message.
-    assert_eq!(
-        yanked.as_deref(),
-        Some("ls"),
-        "double-clicking a 2-char word must yield its text, not be swallowed by the dead-zone"
+    // The yank text is BUBBLED UP as an OffLockAction, not written to the
+    // clipboard under the WM lock (`write_clipboard` can block up to 2s and the
+    // render coordinator composes under this lock). So the WM sets NO message
+    // here; the caller (`Session::handle_mouse`) writes off-lock and sets the
+    // honest message.
+    assert!(
+        matches!(&yanked, OffLockAction::Yank(t) if t == "ls"),
+        "double-clicking a 2-char word must yield its text, not be swallowed by the dead-zone, got {yanked:?}"
     );
     assert_eq!(
         m.take_active_message(),
         None,
         "the WM must NOT write the clipboard / set the message under the lock — the caller does it off-lock"
+    );
+}
+
+/// Middle-click paste must resolve to an `OffLockAction::Paste` UNDER the WM
+/// lock WITHOUT reading the system clipboard: `read_clipboard` shells out to
+/// `pbpaste`/`xclip`/… and can block up to 2s on a wedged helper, and the
+/// render coordinator composes every frame under this same lock, so reading it
+/// here would freeze the session. The handler is sync w.r.t. the clipboard by
+/// construction — it returns the paste intent, and `Session::handle_mouse` does
+/// the read off-lock. Structural regression guard for the freeze-under-lock class.
+#[tokio::test]
+async fn middle_click_returns_paste_action_without_reading_clipboard() {
+    let notify = Arc::new(Notify::new());
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
+        notify,
+        None,
+        cfg(),
+    )
+    .unwrap();
+    // Physical (6,6) → pane-local (5,5): inside the single pane (viewport origin
+    // (1,1), status bar unset → offset 0).
+    let middle = MouseEvent {
+        kind: MouseKind::Press,
+        button: MouseButton::Middle,
+        modifiers: MouseModifiers::default(),
+        row: 6,
+        col: 6,
+    };
+    let action = m.handle_mouse(middle).await.unwrap();
+    // A fresh `cat` pane has no BRACKETED_PASTE mode, so the resolved intent is
+    // a plain (unbracketed) paste carrying the target pane. The clipboard is NOT
+    // read under the lock; the returned action is the whole side effect.
+    assert!(
+        matches!(
+            action,
+            OffLockAction::Paste {
+                bracketed: false,
+                ..
+            }
+        ),
+        "middle-click must resolve to a Paste action off-lock, got {action:?}"
     );
 }
 

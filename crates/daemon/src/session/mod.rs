@@ -19,7 +19,7 @@ use tokio::time;
 use crate::error::DaemonError;
 use crate::osc_actions::{PasteFallback, Wrote};
 use crate::pane::Pane;
-use crate::window_manager::{STATUS_TTL, Severity, WindowManager};
+use crate::window_manager::{OffLockAction, STATUS_TTL, Severity, WindowManager};
 use crate::{LockExt, osc_actions, pipe};
 
 pub struct ClientHandle {
@@ -1041,16 +1041,16 @@ impl Session {
         self: &Arc<Self>,
         event: plexy_glass_mux::MouseEvent,
     ) -> Result<(), DaemonError> {
-        let (yanked, had_message) = {
+        let (action, had_message) = {
             let mut manager = self.window_manager.lock().await;
-            // A copy-mode / drag-select yank returns its text here rather than
-            // writing the clipboard under the lock: write_clipboard can block up
-            // to 2s on a wedged helper, and the render coordinator composes every
-            // frame under this same lock, so awaiting it here would freeze the
-            // session. Other mouse actions (hyperlink open, …) may set a WM
-            // message directly, which can't schedule the TTL wake, so note it.
-            let yanked = manager.handle_mouse(event).await?;
-            (yanked, manager.has_active_message())
+            // Slow clipboard/URL I/O is bubbled up as an OffLockAction rather
+            // than awaited under the lock: a clipboard helper can block up to 2s
+            // on a wedged process, and the render coordinator composes every
+            // frame under this same lock, so awaiting here would freeze the
+            // session. Other mouse actions may set a WM message directly, which
+            // can't schedule the TTL wake, so note it.
+            let action = manager.handle_mouse(event).await?;
+            (action, manager.has_active_message())
         };
         self.notify.notify_one();
         // Auto-dismiss any message a mouse action set, on the same ~3s timer as
@@ -1058,22 +1058,41 @@ impl Session {
         if had_message {
             self.schedule_status_expiry_wake();
         }
-        // The lock is released: now write the clipboard and set the honest
-        // message on re-lock. Mirrors the release→await→re-lock pattern the
-        // connection.rs copy-mode / block-mode yank sites use.
-        if let Some(text) = yanked {
-            let wrote = if osc_actions::write_clipboard(text.as_bytes()).await {
-                Wrote::Yes
-            } else {
-                Wrote::No
-            };
-            let (msg, sev) = osc_actions::yank_status(wrote, &text, PasteFallback::No);
-            {
-                let mut manager = self.window_manager.lock().await;
-                manager.set_status_message(msg, sev);
+        // The lock is released: perform the slow I/O now. Mirrors the
+        // release→await pattern the connection.rs copy-mode / block-mode yank
+        // sites use.
+        match action {
+            OffLockAction::Nothing => {}
+            OffLockAction::Yank(text) => {
+                let wrote = if osc_actions::write_clipboard(text.as_bytes()).await {
+                    Wrote::Yes
+                } else {
+                    Wrote::No
+                };
+                let (msg, sev) = osc_actions::yank_status(wrote, &text, PasteFallback::No);
+                // set_status_message re-locks the WM off-lock and schedules the
+                // TTL wake for us; never call it while a WM guard is held.
+                self.set_status_message(msg, sev).await;
             }
-            self.notify.notify_one();
-            self.schedule_status_expiry_wake();
+            OffLockAction::Paste { pane, bracketed } => {
+                // Read the clipboard OFF the lock, then send. An empty read
+                // (no tool, empty clipboard, or a timed-out helper) is a no-op.
+                let bytes = osc_actions::read_clipboard().await;
+                if !bytes.is_empty() {
+                    let to_send = if bracketed {
+                        let mut v = Vec::with_capacity(bytes.len() + 12);
+                        v.extend_from_slice(b"\x1b[200~");
+                        v.extend_from_slice(&bytes);
+                        v.extend_from_slice(b"\x1b[201~");
+                        v
+                    } else {
+                        bytes
+                    };
+                    if let Err(e) = pane.send_input(bytes::Bytes::from(to_send)).await {
+                        tracing::warn!(error = %e, "middle-click paste send failed");
+                    }
+                }
+            }
         }
         Ok(())
     }

@@ -1,5 +1,6 @@
 //! Owns all windows for one attached client.
 
+use std::fmt;
 use std::io::Error;
 use std::sync::Arc;
 use std::time::Duration;
@@ -97,6 +98,39 @@ pub struct InbandNotification {
     pub body: String,
     pub window_index: usize,
     pub is_active_window: bool,
+}
+
+/// An action a mouse handler resolved UNDER the WM lock but that must be
+/// performed by the caller AFTER the lock is released, because it does slow
+/// subprocess I/O (clipboard read/write, URL open) and the render coordinator
+/// composes every frame under this same lock. Awaiting that I/O while the guard
+/// is held would freeze the whole session's render and input, so the handler
+/// returns the *intent* as data and `Session::handle_mouse` acts on it off-lock.
+/// See the copy-mode yank pattern the middle-click/paste/open paths mirror.
+pub(crate) enum OffLockAction {
+    /// Nothing to do off-lock (the common case).
+    Nothing,
+    /// Copy this text to the system clipboard, then flash the honest yank
+    /// status (copy-mode Enter / drag-select release / copy-mode mouse yank).
+    Yank(String),
+    /// Middle-click paste: read the system clipboard off-lock and send it to
+    /// `pane`, wrapping in bracketed-paste markers when `bracketed`.
+    Paste { pane: Pane, bracketed: bool },
+}
+
+// `Pane` is not `Debug` (it holds PTY handles), so derive isn't available;
+// this prints the variant + the cheap fields so test failures are legible.
+impl fmt::Debug for OffLockAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Nothing => f.write_str("Nothing"),
+            Self::Yank(t) => f.debug_tuple("Yank").field(t).finish(),
+            Self::Paste { bracketed, .. } => f
+                .debug_struct("Paste")
+                .field("bracketed", bracketed)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 /// Outcome of one [`WindowManager::update_monitor_flags`] drain.
