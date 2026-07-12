@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::{ColorSource, Rgb};
+
 /// Which glyph repertoire the status surface and widgets use.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum GlyphTier {
@@ -42,11 +44,11 @@ pub struct BlocksConfig {
     /// When `false`, no block-status border painting is performed.
     pub enabled: bool,
     /// Palette name or `#rrggbb` hex color for succeeded-command border segments.
-    pub ok_color: String,
+    pub ok_color: ColorSource,
     /// Palette name or `#rrggbb` hex color for failed-command border segments.
-    pub fail_color: String,
+    pub fail_color: ColorSource,
     /// Palette name or `#rrggbb` hex for the block-mode selection bracket.
-    pub select_color: String,
+    pub select_color: ColorSource,
     /// Pin the command line at the pane top when its block's output has scrolled
     /// above the viewport (live view only).
     pub sticky_header: bool,
@@ -60,9 +62,9 @@ impl Default for BlocksConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            ok_color: "ok".to_string(),
-            fail_color: "alert".to_string(),
-            select_color: "#dca561".to_string(),
+            ok_color: ColorSource::Name("ok".to_string()),
+            fail_color: ColorSource::Name("alert".to_string()),
+            select_color: ColorSource::Literal(Rgb { r: 0xdc, g: 0xa5, b: 0x61 }),
             sticky_header: true,
             duration: true,
             duration_threshold_ms: 2000,
@@ -79,9 +81,9 @@ pub struct HintsConfig {
     pub alphabet: String,
     /// Palette name or `#rrggbb` for the label text / background / highlighted
     /// match foreground.
-    pub label_fg: String,
-    pub label_bg: String,
-    pub match_fg: String,
+    pub label_fg: ColorSource,
+    pub label_bg: ColorSource,
+    pub match_fg: ColorSource,
 }
 
 impl Default for HintsConfig {
@@ -89,9 +91,9 @@ impl Default for HintsConfig {
         Self {
             enabled: true,
             alphabet: "asdfghjkl".to_string(),
-            label_fg: "bg".to_string(),
-            label_bg: "warn".to_string(),
-            match_fg: "ok".to_string(),
+            label_fg: ColorSource::Name("bg".to_string()),
+            label_bg: ColorSource::Name("warn".to_string()),
+            match_fg: ColorSource::Name("ok".to_string()),
         }
     }
 }
@@ -170,7 +172,9 @@ fn default_prefix() -> String {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PaletteConfig {
-    pub entries: HashMap<String, String>,
+    /// Role name → color, parsed from `#rrggbb` hex at decode. A malformed hex
+    /// is a loud decode error, so every value here is a valid color.
+    pub entries: HashMap<String, Rgb>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -207,8 +211,8 @@ const fn default_refresh() -> Duration {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StyleConfig {
-    pub fg: Option<String>,
-    pub bg: Option<String>,
+    pub fg: Option<ColorSource>,
+    pub bg: Option<ColorSource>,
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,

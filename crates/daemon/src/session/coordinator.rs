@@ -759,8 +759,8 @@ const DEFAULT_SELECT_RGB: (u8, u8, u8) = (0xdc, 0xa5, 0x61); // #dca561
 
 /// Resolve the hint-mode label/match colors from config.
 pub(super) fn hint_colors(cfg: &plexy_glass_config::Config) -> plexy_glass_mux::HintColors {
-    let resolve = |name: &str, def: (u8, u8, u8)| {
-        let rgb = plexy_glass_status::resolve_color(name, &cfg.palette).unwrap_or(
+    let resolve = |source: &plexy_glass_config::ColorSource, def: (u8, u8, u8)| {
+        let rgb = plexy_glass_status::resolve_color(source, &cfg.palette).unwrap_or(
             plexy_glass_status::Rgb {
                 r: def.0,
                 g: def.1,
@@ -781,14 +781,19 @@ pub(super) fn hint_colors(cfg: &plexy_glass_config::Config) -> plexy_glass_mux::
 /// of clashing fixed ANSI indices. Mirrors [`block_border_colors`]: each name
 /// resolves via `resolve_color`, falling back to the built-in palette default.
 pub(super) fn chrome_colors(cfg: &plexy_glass_config::Config) -> plexy_glass_mux::ChromeColors {
+    // Fixed palette-role names (not config color-specs), so look them up directly
+    // in the pre-parsed palette; an unknown role falls back to the built-in default.
     let resolve = |name: &str, def: (u8, u8, u8)| {
-        let rgb = plexy_glass_status::resolve_color(name, &cfg.palette).unwrap_or(
-            plexy_glass_status::Rgb {
+        let rgb = cfg
+            .palette
+            .entries
+            .get(name)
+            .copied()
+            .unwrap_or(plexy_glass_status::Rgb {
                 r: def.0,
                 g: def.1,
                 b: def.2,
-            },
-        );
+            });
         plexy_glass_emulator::Color::Rgb(rgb.r, rgb.g, rgb.b)
     };
     plexy_glass_mux::ChromeColors {
@@ -814,14 +819,19 @@ pub(super) fn message_colors(
     severity: Severity,
 ) -> (plexy_glass_emulator::Color, plexy_glass_emulator::Color) {
     use crate::window_manager::Severity;
+    // Fixed palette-role names (severity key + `bg_bar`), so a direct palette
+    // lookup with the built-in fallback for an unknown role.
     let resolve = |name: &str, def: (u8, u8, u8)| {
-        let rgb = plexy_glass_status::resolve_color(name, &cfg.palette).unwrap_or(
-            plexy_glass_status::Rgb {
+        let rgb = cfg
+            .palette
+            .entries
+            .get(name)
+            .copied()
+            .unwrap_or(plexy_glass_status::Rgb {
                 r: def.0,
                 g: def.1,
                 b: def.2,
-            },
-        );
+            });
         plexy_glass_emulator::Color::Rgb(rgb.r, rgb.g, rgb.b)
     };
     let fg_def = match severity {
@@ -891,7 +901,7 @@ pub(super) fn block_border_colors(
 
 #[cfg(test)]
 mod tests {
-    use plexy_glass_config::{KeymapBinding, built_in_default};
+    use plexy_glass_config::{ColorSource, KeymapBinding, built_in_default};
 
     use super::*;
 
@@ -1175,8 +1185,12 @@ mod tests {
     #[test]
     fn fallback_constants_match_built_in_palette() {
         let palette = &built_in_default().palette;
-        let ok = plexy_glass_status::resolve_color("ok", palette).expect("palette has ok");
-        let alert = plexy_glass_status::resolve_color("alert", palette).expect("palette has alert");
+        let ok = palette.entries.get("ok").copied().expect("palette has ok");
+        let alert = palette
+            .entries
+            .get("alert")
+            .copied()
+            .expect("palette has alert");
         assert_eq!((ok.r, ok.g, ok.b), DEFAULT_OK_RGB);
         assert_eq!((alert.r, alert.g, alert.b), DEFAULT_ALERT_RGB);
     }
@@ -1185,7 +1199,7 @@ mod tests {
     #[test]
     fn block_border_colors_bad_ok_color_falls_back_to_default() {
         let mut cfg = built_in_default();
-        cfg.blocks.ok_color = "not-a-valid-color".to_string();
+        cfg.blocks.ok_color = ColorSource::Name("not-a-valid-color".to_string());
         let colors = block_border_colors(&cfg).expect("expected Some even with bad ok_color");
         // Falls back to the hard-coded default #87a987.
         assert_eq!(
@@ -1200,7 +1214,7 @@ mod tests {
     #[test]
     fn block_border_colors_bad_fail_color_falls_back_to_default() {
         let mut cfg = built_in_default();
-        cfg.blocks.fail_color = "##invalid".to_string();
+        cfg.blocks.fail_color = ColorSource::Name("no-such-role".to_string());
         let colors = block_border_colors(&cfg).expect("expected Some even with bad fail_color");
         assert_eq!(
             colors.fail,
@@ -1213,8 +1227,8 @@ mod tests {
     #[test]
     fn block_border_colors_custom_hex_resolves() {
         let mut cfg = built_in_default();
-        cfg.blocks.ok_color = "#aabbcc".to_string();
-        cfg.blocks.fail_color = "#001122".to_string();
+        cfg.blocks.ok_color = ColorSource::Literal(plexy_glass_status::Rgb { r: 0xaa, g: 0xbb, b: 0xcc });
+        cfg.blocks.fail_color = ColorSource::Literal(plexy_glass_status::Rgb { r: 0x00, g: 0x11, b: 0x22 });
         let colors = block_border_colors(&cfg).expect("expected Some with valid hex colors");
         assert_eq!(
             colors.ok,
@@ -1235,8 +1249,8 @@ mod tests {
         // Add a custom palette entry.
         cfg.palette
             .entries
-            .insert("my_green".to_string(), "#00ff00".to_string());
-        cfg.blocks.ok_color = "my_green".to_string();
+            .insert("my_green".to_string(), plexy_glass_status::Rgb { r: 0x00, g: 0xff, b: 0x00 });
+        cfg.blocks.ok_color = ColorSource::Name("my_green".to_string());
         let colors = block_border_colors(&cfg).expect("expected Some with custom palette name");
         assert_eq!(
             colors.ok,

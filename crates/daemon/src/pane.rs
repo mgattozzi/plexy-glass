@@ -677,33 +677,25 @@ impl Pane {
 }
 
 /// Format an OSC 10/11/12 reply for the given color query using the configured
-/// palette. Returns `None` if the palette is missing the relevant entry or
-/// holds an unparseable hex value, in which case the daemon stays silent
-/// (matches xterm behaviour when no answer is available).
+/// palette. Returns `None` if the palette is missing the relevant entry, in
+/// which case the daemon stays silent (matches xterm behaviour when no answer
+/// is available).
 ///
-/// Palette entries are expected to be hex literals (`#RRGGBB`). Indirect
-/// references (e.g. `cursor = "accent"`) are not resolved here, they should
-/// be resolved to hex literals by config-load time.
+/// Palette entries are already parsed `Rgb` (hex is validated at config decode),
+/// so no re-parse happens here. Indirect references (e.g. `cursor = "accent"`)
+/// are not resolved; the palette holds literal colors, keyed by role name.
 fn format_color_reply(query: ColorQuery, palette: &PaletteConfig) -> Option<Vec<u8>> {
     let (osc_num, key, fallback) = match query {
         ColorQuery::Foreground => ("10", "fg", None),
         ColorQuery::Background => ("11", "bg", None),
         ColorQuery::Cursor => ("12", "cursor", Some("accent")),
     };
-    let hex = palette
+    let Rgb { r, g, b } = palette
         .entries
         .get(key)
         .or_else(|| fallback.and_then(|k| palette.entries.get(k)))
-        .or_else(|| palette.entries.get("fg"))?
-        .clone();
-    let Rgb { r, g, b } = Rgb::parse_hex(&hex).or_else(|| {
-        tracing::debug!(
-            hex = hex.as_str(),
-            key,
-            "palette entry failed to parse as hex; OSC color reply skipped"
-        );
-        None
-    })?;
+        .or_else(|| palette.entries.get("fg"))
+        .copied()?;
     Some(
         format!("\x1b]{osc_num};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x07").into_bytes(),
     )

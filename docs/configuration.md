@@ -100,13 +100,17 @@ palette {
 - A `palette` node **merges onto** the built-in palette: entries you name are
   overridden, the rest keep their defaults. You can also invent new names.
 - Color values must be hex literals of exactly the form `#rrggbb` (six hex
-  digits). There is no short form, no `rgb()`, and no CSS color names.
-  Palette values may not reference other palette names.
+  digits). There is no short form, no `rgb()`, and no CSS color names, and a
+  palette value may not reference another palette name. The hex is parsed once
+  at load, so a malformed value (`accent "#zz"`) is a hard config error with a
+  `line:col`, not a silent fallback.
 
 Palette names are usable in every widget style's `fg`/`bg` (see
-[Styles and padding](#styles-and-padding)). Note that a style color that is
-neither a known palette name nor a `#rrggbb` literal silently resolves to *no
-color* (the terminal default). The `fg` and `bg` entries (and `cursor`, falling
+[Styles and padding](#styles-and-padding)). Note that a style color splits two
+ways: an unknown palette *name* silently resolves to *no color* (the terminal
+default), since names are resolved late and a custom palette can define
+anything, but a `#`-prefixed value that isn't a valid `#rrggbb` literal is a
+hard config error at load. The `fg` and `bg` entries (and `cursor`, falling
 back to `accent`) also answer OSC 10/11/12 color queries from applications
 running inside panes.
 
@@ -611,9 +615,10 @@ blocks {
   `"0"` shows every completed block; anything faster than the threshold is
   hidden otherwise. An unparseable value is a hard config error.
 
-A bad color value (unknown palette name or malformed hex) falls back to the
-built-in default for that field, so it never disables the feature and is not
-a hard error. Both fields resolve through the same color lookup the
+An unknown palette *name* falls back to the built-in default for that field, so
+it never disables the feature and is not a hard error. A malformed `#rrggbb`
+literal, on the other hand, is a hard config error at load (the hex is parsed
+once, up front). Both fields resolve through the same color lookup the
 status-bar widget styles use, so custom `palette` entries are valid values.
 
 The `blocks` node live-reloads with the config (`Ctrl+a R` /
@@ -671,8 +676,9 @@ grid only; scrollback-wide hint mode is deferred.
   you can tell matched from still-to-type characters). Default: `"ok"` (the
   built-in green palette entry).
 
-A bad color value (unknown palette name or malformed hex) falls back to the
-built-in default for that field and is not a hard error.
+An unknown palette *name* falls back to the built-in default for that field and
+is not a hard error; a malformed `#rrggbb` literal is a hard config error at
+load (the hex is parsed up front, not at render).
 
 The `hints` node live-reloads with the config (`Ctrl+a R` / `plexy-glass
 reload`). New colors and alphabet are picked up on the next overlay open.

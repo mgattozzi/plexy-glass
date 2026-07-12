@@ -1,9 +1,17 @@
 use std::time::Duration;
 
 use crate::{
-    BlocksConfig, Config, GlyphTier, HintsConfig, KeymapBinding, KeymapConfig, MouseConfig,
-    NotificationsConfig, Padding, PaletteConfig, Position, StatusConfig, StyleConfig, WidgetSpec,
+    BlocksConfig, ColorSource, Config, GlyphTier, HintsConfig, KeymapBinding, KeymapConfig,
+    MouseConfig, NotificationsConfig, Padding, PaletteConfig, Position, Rgb, StatusConfig,
+    StyleConfig, WidgetSpec,
 };
+
+/// A palette-role color spec for the built-in status styles. Every default
+/// style points at a role name, never a literal, so the built-in stays in sync
+/// with the kanagawa-dragon palette.
+fn role(name: &str) -> ColorSource {
+    ColorSource::Name(name.to_string())
+}
 
 pub fn kanagawa_dragon_palette() -> PaletteConfig {
     // Mirrors the upstream tmux-kanagawa "dragon" mapping
@@ -32,7 +40,8 @@ pub fn kanagawa_dragon_palette() -> PaletteConfig {
         ("ok", "#87a987"),
     ]
     .iter()
-    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+    // invariant: the built-in palette values are valid `#rrggbb` literals.
+    .map(|(k, v)| ((*k).to_string(), Rgb::parse_hex(v).expect("built-in palette hex")))
     .collect();
     PaletteConfig { entries }
 }
@@ -58,8 +67,8 @@ pub fn built_in_default() -> Config {
             left: vec![
                 WidgetSpec::Ssh {
                     style: StyleConfig {
-                        fg: Some("accent".into()),
-                        bg: Some("bg_bar".into()),
+                        fg: Some(role("accent")),
+                        bg: Some(role("bg_bar")),
                         bold: true,
                         ..Default::default()
                     },
@@ -67,8 +76,8 @@ pub fn built_in_default() -> Config {
                 },
                 WidgetSpec::Session {
                     style: StyleConfig {
-                        fg: Some("bg".into()),
-                        bg: Some("accent".into()),
+                        fg: Some(role("bg")),
+                        bg: Some(role("accent")),
                         bold: true,
                         ..Default::default()
                     },
@@ -76,8 +85,8 @@ pub fn built_in_default() -> Config {
                 },
                 WidgetSpec::PrefixIndicator {
                     style: StyleConfig {
-                        fg: Some("bg".into()),
-                        bg: Some("highlight".into()),
+                        fg: Some(role("bg")),
+                        bg: Some(role("highlight")),
                         bold: true,
                         ..Default::default()
                     },
@@ -89,38 +98,38 @@ pub fn built_in_default() -> Config {
                 // session pill on its left and the `bg_bar` inactive tabs. The
                 // most-glanced-at "which window" cue needs a clear boundary.
                 active_style: StyleConfig {
-                    fg: Some("bg".into()),
-                    bg: Some("highlight".into()),
+                    fg: Some(role("bg")),
+                    bg: Some(role("highlight")),
                     bold: true,
                     ..Default::default()
                 },
                 inactive_style: StyleConfig {
-                    fg: Some("muted".into()),
-                    bg: Some("bg_bar".into()),
+                    fg: Some(role("muted")),
+                    bg: Some(role("bg_bar")),
                     ..Default::default()
                 },
             }],
             right: vec![
                 WidgetSpec::CpuLoad {
                     style: StyleConfig {
-                        fg: Some("fg".into()),
-                        bg: Some("selection".into()),
+                        fg: Some(role("fg")),
+                        bg: Some(role("selection")),
                         ..Default::default()
                     },
                     interval: None,
                 },
                 WidgetSpec::Battery {
                     style: StyleConfig {
-                        fg: Some("fg".into()),
-                        bg: Some("bg_bar".into()),
+                        fg: Some(role("fg")),
+                        bg: Some(role("bg_bar")),
                         ..Default::default()
                     },
                     interval: None,
                 },
                 WidgetSpec::Hostname {
                     style: StyleConfig {
-                        fg: Some("fg".into()),
-                        bg: Some("selection".into()),
+                        fg: Some(role("fg")),
+                        bg: Some(role("selection")),
                         ..Default::default()
                     },
                     interval: None,
@@ -134,8 +143,8 @@ pub fn built_in_default() -> Config {
                     format: "%H:%M UTC%:z".into(),
                     interval: None,
                     style: StyleConfig {
-                        fg: Some("fg".into()),
-                        bg: Some("bg_bar".into()),
+                        fg: Some(role("fg")),
+                        bg: Some(role("bg_bar")),
                         ..Default::default()
                     },
                     utc: false,
@@ -277,7 +286,7 @@ mod tests {
         match cfg.status.left.first() {
             Some(WidgetSpec::Ssh { style, content }) => {
                 assert_eq!(content, " ssh ");
-                assert_eq!(style.fg.as_deref(), Some("accent"));
+                assert_eq!(style.fg, Some(role("accent")));
             }
             other => panic!("expected leading Ssh widget, got {other:?}"),
         }

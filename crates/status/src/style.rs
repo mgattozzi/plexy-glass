@@ -1,29 +1,9 @@
-use plexy_glass_config::{PaletteConfig, StyleConfig};
+use plexy_glass_config::{ColorSource, PaletteConfig, StyleConfig};
 use plexy_glass_emulator::Attrs;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Rgb {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-impl Rgb {
-    pub fn parse_hex(s: &str) -> Option<Self> {
-        let s = s.strip_prefix('#')?;
-        // Require 6 ASCII bytes before byte-slicing: a 6-byte string can hold a
-        // multi-byte UTF-8 char straddling a slice boundary (e.g. "#aébc1"),
-        // and slicing off a char boundary panics. ASCII-only makes the byte
-        // indices safe and falls into the existing None path for bad input.
-        if s.len() != 6 || !s.is_ascii() {
-            return None;
-        }
-        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-        Some(Self { r, g, b })
-    }
-}
+// `Rgb` moved down into `plexy-glass-config` (parsed from hex at decode); re-export
+// so every existing `plexy_glass_status::Rgb` user keeps compiling.
+pub use plexy_glass_config::Rgb;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ResolvedStyle {
@@ -32,8 +12,7 @@ pub struct ResolvedStyle {
     pub attrs: Attrs,
 }
 
-/// Resolve a `StyleConfig` by looking up palette names (or accepting
-/// `#rrggbb` literals).
+/// Resolve a `StyleConfig` against the (pre-parsed) palette.
 pub fn resolve_style(style: &StyleConfig, palette: &PaletteConfig) -> ResolvedStyle {
     let mut attrs = Attrs::empty();
     if style.bold {
@@ -49,28 +28,22 @@ pub fn resolve_style(style: &StyleConfig, palette: &PaletteConfig) -> ResolvedSt
         attrs |= Attrs::REVERSE;
     }
     ResolvedStyle {
-        fg: style.fg.as_deref().and_then(|name| lookup(name, palette)),
-        bg: style.bg.as_deref().and_then(|name| lookup(name, palette)),
+        fg: style.fg.as_ref().and_then(|src| resolve_color(src, palette)),
+        bg: style.bg.as_ref().and_then(|src| resolve_color(src, palette)),
         attrs,
     }
 }
 
-/// Resolve a palette name or `#rrggbb` hex literal to an `Rgb` color.
-///
-/// Returns `None` when the name is absent from the palette or the hex is
-/// malformed.
-pub fn resolve_color(name_or_hex: &str, palette: &PaletteConfig) -> Option<Rgb> {
-    lookup(name_or_hex, palette)
-}
-
-fn lookup(name_or_hex: &str, palette: &PaletteConfig) -> Option<Rgb> {
-    if let Some(literal) = Rgb::parse_hex(name_or_hex) {
-        return Some(literal);
+/// Resolve a `ColorSource` to an `Rgb`: a literal is returned as-is; a role name
+/// is a lookup in the pre-parsed palette. An unknown role → `None` → the terminal
+/// default (the same silent-fallback behavior the old string parse had for an
+/// unknown name), but the hex is no longer re-parsed here — it was validated at
+/// config decode.
+pub fn resolve_color(source: &ColorSource, palette: &PaletteConfig) -> Option<Rgb> {
+    match source {
+        ColorSource::Literal(rgb) => Some(*rgb),
+        ColorSource::Name(role) => palette.entries.get(role).copied(),
     }
-    palette
-        .entries
-        .get(name_or_hex)
-        .and_then(|s| Rgb::parse_hex(s))
 }
 
 #[cfg(test)]
@@ -81,49 +54,39 @@ mod tests {
 
     fn palette() -> PaletteConfig {
         let mut e = HashMap::new();
-        e.insert("accent".to_string(), "#7e9cd8".to_string());
-        e.insert("bg".to_string(), "#1f1f28".to_string());
+        e.insert("accent".to_string(), Rgb { r: 0x7e, g: 0x9c, b: 0xd8 });
+        e.insert("bg".to_string(), Rgb { r: 0x1f, g: 0x1f, b: 0x28 });
         PaletteConfig { entries: e }
+    }
+
+    fn name(s: &str) -> ColorSource {
+        ColorSource::Name(s.to_string())
     }
 
     #[test]
     fn resolves_palette_name() {
         let s = StyleConfig {
-            fg: Some("accent".to_string()),
+            fg: Some(name("accent")),
             ..Default::default()
         };
         let r = resolve_style(&s, &palette());
-        assert_eq!(
-            r.fg,
-            Some(Rgb {
-                r: 0x7e,
-                g: 0x9c,
-                b: 0xd8
-            })
-        );
+        assert_eq!(r.fg, Some(Rgb { r: 0x7e, g: 0x9c, b: 0xd8 }));
     }
 
     #[test]
     fn resolves_hex_literal() {
         let s = StyleConfig {
-            fg: Some("#abcdef".to_string()),
+            fg: Some(ColorSource::Literal(Rgb { r: 0xab, g: 0xcd, b: 0xef })),
             ..Default::default()
         };
         let r = resolve_style(&s, &PaletteConfig::default());
-        assert_eq!(
-            r.fg,
-            Some(Rgb {
-                r: 0xab,
-                g: 0xcd,
-                b: 0xef
-            })
-        );
+        assert_eq!(r.fg, Some(Rgb { r: 0xab, g: 0xcd, b: 0xef }));
     }
 
     #[test]
     fn unknown_name_resolves_to_none() {
         let s = StyleConfig {
-            fg: Some("nonexistent".to_string()),
+            fg: Some(name("nonexistent")),
             ..Default::default()
         };
         let r = resolve_style(&s, &PaletteConfig::default());
@@ -141,49 +104,26 @@ mod tests {
     }
 
     #[test]
-    fn resolve_color_hex_literal() {
-        let result = resolve_color("#ff0000", &PaletteConfig::default());
-        assert_eq!(
-            result,
-            Some(Rgb {
-                r: 0xff,
-                g: 0x00,
-                b: 0x00
-            })
+    fn resolve_color_literal() {
+        let result = resolve_color(
+            &ColorSource::Literal(Rgb { r: 0xff, g: 0, b: 0 }),
+            &PaletteConfig::default(),
         );
+        assert_eq!(result, Some(Rgb { r: 0xff, g: 0, b: 0 }));
     }
 
     #[test]
     fn resolve_color_palette_name() {
-        let result = resolve_color("accent", &palette());
-        assert_eq!(
-            result,
-            Some(Rgb {
-                r: 0x7e,
-                g: 0x9c,
-                b: 0xd8
-            })
-        );
+        let result = resolve_color(&ColorSource::Name("accent".to_string()), &palette());
+        assert_eq!(result, Some(Rgb { r: 0x7e, g: 0x9c, b: 0xd8 }));
     }
 
     #[test]
     fn resolve_color_unknown_name_is_none() {
-        let result = resolve_color("nonexistent", &PaletteConfig::default());
+        let result = resolve_color(
+            &ColorSource::Name("nonexistent".to_string()),
+            &PaletteConfig::default(),
+        );
         assert_eq!(result, None);
-    }
-
-    #[test]
-    fn resolve_color_malformed_hex_is_none() {
-        let result = resolve_color("#gggggg", &PaletteConfig::default());
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn parse_hex_multibyte_char_is_none_not_panic() {
-        // "#aébc1": the body is exactly 6 bytes but `é` is 2 bytes straddling the
-        // &s[0..2] boundary, so this must return None, not panic.
-        assert_eq!(Rgb::parse_hex("#aébc1"), None);
-        // A 4-char body padded to 6 bytes by a multi-byte char, too.
-        assert_eq!(Rgb::parse_hex("#1234é"), None);
     }
 }

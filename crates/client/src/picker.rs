@@ -21,7 +21,7 @@ use std::fmt::Write as _;
 use plexy_glass_config::PaletteConfig;
 use plexy_glass_emulator::{display_width, truncate_to_width};
 use plexy_glass_protocol::PtySize;
-use plexy_glass_status::{Rgb, resolve_color};
+use plexy_glass_status::Rgb;
 
 /// The picker's resolved colors, mapped to the same palette roles the daemon's
 /// `chrome_colors` uses so the box matches every other overlay. Resolved once at
@@ -52,7 +52,9 @@ impl PickerTheme {
     const OK: Rgb = Rgb { r: 0x87, g: 0xa9, b: 0x87 };
 
     fn role(palette: &PaletteConfig, name: &str, default: Rgb) -> Rgb {
-        resolve_color(name, palette).unwrap_or(default)
+        // Palette entries are pre-parsed `Rgb`; a role absent from a custom
+        // palette falls back to the fixed kanagawa-dragon default.
+        palette.entries.get(name).copied().unwrap_or(default)
     }
 
     pub fn resolve(palette: &PaletteConfig) -> Self {
@@ -1002,7 +1004,7 @@ mod tests {
 
         // A palette that overrides `accent` moves only the border.
         let mut e = HashMap::new();
-        e.insert("accent".to_string(), "#010203".to_string());
+        e.insert("accent".to_string(), Rgb { r: 1, g: 2, b: 3 });
         let t = PickerTheme::resolve(&PaletteConfig { entries: e });
         assert_eq!(t.border, Rgb { r: 1, g: 2, b: 3 });
         assert_eq!(t.title, d.title, "unset roles keep their default");

@@ -31,8 +31,8 @@ status {
     .unwrap();
     let cfg = load_from_path(&path).expect("parse");
     assert_eq!(
-        cfg.palette.entries.get("fg").map(String::as_str),
-        Some("#ffffff")
+        cfg.palette.entries.get("fg").copied(),
+        crate::Rgb::parse_hex("#ffffff")
     );
     assert_eq!(cfg.status.refresh.as_secs(), 10);
     assert_eq!(cfg.status.right.len(), 1);
