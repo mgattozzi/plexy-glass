@@ -435,7 +435,7 @@ pub struct StatusHit {
 
 #[cfg(test)]
 mod tests {
-    use plexy_glass_config::built_in_default;
+    use plexy_glass_config::{StyleConfig, built_in_default};
 
     use super::*;
     use crate::GlyphSet;
@@ -530,5 +530,53 @@ mod tests {
         // cache containing "demo".
         assert!(!snap.left[1].is_empty());
         assert!(snap.left[1][0].text.contains("demo"));
+    }
+
+    #[tokio::test]
+    async fn compose_pass_never_evaluates_interval_widgets() {
+        // The render coordinator's compose pass runs UNDER the session WM lock
+        // and calls only refresh_event_driven + snapshot. A Shell widget shells
+        // out to a subprocess — the exact slow-I/O-under-the-lock hazard — and
+        // is always interval-driven, so the event-driven pass must NOT evaluate
+        // it; only the off-lock tick task (refresh_due_intervals) does. This
+        // pins that split so composing a frame can never spawn a widget
+        // subprocess while the lock that gates the whole session is held.
+        let mut cfg = built_in_default();
+        cfg.status.right = vec![WidgetSpec::Shell {
+            command: "echo".into(),
+            args: vec!["ran".into()],
+            interval: Some(Duration::from_secs(30)),
+            timeout: Duration::from_secs(1),
+            style: StyleConfig::default(),
+        }];
+        let engine = StatusEngine::new(&cfg.status, &cfg.palette, &GlyphSet::UNICODE);
+        let inner = engine.inner();
+        let ctx = EvalContext {
+            session_name: "demo",
+            windows: &[],
+            active_window: 0,
+            attached_clients: 1,
+            prefix_active: false,
+            active_pane_cwd: None,
+            copy_mode_active: false,
+            sync_active: false,
+            zoom_active: false,
+            dragging_window: None,
+            remote: false,
+        };
+        // Compose pass: the event-driven refresh must leave the Shell widget
+        // un-run (its interval() is always Some), so its cache stays empty.
+        inner.refresh_event_driven(&ctx).await;
+        assert!(
+            inner.snapshot().await.right[0].is_empty(),
+            "an interval Shell widget must not be evaluated by the compose (event-driven) pass"
+        );
+        // The off-lock tick path DOES evaluate it, proving the split is real and
+        // the widget isn't simply broken (a failed spawn still yields '…').
+        inner.refresh_due_intervals(&ctx).await;
+        assert!(
+            !inner.snapshot().await.right[0].is_empty(),
+            "the off-lock tick path must evaluate the interval widget"
+        );
     }
 }

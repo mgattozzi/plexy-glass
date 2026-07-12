@@ -201,13 +201,16 @@ pub(super) async fn render_coordinator(
                 remote,
             };
             let engine = session.status_engine_snapshot();
+            // Event-driven widgets only: they read `ctx` fields, never a
+            // subprocess. Interval widgets (Shell / GitBranch / …) are evaluated
+            // exclusively by the off-lock tick task, which does its first pass at
+            // startup before any sleep — so we do NOT call refresh_due_intervals
+            // here. Calling it on the compose path ran a slow `git`/shell widget
+            // UNDER the WM lock (on the first frame every interval widget is due),
+            // and that lock gates the whole session's render + input. The
+            // coordinator now reads only cached output; a not-yet-evaluated widget
+            // renders blank for one frame and the tick task's notify repaints it.
             engine.refresh_event_driven(&ctx).await;
-            // Also flush any interval widgets whose deadline has passed. On
-            // the first render this populates widgets the tick task hasn't
-            // had a chance to evaluate yet (initial next_due is None, so
-            // they're all considered due); on subsequent renders it's a
-            // cheap no-op when the tick task is keeping up.
-            let _ = engine.refresh_due_intervals(&ctx).await;
             let snap = engine.snapshot().await;
             let host_size = m.host_size();
             // Honor the configured status-bar position for both the click row
