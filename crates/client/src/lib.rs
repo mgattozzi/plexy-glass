@@ -24,7 +24,7 @@ pub use kill::{KillOutcome, kill, kill_all};
 use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
     ClientHello, ClientMsg, Codec, CreatePolicy, ExitStatus, GraphicsCaps, NegotiatedKbd,
-    PROTOCOL_VERSION, ServerMsg, SpawnSpec, client_handshake, client_handshake_with,
+    PROTOCOL_VERSION, ServerMsg, SessionName, SpawnSpec, client_handshake, client_handshake_with,
 };
 pub use pump::{PumpExit, handshake_spawn, pump};
 pub use shell_integration::shell_integration_snippet;
@@ -450,10 +450,22 @@ pub async fn client_attach_smart(
     target: &Target,
     explicit_name: Option<String>,
 ) -> Result<(), ClientError> {
-    let name = explicit_name.unwrap_or_else(|| "main".to_string());
+    // Parse the name (explicit, or the "main" default) into a `SessionName`
+    // BEFORE it hits the wire, so our own client can never send an empty or
+    // invalid name — a bad `-n ""`/`-n "has space"` fails here locally with the
+    // same `EmptyName`/`InvalidName` it would have bounced back off the daemon,
+    // instead of a wire round-trip that ejects the connection.
+    let name = SessionName::parse(explicit_name.as_deref().unwrap_or("main"))
+        .map_err(ClientError::DaemonError)?;
     // `None` lets `run` pick the shell: the local default for a local daemon, or
     // the remote's own `$SHELL` for a remote one (see the spec resolution there).
-    run(target, Some(name), CreatePolicy::CreateIfMissing, None).await
+    run(
+        target,
+        Some(name.to_string()),
+        CreatePolicy::CreateIfMissing,
+        None,
+    )
+    .await
 }
 
 /// Run one or more command-prompt lines against a session.

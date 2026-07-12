@@ -1236,6 +1236,7 @@ name = "plexy-glass-protocol"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "hegeltest",
  "postcard",
  "serde",
  "thiserror 2.0.18",

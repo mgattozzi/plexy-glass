@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use plexy_glass_mux::BufferEntry;
-use plexy_glass_protocol::{ProtocolError, PtySize, SessionEntry, SpawnSpec};
+use plexy_glass_protocol::{ProtocolError, PtySize, SessionEntry, SessionName, SpawnSpec};
 use tokio::sync::Mutex;
 use tokio::task;
 
@@ -18,7 +18,12 @@ use crate::session::Session;
 const PASTE_BUFFER_CAP: usize = 50;
 
 pub struct SessionRegistry {
-    inner: Mutex<HashMap<String, Arc<Session>>>,
+    /// Live sessions keyed by their validated [`SessionName`]. Every key got
+    /// there through `SessionName::parse` at a construction method below (the one
+    /// validation boundary), so an invalid name is unrepresentable in the map.
+    /// Read paths (`get`/`kill`) still take `&str` and look up via `Borrow<str>`
+    /// — an unparseable name just isn't found, exactly the old behavior.
+    inner: Mutex<HashMap<SessionName, Arc<Session>>>,
     /// Daemon-global paste buffers.
     ///
     /// Independent of `inner` and never locked while `inner` is held (the
@@ -144,15 +149,18 @@ impl SessionRegistry {
         size: PtySize,
         config: Arc<plexy_glass_config::Config>,
     ) -> Result<Arc<Session>, DaemonError> {
-        validate_name(&name)?;
+        // Parse the wire `String` into a `SessionName` here — the boundary. A bad
+        // name returns `DaemonError::Protocol(EmptyName | InvalidName)`, which the
+        // caller replies as a graceful `ServerMsg::Error`.
+        let key = SessionName::parse(&name)?;
         let mut map = self.inner.lock().await;
-        if map.contains_key(&name) {
+        if map.contains_key(&key) {
             return Err(DaemonError::Protocol(ProtocolError::SessionAlreadyExists {
                 name,
             }));
         }
-        let session = Session::new(name.clone(), cmd, size, config)?;
-        map.insert(name, Arc::clone(&session));
+        let session = Session::new(name, cmd, size, config)?;
+        map.insert(key, Arc::clone(&session));
         Ok(session)
     }
 
@@ -167,15 +175,15 @@ impl SessionRegistry {
         config: Arc<plexy_glass_config::Config>,
         size: PtySize,
     ) -> Result<Arc<Session>, DaemonError> {
-        validate_name(&template.name)?;
+        let key = SessionName::parse(&template.name)?;
         let mut map = self.inner.lock().await;
-        if let Some(s) = map.get(&template.name)
+        if let Some(s) = map.get(&key)
             && !s.closing.load(Ordering::SeqCst)
         {
             return Ok(Arc::clone(s));
         }
         let session = Session::build_from_template(template, size, config).await?;
-        map.insert(template.name.clone(), Arc::clone(&session));
+        map.insert(key, Arc::clone(&session));
         Ok(session)
     }
 
@@ -213,7 +221,11 @@ impl SessionRegistry {
         size: PtySize,
         config: Arc<plexy_glass_config::Config>,
     ) -> Result<Arc<Session>, DaemonError> {
-        validate_name(&name)?;
+        // Parse at the boundary; `key` is used for the map ops, `name` (the raw
+        // `String`) for the declared-template lookup and the fresh-create
+        // fallback (which re-parses — cheap and keeps `create` the sole insert
+        // path). A bad name returns a graceful `DaemonError::Protocol` here.
+        let key = SessionName::parse(&name)?;
         // Fast path: already running. A still-mapped but *closing* entry must be
         // PRUNED here (mirroring `get`), not merely skipped, otherwise it
         // lingers in the map and the fresh-create fallback below is rejected by
@@ -223,7 +235,7 @@ impl SessionRegistry {
         // `get` to do the pruning.
         {
             let mut map = self.inner.lock().await;
-            let closing = match map.get(&name) {
+            let closing = match map.get(&key) {
                 Some(s) => {
                     if !s.closing.load(Ordering::SeqCst) {
                         return Ok(Arc::clone(s));
@@ -233,7 +245,7 @@ impl SessionRegistry {
                 None => false,
             };
             if closing {
-                map.remove(&name);
+                map.remove(&key);
             }
         }
         // A declared session name is (re)built from its template. (The client
@@ -252,9 +264,12 @@ impl SessionRegistry {
     /// under ONE map-lock hold (so a concurrent `get`/`create` can never observe
     /// the key and the live name disagreeing). Memory-only, nothing on disk.
     pub async fn rename_session(self: &Arc<Self>, old: &str, new: &str) -> Result<(), DaemonError> {
-        validate_name(new)?;
+        // The new name is parsed at the boundary; `old` is a lookup key (`&str`
+        // via `Borrow`), never validated — an unknown/invalid `old` is
+        // `SessionNotFound`, as before.
+        let new_key = SessionName::parse(new)?;
         let mut map = self.inner.lock().await;
-        if map.contains_key(new) {
+        if map.contains_key(&new_key) {
             return Err(DaemonError::Protocol(ProtocolError::SessionAlreadyExists {
                 name: new.to_string(),
             }));
@@ -266,7 +281,7 @@ impl SessionRegistry {
         })?;
         // Key and live name move together, under the same lock hold.
         session.set_name(new.to_string());
-        map.insert(new.to_string(), session);
+        map.insert(new_key, session);
         Ok(())
     }
 
@@ -353,21 +368,6 @@ impl Default for SessionRegistry {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn validate_name(name: &str) -> Result<(), DaemonError> {
-    if name.is_empty() || name.len() > 64 {
-        return Err(DaemonError::Protocol(ProtocolError::EmptyName));
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err(DaemonError::Protocol(ProtocolError::InvalidName {
-            name: name.to_string(),
-        }));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

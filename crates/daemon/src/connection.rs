@@ -2456,6 +2456,64 @@ mod tests {
         server.abort();
     }
 
+    // A bad session name must come back as a GRACEFUL `ServerMsg::Error`, not a
+    // dropped connection. The wire field stays `String` so the frame still
+    // DECODES; the daemon parses `String -> SessionName` at the registry boundary
+    // and replies the same `InvalidName` the old `validate_name` produced. If we'd
+    // put `SessionName` on the wire (`#[serde(try_from)]`), the decode would fail
+    // and the client would see a bare EOF instead — the regression this guards.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attach_with_bad_name_replies_error_not_drop() {
+        let _g = isolate();
+        let (server_side, client_side) = duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            serve(
+                server_side,
+                7,
+                Arc::new(crate::SessionRegistry::new()),
+                Arc::new(plexy_glass_config::built_in_default()),
+            )
+            .await
+        });
+
+        let (mut cr, mut cw) = io::split(client_side);
+        let server_hello = client_handshake(&mut cr, &mut cw).await.unwrap();
+        assert_eq!(server_hello.version, PROTOCOL_VERSION);
+
+        let attach = ClientMsg::AttachOrCreate {
+            // A space is not in `[A-Za-z0-9_-]` → InvalidName.
+            name: Some("has space".into()),
+            create_if_missing: CreatePolicy::CreateIfMissing,
+            cmd: None,
+            size: PtySize {
+                rows: 8,
+                cols: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+        };
+        let bytes = postcard::to_allocvec(&attach).unwrap();
+        Codec::write_frame(&mut cw, &bytes).await.unwrap();
+
+        // The daemon must SEND a frame (graceful), and it must be the InvalidName
+        // error — not EOF (`Ok(None)`) or a read error (a dropped connection).
+        let frame = time::timeout(Duration::from_secs(3), Codec::read_frame(&mut cr))
+            .await
+            .expect("daemon replied within the deadline (did not hang)")
+            .expect("read ok")
+            .expect("daemon sent a frame, not EOF — the connection was NOT dropped");
+        let msg: ServerMsg = postcard::from_bytes(&frame).unwrap();
+        assert!(
+            matches!(
+                msg,
+                ServerMsg::Error(ProtocolError::InvalidName { ref name }) if name == "has space"
+            ),
+            "expected a graceful InvalidName reply, got {msg:?}"
+        );
+
+        server.abort();
+    }
+
     // `Ctrl+a : switch b <Enter>` moves this client from session "a" to the
     // pre-existing live session "b": registered on b, deregistered from a.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

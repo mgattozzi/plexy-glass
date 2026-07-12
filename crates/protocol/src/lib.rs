@@ -4,6 +4,7 @@ pub mod codec;
 pub mod errors;
 pub mod handshake;
 pub mod messages;
+pub mod session_name;
 
 pub use codec::{Codec, MAX_FRAME_BYTES};
 pub use errors::{CodecError, ProtocolError};
@@ -13,3 +14,4 @@ pub use messages::{
     NegotiatedKbd, PROTOCOL_VERSION, ProtocolVersion, PtySize, ServerHello, ServerMsg,
     SessionEntry, SpawnSpec,
 };
+pub use session_name::SessionName;
