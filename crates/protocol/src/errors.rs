@@ -16,6 +16,8 @@ pub enum ProtocolError {
     SpawnFailed { reason: String },
     #[error("unexpected message: {0}")]
     UnexpectedMessage(String),
+    // reserved: never construct — postcard-positional wire enum; add a
+    // structured variant at the END instead
     #[error("internal daemon error: {0}")]
     Internal(String),
     #[error("session not found: {name}")]
