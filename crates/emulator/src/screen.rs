@@ -1980,6 +1980,10 @@ impl Screen {
     }
 
     pub fn handle_osc(&mut self, params: &[&[u8]]) {
+        // Front-drop cap for the in-band notification queue: a chatty child must
+        // not grow it without bound (mirrors MAX_PLACEMENTS/MAX_VIRTUAL). The
+        // daemon drains it each render; this only bounds a burst between drains.
+        const MAX_NOTIFICATIONS: usize = 64;
         let Some(&cmd) = params.first() else {
             return;
         };
@@ -2017,6 +2021,9 @@ impl Screen {
                 if let Some(text) = params.get(1)
                     && *text != b"4"
                 {
+                    if self.pending_notifications.len() >= MAX_NOTIFICATIONS {
+                        self.pending_notifications.remove(0);
+                    }
                     self.pending_notifications.push(Notification {
                         title: String::new(),
                         body: String::from_utf8_lossy(text).into_owned(),
@@ -2034,6 +2041,9 @@ impl Screen {
                         .get(3)
                         .map(|b| String::from_utf8_lossy(b).into_owned())
                         .unwrap_or_default();
+                    if self.pending_notifications.len() >= MAX_NOTIFICATIONS {
+                        self.pending_notifications.remove(0);
+                    }
                     self.pending_notifications
                         .push(Notification { title, body });
                 }
@@ -4306,6 +4316,22 @@ mod tests {
         let mut e = crate::Emulator::new(24, 80);
         e.advance(b"\x1b]9;4;1;60\x07"); // ConEmu progress, not a notification
         assert!(e.screen_mut().take_notifications().is_empty());
+    }
+
+    #[test]
+    fn osc9_notifications_are_capped() {
+        // A chatty child spamming OSC 9 must not grow the pending queue without
+        // bound (mirrors the MAX_PLACEMENTS front-drop guard).
+        let mut input = Vec::new();
+        for _ in 0..10_000 {
+            input.extend_from_slice(b"\x1b]9;x\x07");
+        }
+        let s = parse(&input);
+        assert!(
+            s.pending_notifications.len() <= 64,
+            "queue must be bounded, got {}",
+            s.pending_notifications.len()
+        );
     }
 
     #[test]

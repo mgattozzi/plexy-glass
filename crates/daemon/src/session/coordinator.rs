@@ -1,6 +1,6 @@
 //! Render coordinator and related helpers extracted from `session.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -426,7 +426,16 @@ pub(super) async fn render_coordinator(
             let nt = &cfg.notifications;
             if nt.enabled && nt.in_band {
                 let att = session.client_attention().await;
+                // Coalesce identical requests within a drain so a child looping on
+                // the same OSC 9 / 777 can't storm the notifier, while distinct
+                // notifications (OSC 9 body plus a separate OSC 777 toast, say)
+                // still each fire. The per-screen cap bounds the count; this drops
+                // the exact repeats on top of it.
+                let mut seen: HashSet<(usize, &str, &str)> = HashSet::new();
                 for note in &monitor_drain.in_band {
+                    if !seen.insert((note.window_index, note.title.as_str(), note.body.as_str())) {
+                        continue;
+                    }
                     let attention = attention_for(&att, note.is_active_window);
                     if inband_should_fire(attention) {
                         let title = if note.title.is_empty() {
