@@ -48,9 +48,3 @@ pub enum CodecError {
     #[error("postcard encode error: {0}")]
     Encode(String),
 }
-
-impl From<postcard::Error> for CodecError {
-    fn from(err: postcard::Error) -> Self {
-        Self::Decode(err.to_string())
-    }
-}
