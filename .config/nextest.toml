@@ -42,6 +42,16 @@ e2e = { max-threads = "num-cpus" }
 # Daemon unit tests spawn a pane or two each.
 pty = { max-threads = 4 }
 
+[profile.default]
+# A hung or deadlocked test must terminate and be REPORTED by name, not wedge
+# the whole `--workspace` run forever. Without this the default profile had no
+# per-test ceiling, so a single test that blocks (e.g. a pump test awaiting a
+# `request_reply` reply that never arrives) hangs the entire suite until it is
+# killed by hand. The slowest legitimate test is well under 10s and the whole
+# suite finishes in ~6.5s, so 30s marks a test slow and 60s (two periods)
+# terminates it, with generous headroom for a loaded machine.
+slow-timeout = { period = "30s", terminate-after = 2 }
+
 [[profile.default.overrides]]
 filter = 'binary(e2e)'
 test-group = 'e2e'
