@@ -14,7 +14,6 @@ use crate::buffer::BufferPickerState;
 use crate::hint::HintState;
 use crate::history::HistoryState;
 use crate::line::{ScrollOffset, UnifiedLine, VisibleLine};
-use crate::overlay::{PickerEntry, picker_filtered_indices};
 use crate::palette::PaletteState;
 use crate::pane_id::PaneId;
 use crate::rect::{Point, Rect, Size};
@@ -177,13 +176,6 @@ pub enum OverlayView<'a> {
     /// A single-line command prompt. Rendered like `RenamePrompt` but with a
     /// leading `:` instead of a label.
     Command { buf: &'a str },
-    /// An fzf-style session picker: a centered box with a filter line and the
-    /// filtered session rows, the selected one highlighted.
-    SessionPicker {
-        entries: &'a [PickerEntry],
-        filter: &'a str,
-        selected: usize,
-    },
     /// A fully-expanded session → window → pane tree (`choose-tree`): a centered
     /// box with depth-indented rows, the current-path nodes marked, the selected
     /// row highlighted, and a mode-dependent footer (navigate / confirm-kill /
@@ -1254,23 +1246,6 @@ fn paint_overlay(
             // the rename/command overlays (otherwise it shows behind the box).
             screen.cursor_visible = false;
         }
-        OverlayView::SessionPicker {
-            entries,
-            filter,
-            selected,
-        } => {
-            paint_session_picker(
-                screen,
-                entries,
-                filter,
-                *selected,
-                pane_row_offset,
-                pane_area_rows,
-                cols,
-                chrome,
-            );
-            screen.cursor_visible = false;
-        }
         OverlayView::Tree { state } => {
             paint_tree(screen, state, pane_row_offset, pane_area_rows, cols, chrome);
             screen.cursor_visible = false;
@@ -1535,106 +1510,9 @@ fn paint_welcome(
     }
 }
 
-/// Draw the centered session-picker box: a filter line plus the filtered
-/// session rows (current session marked `*`, selected row REVERSE), scrolled to
-/// keep the selection visible.
-// ponytail: filter/selection state + box geometry + theme; a struct would just
-// rename the same transient call-site args.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "entries, geometry, colors, and filter/selection state; no natural param grouping"
-)]
-fn paint_session_picker(
-    screen: &mut VirtualScreen,
-    entries: &[PickerEntry],
-    filter: &str,
-    selected: usize,
-    pane_row_offset: u16,
-    pane_area_rows: u16,
-    cols: u16,
-    chrome: ChromeColors,
-) {
-    let title = " Sessions ";
-    let footer = " \u{2191}/\u{2193} select \u{b7} enter switch \u{b7} esc cancel ";
-    let empty_msg = "(no matching sessions)";
-    let filtered = picker_filtered_indices(entries, filter);
-    let rows: Vec<String> = filtered
-        .iter()
-        .map(|&i| {
-            let e = &entries[i];
-            let marker = if e.is_current { '*' } else { ' ' };
-            format!("{marker} {}", e.label)
-        })
-        .collect();
-    let filter_line = format!("filter: {filter}");
-
-    // Rows fit between the top border + filter line and the bottom border.
-    let max_visible = (pane_area_rows.saturating_sub(3)).max(1) as usize;
-    let row_count = rows.len().max(1); // empty list still needs 1 message row
-    let visible = row_count.min(max_visible);
-
-    let dw = |s: &str| display_width(s) as usize;
-    let content_w = rows
-        .iter()
-        .map(|s| dw(s))
-        .chain([
-            dw(&filter_line),
-            dw(title),
-            dw(footer),
-            if rows.is_empty() { dw(empty_msg) } else { 0 },
-        ])
-        .max()
-        .unwrap_or(0);
-    let inner_w = (content_w + 2).min(cols.saturating_sub(2) as usize);
-    let box_w = (inner_w + 2) as u16;
-    let box_h = (visible as u16) + 3; // top border + filter line + rows + bottom
-    if box_w < 3 || box_h < 4 || box_w > cols || box_h > pane_area_rows {
-        return;
-    }
-
-    let sel = selected.min(filtered.len().saturating_sub(1));
-    let top = if sel >= visible { sel - visible + 1 } else { 0 };
-
-    let row0 = pane_row_offset + (pane_area_rows.saturating_sub(box_h)) / 2;
-    let col0 = (cols.saturating_sub(box_w)) / 2;
-    let plain = plexy_glass_emulator::Attrs::empty();
-
-    draw_box(screen, row0, col0, box_h, box_w, title, footer, chrome);
-
-    let inner_left = col0 + 1;
-    let inner_right = col0 + box_w - 1; // exclusive max_col for put_str
-
-    // Filter line with a block cursor.
-    put_str(
-        screen,
-        row0 + 1,
-        inner_left,
-        &format!("{filter_line}\u{2588}"),
-        plain,
-        inner_right,
-    );
-
-    // Session rows (or the empty-state message). Rows start below the filter
-    // line, at row0 + 2.
-    if rows.is_empty() {
-        put_str(screen, row0 + 2, inner_left, empty_msg, plain, inner_right);
-    } else {
-        paint_selectable_rows(
-            screen,
-            &rows,
-            row0 + 2,
-            inner_left,
-            inner_right,
-            top,
-            visible,
-            sel,
-        );
-    }
-}
-
 /// Draw the centered history-palette box: a filter line plus one row per
 /// matching block (`glyph dur session/window  command`), the selected row
-/// REVERSE, scrolled to keep the selection visible. Mirrors the session picker.
+/// REVERSE, scrolled to keep the selection visible.
 fn paint_history(
     screen: &mut VirtualScreen,
     state: &HistoryState,
@@ -3730,173 +3608,6 @@ mod tests {
         assert!(found_corner, "welcome box top-left corner drawn");
         assert!(found_text, "welcome content drawn");
         assert!(!vs.cursor_visible, "welcome overlay hides the pane cursor");
-    }
-
-    fn picker_view(name: &str, label: &str, current: bool) -> PickerEntry {
-        PickerEntry {
-            name: name.into(),
-            label: label.into(),
-            is_current: current,
-        }
-    }
-
-    #[test]
-    fn session_picker_renders_box_marker_and_selection() {
-        use plexy_glass_emulator::Attrs;
-        let mut e = Emulator::new(10, 50);
-        pane(&mut e, b"x ");
-        let view = PaneView {
-            id: PaneId(0),
-            rect: Rect::new(Point::new(0, 0), Size::new(10, 50)),
-            screen: e.screen(),
-            is_active: true,
-            scroll_offset: ScrollOffset::new(0),
-            copy_mode: None,
-            block_mode: None,
-            title: None,
-            marked: false,
-            drag_role: PaneDragRole::None,
-        };
-        let entries = vec![
-            picker_view("main", "main - 1 win", true),
-            picker_view("work", "work - 2 win", false),
-        ];
-        let ov = OverlayView::SessionPicker {
-            entries: &entries,
-            filter: "",
-            selected: 1,
-        };
-        let vs = compose(
-            &[view],
-            (10, 50),
-            None,
-            StatusPlacement::Bottom,
-            None,
-            Some(&ov),
-            None,
-            None,
-            None,
-            plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61),
-            ChromeColors::ansi_default(),
-        );
-
-        let mut found_corner = false;
-        let mut found_marker = false;
-        let mut selected_reverse = false;
-        for r in 0..10 {
-            for c in 0..50 {
-                let cell = vs.cell(r, c).unwrap();
-                match cell.grapheme.as_str() {
-                    "\u{250c}" => found_corner = true,
-                    "*" => found_marker = true,
-                    "w" if cell.attrs.contains(Attrs::REVERSE) => selected_reverse = true,
-                    _ => {}
-                }
-            }
-        }
-        assert!(found_corner, "picker box border drawn");
-        assert!(found_marker, "current session marked with *");
-        assert!(selected_reverse, "selected row painted REVERSE");
-        assert!(!vs.cursor_visible, "picker hides the pane cursor");
-    }
-
-    #[test]
-    fn session_picker_places_wide_grapheme_with_spacer() {
-        let mut e = Emulator::new(10, 50);
-        pane(&mut e, b"x ");
-        let view = PaneView {
-            id: PaneId(0),
-            rect: Rect::new(Point::new(0, 0), Size::new(10, 50)),
-            screen: e.screen(),
-            is_active: true,
-            scroll_offset: ScrollOffset::new(0),
-            copy_mode: None,
-            block_mode: None,
-            title: None,
-            marked: false,
-            drag_role: PaneDragRole::None,
-        };
-        // A CJK session name must be sized and placed as one cell + a spacer.
-        let entries = vec![picker_view("中文", "中文", false)];
-        let ov = OverlayView::SessionPicker {
-            entries: &entries,
-            filter: "",
-            selected: 0,
-        };
-        let vs = compose(
-            &[view],
-            (10, 50),
-            None,
-            StatusPlacement::Bottom,
-            None,
-            Some(&ov),
-            None,
-            None,
-            None,
-            plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61),
-            ChromeColors::ansi_default(),
-        );
-        let mut found = false;
-        for r in 0..10 {
-            for c in 0..49 {
-                if vs.cell(r, c).unwrap().grapheme.as_str() == "中" {
-                    // The wide grapheme's second column is a wide spacer.
-                    assert!(
-                        vs.cell(r, c + 1).unwrap().grapheme.is_empty(),
-                        "wide grapheme must be followed by a wide spacer"
-                    );
-                    found = true;
-                }
-            }
-        }
-        assert!(found, "wide grapheme rendered in the picker");
-    }
-
-    #[test]
-    fn session_picker_shows_no_match_message() {
-        let mut e = Emulator::new(10, 50);
-        pane(&mut e, b"x ");
-        let view = PaneView {
-            id: PaneId(0),
-            rect: Rect::new(Point::new(0, 0), Size::new(10, 50)),
-            screen: e.screen(),
-            is_active: true,
-            scroll_offset: ScrollOffset::new(0),
-            copy_mode: None,
-            block_mode: None,
-            title: None,
-            marked: false,
-            drag_role: PaneDragRole::None,
-        };
-        let entries = vec![picker_view("main", "main", true)];
-        let ov = OverlayView::SessionPicker {
-            entries: &entries,
-            filter: "zzz",
-            selected: 0,
-        };
-        let vs = compose(
-            &[view],
-            (10, 50),
-            None,
-            StatusPlacement::Bottom,
-            None,
-            Some(&ov),
-            None,
-            None,
-            None,
-            plexy_glass_emulator::Color::Rgb(0xdc, 0xa5, 0x61),
-            ChromeColors::ansi_default(),
-        );
-        let mut text = String::new();
-        for r in 0..10 {
-            for c in 0..50 {
-                text.push_str(vs.cell(r, c).unwrap().grapheme.as_str());
-            }
-        }
-        assert!(
-            text.contains("no matching sessions"),
-            "empty-state message shown"
-        );
     }
 
     #[test]

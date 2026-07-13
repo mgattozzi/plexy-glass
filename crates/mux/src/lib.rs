@@ -64,7 +64,7 @@ pub use mouse::{
     MouseButton, MouseEncoding, MouseEvent, MouseKind, MouseModifiers, MouseParseAction,
     MouseParser, WheelAxis, encode_for_child,
 };
-pub use overlay::{Overlay, OverlayAction, PickerEntry, RenameTarget, picker_filtered_indices};
+pub use overlay::{Overlay, OverlayAction, RenameTarget};
 pub use palette::{PaletteAction, PaletteEntry, PaletteOutcome, PaletteState, handle_palette};
 pub use pane_id::{PaneId, WindowId};
 pub use preset::LayoutPreset;

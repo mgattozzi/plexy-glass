@@ -2,8 +2,8 @@ use plexy_glass_emulator::Notification;
 use plexy_glass_emulator::coords::{Col, Row};
 use plexy_glass_mux::{
     Command, HintAction, HintKind, HintState, HintTarget, KeyEvent, MouseButton, MouseEvent,
-    MouseKind, MouseModifiers, PickerEntry, Point, ScrollOffset, SwapTarget, TreeAction, TreeKind,
-    TreeNode, UnifiedLine, WheelAxis, blocks, palette,
+    MouseKind, MouseModifiers, Point, ScrollOffset, SwapTarget, TreeAction, TreeKind, TreeNode,
+    UnifiedLine, WheelAxis, blocks, palette,
 };
 use tokio::sync::broadcast;
 use tokio::time;
@@ -844,47 +844,6 @@ fn type_str(m: &mut WindowManager, s: &str) {
     for c in s.chars() {
         m.handle_overlay_key(&okey(plexy_glass_mux::Key::Char(c)));
     }
-}
-
-#[tokio::test]
-async fn session_picker_overlay_commits_switch_session() {
-    let notify = Arc::new(Notify::new());
-    let mut m = WindowManager::new(
-        spec(),
-        PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        },
-        notify,
-        None,
-        cfg(),
-    )
-    .unwrap();
-    m.open_session_picker(vec![
-        PickerEntry {
-            name: "main".into(),
-            label: "main".into(),
-            is_current: true,
-        },
-        PickerEntry {
-            name: "work".into(),
-            label: "work".into(),
-            is_current: false,
-        },
-    ]);
-    assert!(matches!(
-        m.overlay(),
-        Some(plexy_glass_mux::Overlay::SessionPicker { .. })
-    ));
-    // Down to "work", then Enter → SwitchSession("work"); overlay closes.
-    m.handle_overlay_key(&okey(plexy_glass_mux::Key::Arrow(
-        plexy_glass_mux::Direction::Down,
-    )));
-    let r = m.handle_overlay_key(&okey(plexy_glass_mux::Key::Enter));
-    assert!(matches!(r, OverlayKeyResult::SwitchSession(ref n) if n == "work"));
-    assert!(m.overlay().is_none(), "picker closes on commit");
 }
 
 #[tokio::test]

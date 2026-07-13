@@ -1,11 +1,11 @@
 use std::mem;
 
 use plexy_glass_mux::{
-    BufferAction, BufferEntry, BufferOutcome, BufferPickerState, FilterList, HintOutcome, HintPick,
-    HintState, HistoryEntry, HistoryOutcome, HistoryState, HistoryTarget, KeyEvent, NodeKey,
-    Overlay, OverlayAction, PaletteEntry, PaletteOutcome, PaletteState, PickerEntry, RenameTarget,
-    TreeAction, TreeKind, TreeNode, TreeOutcome, TreeState, handle_buffers, handle_hint,
-    handle_history, handle_palette, handle_tree, overlay, session_label,
+    BufferAction, BufferEntry, BufferOutcome, BufferPickerState, HintOutcome, HintPick, HintState,
+    HistoryEntry, HistoryOutcome, HistoryState, HistoryTarget, KeyEvent, NodeKey, Overlay,
+    OverlayAction, PaletteEntry, PaletteOutcome, PaletteState, RenameTarget, TreeAction, TreeKind,
+    TreeNode, TreeOutcome, TreeState, handle_buffers, handle_hint, handle_history, handle_palette,
+    handle_tree, overlay, session_label,
 };
 
 use super::{COMMAND_HISTORY_CAP, WindowManager};
@@ -23,9 +23,6 @@ pub enum OverlayKeyResult {
     /// dispatches it (it may switch sessions / detach / reload, which need
     /// connection-scoped state). The string is the raw, trimmed command line.
     Command(String),
-    /// A session was chosen in the picker. The connection layer switches this
-    /// client to the named session (via the same path as `switch <name>`).
-    SwitchSession(String),
     /// A choose-tree action. The connection layer performs it against the
     /// registry (cross-session kill/rename) or re-points this client (switch).
     Tree(TreeAction),
@@ -121,15 +118,6 @@ impl WindowManager {
     /// connection layer.
     pub fn open_palette(&mut self, entries: Vec<PaletteEntry>) {
         self.set_overlay(Overlay::Palette(PaletteState::new(entries)));
-    }
-
-    /// Open the session picker over a snapshot of live sessions (sorted by name,
-    /// the current one marked). Selection switches via the connection layer.
-    pub fn open_session_picker(&mut self, entries: Vec<PickerEntry>) {
-        self.set_overlay(Overlay::SessionPicker {
-            entries,
-            finder: FilterList::new(),
-        });
     }
 
     /// Open the choose-tree overlay over a pre-built node snapshot (assembled by
@@ -317,7 +305,7 @@ impl WindowManager {
                 BufferOutcome::Act(action) => OverlayKeyResult::Buffer(action),
             };
         }
-        let (action, target, is_command, is_picker) = {
+        let (action, target, is_command) = {
             let Some(overlay) = self.overlay.as_mut() else {
                 return OverlayKeyResult::Ignored;
             };
@@ -327,8 +315,7 @@ impl WindowManager {
                 _ => None,
             };
             let is_command = matches!(overlay, Overlay::Command { .. });
-            let is_picker = matches!(overlay, Overlay::SessionPicker { .. });
-            (action, target, is_command, is_picker)
+            (action, target, is_command)
         };
         match action {
             OverlayAction::None => OverlayKeyResult::Ignored,
@@ -336,11 +323,6 @@ impl WindowManager {
             OverlayAction::Cancel => {
                 self.close_overlay();
                 OverlayKeyResult::Redraw
-            }
-            OverlayAction::Commit(name) if is_picker => {
-                // The picker committed a session name; the connection switches.
-                self.close_overlay();
-                OverlayKeyResult::SwitchSession(name)
             }
             OverlayAction::Commit(text) if is_command => {
                 // Command prompt: record history (coalescing consecutive dups,

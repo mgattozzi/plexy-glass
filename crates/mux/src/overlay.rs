@@ -6,7 +6,6 @@
 
 use crate::buffer::BufferPickerState;
 use crate::command_prompt::{self, Completion};
-use crate::finder::{self, FilterList, FinderKey};
 use crate::hint::HintState;
 use crate::history::HistoryState;
 use crate::palette::PaletteState;
@@ -19,24 +18,6 @@ use crate::{Direction, Key, KeyEvent, Modifiers};
 pub enum RenameTarget {
     Window,
     Pane,
-}
-
-/// One row in the session picker. `name` is the switch target and the filter
-/// key; `label` is the display string (e.g. "work — 2 win, 3 panes"); and
-/// `is_current` marks the session this client is attached to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PickerEntry {
-    pub name: String,
-    pub label: String,
-    pub is_current: bool,
-}
-
-/// Indices into `entries` whose `name` matches `filter` (case-insensitive
-/// substring), preserving the pre-sorted order. Shared by the picker handler
-/// and the compositor.
-pub fn picker_filtered_indices(entries: &[PickerEntry], filter: &str) -> Vec<usize> {
-    let haystacks: Vec<String> = entries.iter().map(|e| e.name.to_lowercase()).collect();
-    finder::filtered_indices(&haystacks, filter)
 }
 
 /// An active overlay. `None` (on the holder) means no overlay.
@@ -56,13 +37,6 @@ pub enum Overlay {
         history: Vec<String>,
         hist_idx: Option<usize>,
         completions: Vec<String>,
-    },
-    /// An fzf-style session picker. `entries` is a snapshot (sorted by name);
-    /// `finder` holds the live filter and the cursor over the filtered view.
-    /// Commit switches to the selected session.
-    SessionPicker {
-        entries: Vec<PickerEntry>,
-        finder: FilterList,
     },
     /// A fully-expanded session → window → pane tree (`choose-tree`). The daemon
     /// drives it via `crate::tree::handle_tree` directly (not through
@@ -119,7 +93,6 @@ pub fn handle(event: &KeyEvent, overlay: &mut Overlay) -> OverlayAction {
             hist_idx,
             completions,
         } => handle_command_prompt(event, buf, history, hist_idx, completions),
-        Overlay::SessionPicker { entries, finder } => handle_session_picker(event, entries, finder),
         // Tree / buffer-picker / history / hint / palette overlays are handled
         // by the daemon via their own pure handlers (actions need the
         // registry or the connection dispatch); these arms only keep the
@@ -324,42 +297,6 @@ fn history_recall(
     }
 }
 
-/// fzf-style picker: printables filter, arrows / Ctrl-k / Ctrl-j navigate,
-/// Home/End jump, Ctrl-U clears, Enter commits the selected session's name,
-/// Esc cancels.
-fn handle_session_picker(
-    event: &KeyEvent,
-    entries: &[PickerEntry],
-    finder_state: &mut FilterList,
-) -> OverlayAction {
-    let hs: Vec<String> = entries.iter().map(|e| e.name.to_lowercase()).collect();
-    let redraw = |changed: bool| {
-        if changed {
-            OverlayAction::Redraw
-        } else {
-            OverlayAction::None
-        }
-    };
-    match finder::classify(event) {
-        FinderKey::Cancel => OverlayAction::Cancel,
-        FinderKey::Accept => match finder_state.selected(&hs) {
-            Some(i) => OverlayAction::Commit(entries[i].name.clone()),
-            None => OverlayAction::None,
-        },
-        FinderKey::Up => redraw(finder_state.up()),
-        FinderKey::Down => redraw(finder_state.down(&hs)),
-        FinderKey::Home => redraw(finder_state.home()),
-        FinderKey::End => redraw(finder_state.end(&hs)),
-        FinderKey::Clear => redraw(finder_state.clear()),
-        FinderKey::Backspace => redraw(finder_state.backspace(&hs)),
-        FinderKey::Char(c) => {
-            finder_state.push(c);
-            OverlayAction::Redraw
-        }
-        FinderKey::Pass => OverlayAction::None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,171 +466,6 @@ mod tests {
         assert_eq!(
             handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o),
             OverlayAction::None
-        );
-    }
-
-    fn entry(name: &str) -> PickerEntry {
-        PickerEntry {
-            name: name.into(),
-            label: name.into(),
-            is_current: false,
-        }
-    }
-
-    #[test]
-    fn picker_filter_empty_returns_all_in_order() {
-        let es = vec![entry("alpha"), entry("beta"), entry("gamma")];
-        assert_eq!(picker_filtered_indices(&es, ""), vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn picker_filter_case_insensitive_substring() {
-        let es = vec![entry("Work"), entry("web"), entry("personal")];
-        // "we" matches "web" only; "e" matches Work? no, it's a substring of name.
-        assert_eq!(picker_filtered_indices(&es, "we"), vec![1]);
-        assert_eq!(picker_filtered_indices(&es, "W"), vec![0, 1]); // Work, web (case-insensitive)
-        assert_eq!(picker_filtered_indices(&es, "PERSON"), vec![2]);
-    }
-
-    #[test]
-    fn picker_filter_no_match_is_empty() {
-        let es = vec![entry("alpha"), entry("beta")];
-        assert!(picker_filtered_indices(&es, "zzz").is_empty());
-    }
-
-    #[test]
-    fn picker_filter_non_ascii() {
-        let es = vec![entry("café"), entry("CAFÉ-2"), entry("tea")];
-        assert_eq!(picker_filtered_indices(&es, "café"), vec![0, 1]);
-    }
-
-    fn picker(names: &[&str]) -> Overlay {
-        Overlay::SessionPicker {
-            entries: names.iter().map(|n| entry(n)).collect(),
-            finder: FilterList::new(),
-        }
-    }
-
-    fn picker_state(o: &Overlay) -> (&str, usize) {
-        let Overlay::SessionPicker { finder, .. } = o else {
-            panic!("expected session picker")
-        };
-        (&finder.filter, finder.cursor)
-    }
-
-    #[test]
-    fn picker_navigation_clamps_both_ends() {
-        let mut o = picker(&["a", "b", "c"]);
-        // Up at top is a no-op.
-        assert_eq!(
-            handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Up)), &mut o),
-            OverlayAction::None
-        );
-        handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o);
-        handle(&ev(Modifiers::CTRL, Key::Char('j')), &mut o);
-        assert_eq!(picker_state(&o).1, 2);
-        // Down at bottom is a no-op.
-        assert_eq!(
-            handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o),
-            OverlayAction::None
-        );
-        handle(&ev(Modifiers::CTRL, Key::Char('k')), &mut o);
-        assert_eq!(picker_state(&o).1, 1);
-        handle(&ev(Modifiers::empty(), Key::Home), &mut o);
-        assert_eq!(picker_state(&o).1, 0);
-        handle(&ev(Modifiers::empty(), Key::End), &mut o);
-        assert_eq!(picker_state(&o).1, 2);
-    }
-
-    #[test]
-    fn picker_typing_filters_and_resets_selection() {
-        let mut o = picker(&["work", "web", "personal"]);
-        handle(&ev(Modifiers::empty(), Key::End), &mut o); // selected -> 2
-        handle(&ev(Modifiers::empty(), Key::Char('w')), &mut o);
-        let (f, sel) = picker_state(&o);
-        assert_eq!(f, "w");
-        assert_eq!(sel, 0, "filter change resets selection to top");
-        // "we" now matches only "web": navigating down stays put.
-        handle(&ev(Modifiers::empty(), Key::Char('e')), &mut o);
-        assert_eq!(picker_state(&o).0, "we");
-        assert_eq!(
-            handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o),
-            OverlayAction::None
-        );
-    }
-
-    #[test]
-    fn picker_backspace_reclamps_selection() {
-        let mut o = picker(&["alpha", "alpine", "beta"]);
-        for c in "alp".chars() {
-            handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
-        }
-        // "alp" matches alpha, alpine; select the second.
-        handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o);
-        assert_eq!(picker_state(&o).1, 1);
-        // Narrow to "alph" -> only "alpha"; selection must clamp to 0.
-        handle(&ev(Modifiers::empty(), Key::Char('h')), &mut o);
-        // (typing reset it to 0 anyway); backspace back to "alp" keeps it valid.
-        handle(&ev(Modifiers::empty(), Key::Backspace), &mut o);
-        assert!(picker_state(&o).1 <= 1);
-    }
-
-    #[test]
-    fn picker_ctrl_u_clears_filter() {
-        let mut o = picker(&["a", "b"]);
-        for c in "xyz".chars() {
-            handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
-        }
-        assert_eq!(
-            handle(&ev(Modifiers::CTRL, Key::Char('u')), &mut o),
-            OverlayAction::Redraw
-        );
-        assert_eq!(picker_state(&o).0, "");
-    }
-
-    #[test]
-    fn picker_enter_commits_selected_name() {
-        let mut o = picker(&["work", "web", "personal"]);
-        handle(&ev(Modifiers::empty(), Key::Arrow(Direction::Down)), &mut o); // -> "web"
-        assert_eq!(
-            handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
-            OverlayAction::Commit("web".into())
-        );
-    }
-
-    #[test]
-    fn picker_enter_on_empty_filtered_list_is_noop() {
-        let mut o = picker(&["work", "web"]);
-        for c in "zzz".chars() {
-            handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
-        }
-        assert_eq!(
-            handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
-            OverlayAction::None
-        );
-    }
-
-    #[test]
-    fn picker_escape_cancels() {
-        let mut o = picker(&["a"]);
-        assert_eq!(
-            handle(&ev(Modifiers::empty(), Key::Escape), &mut o),
-            OverlayAction::Cancel
-        );
-    }
-
-    #[test]
-    fn picker_enter_resolves_filtered_index_not_absolute() {
-        // After filtering, selected=0 must map to the first *filtered* entry,
-        // not entries[0].
-        let mut o = picker(&["alpha", "beta", "gamma"]);
-        for c in "amm".chars() {
-            // "gamma" contains "amm"
-            handle(&ev(Modifiers::empty(), Key::Char(c)), &mut o);
-        }
-        assert_eq!(
-            handle(&ev(Modifiers::empty(), Key::Enter), &mut o),
-            OverlayAction::Commit("gamma".into())
         );
     }
 
