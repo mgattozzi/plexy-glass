@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use plexy_glass_mux::{DiffRenderer, VirtualScreen};
 use plexy_glass_protocol::errors::CodecError;
-use plexy_glass_protocol::{Codec, ServerMsg};
+use plexy_glass_protocol::{Codec, ExitStatus, ServerMsg};
 use tokio::io::AsyncWrite;
 use tokio::sync::{mpsc, watch};
 use tracing::warn;
@@ -84,14 +84,26 @@ impl Renderer {
                     }
                 }
                 changed = frame_rx.changed() => {
-                    match changed {
-                        Ok(()) => {
-                            let frame = frame_rx.borrow_and_update().clone();
-                            let bytes = self.diff.render(&frame);
-                            self.send_output(&mut writer, bytes).await?;
-                        }
-                        // Session ended (`frame_tx` dropped), teardown unchanged.
-                        Err(_) => return Ok(()),
+                    if changed.is_ok() {
+                        let frame = frame_rx.borrow_and_update().clone();
+                        let bytes = self.diff.render(&frame);
+                        self.send_output(&mut writer, bytes).await?;
+                    } else {
+                        // Session ended (`frame_tx` dropped by the coordinator) —
+                        // this arm fires ONLY on a genuine session end (kill or
+                        // last shell exit), never on detach: a detach breaks
+                        // `serve_attach`'s loop and `cleanup_and_exit` calls
+                        // `renderer_task.abort()` (`connection.rs`), which cancels
+                        // this task mid-`select!` before it can ever reach here,
+                        // so `frame_rx` never closes on a detach. Tell the client
+                        // its session ended (rather than a bare EOF) so it can
+                        // follow to another session instead of exiting. A write
+                        // error here means the socket is already gone; swallow it,
+                        // the marker just doesn't land, which is fine.
+                        let _ = self
+                            .write_msg(&mut writer, &ServerMsg::Exited { status: ExitStatus::Unknown })
+                            .await;
+                        return Ok(());
                     }
                 }
                 inj = inject_rx.recv() => {
@@ -294,5 +306,41 @@ mod tests {
         );
 
         task.abort();
+    }
+
+    // Dropping `frame_tx` (the coordinator ending the session) must make the
+    // renderer write one `ServerMsg::Exited` marker before returning, so the
+    // client can tell a genuine session-end apart from a detach (which aborts
+    // this task instead of closing `frame_rx`) or a bare EOF.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn frame_source_closing_emits_exited_marker() {
+        let (tx_a, rx_a) = watch::channel(screen_with("A"));
+        let (_switch_tx, switch_rx) = mpsc::unbounded_channel();
+        let (_inject_tx, inject_rx) = mpsc::unbounded_channel();
+        let (server_sock, mut client_sock) = io::duplex(64 * 1024);
+
+        let task = tokio::spawn(async move {
+            Renderer::new()
+                .run(rx_a, switch_rx, inject_rx, server_sock)
+                .await
+        });
+
+        // Drain the initial attach frame.
+        assert!(next_output(&mut client_sock).await.contains('A'));
+
+        // Coordinator ends the session.
+        drop(tx_a);
+
+        let frame = Codec::read_frame(&mut client_sock)
+            .await
+            .unwrap()
+            .expect("renderer must write the Exited marker before closing");
+        let msg: ServerMsg = postcard::from_bytes(&frame).unwrap();
+        assert!(
+            matches!(msg, ServerMsg::Exited { .. }),
+            "expected Exited, got {msg:?}"
+        );
+
+        task.await.unwrap().unwrap();
     }
 }
