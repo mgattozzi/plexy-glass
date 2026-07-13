@@ -375,6 +375,8 @@ mod tests {
     use std::ptr;
     use std::time::Duration;
 
+    use tokio::time::sleep;
+
     use super::*;
     use crate::test_env;
 
@@ -466,6 +468,31 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "alpha");
         assert_eq!(entries[1].name, "zeta");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_reports_a_later_last_active_for_the_attached_session() {
+        let _g = test_env::isolate();
+        let r = Arc::new(SessionRegistry::new());
+        let attached = r.create("a".into(), spec(), size(), cfg()).await.unwrap();
+        r.create("b".into(), spec(), size(), cfg()).await.unwrap();
+        // Both sessions get `last_active` set at construction, back to back —
+        // sleep past clock granularity so the attach below is unambiguously
+        // later.
+        sleep(Duration::from_millis(5)).await;
+        task::spawn_blocking(move || {
+            attached.register_client(size(), Arc::new(AtomicBool::new(false)), false)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let entries = r.list().await;
+        let a = entries.iter().find(|e| e.name == "a").unwrap();
+        let b = entries.iter().find(|e| e.name == "b").unwrap();
+        assert!(
+            a.last_active > b.last_active,
+            "attaching to `a` must bump its last_active past `b`'s"
+        );
     }
 
     #[tokio::test]

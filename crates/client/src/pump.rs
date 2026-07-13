@@ -881,6 +881,7 @@ mod tests {
             panes: 1,
             clients,
             created: SystemTime::now(),
+            last_active: SystemTime::now(),
         }
     }
 

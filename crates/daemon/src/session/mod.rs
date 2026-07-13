@@ -123,6 +123,11 @@ pub struct Session {
     /// accessor [`Session::name`] (Pane.name style, never hand out a guard).
     name: StdMutex<String>,
     pub created: SystemTime,
+    /// When a client last attached to or switched into this session. Set at
+    /// construction next to `created`, bumped by [`Session::touch_active`] on
+    /// every attach/switch-in. A plain std mutex: the critical section is a
+    /// single `SystemTime` read/write with no `.await` inside it.
+    last_active: StdMutex<SystemTime>,
     pub window_manager: Mutex<WindowManager>,
     pub clients: Mutex<Vec<ClientHandle>>,
     pub notify: Arc<Notify>,
@@ -172,6 +177,19 @@ impl Session {
         *self.name.lock_recover() = new;
     }
 
+    /// This session's most-recent attach/switch-in timestamp.
+    pub fn last_active(&self) -> SystemTime {
+        // invariant: last_active mutex briefly held to clone the value out.
+        *self.last_active.lock_recover()
+    }
+
+    /// Bump `last_active` to now. Called on every attach/switch-in so "the
+    /// session I was most recently in" stays accurate for the follow feature.
+    pub fn touch_active(&self) {
+        // invariant: last_active mutex briefly held to store the value.
+        *self.last_active.lock_recover() = SystemTime::now();
+    }
+
     /// Snapshot the current active config Arc. Hot reload swaps the
     /// inner Arc; callers should call this each time they need a current view
     /// of the config rather than caching across awaits.
@@ -213,6 +231,7 @@ impl Session {
         let session = Arc::new(Self {
             name: StdMutex::new(name),
             created: SystemTime::now(),
+            last_active: StdMutex::new(SystemTime::now()),
             window_manager: Mutex::new(window_manager),
             clients: Mutex::new(Vec::new()),
             notify,
@@ -397,6 +416,7 @@ impl Session {
             panes,
             clients,
             created: self.created,
+            last_active: self.last_active(),
         }
     }
 
@@ -492,6 +512,10 @@ impl Session {
                 name: self.name(),
             }));
         }
+        // A fresh attach counts as "most recently used" (and this also covers
+        // switch-in, since `switch_session` registers the client on the
+        // target session the same way).
+        self.touch_active();
         let client_id = ClientId(self.next_client_id.fetch_add(1, Ordering::SeqCst));
         let frame_rx_for_caller = self.frame_rx_template.clone();
         let frame_rx_for_session = self.frame_rx_template.clone();

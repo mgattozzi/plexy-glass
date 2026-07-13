@@ -44,6 +44,11 @@ pub struct SessionEntry {
     pub panes: u8,
     pub clients: u8,
     pub created: SystemTime,
+    /// When a client last attached to or switched into this session (v13).
+    /// Lets the client pick the most-recently-used session to follow to when
+    /// its own session ends. Appended after the existing fields since postcard
+    /// is positional.
+    pub last_active: SystemTime,
 }
 
 /// What the daemon should spawn.
@@ -100,7 +105,9 @@ pub enum CreatePolicy {
 ///   daemon over `-H`/SSH
 /// - v12: `ServerMsg::OpenSessionPicker`, `ClientMsg::SwitchSession` /
 ///   `ClientMsg::Redraw`: the client-rendered multi-daemon session picker
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(12);
+/// - v13: `SessionEntry.last_active`: the per-session most-recently-used
+///   timestamp, so the client can pick a follow target when its session ends
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(13);
 
 /// Inline-graphics protocols the client's *outer* terminal supports, probed at
 /// attach. The daemon renders images for a client only in a protocol its
@@ -320,7 +327,7 @@ mod tests {
             let bytes = postcard::to_allocvec(&hello).expect("serialize");
             let decoded: ClientHello = postcard::from_bytes(&bytes).expect("deserialize");
             assert_eq!(decoded.remote, remote);
-            assert_eq!(decoded.version, ProtocolVersion(12));
+            assert_eq!(decoded.version, ProtocolVersion(13));
         }
     }
 
@@ -744,7 +751,7 @@ mod tests {
 
     #[test]
     fn v12_messages_round_trip() {
-        assert_eq!(PROTOCOL_VERSION, ProtocolVersion(12));
+        assert_eq!(PROTOCOL_VERSION, ProtocolVersion(13));
         let open = ServerMsg::OpenSessionPicker {
             sessions: vec![SessionEntry {
                 name: "main".into(),
@@ -752,6 +759,7 @@ mod tests {
                 panes: 1,
                 clients: 1,
                 created: SystemTime::UNIX_EPOCH,
+                last_active: SystemTime::UNIX_EPOCH,
             }],
             current: "main".into(),
         };
