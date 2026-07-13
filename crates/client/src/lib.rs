@@ -276,6 +276,12 @@ pub async fn run(
         .await
         {
             Ok(PumpExit::Ended(status)) => break Ok(status),
+            // The follow decision (query `ListSessions`, pick a target by
+            // `last_active`, loop back through `next` like `ReconnectTo`) is
+            // wired up in a later task; until then, a session-ended marker
+            // exits just like a bare EOF rather than leaving this match
+            // non-exhaustive.
+            Ok(PumpExit::Follow) => break Ok(ExitStatus::Unknown),
             Ok(PumpExit::ReconnectTo {
                 target: reconnect_target,
                 name: reconnect_name,

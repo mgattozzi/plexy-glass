@@ -93,8 +93,16 @@ fn parse_color_scheme(b: &[u8]) -> Option<(ColorScheme, usize)> {
 /// Why the pump handed control back to the outer attach loop.
 #[derive(Debug)]
 pub enum PumpExit {
-    /// The child exited or the daemon closed — the client should quit.
+    /// A bare EOF on the daemon socket (detach, or the daemon itself died) —
+    /// the client should quit.
     Ended(ExitStatus),
+    /// The daemon's renderer sent `ServerMsg::Exited`: the SESSION itself
+    /// ended (killed, or its last shell exited), not a detach or daemon
+    /// crash — a detach aborts the renderer before it can write this marker
+    /// (see `crates/daemon/src/renderer.rs`). No payload: the follow
+    /// decision (which session to jump to) is made by the outer loop after
+    /// querying the daemon, not here.
+    Follow,
     /// (Milestone B) the picker chose a session on a DIFFERENT daemon (or a new
     /// one on a host); the outer loop re-attaches (`lib.rs::run`'s `next =
     /// (reconnect_target, Some(reconnect_name))`). `target.host: None` reconnects
@@ -111,8 +119,9 @@ pub enum PumpExit {
 ///
 /// Borrows all of its IO from the caller's outer attach loop (it never spawns,
 /// so the `Send + 'static` bounds are unnecessary). Returns `PumpExit::Ended`
-/// when the child exits or the daemon closes; `ReconnectTo` is reserved for the
-/// picker (Milestone B) and never produced here.
+/// on a bare EOF (detach or daemon death); `PumpExit::Follow` when the daemon
+/// signals the session itself ended; `ReconnectTo` is reserved for the picker
+/// (Milestone B) and never produced here.
 ///
 /// `current_target` is the daemon this pump is attached to (`&next.0` in
 /// `run`); its `host` tags the current daemon's rows in the session picker
@@ -182,8 +191,16 @@ where
                             stdout.flush().await.map_err(ClientError::Io)?;
                         }
                     }
-                    ServerMsg::Exited { status } => {
-                        return Ok(PumpExit::Ended(status));
+                    ServerMsg::Exited { .. } => {
+                        // The renderer writes this marker only when the
+                        // session itself ended (killed, or its last shell
+                        // exited) — a detach aborts the renderer before it
+                        // ever gets here (see `renderer.rs`), so this is
+                        // never a detach. Follow to another session instead
+                        // of exiting; the status is vestigial (the pane's
+                        // real exit status, if any, already came through
+                        // separately) and unused here.
+                        return Ok(PumpExit::Follow);
                     }
                     ServerMsg::Error(e) => {
                         return Err(ClientError::DaemonError(e));
@@ -700,7 +717,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pump_writes_output_to_stdout_and_exits_on_exited() {
+    async fn pump_writes_output_to_stdout_and_follows_on_exited() {
         let (mut server_w, mut client_r) = duplex(64 * 1024);
         let (server_r, mut client_w) = duplex(64 * 1024);
         drop(server_r); // we don't read from the client in this test
@@ -709,13 +726,13 @@ mod tests {
         let (mut stdout_r, mut stdout_w) = duplex(64 * 1024);
         let (_tx, mut resize_rx) = mpsc::channel(4);
 
-        // Server-side: emit one `Output` and then `Exited`.
+        // Server-side: emit one `Output` and then the session-ended marker.
         let server = tokio::spawn(async move {
             let out = ServerMsg::Output(Bytes::from_static(b"abc"));
             let bytes = postcard::to_allocvec(&out).unwrap();
             Codec::write_frame(&mut server_w, &bytes).await.unwrap();
             let done = ServerMsg::Exited {
-                status: ExitStatus::Code(0),
+                status: ExitStatus::Unknown,
             };
             let bytes = postcard::to_allocvec(&done).unwrap();
             Codec::write_frame(&mut server_w, &bytes).await.unwrap();
@@ -732,10 +749,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            matches!(status, PumpExit::Ended(ExitStatus::Code(0))),
-            "got: {status:?}"
-        );
+        assert!(matches!(status, PumpExit::Follow), "got: {status:?}");
 
         // `pump` now borrows `stdout_w`, so it no longer drops on return; close it
         // here so `read_to_end` sees EOF instead of blocking to the timeout.
@@ -790,11 +804,10 @@ mod tests {
             let out = ServerMsg::Output(Bytes::from(srv_payload));
             let bytes = postcard::to_allocvec(&out).unwrap();
             Codec::write_frame(&mut server_w, &bytes).await.unwrap();
-            let done = ServerMsg::Exited {
-                status: ExitStatus::Code(0),
-            };
-            let bytes = postcard::to_allocvec(&done).unwrap();
-            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+            // Bare EOF (not the Exited marker): this test's intent is data
+            // integrity across the payload, so drive a clean-exit end
+            // rather than a follow.
+            drop(server_w);
         });
 
         let status = pump(
@@ -809,7 +822,7 @@ mod tests {
         .await
         .expect("pump must not error on interleaved stdin");
         assert!(
-            matches!(status, PumpExit::Ended(ExitStatus::Code(0))),
+            matches!(status, PumpExit::Ended(ExitStatus::Unknown)),
             "got: {status:?}"
         );
 
@@ -947,12 +960,9 @@ mod tests {
             let msg: ClientMsg = postcard::from_bytes(&frame).unwrap();
             assert_eq!(msg, ClientMsg::Redraw);
 
-            // Let pump return.
-            let done = ServerMsg::Exited {
-                status: ExitStatus::Code(0),
-            };
-            let bytes = postcard::to_allocvec(&done).unwrap();
-            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+            // Let pump return: bare EOF, not the Exited marker — this test's
+            // intent is the Redraw-on-reselect behavior, not follow.
+            drop(server_w);
         });
 
         let status = pump(
@@ -967,7 +977,7 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            matches!(status, PumpExit::Ended(ExitStatus::Code(0))),
+            matches!(status, PumpExit::Ended(ExitStatus::Unknown)),
             "got: {status:?}"
         );
 
@@ -1004,11 +1014,9 @@ mod tests {
             let msg: ClientMsg = postcard::from_bytes(&frame).unwrap();
             assert_eq!(msg, ClientMsg::Redraw);
 
-            let done = ServerMsg::Exited {
-                status: ExitStatus::Code(0),
-            };
-            let bytes = postcard::to_allocvec(&done).unwrap();
-            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+            // Bare EOF, not the Exited marker — this test's intent is the
+            // Esc-cancel Redraw behavior, not follow.
+            drop(server_w);
         });
 
         let status = pump(
@@ -1023,7 +1031,7 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            matches!(status, PumpExit::Ended(ExitStatus::Code(0))),
+            matches!(status, PumpExit::Ended(ExitStatus::Unknown)),
             "got: {status:?}"
         );
 
@@ -1157,11 +1165,9 @@ mod tests {
             let msg: ClientMsg = postcard::from_bytes(&frame).unwrap();
             assert_eq!(msg, ClientMsg::Redraw);
 
-            let done = ServerMsg::Exited {
-                status: ExitStatus::Code(0),
-            };
-            let bytes = postcard::to_allocvec(&done).unwrap();
-            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+            // Bare EOF, not the Exited marker — this test's intent is the
+            // streaming-query behavior, not follow.
+            drop(server_w);
         });
 
         let status = pump(
@@ -1176,7 +1182,7 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            matches!(status, PumpExit::Ended(ExitStatus::Code(0))),
+            matches!(status, PumpExit::Ended(ExitStatus::Unknown)),
             "got: {status:?}"
         );
 
@@ -1223,11 +1229,9 @@ mod tests {
                 }
             );
 
-            let done = ServerMsg::Exited {
-                status: ExitStatus::Code(0),
-            };
-            let bytes = postcard::to_allocvec(&done).unwrap();
-            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+            // Bare EOF, not the Exited marker — this test's intent is the
+            // SwitchSession-on-select behavior, not follow.
+            drop(server_w);
         });
 
         let status = pump(
@@ -1242,7 +1246,7 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            matches!(status, PumpExit::Ended(ExitStatus::Code(0))),
+            matches!(status, PumpExit::Ended(ExitStatus::Unknown)),
             "got: {status:?}"
         );
 
@@ -1424,11 +1428,9 @@ mod tests {
             let msg: ClientMsg = postcard::from_bytes(&frame).unwrap();
             assert_eq!(msg, ClientMsg::Redraw);
 
-            let done = ServerMsg::Exited {
-                status: ExitStatus::Code(0),
-            };
-            let bytes = postcard::to_allocvec(&done).unwrap();
-            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+            // Bare EOF, not the Exited marker — this test's intent is the
+            // forget/rebuild behavior, not follow.
+            drop(server_w);
         });
 
         let status = pump(
@@ -1443,7 +1445,7 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            matches!(status, PumpExit::Ended(ExitStatus::Code(0))),
+            matches!(status, PumpExit::Ended(ExitStatus::Unknown)),
             "got: {status:?}"
         );
 
