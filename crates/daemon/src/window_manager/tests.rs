@@ -672,15 +672,18 @@ async fn copy_mode_anchor_survives_a_resize_that_shrinks_reflowed_total_lines() 
     );
 
     let anchor = pane.with_copy_mode(|cm| cm.anchor).unwrap();
-    if let Some((line, _)) = anchor {
-        assert!(
-            line.get() < total_wide,
-            "anchor must stay in range after reflow too — it drives the \
-             selection highlight and the yanked text range just like cursor \
-             does: anchor_line={} total={total_wide}",
-            line.get()
-        );
-    }
+    // The whole point of this test is that the anchor SURVIVES the resize and
+    // gets re-clamped, not dropped. Assert it is still present before the range
+    // check below, or a future bug that nulls the anchor would let that check
+    // pass vacuously — masking exactly the regression this test guards.
+    let (line, _) = anchor.expect("the selection anchor must survive the resize, not be dropped");
+    assert!(
+        line.get() < total_wide,
+        "anchor must stay in range after reflow too — it drives the \
+         selection highlight and the yanked text range just like cursor \
+         does: anchor_line={} total={total_wide}",
+        line.get()
+    );
 }
 
 #[tokio::test]
