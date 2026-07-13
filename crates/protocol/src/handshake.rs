@@ -119,19 +119,19 @@ where
 ///
 /// The version is peeled off the frame *before* attempting the full
 /// `ClientHello` decode. postcard is positional, not forward/backward
-/// compatible: a peer whose `ClientHello` shape predates a field addition
-/// sends a shorter payload, and decoding it straight into our (larger)
-/// current struct hits end-of-buffer — a `CodecError` that used to propagate
-/// as an opaque "peer hung up" instead of a structured `VersionMismatch`.
-/// Peeling `version` first (it is always the leading field, a transparent
-/// `u16` varint — see `protocol_version_wire_matches_u16`) means we always
-/// learn what the peer claims before gambling on decoding the rest, so an
-/// older peer is rejected up front without ever attempting the full decode.
-/// A newer peer's payload is decoded (postcard's struct decode does not
-/// require the whole buffer be consumed, so extra append-only trailing
-/// fields are silently ignored) purely to report its claimed version back
-/// accurately; either way it is rejected too — no graceful downgrade in
-/// either direction any more.
+/// compatible: a peer whose `ClientHello` shape predates or postdates a
+/// field addition sends a differently-shaped payload, and decoding it
+/// straight into our current struct can hit end-of-buffer or misparse a
+/// field — a `CodecError` that used to propagate as an opaque "peer hung
+/// up" instead of a structured `VersionMismatch`. Peeling `version` first
+/// (it is always the leading field, a transparent `u16` varint — see
+/// `protocol_version_wire_matches_u16`) means we always learn what the peer
+/// claims before gambling on decoding the rest, so any version other than
+/// ours, older or newer, is rejected up front without ever attempting the
+/// full decode. Once the peel confirms `peer_version == PROTOCOL_VERSION`,
+/// the full `ClientHello` decode is known-shape and a decode failure past
+/// that point is a genuine `CodecError` (a same-version peer sending a
+/// corrupt body), not a version problem.
 pub async fn server_handshake<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -147,15 +147,12 @@ where
 
     let (peer_version, _) = postcard::take_from_bytes::<ProtocolVersion>(&frame)
         .map_err(|e| CodecError::Decode(e.to_string()))?;
-    if peer_version < PROTOCOL_VERSION {
+    if peer_version != PROTOCOL_VERSION {
         return Err(reject_version_mismatch(writer, daemon_pid, peer_version).await?);
     }
 
     let client: ClientHello =
         postcard::from_bytes(&frame).map_err(|e| CodecError::Decode(e.to_string()))?;
-    if client.version > PROTOCOL_VERSION {
-        return Err(reject_version_mismatch(writer, daemon_pid, client.version).await?);
-    }
 
     let our_hello = ServerHello {
         version: PROTOCOL_VERSION,
@@ -335,6 +332,58 @@ mod tests {
             HandshakeError::VersionMismatch { ours, peer } => {
                 assert_eq!(ours, PROTOCOL_VERSION.0);
                 assert_eq!(peer, old_version.0);
+            }
+            other => panic!("expected VersionMismatch, got: {other:?}"),
+        }
+
+        // The server must also have sent the structured wire response (hello +
+        // error), not just dropped the connection.
+        let hello_frame = Codec::read_frame(&mut a)
+            .await
+            .unwrap()
+            .expect("server hello frame");
+        let hello: ServerHello = postcard::from_bytes(&hello_frame).unwrap();
+        assert_eq!(hello.version, PROTOCOL_VERSION);
+
+        let err_frame = Codec::read_frame(&mut a)
+            .await
+            .unwrap()
+            .expect("error frame");
+        let msg: crate::ServerMsg = postcard::from_bytes(&err_frame).unwrap();
+        assert!(
+            matches!(
+                msg,
+                crate::ServerMsg::Error(ProtocolError::VersionMismatch { .. })
+            ),
+            "expected ServerMsg::Error(VersionMismatch), got: {msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn newer_versioned_peer_with_reshaped_body_gets_structured_version_mismatch_not_codec_error()
+     {
+        // A NEWER peer whose `ClientHello` shape postdates ours (a field was
+        // added, removed, or reordered) is exactly as undecodable into our
+        // struct as an older peer's shorter shape. The peel must reject a
+        // newer version up front too, symmetrically with the older-peer case
+        // above, so this never reaches the full decode and never surfaces as
+        // an opaque `HandshakeError::Codec` or `PeerClosed`.
+        let (mut a, server_side) = duplex(1024);
+        let (mut sr, mut sw) = io::split(server_side);
+
+        let newer_version = ProtocolVersion(PROTOCOL_VERSION.0 + 1);
+        // Deliberately reshaped/short: just the version, none of the fields a
+        // real ClientHello carries. Attempting the full decode against this
+        // would hit end-of-buffer, so this only passes if the peel rejects
+        // the version before ever trying that decode.
+        let bytes = postcard::to_allocvec(&(newer_version,)).unwrap();
+        Codec::write_frame(&mut a, &bytes).await.unwrap();
+
+        let err = server_handshake(&mut sr, &mut sw, 1).await.unwrap_err();
+        match err {
+            HandshakeError::VersionMismatch { ours, peer } => {
+                assert_eq!(ours, PROTOCOL_VERSION.0);
+                assert_eq!(peer, newer_version.0);
             }
             other => panic!("expected VersionMismatch, got: {other:?}"),
         }
