@@ -660,6 +660,11 @@ where
 }
 
 /// Send the initial `AttachOrCreate` request and wait for `Attached`.
+///
+/// Returns the ATTACHED session's real name from the `Attached` reply, not
+/// the requested `name` — the daemon picks one when `name` is `None`, so the
+/// reply is the only reliable source (used by `run`'s follow handling to know
+/// what just ended, and by a follow-then-pick's picker to seed `current`).
 pub async fn handshake_spawn<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -667,7 +672,7 @@ pub async fn handshake_spawn<R, W>(
     create_if_missing: CreatePolicy,
     spec: Option<plexy_glass_protocol::SpawnSpec>,
     size: PtySize,
-) -> Result<(), ClientError>
+) -> Result<String, ClientError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -688,7 +693,7 @@ where
     let msg: ServerMsg =
         postcard::from_bytes(&frame).map_err(|e| CodecError::Decode(e.to_string()))?;
     match msg {
-        ServerMsg::Attached { .. } => Ok(()),
+        ServerMsg::Attached { session_name, .. } => Ok(session_name),
         ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
         other => Err(ClientError::Io(io::Error::other(format!(
             "expected Attached, got {other:?}"

@@ -25,7 +25,8 @@ pub use kill::{KillOutcome, kill, kill_all};
 use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
     ClientHello, ClientMsg, Codec, CreatePolicy, ExitStatus, GraphicsCaps, NegotiatedKbd,
-    PROTOCOL_VERSION, ServerMsg, SessionName, SpawnSpec, client_handshake, client_handshake_with,
+    PROTOCOL_VERSION, ServerMsg, SessionEntry, SessionName, SpawnSpec, client_handshake,
+    client_handshake_with,
 };
 pub use pump::{PumpExit, handshake_spawn, pump};
 pub use shell_integration::shell_integration_snippet;
@@ -106,6 +107,41 @@ fn run_probe(stdin_fd: BorrowedFd<'_>) -> ProbeOutcome {
         graphics,
         caps,
         type_ahead,
+    }
+}
+
+/// What to do when the session we were attached to has just ended (killed, or
+/// its last shell exited) and `pump` returned `PumpExit::Follow`.
+#[derive(Debug)]
+pub(crate) enum FollowDecision {
+    /// No other session is running; drop to the shell.
+    Exit,
+    /// Exactly one other session; switch to it silently.
+    SwitchTo(String),
+    /// Two or more other sessions; switch to the most-recently-used one, then
+    /// open the picker so the user can go somewhere else if that guess is wrong.
+    SwitchThenPick(String),
+}
+
+/// Decide where to go after a session ends, given the daemon's remaining live
+/// sessions (`others`). `others` is expected to already exclude the
+/// just-ended session (the registry prunes a closing session before `list()`
+/// returns, and the `Follow` arm in `run` filters defensively anyway), so
+/// every entry here is a real follow candidate.
+pub(crate) fn decide_follow(others: &[SessionEntry]) -> FollowDecision {
+    match others {
+        [] => FollowDecision::Exit,
+        [only] => FollowDecision::SwitchTo(only.name.clone()),
+        many => {
+            // invariant: `many` is matched only after the empty and
+            // single-element patterns above, so it has at least two entries
+            // and `max_by_key` always returns `Some`.
+            let mru = many
+                .iter()
+                .max_by_key(|e| e.last_active)
+                .expect("invariant: many is non-empty");
+            FollowDecision::SwitchThenPick(mru.name.clone())
+        }
     }
 }
 
@@ -217,7 +253,10 @@ pub async fn run(
         let initial_size = current_size(stdin_fd)?;
 
         let cmd = resolve_attach_spec(target.host.is_some(), spawn_cmd.clone());
-        handshake_spawn(
+        // The daemon picks the real session name when `name` was `None`, so
+        // the ONLY reliable source for "what am I attached to" is its
+        // `Attached` reply, not the request we sent.
+        let attached_name = handshake_spawn(
             &mut t.reader,
             &mut t.writer,
             name,
@@ -276,12 +315,38 @@ pub async fn run(
         .await
         {
             Ok(PumpExit::Ended(status)) => break Ok(status),
-            // The follow decision (query `ListSessions`, pick a target by
-            // `last_active`, loop back through `next` like `ReconnectTo`) is
-            // wired up in a later task; until then, a session-ended marker
-            // exits just like a bare EOF rather than leaving this match
-            // non-exhaustive.
-            Ok(PumpExit::Follow) => break Ok(ExitStatus::Unknown),
+            Ok(PumpExit::Follow) => {
+                // Query the SAME daemon (`target`'s host is unchanged) for
+                // whatever sessions are still alive. `Connect::Only` never
+                // spawns, so a daemon that's gone entirely (crashed between
+                // our session ending and this query, surfacing as
+                // `ClientError::Connect`, matching `client_kill_session`'s
+                // classification) can't be resurrected by asking about it —
+                // that, any other error, and any non-`SessionList` reply all
+                // fall through to exit, same as a bare EOF would have.
+                let Ok(ServerMsg::SessionList { entries: others }) =
+                    request_reply(target, Connect::Only, ClientMsg::ListSessions).await
+                else {
+                    break Ok(ExitStatus::Unknown);
+                };
+                // Defensive: the registry prunes the closing session out of
+                // `list()` before this query can even land, so `attached_name`
+                // should never be among `others` — filter it out anyway in
+                // case a future race ever lets the prune and this query cross.
+                let others: Vec<SessionEntry> = others
+                    .into_iter()
+                    .filter(|e| e.name != attached_name)
+                    .collect();
+                match decide_follow(&others) {
+                    FollowDecision::Exit => break Ok(ExitStatus::Unknown),
+                    // Task 6 differentiates these: a `SwitchThenPick` also
+                    // opens the picker once it's landed there. For now both
+                    // just land on the chosen session.
+                    FollowDecision::SwitchTo(chosen) | FollowDecision::SwitchThenPick(chosen) => {
+                        next = (target.clone(), Some(chosen));
+                    }
+                }
+            }
             Ok(PumpExit::ReconnectTo {
                 target: reconnect_target,
                 name: reconnect_name,
@@ -810,8 +875,38 @@ fn spawn_sigwinch_task(tx: mpsc::Sender<plexy_glass_protocol::PtySize>, fd: Owne
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::SystemTime;
 
     use super::*;
+
+    fn entry(name: &str, secs: u64) -> SessionEntry {
+        SessionEntry {
+            name: name.to_string(),
+            windows: 1,
+            panes: 1,
+            clients: 0,
+            created: SystemTime::UNIX_EPOCH,
+            last_active: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+        }
+    }
+
+    #[test]
+    fn decide_follow_zero_others_exits() {
+        assert!(matches!(decide_follow(&[]), FollowDecision::Exit));
+    }
+
+    #[test]
+    fn decide_follow_one_other_switches_to_it() {
+        let s = [entry("only", 100)];
+        assert!(matches!(decide_follow(&s), FollowDecision::SwitchTo(n) if n == "only"));
+    }
+
+    #[test]
+    fn decide_follow_many_switches_to_most_recent_then_picks() {
+        // "b" is more recently active than "a" and "c".
+        let s = [entry("a", 100), entry("b", 300), entry("c", 200)];
+        assert!(matches!(decide_follow(&s), FollowDecision::SwitchThenPick(n) if n == "b"));
+    }
 
     #[tokio::test]
     async fn race_with_stall_hint_fires_once_then_resolves_the_real_future() {
