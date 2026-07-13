@@ -120,7 +120,11 @@ fn apply_via_vt(chunks: &[Vec<u8>], rows: u16, cols: u16) -> Vec<Cell> {
     // Flush the parser's pending-grapheme buffer (the emulator holds the last
     // grapheme until the next byte arrives, for cluster/combining handling —
     // see the project's testing note) with a no-op SGR so the final cell of
-    // the final row lands before we read the grid back out.
+    // the final row lands before we read the grid back out. This relies on
+    // the emulator committing that buffered grapheme with its PLACEMENT-TIME
+    // attributes, not the flush's reset (Performer::csi_dispatch flushes the
+    // pending grapheme before applying the CSI to the screen) — empirically
+    // sound across this property's cases.
     e.advance(b"\x1b[m");
     let grid = &e.screen().active;
     let mut out = Vec::with_capacity(rows as usize * cols as usize);

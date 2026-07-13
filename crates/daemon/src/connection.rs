@@ -2129,25 +2129,18 @@ async fn copy_last_output(session: &Arc<Session>, registry: &Arc<SessionRegistry
         })
     };
     if let Some(text) = text {
-        let wrote = if osc_actions::write_clipboard(text.as_bytes()).await {
-            Wrote::Yes
-        } else {
-            Wrote::No
-        };
+        let wrote = osc_actions::write_clipboard(text.as_bytes()).await;
         registry.push_paste_buffer(text.into_bytes()).await;
         // Honest message: a failed clipboard write must not claim "copied".
         // Mirrors the copy-mode / block-mode yank sites above.
-        match wrote {
-            Wrote::Yes => {
-                session
-                    .set_status_ok("copied output of last command".into())
-                    .await;
-            }
-            Wrote::No => {
-                session
-                    .set_status_warn("clipboard unavailable; output saved to paste buffer".into())
-                    .await;
-            }
+        if wrote {
+            session
+                .set_status_ok("copied output of last command".into())
+                .await;
+        } else {
+            session
+                .set_status_warn("clipboard unavailable; output saved to paste buffer".into())
+                .await;
         }
         true
     } else {
@@ -2338,6 +2331,7 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::{env, process};
 
+    use plexy_glass_emulator::{Row, RowMark};
     use plexy_glass_protocol::{
         CreatePolicy, PROTOCOL_VERSION, PtySize, SpawnSpec, client_handshake,
     };
@@ -3062,7 +3056,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn history_jump_lands_in_block_mode_on_the_target_block() {
-        use plexy_glass_emulator::{Row, RowMark};
         let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
@@ -3176,7 +3169,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn history_overlay_open_and_enter_jumps_to_newest_block() {
-        use plexy_glass_emulator::{Row, RowMark};
         let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
@@ -5525,7 +5517,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn copy_output_pushes_buffer_and_sets_status() {
-        use plexy_glass_emulator::RowMark;
         let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
@@ -5567,7 +5558,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn copy_output_warns_when_clipboard_write_fails() {
-        use plexy_glass_emulator::RowMark;
         let _g = isolate();
         let registry = Arc::new(crate::SessionRegistry::new());
         let cfg = Arc::new(plexy_glass_config::built_in_default());
@@ -5592,11 +5582,12 @@ mod tests {
 
         // Empty PATH -> no pbcopy/wl-copy/xclip/xsel -> write_clipboard reports
         // false, so copy-output must not claim success.
-        // SAFETY: nextest runs each test in its own process.
         let dir = tempfile::tempdir().unwrap();
         let old = env::var("PATH").unwrap_or_default();
+        // SAFETY: nextest runs each test in its own process.
         unsafe { env::set_var("PATH", dir.path()) };
         let (ok, message) = run_prompt_line(&session, &registry, "copy-output").await;
+        // SAFETY: nextest runs each test in its own process.
         unsafe { env::set_var("PATH", old) };
 
         assert!(
