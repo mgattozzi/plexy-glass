@@ -225,6 +225,17 @@ impl CopyMode {
         if self.cursor.0.get() >= total_lines {
             self.cursor.0 = UnifiedLine::new(total_lines.saturating_sub(1));
         }
+        // The other half of an active selection: reflow can shrink
+        // `total_lines` (a widening resize re-merges previously-wrapped
+        // scrollback rows), and an anchor set on a now-gone line must be
+        // re-clamped exactly like `cursor` is above, or it's left pointing
+        // past the end of the screen — the selection highlight and the
+        // yanked text range both read `anchor` directly.
+        if let Some((line, col)) = self.anchor
+            && line.get() >= total_lines
+        {
+            self.anchor = Some((UnifiedLine::new(total_lines.saturating_sub(1)), col));
+        }
         let max_top = total_lines.saturating_sub(u32::from(pane_rows));
         // Equivalent note (181:30): `> → >=` is equivalent because when
         // viewport_top == max_top the guard fires and sets viewport_top to
@@ -658,6 +669,40 @@ mod tests {
         cm.set_pane_rows(3, 4);
         assert_eq!(cm.cursor.0.get(), 3);
         assert_eq!(cm.viewport_top, 1);
+    }
+
+    #[test]
+    fn set_pane_rows_clamps_anchor_like_cursor() {
+        // Regression: a reflow that shrinks total_lines (e.g. a widening
+        // resize re-merging wrapped scrollback rows) used to clamp `cursor`
+        // but leave `anchor` pointing past the new end of the screen.
+        let mut cm = CopyMode::new(10, 5, ul(9), 0);
+        cm.anchor = Some((ul(8), 3));
+        cm.set_pane_rows(3, 4);
+        assert_eq!(
+            cm.anchor,
+            Some((ul(3), 3)),
+            "anchor line clamps to total_lines - 1, column untouched"
+        );
+    }
+
+    #[test]
+    fn set_pane_rows_leaves_an_in_range_anchor_untouched() {
+        let mut cm = CopyMode::new(10, 5, ul(9), 0);
+        cm.anchor = Some((ul(2), 3));
+        cm.set_pane_rows(3, 4);
+        assert_eq!(cm.anchor, Some((ul(2), 3)), "in-range anchor is a no-op");
+    }
+
+    #[test]
+    fn set_pane_rows_with_no_anchor_stays_none() {
+        let mut cm = CopyMode::new(10, 5, ul(9), 0);
+        assert_eq!(cm.anchor, None);
+        cm.set_pane_rows(3, 4);
+        assert_eq!(
+            cm.anchor, None,
+            "no anchor to clamp is a no-op, not a panic"
+        );
     }
 
     #[test]
