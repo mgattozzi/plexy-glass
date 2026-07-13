@@ -2495,6 +2495,81 @@ mod tests {
         );
     }
 
+    /// Cross-feature combo (rigor-hardening 7.8): detach mid-overlay.
+    ///
+    /// `Overlay` lives on `WindowManager`, which is itself session-wide
+    /// (`Session::window_manager: Mutex<WindowManager>`, shared by every
+    /// attached client) — the same "one session, one shared view" model that
+    /// makes multi-client attach work at all: every client's `compose()` sees
+    /// the identical screen, cursor, AND overlay state. Popups get an
+    /// explicit "any client's teardown closes it" rule in the connection
+    /// layer's `cleanup_and_exit` (`close_popup()`): they run a live child
+    /// process, so leaving one open unattended after everyone who could see
+    /// it disconnects is a real resource leak. Plain overlays (command
+    /// prompt, pickers, rename, help) hold no child process, and nothing
+    /// calls `close_overlay()` on detach.
+    ///
+    /// This pins that down precisely rather than leaving it undocumented: a
+    /// detach must not corrupt a shared overlay's state, and — unlike
+    /// popups — must not implicitly close it either. Detach/reattach to a
+    /// LIVE daemon is this project's whole model (scrollback, panes, and
+    /// copy mode all survive a detach too); silently dropping a half-typed
+    /// command-prompt line to a network blip, or yanking an open picker out
+    /// from under a SECOND still-attached client just because a third
+    /// client hiccuped, would be a real regression, not a cleanup. If this
+    /// is ever revisited, it should be a deliberate per-client-ownership
+    /// redesign of `Overlay`, not a one-line `close_overlay()` add-on.
+    #[tokio::test]
+    async fn deregister_client_leaves_a_shared_overlay_open_for_the_rest_of_the_session() {
+        let _g = test_env::isolate();
+        let s = Session::new("overlaydetach".into(), spec(), size(), cfg()).unwrap();
+        let flag_a = Arc::new(AtomicBool::new(false));
+        let flag_b = Arc::new(AtomicBool::new(false));
+        let s2 = Arc::clone(&s);
+        let fa = Arc::clone(&flag_a);
+        let a = task::spawn_blocking(move || s2.register_client(size(), fa, false))
+            .await
+            .unwrap()
+            .unwrap();
+        let s2 = Arc::clone(&s);
+        let fb = Arc::clone(&flag_b);
+        let _b = task::spawn_blocking(move || s2.register_client(size(), fb, false))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Open the command-prompt overlay (shared WindowManager state, not
+        // attributed to any one client's connection).
+        s.window_manager
+            .lock()
+            .await
+            .open_command_prompt(Vec::new());
+        assert!(
+            s.window_manager.lock().await.overlay().is_some(),
+            "premise: overlay open"
+        );
+
+        // Client A (who "opened" it, from the wire's point of view) detaches.
+        let s2 = Arc::clone(&s);
+        let cid_a = a.client_id;
+        task::spawn_blocking(move || s2.deregister_client(cid_a))
+            .await
+            .unwrap();
+
+        // The overlay survives for client B (and a future reattach): detach
+        // does not implicitly close it, and the session is not left in a
+        // broken state (a further WindowManager operation still resolves
+        // normally).
+        assert!(
+            s.window_manager.lock().await.overlay().is_some(),
+            "a detach must not silently close a shared, session-wide overlay"
+        );
+        assert!(
+            s.window_manager.lock().await.viewport().rows() > 0,
+            "WindowManager stays fully usable after the detach"
+        );
+    }
+
     // Finding #9 (honest yank) regression: a mouse drag-select yank must write
     // the clipboard OFF the WM lock, since write_clipboard can block up to 2s on
     // a wedged helper and the render coordinator composes every frame under that

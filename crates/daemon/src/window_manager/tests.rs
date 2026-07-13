@@ -570,6 +570,119 @@ async fn copy_mode_mouse_uses_pane_local_coords() {
     );
 }
 
+/// Cross-feature combo (rigor-hardening 7.8): copy mode + a resize that
+/// triggers real reflow. `CopyMode::set_pane_rows` (called from
+/// `Pane::on_size_changed`, itself called from `Window::resize` /
+/// `WindowManager::on_host_resize`, the real SIGWINCH path) clamps
+/// `cursor.0` to the post-reflow `total_lines`, but does NOT touch `anchor`
+/// — the other half of an active selection. Widening a pane can shrink
+/// `total_lines` (previously-wrapped rows re-merge into one), so an anchor
+/// set on a now-gone wrapped line is left pointing past the end of the
+/// screen. This drives a REAL `/bin/cat`-echoed long line through real
+/// reflow (not a hand-built `Screen`) to prove it, matching the project's
+/// documented recurring bug class: a reference (here, `anchor`, a
+/// `UnifiedLine`) kept valid by hand at each mutation site, where one site
+/// was missed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn copy_mode_anchor_survives_a_resize_that_shrinks_reflowed_total_lines() {
+    use bytes::Bytes;
+
+    let mut m = WindowManager::new(
+        spec(),
+        PtySize {
+            rows: 24,
+            cols: 16,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
+        Arc::new(Notify::new()),
+        None,
+        cfg(),
+    )
+    .unwrap();
+    let pane = m.active_window().active_pane().clone();
+
+    // Echo MANY long lines through /bin/cat: `active.num_rows()` is a FIXED
+    // grid height (it doesn't grow with content), so a single wrapped line
+    // never shrinks `total_lines` on its own — only SCROLLBACK reflow does,
+    // once the wrapped rows have actually scrolled off into it. 60 lines of
+    // 40 X's each, each wrapping into ~3 rows at this narrow width, easily
+    // overflows a ~20-row pane into scrollback.
+    let long_line = "X".repeat(40);
+    let mut block = String::new();
+    for _ in 0..60 {
+        block.push_str(&long_line);
+        block.push('\n');
+    }
+    // A trailing sentinel to wait on: `screen_text` only reads the ACTIVE
+    // grid (not scrollback), and most of the 60 X-lines scroll off into
+    // scrollback well before all of them land, so waiting on an X count
+    // plateaus below the real total. The sentinel is the very last thing
+    // sent, so it's still in the active view the moment it lands.
+    block.push_str("DONE_ECHO\n");
+    pane.send_input(Bytes::from(block)).await.unwrap();
+    let deadline = time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let text = pane.with_screen(plexy_glass_mux::screen_text);
+        if text.contains("DONE_ECHO") {
+            break;
+        }
+        assert!(time::Instant::now() < deadline, "echo never landed: {text}");
+        time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let total_narrow =
+        pane.with_screen(|s| s.scrollback.len() as u32 + u32::from(s.active.num_rows()));
+    assert!(
+        total_narrow > 100,
+        "premise: 60 wrapped lines must overflow into scrollback, total_lines={total_narrow}"
+    );
+
+    // Enter copy mode and anchor a selection halfway through the unified
+    // line space: `active.num_rows()` is a fixed viewport height (always
+    // valid pre- and post-resize), so the interesting target is deep in
+    // SCROLLBACK, where the reflow-driven shrink actually happens.
+    let anchor_line = total_narrow / 2;
+    let pane_rows = m.viewport().rows();
+    pane.enter_copy_mode(total_narrow, pane_rows, anchor_line, 0);
+    pane.with_copy_mode_mut(|cm| cm.anchor = Some((UnifiedLine::new(anchor_line), 0)));
+
+    // Widen enough that the whole line fits on one row: real reflow, through
+    // the real on_host_resize path (the daemon's SIGWINCH handler).
+    m.on_host_resize(PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
+    })
+    .unwrap();
+
+    let total_wide =
+        pane.with_screen(|s| s.scrollback.len() as u32 + u32::from(s.active.num_rows()));
+    assert!(
+        total_wide < total_narrow,
+        "premise: widening must shrink total_lines (re-merge the wrap): \
+         narrow={total_narrow} wide={total_wide}"
+    );
+
+    let cursor = pane.with_copy_mode(|cm| cm.cursor).unwrap();
+    assert!(
+        cursor.0.get() < total_wide,
+        "cursor must stay in range after reflow: {cursor:?} total={total_wide}"
+    );
+
+    let anchor = pane.with_copy_mode(|cm| cm.anchor).unwrap();
+    if let Some((line, _)) = anchor {
+        assert!(
+            line.get() < total_wide,
+            "anchor must stay in range after reflow too — it drives the \
+             selection highlight and the yanked text range just like cursor \
+             does: anchor_line={} total={total_wide}",
+            line.get()
+        );
+    }
+}
+
 #[tokio::test]
 async fn forwarded_mouse_uses_pane_local_coords() {
     use bytes::Bytes;
