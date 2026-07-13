@@ -914,6 +914,9 @@ fn apply_sgr_delta(out: &mut String, prev: &CellAttrs, cell: &Cell) {
     if new.attrs.contains(Attrs::ITALIC) {
         out.push_str("\x1b[3m");
     }
+    if new.attrs.contains(Attrs::BLINK) {
+        out.push_str("\x1b[5m");
+    }
     // Underline: re-emit the styled form (`4:N`) so undercurl/dotted/dashed
     // survive to the outer terminal instead of flattening to a plain underline.
     // `Single` uses bare `4m` for back-compat with terminals that don't grok the
@@ -931,6 +934,9 @@ fn apply_sgr_delta(out: &mut String, prev: &CellAttrs, cell: &Cell) {
     }
     if new.attrs.contains(Attrs::REVERSE) {
         out.push_str("\x1b[7m");
+    }
+    if new.attrs.contains(Attrs::HIDDEN) {
+        out.push_str("\x1b[8m");
     }
     if new.attrs.contains(Attrs::HIGHLIGHT) {
         // Bright-yellow background (16-colour) distinguishes search matches
@@ -1369,6 +1375,52 @@ mod tests {
             !s.contains("\x1b[4:"),
             "single must not emit a colon form: {s:?}"
         );
+    }
+
+    #[test]
+    fn blink_attr_emits_5() {
+        // Regression: `apply_sgr_delta` had arms for BOLD/DIM/ITALIC/UNDERLINE/
+        // REVERSE/HIGHLIGHT/STRIKETHROUGH but none for BLINK, so a child that set
+        // SGR 5 had it captured by the emulator's parser (screen.rs does handle
+        // it) and then silently dropped on the way back out to the real
+        // terminal. Found by `tests/prop_diff.rs`'s apply(diff(a,b),a) == b
+        // property.
+        let mut d = DiffRenderer::new();
+        let mut v = VirtualScreen::blank(1, 2);
+        v.put(
+            0,
+            0,
+            Cell {
+                grapheme: SmolStr::new("B"),
+                attrs: Attrs::BLINK,
+                ..Cell::default()
+            },
+        );
+        let bytes = d.render(&v);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("\x1b[5m"), "expected blink SGR: {s:?}");
+    }
+
+    #[test]
+    fn hidden_attr_emits_8() {
+        // Same regression class as `blink_attr_emits_5`: SGR 8 (conceal) was
+        // captured on decode but never re-emitted on encode. Concealed text
+        // (some `read -s`-style prompts use it) rendered in plain sight instead
+        // of being hidden.
+        let mut d = DiffRenderer::new();
+        let mut v = VirtualScreen::blank(1, 2);
+        v.put(
+            0,
+            0,
+            Cell {
+                grapheme: SmolStr::new("H"),
+                attrs: Attrs::HIDDEN,
+                ..Cell::default()
+            },
+        );
+        let bytes = d.render(&v);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("\x1b[8m"), "expected hidden/conceal SGR: {s:?}");
     }
 
     #[test]
