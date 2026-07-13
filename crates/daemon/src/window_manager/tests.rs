@@ -2785,6 +2785,52 @@ async fn structural_commands_clear_zoom() {
     }
 }
 
+/// Cross-feature combo (rigor-hardening 7.8): zoom a pane, then split it.
+/// `structural_commands_clear_zoom` above checks the zoom FLAG for several
+/// commands but not `SplitV`/`SplitH` themselves, and none of them check
+/// WHICH pane ends up focused afterward. A split is the case most likely to
+/// leave a stale reference behind, since it mints a brand new leaf and
+/// `clear_zoom_restore` runs (restoring the real, non-zoomed geometry)
+/// BEFORE the split's own layout mutation, so a bug here would show up as
+/// either the zoom flag surviving, or focus landing on the wrong pane, or
+/// the "restored" geometry actually still being the old full-viewport zoom
+/// rect.
+#[tokio::test]
+async fn zoom_then_split_clears_zoom_and_focuses_the_new_pane() {
+    let mut m = mk_mgr();
+    let vp = m.viewport();
+    let before = m.active_window().active();
+
+    m.handle_command(Command::ZoomToggle).unwrap();
+    assert!(m.active_window().is_zoomed(), "single pane starts zoomed");
+
+    m.handle_command(Command::SplitV).unwrap();
+
+    assert!(
+        !m.active_window().is_zoomed(),
+        "split must clear the zoom overlay"
+    );
+    let after = m.active_window().active();
+    assert_ne!(
+        after, before,
+        "the newly split pane must become active, not the stale zoomed one"
+    );
+    assert_eq!(
+        m.active_window().panes().count(),
+        2,
+        "split must actually add the second pane"
+    );
+    // The active pane's rect must be a real subdivided rect, not still the
+    // full-viewport rect zoom used to paint — proves the overlay's geometry
+    // was actually restored, not just its boolean flag flipped.
+    let rect = m.active_window().layout().rect_of(after, vp).unwrap();
+    assert!(
+        rect.cols() < vp.cols(),
+        "post-split, the active pane must not still fill the full zoomed \
+         viewport: {rect:?} vs viewport {vp:?}"
+    );
+}
+
 #[tokio::test]
 async fn swap_pane_next_and_prev_are_directional() {
     let setup = || {

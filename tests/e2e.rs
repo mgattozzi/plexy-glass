@@ -3627,6 +3627,159 @@ fn prev_prompt_and_next_prompt_scroll_viewport() {
     );
 }
 
+/// Cross-feature combo (rigor-hardening 7.8): fold a block, then scroll the
+/// LIVE viewport back to it with `prev-prompt`. `scroll_offset` is
+/// visible-line space (folds change how many lines a block "costs"), so this
+/// exercises the fold-aware scroll math in `blocks::scroll_line_at` /
+/// `prompt_at_or_above` end to end over the real wire, not just block mode's
+/// own list view. If the scroll math weren't fold-aware, the folded output
+/// would either reappear (scroll landed at the wrong, unfolded offset) or
+/// the fold would silently drop across the navigation.
+#[test]
+fn fold_then_scroll_lands_the_folded_prompt_at_the_top() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+    // 10-row terminal (8 usable rows after status + frame), matching
+    // `prev_prompt_and_next_prompt_scroll_viewport`'s sizing.
+    let mut sess = TestSession::builder(&env).size(10, 60).start();
+    assert!(
+        sess.wait_ready("main", Duration::from_secs(20)),
+        "daemon never rendered"
+    );
+
+    // Plant TWO blocks: `blocks::foldable_output` only folds a block that has
+    // a LATER prompt bounding its output range (never the still-open/active
+    // one), so FOLDMARK needs a second block after it to become foldable at
+    // all. Block 1: prompt "FOLDMARK", 6 output lines, completed exit 0.
+    // Block 2: prompt "SECONDPROMPT", left open (no output/close needed, its
+    // mere existence is what closes block 1's range). 8 rows total (1 + 6 +
+    // 1), exactly the 8 usable rows, so nothing scrolls yet.
+    let mark_plant = sess.buffer_len();
+    sess.send_str(
+        "printf '\\033]133;A\\007FOLDMARK\\r\\n\\033]133;C\\007OUTLINE_1\\nOUTLINE_2\\nOUTLINE_3\\nOUTLINE_4\\nOUTLINE_5\\nOUTLINE_6\\n\\033]133;D;0\\007\\033]133;A\\007SECONDPROMPT\\r\\n'\n",
+    );
+    assert!(
+        sess.wait_for_from(mark_plant, b"SECONDPROMPT", Duration::from_secs(10)),
+        "planted blocks never rendered. pane: {}",
+        sess.snapshot_str()
+    );
+
+    // Enter block mode. The newest block (SECONDPROMPT) auto-selects; move up
+    // once to FOLDMARK, then fold it.
+    sess.send_prefix(b'b');
+    assert!(
+        sess.wait_for(b"\xe2\x94\x8f", Duration::from_secs(10)),
+        "block mode never opened. pane: {}",
+        sess.snapshot_str()
+    );
+    let mark_up = sess.buffer_len();
+    sess.send(b"k"); // move selection up to FOLDMARK
+    assert!(
+        sess.wait_for_from(mark_up, b"FOLDMARK", Duration::from_secs(10)),
+        "selection never moved to FOLDMARK. pane: {}",
+        sess.snapshot_str()
+    );
+    let mark_fold = sess.buffer_len();
+    sess.send(b"\t"); // Tab: toggle-fold the selected block
+    assert!(
+        sess.wait_for_from(mark_fold, b"6 lines", Duration::from_secs(10)),
+        "fold summary '6 lines' never appeared. pane: {}",
+        sess.snapshot_str()
+    );
+
+    // `q` exits block mode back to the live pane (unlike a bare Escape byte,
+    // it's unambiguous immediately, no idle-flush parking against a possible
+    // following CSI/Alt-prefixed byte); immediately follow with a real shell
+    // command so we can confirm (via its output arriving) that input reached
+    // the shell rather than being swallowed as a stray block-mode key.
+    let mark_exit = sess.buffer_len();
+    sess.send(b"q");
+    sess.send_str("echo ESCPROBE\n");
+    assert!(
+        sess.wait_for_from(mark_exit, b"ESCPROBE", Duration::from_secs(10)),
+        "shell never responded after leaving block mode. pane: {}",
+        sess.snapshot_str()
+    );
+
+    // Flood the pane so the (now 1-row, folded) block scrolls off the top of
+    // the live viewport into scrollback.
+    let mark_seq = sess.buffer_len();
+    sess.send_str("seq 1 20; printf 'SEQ_''DONE\\n'\n");
+    // Wait on the "SEQ_" prefix, not the full sentinel: the diff renderer
+    // skips re-emitting a cell whose content happens to already match (the
+    // same class of pitfall `prev_prompt_and_next_prompt_scroll_viewport`
+    // documents for its own sentinel), and this pane's prior content (the
+    // fold/block-mode session above) coincidentally leaves a stale 'O'/'N'
+    // sitting exactly where "DONE" would land, splitting the sentinel's
+    // bytes across two separate CUP-addressed writes in the wire stream even
+    // though the rendered grid ends up correct either way.
+    assert!(
+        sess.wait_for_from(mark_seq, b"SEQ_", Duration::from_secs(10)),
+        "seq+sentinel output never appeared: {}",
+        sess.snapshot_str()
+    );
+
+    // Confirm FOLDMARK has actually left the live viewport before scrolling
+    // back to it (the precondition for this test to mean anything).
+    let foldmark_gone = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut gone = false;
+        while Instant::now() < deadline {
+            let (_s, cap_out, _e) = run_cli(&env, &["capture"]);
+            if !cap_out.contains("FOLDMARK") {
+                gone = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        gone
+    };
+    assert!(
+        foldmark_gone,
+        "FOLDMARK never left the live viewport after the seq flood — \
+         precondition for prev-prompt not met. capture: {}",
+        run_cli(&env, &["capture"]).1
+    );
+
+    // Scroll back to the (folded) prompt via the headless prev-prompt verb.
+    // Two hops: the nearer prior prompt is SECONDPROMPT (planted right after
+    // FOLDMARK precisely to make FOLDMARK foldable), so the first prev-prompt
+    // lands there and the second reaches FOLDMARK.
+    let (cmd_status, _, cmd_err) = run_cli(&env, &["cmd", "prev-prompt"]);
+    assert!(
+        cmd_status.success(),
+        "cmd prev-prompt (1st hop) failed: {cmd_err}"
+    );
+    let mark_scroll = sess.buffer_len();
+    let (cmd_status, _, cmd_err) = run_cli(&env, &["cmd", "prev-prompt"]);
+    assert!(
+        cmd_status.success(),
+        "cmd prev-prompt (2nd hop) failed: {cmd_err}"
+    );
+
+    // The folded command row (with its "6 lines" annotation) must reappear...
+    assert!(
+        sess.wait_for_from(mark_scroll, b"FOLDMARK", Duration::from_secs(8)),
+        "FOLDMARK did not reappear after prev-prompt. raw: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for_from(mark_scroll, b"6 lines", Duration::from_secs(8)),
+        "fold summary did not reappear after prev-prompt (fold state lost \
+         across the scroll?). raw: {}",
+        sess.snapshot_str()
+    );
+    // ...and the folded-away output must NOT: if the scroll math weren't
+    // fold-aware it could land on a raw, unfolded offset and re-paint the
+    // hidden lines.
+    let after_scroll = sess.snapshot();
+    let fresh = String::from_utf8_lossy(&after_scroll[mark_scroll.min(after_scroll.len())..]);
+    assert!(
+        !fresh.contains("OUTLINE_1"),
+        "folded output leaked back into view after prev-prompt: {fresh:?}"
+    );
+}
+
 /// No-blocks error path: `capture --last-command` on a fresh session (no OSC
 /// 133 output ever seen) must exit with status 1 and mention "no command
 /// blocks" on stderr.
