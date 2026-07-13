@@ -562,6 +562,15 @@ impl Pane {
 
     /// Adjust the scroll offset by `delta` rows (positive = up into
     /// scrollback, negative = down toward live). Clamps to `[0, max]`.
+    // `AtomicU32::fetch_update` was renamed to `try_update` on nightly, but it
+    // stays the canonical name on stable, so we keep `fetch_update` and suppress
+    // the nightly-only deprecation. This must be `allow`, not `expect`: on stable
+    // the `deprecated` lint never fires, so an `expect` would go unfulfilled and
+    // fail the build there.
+    #[allow(
+        deprecated,
+        reason = "fetch_update is stable's canonical name; nightly renamed it to try_update"
+    )]
     pub fn scroll_by(&self, delta: i32, max_offset: ScrollOffset) {
         let max = i64::from(max_offset.get());
         let _ =
