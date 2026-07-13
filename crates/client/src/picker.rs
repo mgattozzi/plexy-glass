@@ -174,15 +174,20 @@ pub enum PickerOutcome {
     },
     /// Forget an ad-hoc host from the client-side roster file.
     Forget { host: Host },
+    /// Kill session `name` on `host`'s daemon (`k` then `y` confirms on a
+    /// session row). The picker never talks to the daemon itself; the pump
+    /// resolves `host` to a `Target` and sends a one-off `KillSession` on a
+    /// fresh connection (the `client_kill_session` pattern, `lib.rs:407`).
+    Kill { host: Option<Host>, name: String },
 }
 
 /// The picker's input sub-mode. `Navigate` is **action-first**: letters are
-/// actions (`i` install toggle, `n` new, `x` forget), arrows move, `Enter`
-/// connects, and `/` enters `Filtering` — no key types into the filter here.
-/// `Filtering` is the explicit filter mode: printables edit `self.filter`,
-/// `Enter`/an arrow return to `Navigate` (keeping the filter), `Esc` clears it.
-/// In `Prompting`, every printable (including `n`/`x`) types the new session's
-/// name, `Enter` commits `New`, `Esc` returns to `Navigate`.
+/// actions (`i` install toggle, `n` new, `x` forget, `k` kill), arrows move,
+/// `Enter` connects, and `/` enters `Filtering` — no key types into the filter
+/// here. `Filtering` is the explicit filter mode: printables edit
+/// `self.filter`, `Enter`/an arrow return to `Navigate` (keeping the filter),
+/// `Esc` clears it. In `Prompting`, every printable (including `n`/`x`) types
+/// the new session's name, `Enter` commits `New`, `Esc` returns to `Navigate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerMode {
     Navigate,
@@ -200,6 +205,14 @@ pub enum PickerMode {
     /// returns to `Navigate`. Distinct from `Prompting`, which names a new session.
     PromptingHost {
         buf: String,
+    },
+    /// Confirm-before-destroy for `k` on a session row (mirrors the
+    /// choose-tree's `TreeMode::ConfirmKill`): `y` commits `PickerOutcome::Kill`
+    /// for the `{host, name}` captured when `k` was pressed; `n`/Esc aborts back
+    /// to `Navigate` with no outcome.
+    ConfirmKill {
+        host: Option<Host>,
+        name: String,
     },
 }
 
@@ -326,6 +339,17 @@ impl PickerState {
         self.adhoc = hosts;
     }
 
+    /// Drop the one session row `(host, name)` — the pump's local roster edit
+    /// after a successful kill of a NON-current session (mirrors
+    /// `resolve_host`'s retain, but targets exactly one row instead of every
+    /// session under a host). Re-clamps the cursor same as the other
+    /// roster-mutating methods.
+    pub fn remove_row(&mut self, host: &Option<Host>, name: &str) {
+        self.rows
+            .retain(|r| !(r.kind == RowKind::Session && r.host == *host && r.name == name));
+        self.clamp();
+    }
+
     /// Seed the terminal size (pump, at build) and update it on resize.
     pub const fn set_size(&mut self, size: PtySize) {
         self.size = size;
@@ -404,6 +428,7 @@ impl PickerState {
         match self.mode {
             PickerMode::Prompting { .. } => self.handle_prompting(byte),
             PickerMode::PromptingHost { .. } => self.handle_prompting_host(byte),
+            PickerMode::ConfirmKill { .. } => self.handle_confirm_kill(byte),
             PickerMode::Filtering => self.handle_filtering(byte),
             PickerMode::Navigate => self.handle_navigate(byte),
         }
@@ -469,7 +494,46 @@ impl PickerState {
                 },
                 _ => None,
             },
+            // `k` opens the kill confirmation only on a session row; a no-op on
+            // a host row (the anchor identifies a daemon, not a session to
+            // kill) and on the `＋` slot (`selected()` is `None` there).
+            b'k' => {
+                if let Some(row) = self.selected()
+                    && row.kind == RowKind::Session
+                {
+                    self.mode = PickerMode::ConfirmKill {
+                        host: row.host.clone(),
+                        name: row.name.clone(),
+                    };
+                }
+                None
+            }
             _ => None, // no implicit filtering: unbound keys do nothing
+        }
+    }
+
+    /// `y`/`n` (or Esc) for the `k`-opened kill confirmation: `y` commits
+    /// `PickerOutcome::Kill` for the `{host, name}` captured at `k`-press time
+    /// and returns to `Navigate`; `n`/Esc aborts back to `Navigate` with no
+    /// outcome; anything else is a no-op (stays in `ConfirmKill`).
+    fn handle_confirm_kill(&mut self, byte: u8) -> Option<PickerOutcome> {
+        match byte {
+            b'y' => {
+                let PickerMode::ConfirmKill { host, name } = &self.mode else {
+                    return None; // invariant: only reached while ConfirmKill
+                };
+                let outcome = PickerOutcome::Kill {
+                    host: host.clone(),
+                    name: name.clone(),
+                };
+                self.mode = PickerMode::Navigate;
+                Some(outcome)
+            }
+            b'n' | 0x1b => {
+                self.mode = PickerMode::Navigate;
+                None
+            }
+            _ => None,
         }
     }
 
@@ -756,6 +820,9 @@ impl PickerState {
                 )
             }
             PickerMode::PromptingHost { buf } => format!("connect to host: {buf}"),
+            // The confirmation itself is the footer message (`footer_hint`);
+            // the prompt line stays blank here.
+            PickerMode::ConfirmKill { .. } => String::new(),
             PickerMode::Filtering => format!("filter: {}", self.filter),
             // In Navigate a non-empty filter stays visible (the list is still
             // narrowed) with a hint that `/` re-enters editing; an empty filter
@@ -905,6 +972,7 @@ impl PickerState {
             PickerMode::Prompting { .. } | PickerMode::PromptingHost { .. } => {
                 " \u{23ce} confirm \u{00b7} esc cancel ".into()
             }
+            PickerMode::ConfirmKill { name, .. } => format!(" Kill session '{name}'?  y / n "),
             PickerMode::Navigate => {
                 let ins = if self.install.provisions() {
                     "on"
@@ -912,7 +980,7 @@ impl PickerState {
                     "off"
                 };
                 format!(
-                    " \u{2191}/\u{2193} move \u{00b7} \u{23ce} connect \u{00b7} / filter \u{00b7} n new \u{00b7} i install: {ins} \u{00b7} x forget \u{00b7} esc "
+                    " \u{2191}/\u{2193} move \u{00b7} \u{23ce} connect \u{00b7} / filter \u{00b7} n new \u{00b7} i install: {ins} \u{00b7} x forget \u{00b7} k kill \u{00b7} esc "
                 )
             }
         }
@@ -1414,6 +1482,98 @@ mod tests {
         assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
         assert_eq!(s.handle_key(b'x'), None, "x on the local anchor is a no-op");
         assert_eq!(s.filter(), "", "the no-op does not leak into the filter");
+    }
+
+    // --- Task 7: k / ConfirmKill (kill a session from the picker) ---
+
+    /// `n` local session rows, cursor parked on the first (`names[0]`).
+    fn picker_with_sessions(names: &[&str]) -> PickerState {
+        PickerState::new(names.iter().map(|n| session(n, None)).collect())
+    }
+
+    /// Cursor parked on the local anchor (a `Host` row), not a session.
+    fn picker_on_host_row() -> PickerState {
+        PickerState::new(vec![host_row_local(), session("main", None)])
+    }
+
+    #[test]
+    fn k_on_a_session_row_enters_confirm_kill() {
+        let mut p = picker_with_sessions(&["work", "play"]);
+        assert!(p.handle_key(b'k').is_none());
+        assert!(matches!(&p.mode, PickerMode::ConfirmKill { name, .. } if name == "work"));
+    }
+
+    #[test]
+    fn confirm_kill_y_emits_kill_and_n_aborts() {
+        let mut p = picker_with_sessions(&["work", "play"]);
+        p.handle_key(b'k');
+        // n aborts back to Navigate, no outcome.
+        assert!(p.handle_key(b'n').is_none());
+        assert!(matches!(p.mode, PickerMode::Navigate));
+        // k then y emits Kill for the row captured at k-press time.
+        p.handle_key(b'k');
+        assert!(matches!(
+            p.handle_key(b'y'),
+            Some(PickerOutcome::Kill { name, .. }) if name == "work"
+        ));
+        assert!(
+            matches!(p.mode, PickerMode::Navigate),
+            "y returns to Navigate"
+        );
+    }
+
+    #[test]
+    fn confirm_kill_esc_also_aborts() {
+        let mut p = picker_with_sessions(&["work"]);
+        p.handle_key(b'k');
+        assert_eq!(p.handle_key(0x1b), None, "Esc aborts like n");
+        assert!(matches!(p.mode, PickerMode::Navigate));
+    }
+
+    #[test]
+    fn k_is_a_no_op_on_a_host_row() {
+        let mut p = picker_on_host_row();
+        assert!(p.handle_key(b'k').is_none());
+        assert!(matches!(p.mode, PickerMode::Navigate));
+    }
+
+    #[test]
+    fn k_is_a_no_op_on_the_connect_slot() {
+        // An empty roster: the only position is the synthesized `＋` slot
+        // (`selected()` is `None` there) — `k` has no session row to act on.
+        let mut p = PickerState::new(vec![]);
+        assert!(p.is_new_host_selected());
+        assert_eq!(p.handle_key(b'k'), None);
+        assert!(matches!(p.mode, PickerMode::Navigate));
+    }
+
+    #[test]
+    fn k_carries_the_rows_host_for_a_remote_session() {
+        let mut p = PickerState::new(vec![session("api", Some("prod"))]);
+        p.handle_key(b'k');
+        assert_eq!(
+            p.mode,
+            PickerMode::ConfirmKill {
+                host: Some("prod".into()),
+                name: "api".into(),
+            }
+        );
+        assert_eq!(
+            p.handle_key(b'y'),
+            Some(PickerOutcome::Kill {
+                host: Some("prod".into()),
+                name: "api".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn confirm_kill_footer_names_the_session() {
+        let mut p = picker_with_sessions(&["work"]);
+        p.handle_key(b'k');
+        let text = visible_text(&p.render());
+        assert!(text.contains("Kill session 'work'?"), "got: {text}");
+        assert!(text.contains("y / n"), "got: {text}");
     }
 
     #[test]

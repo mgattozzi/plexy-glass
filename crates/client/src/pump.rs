@@ -15,7 +15,7 @@ use crate::error::ClientError;
 use crate::picker::{PickerOutcome, PickerRow, PickerState, PickerTheme, RowKind, RowStatus};
 use crate::query::{self, HostStatus};
 use crate::roster::{self, RosterSource};
-use crate::transport::{Connect, Host, Target};
+use crate::transport::{Connect, Host, InstallPolicy, Target};
 
 const STDIN_CHUNK: usize = 4096;
 
@@ -194,6 +194,13 @@ where
         picker = Some((state, attached_name.to_string()));
     }
 
+    // Once stdin hits EOF, stop polling it. A closed stdin read returns 0
+    // immediately and forever, so a bare `continue` on it busy-spins the select
+    // loop and starves the daemon-frame arm (on a current-thread runtime it
+    // never yields, so a buffered `Exited`/frame is never read). Gating the arm
+    // keeps the session alive, driven by daemon frames, with no spin.
+    let mut stdin_open = true;
+
     loop {
         stdin_buf.clear();
         stdin_buf.resize(STDIN_CHUNK, 0);
@@ -269,11 +276,14 @@ where
                     _ => {}
                 }
             }
-            // Client -> daemon (stdin)
-            n = stdin.read(&mut stdin_buf) => {
+            // Client -> daemon (stdin). Disabled once stdin closes (see
+            // `stdin_open` above) so a persistent EOF can't spin the loop.
+            n = stdin.read(&mut stdin_buf), if stdin_open => {
                 let n = n.map_err(ClientError::Io)?;
                 if n == 0 {
-                    // stdin closed; we keep the session alive until the child exits.
+                    // stdin closed; stop polling it and keep the session alive
+                    // (driven by daemon frames) until the child exits.
+                    stdin_open = false;
                     continue;
                 }
                 let mut chunk = stdin_buf.split_to(n).to_vec();
@@ -375,6 +385,80 @@ where
                             stdout.flush().await.map_err(ClientError::Io)?;
                             picker_rx =
                                 Some(spawn_picker_query(fresh.remote_hosts, fresh.query_local));
+                            picker = Some((state, current));
+                        }
+                        Some(PickerOutcome::Kill { host, name }) => {
+                            // Resolve the row's host to a Target the same way
+                            // `accept`/`Reconnect` do: the row's own daemon
+                            // when it differs from ours (a fresh Target, no
+                            // known remote_bin/install for it), or
+                            // `current_target` itself (keeping its
+                            // remote_bin/install) when the row IS our own
+                            // daemon. Either way this is a FRESH one-off
+                            // connection (`Connect::Only`) — `KillSession` is
+                            // only accepted as a connection's first message —
+                            // mirroring `client_kill_session` (`lib.rs:407`).
+                            let target = if host == current_target.host {
+                                current_target.clone()
+                            } else {
+                                Target {
+                                    host: host.clone(),
+                                    remote_bin: None,
+                                    install: InstallPolicy::UseExisting,
+                                }
+                            };
+                            let is_current_session =
+                                host == current_target.host && name == current;
+                            let reply = crate::request_reply(
+                                &target,
+                                Connect::Only,
+                                ClientMsg::KillSession { name: name.clone() },
+                            )
+                            .await;
+                            match reply {
+                                Ok(ServerMsg::SessionKilled { .. }) if is_current_session => {
+                                    // Do nothing here: the daemon is tearing
+                                    // down OUR main connection right now, its
+                                    // renderer will write the Exited marker
+                                    // (the arm above), and that already turns
+                                    // into PumpExit::Follow.
+                                }
+                                Ok(ServerMsg::SessionKilled { .. }) => {
+                                    // A different session: drop its row
+                                    // locally and stay in the picker, mirroring
+                                    // the Forget arm's local edit + repaint.
+                                    state.remove_row(&host, &name);
+                                    stdout
+                                        .write_all(&state.render())
+                                        .await
+                                        .map_err(ClientError::Io)?;
+                                    stdout.flush().await.map_err(ClientError::Io)?;
+                                }
+                                Ok(ServerMsg::Error(e)) => {
+                                    stdout
+                                        .write_all(
+                                            format!(
+                                                "\r\nplexy-glass: {}\r\n",
+                                                ClientError::DaemonError(e)
+                                            )
+                                            .as_bytes(),
+                                        )
+                                        .await
+                                        .map_err(ClientError::Io)?;
+                                    stdout.flush().await.map_err(ClientError::Io)?;
+                                }
+                                // Any other reply (rare, `ServerMsg` is
+                                // `#[non_exhaustive]`) or a transport/connect
+                                // failure: flash it and stay in the picker.
+                                Ok(_) => {}
+                                Err(e) => {
+                                    stdout
+                                        .write_all(format!("\r\nplexy-glass: {e}\r\n").as_bytes())
+                                        .await
+                                        .map_err(ClientError::Io)?;
+                                    stdout.flush().await.map_err(ClientError::Io)?;
+                                }
+                            }
                             picker = Some((state, current));
                         }
                         None => {
@@ -771,6 +855,7 @@ mod tests {
     use plexy_glass_protocol::{ExitStatus, ServerMsg, SessionEntry, server_handshake};
     use tokio::io::{duplex, split};
     use tokio::net::UnixListener;
+    use tokio::sync::oneshot;
     use tokio::{task, time};
 
     use super::*;
@@ -1539,6 +1624,206 @@ mod tests {
         assert_eq!(roster::load_adhoc(), Vec::<Host>::new());
 
         driver.await.unwrap();
+    }
+
+    // --- Task 7: `k` + `y` kills a session from the picker ---
+
+    #[tokio::test]
+    async fn pump_picker_kill_noncurrent_session_sends_kill_session_and_drops_the_row() {
+        // `k` + `y` on a NON-current session row sends a one-off `KillSession`
+        // on a FRESH connection (`KillSession` is only accepted as a
+        // connection's first message) to the resolved daemon — here the same
+        // local daemon, so a stub bound at `PLEXY_GLASS_DIR`'s socket answers
+        // it, same pattern as `pump_opens_picker_after_attach_when_flag_is_set`.
+        // On success the row is dropped locally and the picker stays open.
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: nextest runs each test in its own process, so there is no
+        // cross-test race on this env var.
+        unsafe { env::set_var("PLEXY_GLASS_DIR", tmp.path()) };
+        let paths = RuntimePaths::for_current_user().unwrap();
+        fs::create_dir_all(&paths.runtime_dir).unwrap();
+        let listener = UnixListener::bind(&paths.socket).unwrap();
+        let stub = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut r, mut w) = split(stream);
+            server_handshake(&mut r, &mut w, 4242).await.unwrap();
+            let frame = Codec::read_frame(&mut r).await.unwrap().unwrap();
+            let msg: ClientMsg = postcard::from_bytes(&frame).unwrap();
+            assert_eq!(
+                msg,
+                ClientMsg::KillSession {
+                    name: "build".into()
+                }
+            );
+            let reply = ServerMsg::SessionKilled {
+                name: "build".into(),
+            };
+            Codec::write_frame(&mut w, &postcard::to_allocvec(&reply).unwrap())
+                .await
+                .unwrap();
+        });
+
+        let (mut server_w, mut client_r) = duplex(64 * 1024);
+        let (mut server_r, mut client_w) = duplex(64 * 1024);
+        let (mut stdin_w, mut stdin_r) = duplex(64);
+        let (mut stdout_r, mut stdout_w) = duplex(64 * 1024);
+        let (_tx, mut resize_rx) = mpsc::channel(4);
+
+        let driver = tokio::spawn(async move {
+            let open = ServerMsg::OpenSessionPicker {
+                sessions: vec![picker_entry("main", 1), picker_entry("build", 0)],
+                current: "main".into(),
+            };
+            let bytes = postcard::to_allocvec(&open).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+
+            read_until_contains(&mut stdout_r, "build", Duration::from_secs(1)).await;
+
+            // Cursor starts on "main" (the current session); move to "build"
+            // and kill it.
+            stdin_w.write_all(b"\x0e").await.unwrap();
+            stdin_w.write_all(b"k").await.unwrap();
+            stdin_w.write_all(b"y").await.unwrap();
+
+            // Wait for the repaint after the kill; "build" must be gone but
+            // the picker itself is still up (the stable `install:` marker).
+            let second =
+                read_until_contains(&mut stdout_r, "install:", Duration::from_secs(2)).await;
+            assert!(
+                !String::from_utf8_lossy(&second).contains("build"),
+                "killed row is gone from the rebuilt rows"
+            );
+
+            // Still in the picker: Esc cancels normally and sends Redraw.
+            stdin_w.write_all(b"\x1b").await.unwrap();
+            let frame = time::timeout(Duration::from_secs(2), Codec::read_frame(&mut server_r))
+                .await
+                .expect("timed out waiting for a ClientMsg")
+                .unwrap()
+                .expect("daemon channel closed before a ClientMsg arrived");
+            let msg: ClientMsg = postcard::from_bytes(&frame).unwrap();
+            assert_eq!(msg, ClientMsg::Redraw);
+
+            // Bare EOF, not the Exited marker — this test's intent is the
+            // kill/drop-row behavior, not follow (that's covered below).
+            drop(server_w);
+        });
+
+        let status = pump(
+            &mut client_r,
+            &mut client_w,
+            &mut stdin_r,
+            &mut stdout_w,
+            test_size(),
+            &mut resize_rx,
+            &Target::default(),
+            false,
+            "main",
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(status, PumpExit::Ended(ExitStatus::Unknown)),
+            "got: {status:?}"
+        );
+
+        driver.await.unwrap();
+        stub.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pump_picker_kill_current_session_lets_the_exited_arm_follow() {
+        // Killing the CURRENT session still round-trips the one-off
+        // `KillSession` over its own fresh connection, but the pump does
+        // nothing special on success (no special-casing by name) — it's the
+        // daemon tearing down the PRIMARY connection separately, whose
+        // renderer writes the `Exited` marker (Task 4), that the pump turns
+        // into `PumpExit::Follow`. Proves the two features compose: handling
+        // `Kill` never short-circuits the follow.
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: nextest runs each test in its own process, so there is no
+        // cross-test race on this env var.
+        unsafe { env::set_var("PLEXY_GLASS_DIR", tmp.path()) };
+        let paths = RuntimePaths::for_current_user().unwrap();
+        fs::create_dir_all(&paths.runtime_dir).unwrap();
+        let listener = UnixListener::bind(&paths.socket).unwrap();
+        // In production the `Exited` marker is a CONSEQUENCE of the daemon
+        // killing the session, so it can never precede the kill. Model that
+        // ordering: the stub signals once it has processed the `KillSession`,
+        // and the driver only emits `Exited` after that signal. Without it the
+        // pump can follow on `Exited` before it ever sends the kill, and the
+        // stub's `accept()` then blocks forever.
+        let (kill_done_tx, kill_done_rx) = oneshot::channel::<()>();
+        let stub = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut r, mut w) = split(stream);
+            server_handshake(&mut r, &mut w, 4242).await.unwrap();
+            let frame = Codec::read_frame(&mut r).await.unwrap().unwrap();
+            let msg: ClientMsg = postcard::from_bytes(&frame).unwrap();
+            assert_eq!(
+                msg,
+                ClientMsg::KillSession {
+                    name: "main".into()
+                }
+            );
+            let reply = ServerMsg::SessionKilled {
+                name: "main".into(),
+            };
+            Codec::write_frame(&mut w, &postcard::to_allocvec(&reply).unwrap())
+                .await
+                .unwrap();
+            let _ = kill_done_tx.send(());
+        });
+
+        let (mut server_w, mut client_r) = duplex(64 * 1024);
+        let (server_r, mut client_w) = duplex(64 * 1024);
+        drop(server_r); // no ClientMsg is expected on the primary connection
+        let (mut stdin_w, mut stdin_r) = duplex(64);
+        let (mut stdout_r, mut stdout_w) = duplex(64 * 1024);
+        let (_tx, mut resize_rx) = mpsc::channel(4);
+
+        let driver = tokio::spawn(async move {
+            let open = ServerMsg::OpenSessionPicker {
+                sessions: vec![picker_entry("main", 1)],
+                current: "main".into(),
+            };
+            let bytes = postcard::to_allocvec(&open).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+
+            read_until_contains(&mut stdout_r, "main", Duration::from_secs(1)).await;
+
+            // Cursor starts on "main" already (the current session).
+            stdin_w.write_all(b"k").await.unwrap();
+            stdin_w.write_all(b"y").await.unwrap();
+
+            // Only now that the kill has round-tripped (in production the daemon
+            // has torn the session down) does the renderer emit the Exited
+            // marker on the primary connection.
+            kill_done_rx.await.unwrap();
+            let done = ServerMsg::Exited {
+                status: ExitStatus::Unknown,
+            };
+            let bytes = postcard::to_allocvec(&done).unwrap();
+            Codec::write_frame(&mut server_w, &bytes).await.unwrap();
+        });
+
+        let status = pump(
+            &mut client_r,
+            &mut client_w,
+            &mut stdin_r,
+            &mut stdout_w,
+            test_size(),
+            &mut resize_rx,
+            &Target::default(),
+            false,
+            "main",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(status, PumpExit::Follow), "got: {status:?}");
+
+        driver.await.unwrap();
+        stub.await.unwrap();
     }
 
     // --- Follow-then-pick: open the picker after attach (>=2 remaining
