@@ -434,6 +434,7 @@ pub fn handle_hint(event: &KeyEvent, state: &mut HintState) -> HintOutcome {
 
 #[cfg(test)]
 mod tests {
+    use hegel::{TestCase, generators as gs};
     use plexy_glass_emulator::Emulator;
 
     use super::*;
@@ -886,5 +887,74 @@ mod tests {
             65,
             "all 65 labels must be distinct: {labels:?}"
         );
+    }
+
+    // ── resolve_overlaps property (task 7.5) ─────────────────────────────────
+    //
+    // `resolve_overlaps` and `Span` are module-private (no public handle to
+    // reach them from an integration test), so this property lives here
+    // instead of `tests/prop_hint.rs` — see that file's module doc. Two
+    // invariants, both genuine consequences of the "leftmost-longest-highest-
+    // priority" sweep documented on `resolve_overlaps`, not restatements of
+    // its code: (1) no two kept spans overlap, and (2) every span from the
+    // input — kept or discarded — overlaps at least one kept span, i.e. no
+    // discarded span could have been added to `kept` without a conflict, so
+    // the packing is maximal, not merely conflict-free.
+    fn ranges_overlap(a: (u16, u16), b: (u16, u16)) -> bool {
+        a.0 < b.1 && b.0 < a.1
+    }
+
+    fn draw_span(tc: &TestCase) -> Span {
+        const KINDS: [HintKind; 8] = [
+            HintKind::Hyperlink,
+            HintKind::Url,
+            HintKind::Email,
+            HintKind::Path,
+            HintKind::Uuid,
+            HintKind::Ip,
+            HintKind::Sha,
+            HintKind::HexColor,
+        ];
+        let start_col = tc.draw(gs::integers::<u16>().min_value(0).max_value(30));
+        let len = tc.draw(gs::integers::<u16>().min_value(1).max_value(6));
+        let kind = KINDS[tc.draw(
+            gs::integers::<usize>()
+                .min_value(0)
+                .max_value(KINDS.len() - 1),
+        )];
+        Span {
+            start_col,
+            end_col: start_col + len,
+            kind,
+            text: String::new(),
+        }
+    }
+
+    #[hegel::test(test_cases = 500)]
+    fn resolve_overlaps_output_is_overlap_free_and_maximal(tc: TestCase) {
+        let n = tc.draw(gs::integers::<usize>().min_value(0).max_value(15));
+        let spans: Vec<Span> = (0..n).map(|_| draw_span(&tc)).collect();
+        let ranges: Vec<(u16, u16)> = spans.iter().map(|s| (s.start_col, s.end_col)).collect();
+        tc.note(&format!("ranges={ranges:?}"));
+
+        let kept = resolve_overlaps(spans);
+        let kept_ranges: Vec<(u16, u16)> = kept.iter().map(|s| (s.start_col, s.end_col)).collect();
+
+        for (i, a) in kept_ranges.iter().enumerate() {
+            for b in kept_ranges.iter().skip(i + 1) {
+                assert!(
+                    !ranges_overlap(*a, *b),
+                    "kept spans overlap: {a:?} vs {b:?}"
+                );
+            }
+        }
+
+        for r in &ranges {
+            assert!(
+                kept_ranges.iter().any(|k| ranges_overlap(*r, *k)),
+                "span {r:?} conflicts with no kept span — resolve_overlaps could \
+                 have kept it too, so the output is not maximal: kept={kept_ranges:?}"
+            );
+        }
     }
 }
