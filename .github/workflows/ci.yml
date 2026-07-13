@@ -4,11 +4,18 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  # Nightly cadence for the slow rigor tools (mutation testing, deep fuzzing,
+  # Miri) that are too expensive to run on every push/PR. 03:00 UTC, off-peak.
+  schedule:
+    - cron: '0 3 * * *'
 
 # A new push to a ref cancels the older run of the same ref. For main this means
 # a newer commit supersedes an in-flight test+build+release (latest nightly wins).
+# The group is keyed by event too, so a scheduled run (long-lived: mutants/fuzz/
+# Miri can take hours) never gets cancelled by an ordinary push to main, and
+# vice versa.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:
@@ -30,12 +37,23 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # --no-fail-fast so a red run reports EVERY failure at once (full CI
       # visibility), not just the first — no cost when the suite is green.
       - run: cargo nextest run --workspace --no-fail-fast
       - run: cargo test --workspace --doc
+
+  # rustfmt.toml uses nightly-only options (imports_granularity, group_imports),
+  # which plain stable `cargo fmt` silently skips. Runs once (not in the `test`
+  # matrix) since rustfmt's output doesn't vary by OS.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
 
   build:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -88,7 +106,7 @@ jobs:
 
   release:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [test, build]
+    needs: [test, build, fmt]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -128,3 +146,111 @@ jobs:
             dist/plexy-glass-*
             dist/SHA256SUMS
           fail_on_unmatched_files: true
+
+  # --- Dormant rigor tools, on the nightly schedule only. Each is a signal,
+  # not a push/PR gate: none of test/build/release depend on them, so a red
+  # run here never blocks a merge. workflow_dispatch is wired in too so any
+  # of them can be run on demand from the Actions tab.
+
+  mutants:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants,cargo-nextest
+      # Scoped to the pure-logic crates (.cargo/mutants.toml carries the
+      # excludes + test_tool=nextest) to bound cost — a full-workspace sweep
+      # isn't affordable nightly. Missed mutants exit nonzero (cargo-mutants
+      # exit code 2), so this job goes red whenever a survivor exists; that's
+      # expected, not a bug — see docs/testing.md's baseline tables for the
+      # mutants already triaged as documented equivalents.
+      - run: cargo mutants -p plexy-glass-emulator -p plexy-glass-mux -p plexy-glass-keys -p plexy-glass-config -p plexy-glass-protocol
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mutants-report
+          path: mutants.out/
+          if-no-files-found: warn
+
+  bolero:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      # cargo-bolero has no taiki-e/install-action manifest entry, so this is
+      # a plain `cargo install`; the version pin matches `bolero = "0.13.4"`
+      # in Cargo.toml so the CLI and the linked library stay in step.
+      - run: cargo install cargo-bolero --version 0.13.4 --locked
+      # Six libfuzzer targets under [profile.fuzz], 3 minutes each (~18min of
+      # fuzzing plus nightly build time). Target names are the #[test] fns
+      # inside the fuzz_*.rs files, not the filenames themselves. A crash
+      # exits the engine (and this step) nonzero.
+      - run: cargo bolero test parser_advance -p plexy-glass-emulator -T 3min
+      - run: cargo bolero test graphics_advance -p plexy-glass-emulator -T 3min
+      - run: cargo bolero test key_consume -p plexy-glass-keys -T 3min
+      - run: cargo bolero test mouse_consume -p plexy-glass-mux -T 3min
+      - run: cargo bolero test fuzz_compose_does_not_panic -p plexy-glass-mux -T 3min
+      - run: cargo bolero test picker_replay -p plexy-glass-client -T 3min
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bolero-crashes
+          path: |
+            crates/emulator/tests/__fuzz__/parser_advance/crashes
+            crates/emulator/tests/__fuzz__/graphics_advance/crashes
+            crates/keys/tests/__fuzz__/key_consume/crashes
+            crates/mux/tests/__fuzz__/mouse_consume/crashes
+            crates/mux/tests/__fuzz__/compose_does_not_panic/crashes
+            crates/client/tests/__fuzz__/picker_replay/crashes
+          if-no-files-found: ignore
+
+  miri:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo miri setup
+      # Pure crates only; they carry no hand-written unsafe, so this is a
+      # std/dependency soundness check, not an unsafe audit. Filtersets are
+      # copied verbatim from docs/testing.md: async/PTY/subprocess tests can't
+      # run under Miri, insta's snapshot_ tests fork() (unsupported on Miri),
+      # the hint regex NFA and five large-buffer emulator tests are
+      # intractable at Miri's ~40x slowdown, and prop_* binaries hit a
+      # Stacked-Borrows violation inside hegeltest's C FFI layer (not our bug).
+      - run: cargo miri nextest run -p plexy-glass-emulator -E 'not (binary(/^(prop_|fuzz_)/) | test(combining_mark_cap_exact_boundary) | test(combining_mark_flood_is_bounded) | test(dcs_payload_is_capped_at_dcs_cap) | test(graphics_apc_payload_survives_1mb_size) | test(osc_52_oversized_payload_dropped))'
+      - run: cargo miri nextest run -p plexy-glass-keys -E 'not binary(/^(prop_|fuzz_)/)'
+      - run: MIRIFLAGS=-Zmiri-disable-isolation cargo miri nextest run -p plexy-glass-mux -E 'not (binary(/^(prop_|fuzz_)/) | test(snapshot_) | test(hint::tests::scans_) | test(hint::tests::url_))'
+      - run: MIRIFLAGS=-Zmiri-disable-isolation cargo miri nextest run -p plexy-glass-config -E 'not binary(/^(prop_|fuzz_)/)'
+      - run: cargo miri nextest run -p plexy-glass-protocol -E 'test(messages::)'
+
+  # Optional (task 8.5): coverage trend visibility, no threshold gate.
+  coverage:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      - run: cargo llvm-cov nextest --workspace --summary-only | tee coverage-summary.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-summary
+          path: coverage-summary.txt
+          if-no-files-found: error
