@@ -126,6 +126,22 @@ pub enum PumpExit {
 /// `current_target` is the daemon this pump is attached to (`&next.0` in
 /// `run`); its `host` tags the current daemon's rows in the session picker
 /// (`None` when truly local) and is the daemon EXCLUDED from the roster query.
+///
+/// `open_picker_after_attach` is set by a `FollowDecision::SwitchThenPick`
+/// (`run`'s `Follow` handling in `lib.rs`): when true, the picker opens
+/// immediately, before this pump reads a single daemon frame, seeded from a
+/// fresh `ListSessions` query rather than waiting for the daemon to push
+/// `OpenSessionPicker` (an ordinary attach never gets that message).
+/// `attached_name` is the session this pump just attached to (from the
+/// `Attached` reply, not the name requested — the daemon may have picked),
+/// used to seed the picker's `current` row.
+// ponytail: IO handles + a resize channel + the follow-pick bool/name; a
+// wrapper struct would just rename the same transient call-site args (cf.
+// `draw_box`'s allow in compositor.rs).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "IO handles, a resize channel, the target, and the follow-pick flag/name; no natural param grouping"
+)]
 pub async fn pump<R, W, In, Out>(
     daemon_read: &mut R,
     daemon_write: &mut W,
@@ -134,6 +150,8 @@ pub async fn pump<R, W, In, Out>(
     initial_size: PtySize,
     resize_rx: &mut mpsc::Receiver<PtySize>,
     current_target: &Target,
+    open_picker_after_attach: bool,
+    attached_name: &str,
 ) -> Result<PumpExit, ClientError>
 where
     R: AsyncRead + Unpin,
@@ -163,6 +181,19 @@ where
     // host's rows in incrementally; `None` on the channel means every queried
     // daemon has resolved.
     let mut picker_rx: Option<mpsc::UnboundedReceiver<(Option<Host>, HostStatus)>> = None;
+
+    if open_picker_after_attach {
+        let entries = fresh_session_list(current_target).await?;
+        let (state, rx) = build_picker_state(entries, current_target, attached_name, size);
+        stdout
+            .write_all(&state.render())
+            .await
+            .map_err(ClientError::Io)?;
+        stdout.flush().await.map_err(ClientError::Io)?;
+        picker_rx = Some(rx);
+        picker = Some((state, attached_name.to_string()));
+    }
+
     loop {
         stdin_buf.clear();
         stdin_buf.resize(STDIN_CHUNK, 0);
@@ -222,20 +253,11 @@ where
                         // each). The picker opens IMMEDIATELY; the streaming
                         // query below fills the other daemons' rows in as each
                         // resolves.
-                        let assembly =
-                            build_picker_rows(sessions, current_target.host.as_deref());
-                        let mut state = PickerState::new_with_current(
-                            assembly.rows,
-                            &current_target.host,
-                            &current,
-                        );
-                        state.set_adhoc_hosts(assembly.adhoc);
-                        state.set_size(size);
-                        state.set_theme(PickerTheme::resolve(&roster::config_palette()));
+                        let (state, rx) =
+                            build_picker_state(sessions, current_target, &current, size);
                         stdout.write_all(&state.render()).await.map_err(ClientError::Io)?;
                         stdout.flush().await.map_err(ClientError::Io)?;
-                        picker_rx =
-                            Some(spawn_picker_query(assembly.remote_hosts, assembly.query_local));
+                        picker_rx = Some(rx);
                         picker = Some((state, current));
                     }
                     // `Attached` was already handled by the caller; `ServerMsg`
@@ -475,6 +497,44 @@ fn build_picker_rows(sessions: Vec<SessionEntry>, current_host: Option<&str>) ->
     }
 }
 
+/// Build a ready-to-render `PickerState` from a session list plus the daemon
+/// we're attached to, and kick off the streaming per-host roster query.
+/// Shared by the `ServerMsg::OpenSessionPicker` handler (the daemon-initiated
+/// picker, `Ctrl+a w`) and the follow-then-pick path (`pump`'s
+/// `open_picker_after_attach`): both need the exact same rows assembled from a
+/// session list, `current_target`, and the current session's name.
+fn build_picker_state(
+    sessions: Vec<SessionEntry>,
+    current_target: &Target,
+    current: &str,
+    size: PtySize,
+) -> (
+    PickerState,
+    mpsc::UnboundedReceiver<(Option<Host>, HostStatus)>,
+) {
+    let assembly = build_picker_rows(sessions, current_target.host.as_deref());
+    let mut state = PickerState::new_with_current(assembly.rows, &current_target.host, current);
+    state.set_adhoc_hosts(assembly.adhoc);
+    state.set_size(size);
+    state.set_theme(PickerTheme::resolve(&roster::config_palette()));
+    let rx = spawn_picker_query(assembly.remote_hosts, assembly.query_local);
+    (state, rx)
+}
+
+/// A one-off `ListSessions` round trip on a fresh connection (`Connect::Only`,
+/// no spawn), for seeding the follow-then-pick picker. `request_reply` opens
+/// its own connection to `target`, separate from this pump's attached one —
+/// the daemon dispatches `ListSessions` only as a connection's first message
+/// (see `crates/daemon/src/connection.rs`), so it cannot ride the existing
+/// attach connection.
+async fn fresh_session_list(target: &Target) -> Result<Vec<SessionEntry>, ClientError> {
+    match crate::request_reply(target, Connect::Only, ClientMsg::ListSessions).await? {
+        ServerMsg::SessionList { entries } => Ok(entries),
+        ServerMsg::Error(e) => Err(ClientError::DaemonError(e)),
+        _ => Err(ClientError::UnexpectedReply),
+    }
+}
+
 /// The OTHER-daemon host rows, assembled fresh from the roster: a `local`
 /// Pending anchor when we're attached to a REMOTE (so local is an OTHER
 /// daemon), plus one Pending anchor per roster host in `{config} ∪ ad-hoc`
@@ -704,10 +764,13 @@ where
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, SystemTime};
+    use std::{env, fs};
 
     use bytes::Bytes;
-    use plexy_glass_protocol::{ExitStatus, ServerMsg, SessionEntry};
-    use tokio::io::duplex;
+    use plexy_glass_daemon::RuntimePaths;
+    use plexy_glass_protocol::{ExitStatus, ServerMsg, SessionEntry, server_handshake};
+    use tokio::io::{duplex, split};
+    use tokio::net::UnixListener;
     use tokio::{task, time};
 
     use super::*;
@@ -751,6 +814,8 @@ mod tests {
             test_size(),
             &mut resize_rx,
             &Target::default(),
+            false,
+            "main",
         )
         .await
         .unwrap();
@@ -823,6 +888,8 @@ mod tests {
             test_size(),
             &mut resize_rx,
             &Target::default(),
+            false,
+            "main",
         )
         .await
         .expect("pump must not error on interleaved stdin");
@@ -978,6 +1045,8 @@ mod tests {
             test_size(),
             &mut resize_rx,
             &Target::default(),
+            false,
+            "main",
         )
         .await
         .unwrap();
@@ -1032,6 +1101,8 @@ mod tests {
             test_size(),
             &mut resize_rx,
             &Target::default(),
+            false,
+            "main",
         )
         .await
         .unwrap();
@@ -1183,6 +1254,8 @@ mod tests {
             test_size(),
             &mut resize_rx,
             &Target::default(),
+            false,
+            "main",
         )
         .await
         .unwrap();
@@ -1247,6 +1320,8 @@ mod tests {
             test_size(),
             &mut resize_rx,
             &Target::default(),
+            false,
+            "main",
         )
         .await
         .unwrap();
@@ -1306,6 +1381,8 @@ mod tests {
                 test_size(),
                 &mut resize_rx,
                 &local,
+                false,
+                "main",
             ) => status.unwrap(),
             () = driver => unreachable!("driver parks forever after its writes"),
         };
@@ -1368,6 +1445,8 @@ mod tests {
                 test_size(),
                 &mut resize_rx,
                 &local,
+                false,
+                "main",
             ) => status.unwrap(),
             () = driver => unreachable!("driver parks forever after its writes"),
         };
@@ -1446,6 +1525,8 @@ mod tests {
             test_size(),
             &mut resize_rx,
             &Target::default(),
+            false,
+            "main",
         )
         .await
         .unwrap();
@@ -1458,5 +1539,98 @@ mod tests {
         assert_eq!(roster::load_adhoc(), Vec::<Host>::new());
 
         driver.await.unwrap();
+    }
+
+    // --- Follow-then-pick: open the picker after attach (>=2 remaining
+    // sessions) ---
+
+    #[tokio::test]
+    async fn pump_opens_picker_after_attach_when_flag_is_set() {
+        // `open_picker_after_attach` makes `pump` issue its OWN `ListSessions`
+        // round trip on a fresh connection (`current_target`, `Connect::Only`)
+        // before it ever reads a frame off the attached connection — the
+        // daemon dispatches `ListSessions` only as a connection's first
+        // message, so this can't ride the primary duplex pair below. Point
+        // `PLEXY_GLASS_DIR` at a private tempdir and bind a minimal stub
+        // there to answer it.
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: no other test in this crate reads or writes
+        // `PLEXY_GLASS_DIR`, and nextest runs each test in its own process,
+        // so there is no cross-test race to guard against.
+        unsafe { env::set_var("PLEXY_GLASS_DIR", tmp.path()) };
+        let paths = RuntimePaths::for_current_user().unwrap();
+        fs::create_dir_all(&paths.runtime_dir).unwrap();
+        let listener = UnixListener::bind(&paths.socket).unwrap();
+        let stub = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut r, mut w) = split(stream);
+            server_handshake(&mut r, &mut w, 4242).await.unwrap();
+            let frame = Codec::read_frame(&mut r).await.unwrap().unwrap();
+            let msg: ClientMsg = postcard::from_bytes(&frame).unwrap();
+            assert_eq!(msg, ClientMsg::ListSessions);
+            let reply = ServerMsg::SessionList {
+                entries: vec![picker_entry("main", 1), picker_entry("build", 0)],
+            };
+            Codec::write_frame(&mut w, &postcard::to_allocvec(&reply).unwrap())
+                .await
+                .unwrap();
+        });
+
+        // The PRIMARY attached connection: a plain in-memory duplex, untouched
+        // by the stub above. Nothing is ever written on `server_w` — it's only
+        // dropped, below, to end `pump` with a bare EOF.
+        let (server_w, mut client_r) = duplex(64 * 1024);
+        let (mut server_r, mut client_w) = duplex(64 * 1024);
+        let (mut stdin_w, mut stdin_r) = duplex(64);
+        let (mut stdout_r, mut stdout_w) = duplex(64 * 1024);
+        let (_tx, mut resize_rx) = mpsc::channel(4);
+
+        let pump_task = tokio::spawn(async move {
+            pump(
+                &mut client_r,
+                &mut client_w,
+                &mut stdin_r,
+                &mut stdout_w,
+                test_size(),
+                &mut resize_rx,
+                &Target::default(),
+                true,
+                "main",
+            )
+            .await
+        });
+
+        // The picker renders before `pump` reads anything off the primary
+        // connection, seeded with BOTH sessions and cursor parked on "main"
+        // (the attached one).
+        let rendered = read_until_contains(&mut stdout_r, "build", Duration::from_secs(2)).await;
+        let text = String::from_utf8_lossy(&rendered);
+        assert!(text.contains("main"), "the attached session is listed");
+        assert!(text.contains("build"), "the other session is listed");
+
+        // Esc closes the picker -> Redraw over the PRIMARY connection (the
+        // stub above is done after its one reply and plays no further part).
+        stdin_w.write_all(b"\x1b").await.unwrap();
+        let frame = time::timeout(Duration::from_secs(2), Codec::read_frame(&mut server_r))
+            .await
+            .expect("timed out waiting for a ClientMsg")
+            .unwrap()
+            .expect("daemon channel closed before a ClientMsg arrived");
+        let msg: ClientMsg = postcard::from_bytes(&frame).unwrap();
+        assert_eq!(msg, ClientMsg::Redraw);
+
+        // Bare EOF ends the pump.
+        drop(server_w);
+        let status = time::timeout(Duration::from_secs(2), pump_task)
+            .await
+            .expect("pump timed out")
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(status, PumpExit::Ended(ExitStatus::Unknown)),
+            "got: {status:?}"
+        );
+
+        stub.await.unwrap();
     }
 }

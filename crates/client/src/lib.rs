@@ -176,6 +176,11 @@ pub async fn run(
     // `Ended`, so this loop runs exactly once and single-attach behavior is
     // byte-identical to before.
     let mut next: (Target, Option<String>) = (target.clone(), name);
+    // Set by a `FollowDecision::SwitchThenPick`: the follow landed on the
+    // most-recently-used session but there were >=2 candidates, so the NEXT
+    // `pump` call should open the picker right after attaching there.
+    // One-shot: read and cleared at the top of the next `pump` call below.
+    let mut open_picker_after_attach = false;
 
     let outcome: Result<ExitStatus, ClientError> = loop {
         let target = &next.0;
@@ -303,6 +308,10 @@ pub async fn run(
         // we get here the session has already ended or we're moving to a
         // different daemon, so tearing down the old ssh connection promptly is
         // the behavior we want, not a regression.
+        // One-shot: whatever this call reads is consumed for THIS attach only.
+        let use_picker = open_picker_after_attach;
+        open_picker_after_attach = false;
+
         match pump(
             &mut t.reader,
             &mut t.writer,
@@ -311,6 +320,8 @@ pub async fn run(
             initial_size,
             &mut resize_rx,
             target,
+            use_picker,
+            &attached_name,
         )
         .await
         {
@@ -339,11 +350,12 @@ pub async fn run(
                     .collect();
                 match decide_follow(&others) {
                     FollowDecision::Exit => break Ok(ExitStatus::Unknown),
-                    // Task 6 differentiates these: a `SwitchThenPick` also
-                    // opens the picker once it's landed there. For now both
-                    // just land on the chosen session.
-                    FollowDecision::SwitchTo(chosen) | FollowDecision::SwitchThenPick(chosen) => {
+                    FollowDecision::SwitchTo(chosen) => {
                         next = (target.clone(), Some(chosen));
+                    }
+                    FollowDecision::SwitchThenPick(chosen) => {
+                        next = (target.clone(), Some(chosen));
+                        open_picker_after_attach = true;
                     }
                 }
             }
