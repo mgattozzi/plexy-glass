@@ -2285,7 +2285,8 @@ fn default_spawn_spec() -> SpawnSpec {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::symlink;
+    use std::fs::{self, Permissions};
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::{env, process};
 
     use plexy_glass_emulator::{Row, RowMark};
@@ -5431,6 +5432,29 @@ mod tests {
         }
     }
 
+    /// A tempdir holding a stub clipboard tool named for the FIRST candidate
+    /// `osc_actions::write_clipboard` tries on each platform (`pbcopy` on macOS,
+    /// `wl-copy` on Linux), so a test can point `PATH` at it and force the
+    /// clipboard-write SUCCESS branch. The mirror of
+    /// `copy_output_warns_when_clipboard_write_fails`, which points `PATH` at an
+    /// EMPTY dir to force the failure branch. Both are needed because the branch
+    /// taken is otherwise a fact about the machine, not about our code: a real
+    /// `pbcopy` exists on a dev Mac, but CI's headless Linux runner has no
+    /// wl-copy/xclip/xsel, so the happy path silently flipped to the warn branch
+    /// there and reddened `main`. The stub only has to spawn and exit —
+    /// `write_clipboard` reports success once the child completes without
+    /// timing out — and `/bin/sh` resolves by absolute path, so it still runs
+    /// with the stub dir as the whole `PATH`.
+    fn stub_clipboard_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for tool in ["pbcopy", "wl-copy"] {
+            let p = dir.path().join(tool);
+            fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&p, Permissions::from_mode(0o755)).unwrap();
+        }
+        dir
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn copy_output_pushes_buffer_and_sets_status() {
         let _g = isolate();
@@ -5458,7 +5482,18 @@ mod tests {
             });
         }
 
+        // Stub clipboard tool on an otherwise-empty PATH -> write_clipboard
+        // reports success, so the "copied" message below is a fact about our
+        // code rather than about whether this machine happens to have a
+        // clipboard. See `stub_clipboard_dir`.
+        let dir = stub_clipboard_dir();
+        let old = env::var("PATH").unwrap_or_default();
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { env::set_var("PATH", dir.path()) };
         let (ok, message) = run_prompt_line(&session, &registry, "copy-output").await;
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { env::set_var("PATH", old) };
+
         assert!(ok, "copy-output with a completed block failed: {message:?}");
         assert_eq!(
             registry.paste_buffer_top().await.as_deref(),
