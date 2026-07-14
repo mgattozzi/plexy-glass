@@ -86,7 +86,8 @@ pub async fn install_remote(host: &Host) -> Result<(), ClientError> {
     let expected = sha_for(&sums, &asset)
         .ok_or_else(|| ClientError::Install(format!("no nightly artifact for {triple}")))?;
 
-    // 3. Idempotent.
+    // 3. Idempotent: the remote already has these exact bytes, and (since a push
+    //    always restarts the daemon below) it is already serving them.
     if !install_needed(remote_sha.as_deref(), expected) {
         return Ok(());
     }
@@ -102,6 +103,52 @@ pub async fn install_remote(host: &Host) -> Result<(), ClientError> {
 
     // 5. Push over SSH (binary streamed on stdin).
     ssh_push(host, &bytes).await?;
+
+    // 6. New bytes on disk are not an upgrade on their own — see below.
+    kill_remote_daemon(host).await
+}
+
+/// Stop the remote daemon after pushing a new binary, so the next connection
+/// spawns the one we just installed.
+///
+/// Writing `REMOTE_CACHE_BIN` used to be the whole of `--install`, which made it
+/// silently useless as an upgrade: the daemon already listening on the remote
+/// socket keeps running the OLD binary, and `bridge`'s `connect_or_spawn`
+/// (`crates/client/src/bridge.rs`) happily connects to it rather than starting
+/// the new one. So `--install` would change the bytes, report success, and leave
+/// the same version mismatch in place — which is why our own docs telling you to
+/// re-run `--install` to fix a skewed remote could never work. The daemon is
+/// memory-only, so restarting it is the only way to run new bytes.
+///
+/// Only on the push path, deliberately. `--install` is a global flag and the
+/// picker carries a sticky `i` toggle (`InstallPolicy::toggled`), so a habitual
+/// `--install` that finds the remote already current must NOT terminate the
+/// user's live sessions for nothing — under step 3's idempotence a matching
+/// checksum now also implies the daemon is already serving those bytes, since
+/// every push from here on restarts it. A remote left with new bytes and a stale
+/// daemon by the old no-kill behavior is the one case this can't heal on its own
+/// and needs a one-time `plexy-glass -H <host> kill`.
+///
+/// Invoked as the cache binary directly: `kill` only reads a pidfile and signals,
+/// so any version does the job, and the cache path is the one we just verified
+/// into place. It is scoped to the remote's own runtime dir and exits 0 when
+/// nothing is running, so this is a no-op on a cold host.
+async fn kill_remote_daemon(host: &Host) -> Result<(), ClientError> {
+    let status = Command::new("ssh")
+        .arg("-T")
+        .arg(&**host)
+        .arg(remote_sh(&format!("{REMOTE_CACHE_BIN} kill")))
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
+        .await
+        .map_err(ClientError::Io)?;
+    if !status.success() {
+        return Err(ClientError::Install(format!(
+            "ssh {host}: installed the new binary but could not stop the old daemon; \
+             it would keep serving the previous version (try `plexy-glass -H {host} kill`)"
+        )));
+    }
     Ok(())
 }
 

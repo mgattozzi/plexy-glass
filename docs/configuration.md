@@ -1139,7 +1139,7 @@ A host anchor carries a status glyph, filled in as its query resolves:
 | `●` | Live: the daemon answered, and its sessions are listed under the anchor |
 | `○` | Empty: the daemon answered but has no sessions |
 | `⚠` | Unreachable: connect failed or timed out |
-| `⚠ vN` | Version mismatch: the remote runs protocol `vN`, run with `--install` to upgrade it |
+| `⚠ vN` | Version mismatch: the remote runs protocol `vN`; reattach with `--install` to upgrade it (this restarts the remote daemon, ending its sessions) |
 
 Remote queries stream in independently, so a slow or unreachable host never
 blocks the rest of the list. There's no animated connect spinner yet; a

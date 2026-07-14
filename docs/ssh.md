@@ -49,6 +49,20 @@ Note that the marker rides protocol v11: after you upgrade past it, re-run
 against a v10 daemon prints `handshake: peer speaks protocol version 10, we
 speak 11` until you do).
 
+`--install` stops the remote daemon whenever it actually pushes a new binary,
+because writing the binary is not an upgrade on its own: the daemon already
+listening on the remote socket goes on running the *old* one, and `bridge`
+connects to it rather than starting the new one. So the restart is what makes
+the upgrade take effect, and it means **a successful `--install` ends the
+sessions on that host** — the daemon is memory-only, so there is no way to run
+new bytes without restarting it. An `--install` that finds the remote already
+current changes nothing and leaves your sessions alone.
+
+One caveat if you used `--install` before this behavior existed: it may have
+left a host with the new binary on disk and the old daemon still running. A
+matching checksum makes `--install` a no-op, so it can't heal that on its own.
+Run `plexy-glass -H <host> kill` once and reattach.
+
 ## How it works: the `bridge`
 
 `-H` spawns `ssh -T <target> <remote-bin> bridge` and treats the child's
