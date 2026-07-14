@@ -65,6 +65,12 @@ test-group = 'e2e'
 # noise, not a plexy-glass process leak (verified: no processes survive
 # the run).
 leak-timeout = "500ms"
+# The e2e tests each spin up a real client+daemon over a PTY, so they run
+# seconds not milliseconds (the osc7 one is ~8s) and a loaded CI box stretches
+# that further. The default profile's 30s/60s ceiling would false-terminate a
+# legit run, so give e2e its own doubled headroom while still turning a genuine
+# deadlock into a named failure.
+slow-timeout = { period = "60s", terminate-after = 2 }
 
 [[profile.default.overrides]]
 filter = 'package(plexy-glass-daemon)'

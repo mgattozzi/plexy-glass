@@ -246,12 +246,8 @@ where
                     ServerMsg::OpenSessionPicker { sessions, current } => {
                         // Note: stdin typed in the round-trip window before this
                         // arrives is still forwarded to the pane (inherent to the
-                        // client-rendered picker; the old daemon overlay switched
-                        // synchronously and swallowed those keystrokes).
-                        // Session-row labels match `open_session_picker_overlay`
-                        // (crates/daemon/src/connection.rs) verbatim, so the
-                        // client-rendered picker reads the same as the old
-                        // daemon-rendered one.
+                        // client-rendered picker: the daemon sends the session
+                        // list and keeps serving the pane until we open the box).
                         //
                         // Assemble the daemon set: the current daemon (a Live
                         // Host anchor + its `sessions`, tagged by the real
