@@ -5824,3 +5824,269 @@ fn alt_drag_status_tab_reorders_windows() {
         sess.snapshot_str()
     );
 }
+
+/// The crux of the follow-to-another-session feature end to end: when the
+/// session a client is attached to is KILLED (not detached) and exactly one
+/// other live session exists, the client reattaches to it silently instead of
+/// dropping to the shell. This is the daemon-side composition that unit tests
+/// can't reach: a fresh one-off `KillSession` connection (opened from the
+/// `Ctrl+a w` picker's `k`/`y`) must reply `SessionKilled` promptly and
+/// INDEPENDENTLY of the coordinator tearing down the PRIMARY connection's
+/// renderer, which writes `ServerMsg::Exited` only once `frame_tx` actually
+/// drops (`crates/daemon/src/renderer.rs`) — the pump then turns that into
+/// `PumpExit::Follow` (`crates/client/src/pump.rs`). The synthetic version of
+/// this composition is `pump_picker_kill_current_session_lets_the_exited_arm_follow`
+/// in `crates/client/src/pump.rs`; this proves it against a real daemon.
+#[test]
+fn follow_after_kill_switches_silently_to_the_only_other_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // "beta" stays alive in the daemon after detach (sessions are in-memory,
+    // never torn down by a detach), so it's the ONE other live session
+    // "alpha" follows to once it's killed.
+    {
+        let mut beta = TestSession::builder(&env)
+            .args(&["attach", "-n", "beta"])
+            .start();
+        assert!(
+            beta.wait_ready("beta", Duration::from_secs(20)),
+            "beta session never rendered: {}",
+            beta.snapshot_str()
+        );
+        beta.send_str("echo BETA_MARKER\n");
+        assert!(
+            beta.wait_for(b"BETA_MARKER", Duration::from_secs(10)),
+            "beta session never echoed its marker: {}",
+            beta.snapshot_str()
+        );
+        beta.send_prefix(b'd'); // detach; session persists in the daemon
+        assert!(
+            beta.wait_exit(Duration::from_secs(10)),
+            "beta client did not exit on detach"
+        );
+    }
+
+    let mut sess = TestSession::builder(&env)
+        .args(&["attach", "-n", "alpha"])
+        .start();
+    assert!(
+        sess.wait_ready("alpha", Duration::from_secs(20)),
+        "alpha session never rendered: {}",
+        sess.snapshot_str()
+    );
+
+    // Open the picker on alpha's own connection; the cursor starts on
+    // alpha's own row (`new_with_current`), so `k` targets it with no
+    // navigation needed.
+    sess.send_prefix(b'w');
+    assert!(
+        sess.wait_for(b"plexy-glass", Duration::from_secs(10)),
+        "picker title never painted: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for(b"beta", Duration::from_secs(5)),
+        "picker never listed beta: {}",
+        sess.snapshot_str()
+    );
+
+    sess.send(b"k");
+    assert!(
+        sess.wait_for(b"Kill session 'alpha'?", Duration::from_secs(10)),
+        "k never opened the kill confirmation: {}",
+        sess.snapshot_str()
+    );
+    sess.send(b"y");
+
+    // alpha ends; the client must land on beta's content, not exit.
+    assert!(
+        sess.wait_for(b"BETA_MARKER", Duration::from_secs(15)),
+        "follow never landed on beta's content: {}",
+        sess.snapshot_str()
+    );
+
+    // Prove the client is genuinely alive and interactive post-follow, not
+    // just replaying beta's old scrollback on its way out.
+    let mark = sess.buffer_len();
+    sess.send_str("echo FOLLOWED_OK\n");
+    assert!(
+        sess.wait_for_from(mark, b"FOLLOWED_OK", Duration::from_secs(10)),
+        "client did not stay interactive after following to beta: {}",
+        sess.snapshot_str()
+    );
+}
+
+/// The invariant the follow feature must never violate: a plain DETACH
+/// (`Ctrl+a d`) still exits the client to the shell, even though another live
+/// session exists to follow to. Only a session END (kill, or the last shell
+/// exiting) follows — a detach breaks `serve_attach`'s loop and aborts the
+/// renderer before it ever writes the `ServerMsg::Exited` marker, so the pump
+/// sees a bare EOF (`PumpExit::Ended`), never `Follow`.
+#[test]
+fn detach_still_exits_even_with_another_session_alive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    {
+        let mut beta = TestSession::builder(&env)
+            .args(&["attach", "-n", "beta"])
+            .start();
+        assert!(
+            beta.wait_ready("beta", Duration::from_secs(20)),
+            "beta session never rendered: {}",
+            beta.snapshot_str()
+        );
+        beta.send_prefix(b'd');
+        assert!(
+            beta.wait_exit(Duration::from_secs(10)),
+            "beta client did not exit on detach"
+        );
+    }
+
+    let mut sess = TestSession::builder(&env)
+        .args(&["attach", "-n", "alpha"])
+        .start();
+    assert!(
+        sess.wait_ready("alpha", Duration::from_secs(20)),
+        "alpha session never rendered: {}",
+        sess.snapshot_str()
+    );
+
+    sess.send_prefix(b'd'); // detach, NOT kill
+    assert!(
+        sess.wait_exit(Duration::from_secs(10)),
+        "client did not exit to the shell on detach, even though beta was still alive"
+    );
+}
+
+/// The >=2-other-sessions case: when the followed-from session ends and
+/// SEVERAL others are alive, the client reattaches to the most-recently-used
+/// one but doesn't just guess silently — it reopens the picker right after, so
+/// a wrong guess is one keystroke away from being corrected
+/// (`FollowDecision::SwitchThenPick`, `crates/client/src/lib.rs`).
+///
+/// "gamma" is attached (then detached) after "beta", so it has the later
+/// `last_active` and is the MRU target. Canceling out of the auto-reopened
+/// picker leaves the underlying attach wherever the follow actually landed;
+/// asserting gamma's marker re-renders (not beta's) proves it landed on the
+/// MRU session, not just any of the remaining ones.
+///
+/// The pure decision (`decide_follow` picking the max-`last_active` entry
+/// among >=2 candidates) is already unit-tested in `crates/client/src/lib.rs`
+/// (`decide_follow_many_switches_to_most_recent_then_picks`), and `pump`'s
+/// `open_picker_after_attach` flag is unit-tested against a synthetic server
+/// in `crates/client/src/pump.rs`
+/// (`pump_opens_picker_after_attach_when_flag_is_set`); this is the real-daemon
+/// composition of both, which turned out to be feasible through this harness
+/// after all (no need to fall back to pump-level-only coverage).
+#[test]
+fn follow_after_kill_opens_the_picker_over_the_mru_session_with_three_sessions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    {
+        let mut beta = TestSession::builder(&env)
+            .args(&["attach", "-n", "beta"])
+            .start();
+        assert!(
+            beta.wait_ready("beta", Duration::from_secs(20)),
+            "beta session never rendered: {}",
+            beta.snapshot_str()
+        );
+        beta.send_str("echo BETA_MARKER\n");
+        assert!(
+            beta.wait_for(b"BETA_MARKER", Duration::from_secs(10)),
+            "beta session never echoed its marker: {}",
+            beta.snapshot_str()
+        );
+        beta.send_prefix(b'd');
+        assert!(
+            beta.wait_exit(Duration::from_secs(10)),
+            "beta client did not exit on detach"
+        );
+    }
+    {
+        let mut gamma = TestSession::builder(&env)
+            .args(&["attach", "-n", "gamma"])
+            .start();
+        assert!(
+            gamma.wait_ready("gamma", Duration::from_secs(20)),
+            "gamma session never rendered: {}",
+            gamma.snapshot_str()
+        );
+        gamma.send_str("echo GAMMA_MARKER\n");
+        assert!(
+            gamma.wait_for(b"GAMMA_MARKER", Duration::from_secs(10)),
+            "gamma session never echoed its marker: {}",
+            gamma.snapshot_str()
+        );
+        gamma.send_prefix(b'd');
+        assert!(
+            gamma.wait_exit(Duration::from_secs(10)),
+            "gamma client did not exit on detach"
+        );
+    }
+
+    let mut sess = TestSession::builder(&env)
+        .args(&["attach", "-n", "alpha"])
+        .start();
+    assert!(
+        sess.wait_ready("alpha", Duration::from_secs(20)),
+        "alpha session never rendered: {}",
+        sess.snapshot_str()
+    );
+
+    sess.send_prefix(b'w');
+    assert!(
+        sess.wait_for(b"plexy-glass", Duration::from_secs(10)),
+        "picker title never painted: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for(b"beta", Duration::from_secs(5)),
+        "picker never listed beta: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for(b"gamma", Duration::from_secs(5)),
+        "picker never listed gamma: {}",
+        sess.snapshot_str()
+    );
+
+    sess.send(b"k");
+    assert!(
+        sess.wait_for(b"Kill session 'alpha'?", Duration::from_secs(10)),
+        "k never opened the kill confirmation: {}",
+        sess.snapshot_str()
+    );
+    let mark = sess.buffer_len();
+    sess.send(b"y");
+
+    // alpha ends; two others remain (beta, gamma), so the client reattaches
+    // to the MRU one and reopens the picker rather than guessing silently.
+    assert!(
+        sess.wait_for_from(mark, b"plexy-glass", Duration::from_secs(15)),
+        "picker never reopened after the follow: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for(b"beta", Duration::from_secs(5)),
+        "reopened picker never listed beta: {}",
+        sess.snapshot_str()
+    );
+    assert!(
+        sess.wait_for(b"gamma", Duration::from_secs(5)),
+        "reopened picker never listed gamma: {}",
+        sess.snapshot_str()
+    );
+
+    // Cancel out of the auto-opened picker; the underlying attach is already
+    // wherever the follow landed, so its content is what re-renders.
+    sess.send(b"\x1b");
+    assert!(
+        sess.wait_for(b"GAMMA_MARKER", Duration::from_secs(10)),
+        "follow-then-pick did not land on gamma (the MRU session): {}",
+        sess.snapshot_str()
+    );
+}
