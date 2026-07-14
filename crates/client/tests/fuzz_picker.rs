@@ -9,14 +9,14 @@
 //! deep, coverage-guided runs use
 //! `cargo bolero test picker_replay --engine libfuzzer`.
 
-use plexy_glass_client::Host;
 use plexy_glass_client::picker::{PickerRow, PickerState, RowKind, RowStatus};
+use plexy_glass_client::{Host, RemoteName};
 
 fn row(name: &str, label: &str, host: Option<&str>, kind: RowKind, status: RowStatus) -> PickerRow {
     PickerRow {
         name: name.into(),
         label: label.into(),
-        host: host.map(Host::from),
+        host: host.map_or(Host::Local, |h| Host::Remote(RemoteName::from(h))),
         kind,
         status,
     }

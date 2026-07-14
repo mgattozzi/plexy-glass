@@ -36,7 +36,7 @@ use tokio::sync::mpsc;
 use tokio::{io as tokio_io, time};
 use tracing::info;
 pub use transport::{
-    Connect, Host, InstallPolicy, Target, Transport, connect_only, connect_or_spawn,
+    Connect, Host, InstallPolicy, RemoteName, Target, Transport, connect_only, connect_or_spawn,
     default_socket_path, open_transport, ssh_args,
 };
 pub use tty::{HostTty, current_size};
@@ -195,7 +195,7 @@ pub async fn run(
         // raw window, drops back to cooked before the `ssh` child spawns (so auth
         // prompts land normally), then opens the transport and re-enters raw for
         // the handshake + session.
-        let (mut t, guard, probe) = if target.host.is_none() {
+        let (mut t, guard, probe) = if target.host.is_local() {
             let t = open_transport(target, Connect::Spawn).await?;
             let guard = HostTty::enter_raw(stdin_fd)?;
             let probe = run_probe(stdin_fd);
@@ -239,7 +239,7 @@ pub async fn run(
             term,
             kbd: probe.kbd,
             graphics: probe.graphics,
-            remote: target.host.is_some(),
+            remote: target.host.is_remote(),
         };
         let server_hello = match client_handshake_with(&mut t.reader, &mut t.writer, hello).await {
             Ok(h) => h,
@@ -257,7 +257,7 @@ pub async fn run(
 
         let initial_size = current_size(stdin_fd)?;
 
-        let cmd = resolve_attach_spec(target.host.is_some(), spawn_cmd.clone());
+        let cmd = resolve_attach_spec(target.host.is_remote(), spawn_cmd.clone());
         // The daemon picks the real session name when `name` was `None`, so
         // the ONLY reliable source for "what am I attached to" is its
         // `Attached` reply, not the request we sent.
@@ -277,8 +277,8 @@ pub async fn run(
         // fires for a remote; best-effort (`add_adhoc` already swallows its own
         // write errors). No double-listing: this host becomes `current_target`
         // for the NEXT picker open, which excludes it from the query set.
-        if let Some(host) = &target.host {
-            roster::add_adhoc(host);
+        if let Host::Remote(name) = &target.host {
+            roster::add_adhoc(name);
         }
 
         // Replay probe-window type-ahead now that a pane exists to receive it. These
@@ -516,7 +516,12 @@ pub async fn client_kill_session(target: &Target, name: String) -> Result<(), Cl
 /// its own outcome (inherited stdio) and we propagate its exit status.
 pub async fn client_kill_remote(target: &Target, all: bool) -> Result<(), ClientError> {
     // invariant: only called for a remote target (main.rs guards on host).
-    let host = target.host.as_ref().expect("remote kill requires a host");
+    // invariant: only called for a remote target (main.rs guards on host).
+    let Host::Remote(host) = &target.host else {
+        return Err(ClientError::Io(io::Error::other(
+            "remote kill requires a remote host",
+        )));
+    };
     let cmd: &[&str] = if all { &["kill", "--all"] } else { &["kill"] };
     let status = Command::new("ssh")
         .args(transport::ssh_remote_args(host, target, cmd))

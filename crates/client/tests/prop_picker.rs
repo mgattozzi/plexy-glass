@@ -1,6 +1,7 @@
 use std::mem::take;
 
 use hegel::{TestCase, generators as gs};
+use plexy_glass_client::Host;
 use plexy_glass_client::picker::{PickerRow, PickerState, RowKind, RowStatus};
 use plexy_glass_emulator::display_width;
 use plexy_glass_protocol::PtySize;
@@ -67,7 +68,7 @@ fn prop_box_fits_terminal(tc: TestCase) {
         .map(|i| PickerRow {
             name: format!("s{i}"),
             label: format!("session-{i}"),
-            host: None,
+            host: Host::Local,
             kind: RowKind::Session,
             status: RowStatus::Live,
         })

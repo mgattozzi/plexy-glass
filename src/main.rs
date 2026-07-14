@@ -146,8 +146,12 @@ async fn main() -> anyhow::Result<()> {
         plexy_glass_client::InstallPolicy::UseExisting
     };
     let target = plexy_glass_client::Target {
-        // The CLI/config boundary: `-H` is a plain string; parse it into a `Host`.
-        host: cli.host.map(plexy_glass_client::Host::from),
+        // The CLI boundary: `-H` is a plain string, and its absence means the
+        // LOCAL daemon — a destination, not a missing value. Parse both into
+        // `Host` here so nothing downstream re-derives "local" from a `None`.
+        host: cli.host.map_or(plexy_glass_client::Host::Local, |h| {
+            plexy_glass_client::Host::Remote(plexy_glass_client::RemoteName::from(h))
+        }),
         remote_bin: cli.remote_bin,
         install,
     };
@@ -162,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
         Subcommands::Kill { name, all } => {
             if let Some(session_name) = name {
                 plexy_glass_client::client_kill_session(&target, session_name).await?;
-            } else if target.host.is_some() {
+            } else if target.host.is_remote() {
                 // No `-n`, remote: `kill` signals a process, not a daemon-protocol
                 // request, so it must run ON the remote (a local kill would stop
                 // THIS machine's daemon). Runs `<remote-bin> kill [--all]` over SSH.

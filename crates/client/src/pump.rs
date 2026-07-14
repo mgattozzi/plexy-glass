@@ -15,7 +15,7 @@ use crate::error::ClientError;
 use crate::picker::{PickerOutcome, PickerRow, PickerState, PickerTheme, RowKind, RowStatus};
 use crate::query::{self, HostStatus};
 use crate::roster::{self, RosterSource};
-use crate::transport::{Connect, Host, InstallPolicy, Target};
+use crate::transport::{Connect, Host, InstallPolicy, RemoteName, Target};
 
 const STDIN_CHUNK: usize = 4096;
 
@@ -180,7 +180,7 @@ where
     // (`Some` iff `picker` is `Some`). Each `(host, status)` fills the matching
     // host's rows in incrementally; `None` on the channel means every queried
     // daemon has resolved.
-    let mut picker_rx: Option<mpsc::UnboundedReceiver<(Option<Host>, HostStatus)>> = None;
+    let mut picker_rx: Option<mpsc::UnboundedReceiver<(Host, HostStatus)>> = None;
 
     if open_picker_after_attach {
         let entries = fresh_session_list(current_target).await?;
@@ -372,8 +372,12 @@ where
                             // session rows under it) disappears. Stay in the
                             // picker; do NOT return.
                             roster::forget_adhoc(&host);
-                            let fresh = build_roster_rows(current_target.host.as_deref());
-                            state.replace_other_rows(&current_target.host, fresh.rows, fresh.adhoc);
+                            let fresh = build_roster_rows(&current_target.host);
+                            state.replace_other_rows(
+                                &Some(current_target.host.clone()),
+                                fresh.rows,
+                                fresh.adhoc,
+                            );
                             stdout
                                 .write_all(&state.render())
                                 .await
@@ -501,7 +505,7 @@ where
                         // update; ignore it. Otherwise fold the result in and
                         // repaint under the same picker-owns-the-screen rule.
                         if let Some((state, _current)) = picker.as_mut() {
-                            let (row_status, rows) = resolve_status(host.as_deref(), hs);
+                            let (row_status, rows) = resolve_status(&host, hs);
                             state.resolve_host(&host, row_status, rows);
                             stdout.write_all(&state.render()).await.map_err(ClientError::Io)?;
                             stdout.flush().await.map_err(ClientError::Io)?;
@@ -523,7 +527,9 @@ struct PickerAssembly {
     /// and the render-time divider).
     adhoc: Vec<String>,
     /// The OTHER daemons' remote hosts to stream-query (roster minus current).
-    remote_hosts: Vec<Host>,
+    /// Remotes only — the local daemon rides `query_local`, not this list, since
+    /// it is queried on the socket rather than over ssh.
+    remote_hosts: Vec<RemoteName>,
     /// Whether the local daemon is in the OTHER set (true only when we're
     /// attached to a REMOTE), so it gets queried on the local socket.
     query_local: bool,
@@ -531,7 +537,7 @@ struct PickerAssembly {
 
 /// Format one `SessionEntry` into a picker Session row tagged by `host`. The
 /// label matches the daemon's old overlay verbatim.
-fn session_row(e: SessionEntry, host: Option<Host>) -> PickerRow {
+fn session_row(e: SessionEntry, host: Host) -> PickerRow {
     PickerRow {
         label: format!(
             "{} \u{2014} {} win, {} panes, {} clients",
@@ -552,18 +558,20 @@ fn session_row(e: SessionEntry, host: Option<Host>) -> PickerRow {
 /// MINUS current (compared by host) gets a `Pending` anchor. The
 /// configured-then-ad-hoc order from `roster::assemble` is preserved so the
 /// render-time divider lands correctly.
-fn build_picker_rows(sessions: Vec<SessionEntry>, current_host: Option<&str>) -> PickerAssembly {
+fn build_picker_rows(sessions: Vec<SessionEntry>, current_host: &Host) -> PickerAssembly {
     let mut rows = Vec::new();
-    let anchor_name = current_host.map_or_else(|| "local".to_string(), String::from);
+    // `Host: Display` is `local` for the local daemon, else the ssh target — the
+    // anchor label and the row identity are the same string.
+    let anchor_name = current_host.to_string();
     rows.push(PickerRow {
         name: anchor_name.clone(),
         label: anchor_name,
-        host: current_host.map(Host::from),
+        host: current_host.clone(),
         kind: RowKind::Host,
         status: RowStatus::Live,
     });
     for e in sessions {
-        rows.push(session_row(e, current_host.map(Host::from)));
+        rows.push(session_row(e, current_host.clone()));
     }
 
     let mut roster_rows = build_roster_rows(current_host);
@@ -588,12 +596,10 @@ fn build_picker_state(
     current_target: &Target,
     current: &str,
     size: PtySize,
-) -> (
-    PickerState,
-    mpsc::UnboundedReceiver<(Option<Host>, HostStatus)>,
-) {
-    let assembly = build_picker_rows(sessions, current_target.host.as_deref());
-    let mut state = PickerState::new_with_current(assembly.rows, &current_target.host, current);
+) -> (PickerState, mpsc::UnboundedReceiver<(Host, HostStatus)>) {
+    let assembly = build_picker_rows(sessions, &current_target.host);
+    let mut state =
+        PickerState::new_with_current(assembly.rows, &Some(current_target.host.clone()), current);
     state.set_adhoc_hosts(assembly.adhoc);
     state.set_size(size);
     state.set_theme(PickerTheme::resolve(&roster::config_palette()));
@@ -626,21 +632,21 @@ async fn fresh_session_list(target: &Target) -> Result<Vec<SessionEntry>, Client
 struct RosterRows {
     rows: Vec<PickerRow>,
     adhoc: Vec<String>,
-    remote_hosts: Vec<Host>,
+    remote_hosts: Vec<RemoteName>,
     query_local: bool,
 }
 
-fn build_roster_rows(current_host: Option<&str>) -> RosterRows {
+fn build_roster_rows(current_host: &Host) -> RosterRows {
     let roster = roster::assemble(&roster::config_remotes(), &roster::load_adhoc());
-    // The local daemon (host `None`) is an OTHER daemon only when we're attached
-    // to a remote; attached-local, it IS the current daemon and is excluded.
-    let query_local = current_host.is_some();
+    // The local daemon is an OTHER daemon only when we're attached to a remote;
+    // attached-local, it IS the current daemon and is excluded.
+    let query_local = current_host.is_remote();
     let mut rows = Vec::new();
     if query_local {
         rows.push(PickerRow {
-            name: "local".to_string(),
-            label: "local".to_string(),
-            host: None,
+            name: Host::Local.to_string(),
+            label: Host::Local.to_string(),
+            host: Host::Local,
             kind: RowKind::Host,
             status: RowStatus::Pending,
         });
@@ -648,7 +654,7 @@ fn build_roster_rows(current_host: Option<&str>) -> RosterRows {
     let mut remote_hosts = Vec::new();
     let mut adhoc = Vec::new();
     for h in roster {
-        if current_host == Some(&*h.host) {
+        if current_host.remote() == Some(&h.host) {
             continue; // this IS the current daemon
         }
         if h.source == RosterSource::AdHoc {
@@ -657,7 +663,7 @@ fn build_roster_rows(current_host: Option<&str>) -> RosterRows {
         rows.push(PickerRow {
             name: h.host.to_string(),
             label: h.host.to_string(),
-            host: Some(h.host.clone()),
+            host: Host::Remote(h.host.clone()),
             kind: RowKind::Host,
             status: RowStatus::Pending,
         });
@@ -678,13 +684,13 @@ fn build_roster_rows(current_host: Option<&str>) -> RosterRows {
 
 /// Map a resolved [`HostStatus`] to its picker row status + the Session rows to
 /// splice under the host (empty unless `Live`).
-fn resolve_status(host: Option<&str>, hs: HostStatus) -> (RowStatus, Vec<PickerRow>) {
+fn resolve_status(host: &Host, hs: HostStatus) -> (RowStatus, Vec<PickerRow>) {
     match hs {
         HostStatus::Live(entries) => (
             RowStatus::Live,
             entries
                 .into_iter()
-                .map(|e| session_row(e, host.map(Host::from)))
+                .map(|e| session_row(e, host.clone()))
                 .collect(),
         ),
         HostStatus::Empty => (RowStatus::Empty, Vec::new()),
@@ -702,9 +708,9 @@ fn resolve_status(host: Option<&str>, hs: HostStatus) -> (RowStatus, Vec<PickerR
 /// so the drain updates rows uniformly. The original sender is dropped here so
 /// the channel closes once every producer finishes.
 fn spawn_picker_query(
-    remote_hosts: Vec<Host>,
+    remote_hosts: Vec<RemoteName>,
     query_local: bool,
-) -> mpsc::UnboundedReceiver<(Option<Host>, HostStatus)> {
+) -> mpsc::UnboundedReceiver<(Host, HostStatus)> {
     const PER_HOST: Duration = Duration::from_millis(2500);
     let (tx, rx) = mpsc::unbounded_channel();
     if !remote_hosts.is_empty() {
@@ -715,7 +721,7 @@ fn spawn_picker_query(
         let fwd = tx.clone();
         tokio::spawn(async move {
             while let Some((host, status)) = raw_rx.recv().await {
-                if fwd.send((Some(host), status)).is_err() {
+                if fwd.send((Host::Remote(host), status)).is_err() {
                     break; // picker closed
                 }
             }
@@ -736,7 +742,7 @@ fn spawn_picker_query(
                 Ok(r) => r,
                 Err(_) => Err(ClientError::Io(io::Error::other("timeout"))),
             };
-            let _ = ltx.send((None, query::classify(res)));
+            let _ = ltx.send((Host::Local, query::classify(res)));
         });
     }
     rx
@@ -745,8 +751,8 @@ fn spawn_picker_query(
 /// Await the next streaming query result, or pend forever when no picker query
 /// is live (`picker_rx` is `None`) so the drain `select!` arm stays inert.
 async fn next_status(
-    rx: &mut Option<mpsc::UnboundedReceiver<(Option<Host>, HostStatus)>>,
-) -> Option<(Option<Host>, HostStatus)> {
+    rx: &mut Option<mpsc::UnboundedReceiver<(Host, HostStatus)>>,
+) -> Option<(Host, HostStatus)> {
     match rx {
         Some(rx) => rx.recv().await,
         None => pending().await,
@@ -1205,20 +1211,20 @@ mod tests {
         roster::set_test_roster(vec!["prod".into()], vec!["scratch".into()]);
         let a = build_picker_rows(
             vec![picker_entry("main", 1), picker_entry("build", 0)],
-            None,
+            &Host::Local,
         );
 
         assert_eq!(a.rows[0].kind, RowKind::Host, "current-daemon anchor first");
-        assert_eq!(a.rows[0].host, None, "local anchor");
+        assert_eq!(a.rows[0].host, Host::Local, "local anchor");
         assert_eq!(a.rows[0].status, RowStatus::Live);
         assert_eq!(a.rows[1].name, "main");
         assert_eq!(a.rows[1].kind, RowKind::Session);
-        assert_eq!(a.rows[1].host, None, "current session tagged local");
+        assert_eq!(a.rows[1].host, Host::Local, "current session tagged local");
 
         assert!(!a.query_local, "attached-local does not query local again");
         assert_eq!(
             a.remote_hosts,
-            vec![Host::from("prod"), Host::from("scratch")]
+            vec![RemoteName::from("prod"), RemoteName::from("scratch")]
         );
         assert_eq!(a.adhoc, vec!["scratch".to_string()]);
         let prod = a
@@ -1236,21 +1242,24 @@ mod tests {
         // query set; the local daemon becomes an OTHER daemon (queried), and
         // "dev" stays a remote to query.
         roster::set_test_roster(vec!["prod".into(), "dev".into()], vec![]);
-        let a = build_picker_rows(vec![picker_entry("api", 1)], Some("prod"));
+        let a = build_picker_rows(
+            vec![picker_entry("api", 1)],
+            &Host::Remote(RemoteName::from("prod")),
+        );
 
         assert_eq!(
-            a.rows[0].host.as_deref(),
-            Some("prod"),
+            a.rows[0].host,
+            Host::Remote(RemoteName::from("prod")),
             "remote current anchor"
         );
         assert_eq!(a.rows[0].kind, RowKind::Host);
         assert!(a.query_local, "attached-remote queries the local daemon");
         assert_eq!(
             a.remote_hosts,
-            vec![Host::from("dev")],
+            vec![RemoteName::from("dev")],
             "prod (current) excluded"
         );
-        let locals: Vec<_> = a.rows.iter().filter(|r| r.host.is_none()).collect();
+        let locals: Vec<_> = a.rows.iter().filter(|r| r.host.is_local()).collect();
         assert_eq!(locals.len(), 1, "one local-other anchor");
         assert_eq!(locals[0].kind, RowKind::Host);
         assert_eq!(locals[0].status, RowStatus::Pending);
@@ -1262,7 +1271,7 @@ mod tests {
         // stores only real host/session rows (no empty-labeled sentinel), so a
         // duplicate or mid-list `＋` is unrepresentable.
         roster::set_test_roster(vec!["prod".into()], vec![]);
-        let a = build_picker_rows(vec![], None);
+        let a = build_picker_rows(vec![], &Host::Local);
         assert!(
             a.rows.iter().all(|r| !r.label.is_empty()),
             "no fabricated empty-labeled slot row"
@@ -1469,7 +1478,7 @@ mod tests {
         };
         match status {
             PumpExit::ReconnectTo { target: t, name } => {
-                assert_eq!(t.host.as_deref(), Some("nonexistent.invalid"));
+                assert_eq!(t.host.remote().map(|n| &**n), Some("nonexistent.invalid"));
                 assert_eq!(
                     name, "main",
                     "empty host-anchor name normalized to the daemon default"
@@ -1533,7 +1542,7 @@ mod tests {
         };
         match status {
             PumpExit::ReconnectTo { target: t, name } => {
-                assert_eq!(t.host.as_deref(), Some("nonexistent.invalid"));
+                assert_eq!(t.host.remote().map(|n| &**n), Some("nonexistent.invalid"));
                 assert_eq!(name, "fresh");
             }
             other => panic!("expected ReconnectTo, got {other:?}"),
@@ -1617,7 +1626,7 @@ mod tests {
         );
 
         // Confirm the roster hook itself is gone, not just the rendered row.
-        assert_eq!(roster::load_adhoc(), Vec::<Host>::new());
+        assert_eq!(roster::load_adhoc(), Vec::<RemoteName>::new());
 
         driver.await.unwrap();
     }

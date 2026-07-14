@@ -26,30 +26,99 @@ use crate::install::remote_sh;
 /// `Ord`/`PartialOrd` are derived (lexicographic, same as the `String` it wraps)
 /// so the roster's `assemble` can keep sorting hosts alphabetically.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Host(pub String);
+pub struct RemoteName(pub String);
 
-impl Deref for Host {
+impl Deref for RemoteName {
     type Target = str;
     fn deref(&self) -> &str {
         &self.0
     }
 }
 
-impl fmt::Display for Host {
+impl fmt::Display for RemoteName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl From<String> for Host {
+impl From<String> for RemoteName {
     fn from(s: String) -> Self {
         Self(s)
     }
 }
 
-impl From<&str> for Host {
+impl From<&str> for RemoteName {
     fn from(s: &str) -> Self {
         Self(s.to_string())
+    }
+}
+
+/// Which daemon a verb talks to: the local socket in this user's runtime dir, or
+/// a remote one over SSH.
+///
+/// An enum rather than `Option<RemoteName>` because **the local daemon is a real,
+/// nameable destination, not the absence of one**. Conflating those is what let
+/// the session picker read `None` as both "attached to local" and "no daemon
+/// attached": `accept()` compares a row's host against the current one, so a
+/// standalone picker (no session) claimed every local row as `same_daemon` and
+/// answered Enter-on-local with `Cancel` — i.e. quit to the shell — while the
+/// caller could not tell that apart from a real Esc. With `Local` spelled out,
+/// `Option<Host>` recovers its honest meaning ("attached, or not") and the
+/// ambiguity is unrepresentable.
+///
+/// `Ord` is derived, so `Local` sorts before every `Remote` (declaration order)
+/// and remotes sort among themselves lexicographically — which is what the
+/// roster wants anyway.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Host {
+    /// This machine's daemon, over its unix socket.
+    #[default]
+    Local,
+    /// A daemon on another machine, reached by running `bridge` over SSH.
+    Remote(RemoteName),
+}
+
+impl Host {
+    /// The SSH target, or `None` when this is the local socket. The only way to
+    /// get a name out, so a caller that needs to `ssh` somewhere has to handle
+    /// `Local` rather than route it to a bogus host.
+    #[must_use]
+    pub const fn remote(&self) -> Option<&RemoteName> {
+        match self {
+            Self::Local => None,
+            Self::Remote(name) => Some(name),
+        }
+    }
+
+    /// Whether this routes over SSH. Drives `ClientHello.remote` and the status
+    /// bar's `ssh` badge.
+    #[must_use]
+    pub const fn is_remote(&self) -> bool {
+        matches!(self, Self::Remote(_))
+    }
+
+    /// Whether this is the local socket. The inverse of [`is_remote`](Self::is_remote),
+    /// spelled out so callers branching local-first read as a positive.
+    #[must_use]
+    pub const fn is_local(&self) -> bool {
+        matches!(self, Self::Local)
+    }
+}
+
+impl fmt::Display for Host {
+    /// `local` for the local daemon, else the SSH target. This is the picker's
+    /// host-anchor label, so the string is user-visible.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local => f.write_str("local"),
+            Self::Remote(name) => f.write_str(name),
+        }
+    }
+}
+
+impl From<RemoteName> for Host {
+    fn from(name: RemoteName) -> Self {
+        Self::Remote(name)
     }
 }
 
@@ -91,8 +160,8 @@ impl InstallPolicy {
 /// Where a verb runs: the local daemon, or a remote one over SSH.
 #[derive(Debug, Clone, Default)]
 pub struct Target {
-    /// `Some(ssh-target)` routes over SSH; `None` uses the local socket.
-    pub host: Option<Host>,
+    /// Which daemon to talk to. Defaults to [`Host::Local`].
+    pub host: Host,
     /// Explicit remote `plexy-glass` path (`--remote-bin`).
     pub remote_bin: Option<String>,
     /// `--install`: provision the remote binary before connecting.
@@ -112,7 +181,7 @@ pub struct Target {
 /// chosen binary. If neither exists the final `exec` fails 127, which the client
 /// surfaces as [`ClientError::RemoteNotFound`]. `cmd` is the subcommand + flags,
 /// e.g. `["bridge"]`, `["bridge", "--no-spawn"]`, or `["kill", "--all"]`.
-pub fn ssh_remote_args(host: &Host, target: &Target, cmd: &[&str]) -> Vec<String> {
+pub fn ssh_remote_args(host: &RemoteName, target: &Target, cmd: &[&str]) -> Vec<String> {
     let mut args = vec!["-T".to_string(), host.to_string()];
     if let Some(bin) = &target.remote_bin {
         args.push(bin.clone());
@@ -131,7 +200,7 @@ pub fn ssh_remote_args(host: &Host, target: &Target, cmd: &[&str]) -> Vec<String
 /// The `ssh` argv to run the `bridge` for a connection verb (attach + every
 /// request/reply). `Connect::Only` appends `--no-spawn` so a scripting verb
 /// never starts a remote daemon.
-pub fn ssh_args(host: &Host, target: &Target, connect: Connect) -> Vec<String> {
+pub fn ssh_args(host: &RemoteName, target: &Target, connect: Connect) -> Vec<String> {
     let cmd: &[&str] = if connect == Connect::Only {
         &["bridge", "--no-spawn"]
     } else {
@@ -146,7 +215,7 @@ mod ssh_tests {
 
     fn target(remote_bin: Option<&str>) -> Target {
         Target {
-            host: Some("h".into()),
+            host: Host::Remote(RemoteName::from("h")),
             remote_bin: remote_bin.map(str::to_string),
             install: InstallPolicy::UseExisting,
         }
@@ -156,14 +225,18 @@ mod ssh_tests {
     fn ssh_args_explicit_bin_is_invoked_directly() {
         assert_eq!(
             ssh_args(
-                &Host::from("prod"),
+                &RemoteName::from("prod"),
                 &target(Some("/opt/pg")),
                 Connect::Spawn
             ),
             vec!["-T", "prod", "/opt/pg", "bridge"]
         );
         assert_eq!(
-            ssh_args(&Host::from("u@h"), &target(Some("/opt/pg")), Connect::Only),
+            ssh_args(
+                &RemoteName::from("u@h"),
+                &target(Some("/opt/pg")),
+                Connect::Only
+            ),
             vec!["-T", "u@h", "/opt/pg", "bridge", "--no-spawn"]
         );
     }
@@ -172,7 +245,7 @@ mod ssh_tests {
     fn ssh_args_default_falls_back_path_then_cache() {
         let cache = install::REMOTE_CACHE_BIN;
         // Spawn: try PATH, then the cache path.
-        let a = ssh_args(&Host::from("prod"), &target(None), Connect::Spawn);
+        let a = ssh_args(&RemoteName::from("prod"), &target(None), Connect::Spawn);
         assert_eq!(a[0], "-T");
         assert_eq!(a[1], "prod");
         assert_eq!(a.len(), 3);
@@ -183,7 +256,7 @@ mod ssh_tests {
             )
         );
         // Only: --no-spawn rides both branches.
-        let b = ssh_args(&Host::from("prod"), &target(None), Connect::Only);
+        let b = ssh_args(&RemoteName::from("prod"), &target(None), Connect::Only);
         assert_eq!(
             b[2],
             format!(
@@ -198,14 +271,14 @@ mod ssh_tests {
         // Explicit bin: `kill --all` as direct argv.
         assert_eq!(
             ssh_remote_args(
-                &Host::from("prod"),
+                &RemoteName::from("prod"),
                 &target(Some("/opt/pg")),
                 &["kill", "--all"]
             ),
             vec!["-T", "prod", "/opt/pg", "kill", "--all"]
         );
         // Default: the same PATH-then-cache fallback, running `kill` remotely.
-        let k = ssh_remote_args(&Host::from("prod"), &target(None), &["kill"]);
+        let k = ssh_remote_args(&RemoteName::from("prod"), &target(None), &["kill"]);
         assert_eq!(
             k[2],
             format!(
@@ -240,7 +313,7 @@ impl Transport {
 /// Open a connection to the target daemon (local socket or SSH `bridge`).
 pub async fn open_transport(target: &Target, connect: Connect) -> Result<Transport, ClientError> {
     match &target.host {
-        None => {
+        Host::Local => {
             let socket = default_socket_path()?;
             let stream = match connect {
                 Connect::Spawn => connect_or_spawn(&socket).await?,
@@ -253,7 +326,7 @@ pub async fn open_transport(target: &Target, connect: Connect) -> Result<Transpo
                 child: None,
             })
         }
-        Some(host) => {
+        Host::Remote(host) => {
             if target.install.provisions() {
                 install::install_remote(host).await?;
             }

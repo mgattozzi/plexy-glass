@@ -27,7 +27,7 @@ use plexy_glass_emulator::{display_width, truncate_to_width};
 use plexy_glass_protocol::PtySize;
 use plexy_glass_status::Rgb;
 
-use crate::transport::{Host, InstallPolicy};
+use crate::transport::{Host, InstallPolicy, RemoteName};
 
 /// The picker's resolved colors, mapped to the same palette roles the daemon's
 /// `chrome_colors` uses so the box matches every other overlay. Resolved once at
@@ -138,13 +138,13 @@ pub enum RowStatus {
 /// One row in the picker list. `name` is the wire identity (`SwitchSession` /
 /// reconnect session name for a session row, the ssh target for a host row);
 /// `label` is the pre-formatted display text and the filter haystack; `host` is
-/// `None` for the local daemon's sessions and `Some(target)` for a remote's
-/// (and for host rows); `kind`/`status` drive the sectioning + indicators.
+/// the daemon the row lives on ([`Host::Local`] or a remote); `kind`/`status`
+/// drive the sectioning + indicators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickerRow {
     pub name: String,
     pub label: String,
-    pub host: Option<Host>,
+    pub host: Host,
     pub kind: RowKind,
     pub status: RowStatus,
 }
@@ -160,7 +160,7 @@ pub enum PickerOutcome {
     /// `PumpExit::ReconnectTo` — is wired in Task 6). `install` carries the
     /// picker's persistent `i` toggle through to the reconnect `Target`.
     Reconnect {
-        host: Option<Host>,
+        host: Host,
         name: String,
         install: InstallPolicy,
     },
@@ -168,17 +168,17 @@ pub enum PickerOutcome {
     /// `install` carries the picker's persistent `i` toggle through to the
     /// reconnect `Target`.
     New {
-        host: Option<Host>,
+        host: Host,
         name: String,
         install: InstallPolicy,
     },
     /// Forget an ad-hoc host from the client-side roster file.
-    Forget { host: Host },
+    Forget { host: RemoteName },
     /// Kill session `name` on `host`'s daemon (`k` then `y` confirms on a
     /// session row). The picker never talks to the daemon itself; the pump
     /// resolves `host` to a `Target` and sends a one-off `KillSession` on a
     /// fresh connection (the `client_kill_session` pattern, `lib.rs:407`).
-    Kill { host: Option<Host>, name: String },
+    Kill { host: Host, name: String },
 }
 
 /// The picker's input sub-mode. `Navigate` is **action-first**: letters are
@@ -197,7 +197,7 @@ pub enum PickerMode {
     /// and returns to `Navigate`.
     Filtering,
     Prompting {
-        host: Option<Host>,
+        host: Host,
         buf: String,
     },
     /// Typing a brand-new ad-hoc ssh target (from the synthesized `＋` slot).
@@ -211,7 +211,7 @@ pub enum PickerMode {
     /// for the `{host, name}` captured when `k` was pressed; `n`/Esc aborts back
     /// to `Navigate` with no outcome.
     ConfirmKill {
-        host: Option<Host>,
+        host: Host,
         name: String,
     },
 }
@@ -227,12 +227,17 @@ pub struct PickerState {
     /// Set by the pump after `new` (Task 5); empty for the local-only picker.
     adhoc: Vec<String>,
     /// The daemon this client is currently attached to — `None` when attached
-    /// to the LOCAL daemon, `Some(host)` when attached to a remote. Drives
-    /// `accept`: a row on the current daemon fast-switches (`Switch`, no
-    /// reconnect) and the current daemon's own host anchor is a no-op `Cancel`,
-    /// while anything on a DIFFERENT daemon reconnects. Defaults to `None` for
-    /// the `new` (local-only) path; the pump seeds the real value via
-    /// `new_with_current`.
+    /// which daemon we are attached to, or `None` when we are attached to NONE
+    /// (the standalone picker, opened after an attach failure with no session to
+    /// live in). Drives `accept`: a row on the current daemon fast-switches
+    /// (`Switch`, no reconnect) and the current daemon's own host anchor is a
+    /// no-op `Cancel`, while anything on a DIFFERENT daemon reconnects.
+    ///
+    /// `None` genuinely means "not attached" only because [`Host`] spells
+    /// `Local` out: while the local daemon was encoded as `None`, this field
+    /// could not tell "attached to local" from "attached to nothing", and a
+    /// standalone picker answered Enter-on-local with `Cancel` (quit) because
+    /// every local row compared equal to it.
     current_host: Option<Host>,
     filter: String,
     cursor: usize,
@@ -256,7 +261,7 @@ impl PickerState {
         Self {
             rows,
             adhoc: Vec::new(),
-            current_host: None,
+            current_host: Some(Host::Local),
             filter: String::new(),
             cursor: 0,
             mode: PickerMode::Navigate,
@@ -284,7 +289,9 @@ impl PickerState {
         let cursor = rows
             .iter()
             .position(|r| {
-                r.kind == RowKind::Session && r.host == *current_host && r.name == current_session
+                r.kind == RowKind::Session
+                    && Some(&r.host) == current_host.as_ref()
+                    && r.name == current_session
             })
             .unwrap_or(0);
         Self {
@@ -311,12 +318,7 @@ impl PickerState {
     /// empty for anything but a `Live` result; a `Live` daemon's sessions are
     /// spliced in right after its anchor. Idempotent — a re-resolve drops the
     /// prior session rows first — and re-clamps the cursor.
-    pub fn resolve_host(
-        &mut self,
-        host: &Option<Host>,
-        status: RowStatus,
-        mut sessions: Vec<PickerRow>,
-    ) {
+    pub fn resolve_host(&mut self, host: &Host, status: RowStatus, mut sessions: Vec<PickerRow>) {
         self.rows
             .retain(|r| !(r.kind == RowKind::Session && r.host == *host));
         if let Some(idx) = self
@@ -344,7 +346,7 @@ impl PickerState {
     /// `resolve_host`'s retain, but targets exactly one row instead of every
     /// session under a host). Re-clamps the cursor same as the other
     /// roster-mutating methods.
-    pub fn remove_row(&mut self, host: &Option<Host>, name: &str) {
+    pub fn remove_row(&mut self, host: &Host, name: &str) {
         self.rows
             .retain(|r| !(r.kind == RowKind::Session && r.host == *host && r.name == name));
         self.clamp();
@@ -374,7 +376,7 @@ impl PickerState {
         rows: Vec<PickerRow>,
         adhoc: Vec<String>,
     ) {
-        self.rows.retain(|r| &r.host == current_host);
+        self.rows.retain(|r| Some(&r.host) == current_host.as_ref());
         self.rows.extend(rows);
         self.adhoc = adhoc;
         self.clamp();
@@ -488,7 +490,7 @@ impl PickerState {
             // anchor, on configured hosts, on session rows, and on the `＋` slot
             // (`selected()` is `None` there) — nothing to forget on any of those.
             b'x' => match self.selected() {
-                Some(row) if row.kind == RowKind::Host => match &row.host {
+                Some(row) if row.kind == RowKind::Host => match row.host.remote() {
                     Some(h) if self.is_adhoc(h) => Some(PickerOutcome::Forget { host: h.clone() }),
                     _ => None,
                 },
@@ -643,7 +645,7 @@ impl PickerState {
                     return None; // refuse an empty host; stay prompting
                 }
                 let outcome = PickerOutcome::Reconnect {
-                    host: Some(Host::from(buf.clone())),
+                    host: Host::Remote(RemoteName::from(buf.clone())),
                     name: String::new(),
                     install: self.install,
                 };
@@ -681,7 +683,12 @@ impl PickerState {
     /// An empty filtered view yields `None` (cursor parked).
     fn accept(&self) -> Option<PickerOutcome> {
         let row = self.selected()?;
-        let same_daemon = row.host == self.current_host;
+        // `as_ref() == Some(&row.host)` and not `== self.current_host`: when we
+        // are attached to nothing this is false for EVERY row, so every Enter is a
+        // Reconnect and neither `Switch` (needs the attached daemon) nor an
+        // anchor `Cancel` (indistinguishable from Esc at the call site) can be
+        // produced by a standalone picker.
+        let same_daemon = self.current_host.as_ref() == Some(&row.host);
         match row.kind {
             RowKind::Session if same_daemon => Some(PickerOutcome::Switch(row.name.clone())),
             RowKind::Session => Some(PickerOutcome::Reconnect {
@@ -698,8 +705,8 @@ impl PickerState {
         }
     }
 
-    fn is_adhoc(&self, host: &str) -> bool {
-        self.adhoc.iter().any(|h| h == host)
+    fn is_adhoc(&self, host: &RemoteName) -> bool {
+        self.adhoc.iter().any(|h| h.as_str() == &**host)
     }
 
     fn push_filter(&mut self, byte: u8) {
@@ -758,8 +765,8 @@ impl PickerState {
         let mut emitted_any = false;
         let visible: Vec<&PickerRow> = self.visible();
         for (i, row) in visible.iter().enumerate() {
-            let is_local = row.host.is_none();
-            let is_adhoc = row.host.as_deref().is_some_and(|h| self.is_adhoc(h));
+            let is_local = row.host.is_local();
+            let is_adhoc = row.host.remote().is_some_and(|h| self.is_adhoc(h));
             if is_local && !emitted_local {
                 if row.kind == RowKind::Session {
                     lines.push(Line {
@@ -814,10 +821,7 @@ impl PickerState {
         let footer = self.footer_hint();
         let prompt = match &self.mode {
             PickerMode::Prompting { host, buf } => {
-                format!(
-                    "new session on {}: {buf}",
-                    host.as_deref().unwrap_or("local")
-                )
+                format!("new session on {host}: {buf}")
             }
             PickerMode::PromptingHost { buf } => format!("connect to host: {buf}"),
             // The confirmation itself is the footer message (`footer_hint`);
@@ -909,10 +913,10 @@ impl PickerState {
         let glyph = status_glyph(&row.status);
         match row.kind {
             RowKind::Host => {
-                let text = if row.host.is_none() {
+                let text = if row.host.is_local() {
                     row.name.clone()
                 } else {
-                    let tag = if row.host.as_deref().is_some_and(|h| self.is_adhoc(h)) {
+                    let tag = if row.host.remote().is_some_and(|h| self.is_adhoc(h)) {
                         "ad-hoc"
                     } else {
                         "configured"
@@ -1141,11 +1145,16 @@ mod tests {
         assert_eq!(t.title, d.title, "unset roles keep their default");
     }
 
+    /// A remote daemon by ssh target.
+    fn remote(name: &str) -> Host {
+        Host::Remote(RemoteName::from(name))
+    }
+
     fn session(name: &str, host: Option<&str>) -> PickerRow {
         PickerRow {
             name: name.into(),
             label: format!("{name} \u{2014} 1 win"),
-            host: host.map(Host::from),
+            host: host.map_or(Host::Local, remote),
             kind: RowKind::Session,
             status: RowStatus::Live,
         }
@@ -1155,18 +1164,18 @@ mod tests {
         PickerRow {
             name: host.into(),
             label: host.into(),
-            host: Some(host.into()),
+            host: remote(host),
             kind: RowKind::Host,
             status,
         }
     }
 
-    /// The current LOCAL daemon's anchor row (Task 5): a `Host` row, `host` None.
+    /// The current LOCAL daemon's anchor row (Task 5): a `Host` row on `Local`.
     fn host_row_local() -> PickerRow {
         PickerRow {
             name: "local".into(),
             label: "local".into(),
-            host: None,
+            host: Host::Local,
             kind: RowKind::Host,
             status: RowStatus::Live,
         }
@@ -1177,7 +1186,7 @@ mod tests {
         PickerRow {
             name: name.into(),
             label: name.into(),
-            host: None,
+            host: Host::Local,
             kind: RowKind::Session,
             status: RowStatus::Live,
         }
@@ -1416,7 +1425,7 @@ mod tests {
         }
         match s.handle_key(b'\r') {
             Some(PickerOutcome::New { host, name, .. }) => {
-                assert_eq!(host, Some("prod".into()));
+                assert_eq!(host, remote("prod"));
                 assert_eq!(name, "newx1");
             }
             other => panic!("expected New, got {other:?}"),
@@ -1442,7 +1451,7 @@ mod tests {
         }
         match s.handle_key(b'\r') {
             Some(PickerOutcome::New { host, name, .. }) => {
-                assert_eq!(host, None, "the local anchor's host is None");
+                assert_eq!(host, Host::Local, "the local anchor's host is Local");
                 assert_eq!(name, "fresh");
             }
             other => panic!("expected New, got {other:?}"),
@@ -1462,7 +1471,10 @@ mod tests {
         assert_eq!(s.filter(), "", "the no-op does not leak into the filter");
         s.handle_key(0x0e); // api
         s.handle_key(0x0e); // scratch (ad-hoc host, index 4)
-        assert_eq!(s.selected().map(|r| r.name.clone()), Some("scratch".into()));
+        assert_eq!(
+            s.selected().map(|r| r.name.clone()),
+            Some("scratch".to_string())
+        );
         assert_eq!(
             s.handle_key(b'x'),
             Some(PickerOutcome::Forget {
@@ -1554,14 +1566,14 @@ mod tests {
         assert_eq!(
             p.mode,
             PickerMode::ConfirmKill {
-                host: Some("prod".into()),
+                host: remote("prod"),
                 name: "api".into(),
             }
         );
         assert_eq!(
             p.handle_key(b'y'),
             Some(PickerOutcome::Kill {
-                host: Some("prod".into()),
+                host: remote("prod"),
                 name: "api".into(),
             })
         );
@@ -1615,14 +1627,14 @@ mod tests {
             session("main", None),
             session("build", None),
         ];
-        let s = PickerState::new_with_current(rows, &None, "build");
+        let s = PickerState::new_with_current(rows, &Some(Host::Local), "build");
         assert_eq!(s.selected().map(|r| r.name.clone()), Some("build".into()));
     }
 
     #[test]
     fn new_with_current_falls_back_to_row_zero_when_session_absent() {
         let rows = vec![host_row_local(), session("main", None)];
-        let s = PickerState::new_with_current(rows, &None, "ghost");
+        let s = PickerState::new_with_current(rows, &Some(Host::Local), "ghost");
         // No "ghost" row → cursor parks at 0 (the anchor).
         assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
     }
@@ -1635,7 +1647,7 @@ mod tests {
             host_row("prod", RowStatus::Pending),
         ]);
         s.resolve_host(
-            &Some("prod".into()),
+            &remote("prod"),
             RowStatus::Live,
             vec![session("api", Some("prod"))],
         );
@@ -1651,13 +1663,13 @@ mod tests {
             "session spliced after its anchor"
         );
         assert_eq!(rows[prod + 1].kind, RowKind::Session);
-        assert_eq!(rows[prod + 1].host.as_deref(), Some("prod"));
+        assert_eq!(rows[prod + 1].host, remote("prod"));
     }
 
     #[test]
     fn resolve_host_unreachable_sets_status_only() {
         let mut s = PickerState::new(vec![host_row("prod", RowStatus::Pending)]);
-        s.resolve_host(&Some("prod".into()), RowStatus::Unreachable, vec![]);
+        s.resolve_host(&remote("prod"), RowStatus::Unreachable, vec![]);
         assert_eq!(
             s.selected().map(|r| r.status.clone()),
             Some(RowStatus::Unreachable)
@@ -1669,13 +1681,9 @@ mod tests {
     fn resolve_host_is_idempotent_on_reresolve() {
         let mut s = PickerState::new(vec![host_row("prod", RowStatus::Pending)]);
         let live = |name: &str| session(name, Some("prod"));
-        s.resolve_host(
-            &Some("prod".into()),
-            RowStatus::Live,
-            vec![live("a"), live("b")],
-        );
+        s.resolve_host(&remote("prod"), RowStatus::Live, vec![live("a"), live("b")]);
         // A second Live result replaces (does not duplicate) the child rows.
-        s.resolve_host(&Some("prod".into()), RowStatus::Live, vec![live("c")]);
+        s.resolve_host(&remote("prod"), RowStatus::Live, vec![live("c")]);
         let names: Vec<_> = s.visible().iter().map(|r| r.name.clone()).collect();
         assert_eq!(names, vec!["prod".to_string(), "c".to_string()]);
     }
@@ -1697,7 +1705,7 @@ mod tests {
             host_row("scratch", RowStatus::Pending),
         ]);
         s.replace_other_rows(
-            &None,
+            &Some(Host::Local),
             vec![host_row("scratch", RowStatus::Pending)],
             vec!["scratch".into()],
         );
@@ -1720,8 +1728,11 @@ mod tests {
     fn replace_other_rows_reclamps_a_cursor_that_lost_its_row() {
         let mut s = PickerState::new(vec![host_row_local(), host_row("prod", RowStatus::Live)]);
         s.handle_key(0x0e); // cursor -> "prod" (index 1)
-        assert_eq!(s.selected().map(|r| r.name.clone()), Some("prod".into()));
-        s.replace_other_rows(&None, vec![], vec![]);
+        assert_eq!(
+            s.selected().map(|r| r.name.clone()),
+            Some("prod".to_string())
+        );
+        s.replace_other_rows(&Some(Host::Local), vec![], vec![]);
         assert_eq!(
             s.visible().len(),
             1,
@@ -1762,7 +1773,7 @@ mod tests {
         assert_eq!(
             s.handle_key(b'\r'),
             Some(PickerOutcome::Reconnect {
-                host: Some("prod".into()),
+                host: remote("prod"),
                 name: "api".into(),
                 install: InstallPolicy::UseExisting,
             })
@@ -1779,15 +1790,61 @@ mod tests {
     fn enter_on_current_daemon_anchor_cancels_not_reconnect() {
         let mut s = PickerState::new_with_current(
             vec![host_row_local(), session("main", None)],
-            &None,
+            &Some(Host::Local),
             "main",
         );
-        s.handle_key(0x10); // up → the local anchor (host None == current_host None)
+        s.handle_key(0x10); // up → the local anchor (row host Local == attached Local)
         assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
         assert_eq!(
             s.handle_key(b'\r'),
             Some(PickerOutcome::Cancel),
             "Enter on the current daemon's anchor closes the picker; it does NOT reconnect with an empty name"
+        );
+    }
+
+    /// Attached to NOTHING (`current_host: None`), every row belongs to some
+    /// OTHER daemon — including the local ones. This is the property the
+    /// standalone picker rests on, and it is only expressible because `Host`
+    /// names `Local`: while the local daemon was encoded as `None`, this state
+    /// was indistinguishable from "attached to local", so Enter on the local
+    /// anchor answered `Cancel` (which the caller cannot tell from Esc, i.e.
+    /// quit to the shell) and local session rows answered `Switch` (which needs
+    /// the attached daemon a standalone picker does not have).
+    #[test]
+    fn detached_picker_reconnects_to_local_rows_instead_of_switching_or_cancelling() {
+        let mut s = PickerState::new_with_current(
+            vec![host_row_local(), session("main", None)],
+            &None, // attached to nothing
+            "main",
+        );
+
+        // The local session row: Reconnect, NOT Switch.
+        assert_eq!(s.selected().map(|r| r.kind), Some(RowKind::Host));
+        s.handle_key(0x0e); // down → the local session row
+        assert_eq!(
+            s.handle_key(b'\r'),
+            Some(PickerOutcome::Reconnect {
+                host: Host::Local,
+                name: "main".into(),
+                install: InstallPolicy::UseExisting,
+            }),
+            "detached, a local session row must reconnect: there is no attached daemon to Switch within"
+        );
+
+        // The local host anchor: Reconnect, NOT Cancel.
+        let mut s = PickerState::new_with_current(
+            vec![host_row_local(), session("main", None)],
+            &None,
+            "main",
+        );
+        assert_eq!(
+            s.handle_key(b'\r'),
+            Some(PickerOutcome::Reconnect {
+                host: Host::Local,
+                name: String::new(),
+                install: InstallPolicy::UseExisting,
+            }),
+            "detached, Enter on the local anchor must connect to it, not quit to the shell"
         );
     }
 
@@ -1798,15 +1855,18 @@ mod tests {
     fn enter_on_other_host_anchor_reconnects_with_empty_name() {
         let mut s = PickerState::new_with_current(
             vec![host_row_local(), host_row("prod", RowStatus::Pending)],
-            &None,
+            &Some(Host::Local),
             "main",
         );
         s.handle_key(0x0e); // down → prod anchor (host Some("prod") != current None)
-        assert_eq!(s.selected().map(|r| r.name.clone()), Some("prod".into()));
+        assert_eq!(
+            s.selected().map(|r| r.name.clone()),
+            Some("prod".to_string())
+        );
         assert_eq!(
             s.handle_key(b'\r'),
             Some(PickerOutcome::Reconnect {
-                host: Some("prod".into()),
+                host: remote("prod"),
                 name: String::new(),
                 install: InstallPolicy::UseExisting,
             })
@@ -1818,7 +1878,7 @@ mod tests {
     /// picking a session on a DIFFERENT daemon must `Reconnect`.
     #[test]
     fn attached_remote_same_daemon_switches_other_reconnects() {
-        let host = Some(Host::from("h"));
+        let host = Some(remote("h"));
         let mut s = PickerState::new_with_current(
             vec![
                 host_row("h", RowStatus::Live), // current daemon's anchor (host Some("h"))
@@ -1843,7 +1903,7 @@ mod tests {
         assert_eq!(
             s.handle_key(b'\r'),
             Some(PickerOutcome::Reconnect {
-                host: Some("other".into()),
+                host: remote("other"),
                 name: "b".into(),
                 install: InstallPolicy::UseExisting,
             }),
@@ -1880,15 +1940,18 @@ mod tests {
     fn reconnect_carries_the_install_toggle() {
         let mut s = PickerState::new_with_current(
             vec![host_row("prod", RowStatus::Pending)],
-            &None,
+            &Some(Host::Local),
             "main",
         );
-        assert_eq!(s.selected().map(|r| r.name.clone()), Some("prod".into()));
+        assert_eq!(
+            s.selected().map(|r| r.name.clone()),
+            Some("prod".to_string())
+        );
         s.handle_key(b'i'); // install on
         assert_eq!(
             s.handle_key(b'\r'),
             Some(PickerOutcome::Reconnect {
-                host: Some("prod".into()),
+                host: remote("prod"),
                 name: String::new(),
                 install: InstallPolicy::Provision,
             })
@@ -1914,7 +1977,7 @@ mod tests {
         }
         match s.handle_key(b'\r') {
             Some(PickerOutcome::New { host, name, .. }) => {
-                assert_eq!(host, None);
+                assert_eq!(host, Host::Local);
                 assert_eq!(name, "fresh");
             }
             other => panic!("expected New after typing a name, got {other:?}"),
@@ -1960,7 +2023,7 @@ mod tests {
         assert_eq!(
             s.handle_key(b'\r'),
             Some(PickerOutcome::Reconnect {
-                host: Some("wsl2".into()),
+                host: remote("wsl2"),
                 name: String::new(),
                 install: InstallPolicy::Provision,
             })
@@ -2212,7 +2275,7 @@ mod tests {
                 host_row("prod", RowStatus::Live),
                 session("api", Some("prod")),
             ],
-            &None,
+            &Some(Host::Local),
             "main",
         );
         s.handle_key(b'i'); // install on, in Navigate
@@ -2227,7 +2290,7 @@ mod tests {
         assert_eq!(
             s.handle_key(b'\r'),
             Some(PickerOutcome::Reconnect {
-                host: Some("prod".into()),
+                host: remote("prod"),
                 name: "api".into(),
                 install: InstallPolicy::Provision,
             }),
