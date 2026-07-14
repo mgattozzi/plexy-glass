@@ -385,7 +385,7 @@ where
                             // session rows under it) disappears. Stay in the
                             // picker; do NOT return.
                             roster::forget_adhoc(&host);
-                            let fresh = build_roster_rows(&current_target.host);
+                            let fresh = build_roster_rows(Some(&current_target.host));
                             state.replace_other_rows(
                                 &Some(current_target.host.clone()),
                                 fresh.rows,
@@ -557,6 +557,180 @@ const PICKER_ENTER: &[u8] = b"\x1b[?1049h";
 /// the content.
 const PICKER_LEAVE: &[u8] = b"\x1b[?1049l\x1b[?25h";
 
+/// Drive the session picker with NO attached session, to an outcome.
+///
+/// The picker used to exist only inside `pump`, i.e. only once you were already
+/// attached to something. That is exactly backwards for the case that needs it
+/// most: when an attach FAILS there is no session to open a picker in, so the
+/// error had nowhere to go but out of `run` and into the process exit. Detached,
+/// the picker becomes the answer to "that didn't work, where do you want to go
+/// instead" rather than a thing you can only reach once you're already somewhere.
+///
+/// Returns the daemon + session to attach next, or `None` to fall back to the
+/// command line (the user pressed Esc, or there is nothing anywhere to offer).
+///
+/// This is only representable because `Host` names `Local`: `current_host: None`
+/// now means "attached to nothing" rather than "attached to local", so `accept()`
+/// matches no row, and every Enter is a `Reconnect`. See `PickerState::accept`.
+///
+/// The caller owns raw mode (`HostTty`); this owns the alt screen for its
+/// lifetime.
+pub(crate) async fn run_standalone_picker<In, Out>(
+    stdin: &mut In,
+    stdout: &mut Out,
+    size: PtySize,
+    notice: &str,
+) -> Result<Option<(Target, String)>, ClientError>
+where
+    In: AsyncRead + Unpin,
+    Out: AsyncWrite + Unpin,
+{
+    // Nothing anywhere to offer -> the command line, rather than an empty box.
+    //
+    // Deliberately keyed on REACHABILITY, not on session count: a reachable
+    // daemon with zero sessions has plenty to offer, since `n` makes one on it.
+    // Likewise an empty roster is not the end of it while a daemon is up. Only
+    // "no hosts known AND no local daemon" is genuinely nowhere to go.
+    //
+    // The local probe is cheap enough to do inline: it is a unix socket, so a
+    // missing daemon fails in microseconds and never pays the per-host ssh
+    // budget the roster query does.
+    if roster::assemble(&roster::config_remotes(), &roster::load_adhoc()).is_empty()
+        && !local_daemon_is_live().await
+    {
+        return Ok(None);
+    }
+
+    let roster_rows = build_roster_rows(None);
+    let mut state = PickerState::new_with_current(roster_rows.rows, &None, "");
+    state.set_adhoc_hosts(roster_rows.adhoc);
+    state.set_size(size);
+    state.set_theme(PickerTheme::resolve(&roster::config_palette()));
+    state.set_notice(notice.to_string());
+    let mut picker_rx = Some(spawn_picker_query(
+        roster_rows.remote_hosts,
+        roster_rows.query_local,
+    ));
+
+    stdout
+        .write_all(PICKER_ENTER)
+        .await
+        .map_err(ClientError::Io)?;
+    tty::set_alt_active(true);
+    let outcome = drive_standalone_picker(stdin, stdout, &mut state, &mut picker_rx).await;
+    stdout
+        .write_all(PICKER_LEAVE)
+        .await
+        .map_err(ClientError::Io)?;
+    tty::set_alt_active(false);
+    stdout.flush().await.map_err(ClientError::Io)?;
+    outcome
+}
+
+/// Whether a daemon is listening on the local socket. `Connect::Only`, so asking
+/// can never start one — the point is to find out if there is anywhere to go, not
+/// to make somewhere to go.
+async fn local_daemon_is_live() -> bool {
+    matches!(
+        crate::request_reply(&Target::default(), Connect::Only, ClientMsg::ListSessions).await,
+        Ok(ServerMsg::SessionList { .. })
+    )
+}
+
+/// The standalone picker's event loop, split out so `run_standalone_picker` can
+/// pop the alt screen on every exit path including `?`.
+async fn drive_standalone_picker<In, Out>(
+    stdin: &mut In,
+    stdout: &mut Out,
+    state: &mut PickerState,
+    picker_rx: &mut Option<mpsc::UnboundedReceiver<(Host, HostStatus)>>,
+) -> Result<Option<(Target, String)>, ClientError>
+where
+    In: AsyncRead + Unpin,
+    Out: AsyncWrite + Unpin,
+{
+    let mut buf = BytesMut::with_capacity(STDIN_CHUNK);
+    stdout
+        .write_all(&state.render())
+        .await
+        .map_err(ClientError::Io)?;
+    stdout.flush().await.map_err(ClientError::Io)?;
+
+    loop {
+        tokio::select! {
+            n = stdin.read_buf(&mut buf) => {
+                let n = n.map_err(ClientError::Io)?;
+                // stdin closed with nothing chosen: there is no session to keep
+                // alive here (that is the whole point of this picker), so the
+                // only honest answer is the command line.
+                if n == 0 {
+                    return Ok(None);
+                }
+                let chunk = buf.split().to_vec();
+                match feed_picker_bytes(state, &chunk) {
+                    Some(PickerOutcome::Cancel) => return Ok(None),
+                    Some(
+                        PickerOutcome::Reconnect { host, name, install }
+                        | PickerOutcome::New { host, name, install },
+                    ) => {
+                        // A host anchor commits an empty name meaning "that
+                        // daemon's default session"; normalize it exactly as the
+                        // attached picker does, so an empty name never reaches
+                        // the wire (the daemon rejects it with `EmptyName`).
+                        let name = if name.is_empty() { "main".to_string() } else { name };
+                        return Ok(Some((Target { host, remote_bin: None, install }, name)));
+                    }
+                    Some(PickerOutcome::Switch(name)) => {
+                        // Unreachable: `accept` only emits `Switch` for a row on
+                        // the daemon we are attached to, and we are attached to
+                        // none. Treat it as what it would have to mean anyway
+                        // rather than panic on a state the types still permit.
+                        return Ok(Some((Target::default(), name)));
+                    }
+                    Some(PickerOutcome::Forget { host }) => {
+                        roster::forget_adhoc(&host);
+                        let fresh = build_roster_rows(None);
+                        state.replace_other_rows(&None, fresh.rows, fresh.adhoc);
+                        *picker_rx = Some(spawn_picker_query(fresh.remote_hosts, fresh.query_local));
+                    }
+                    Some(PickerOutcome::Kill { host, name }) => {
+                        // No session of ours to lose here, so unlike the attached
+                        // picker's Kill there is no current-session case: every
+                        // kill is someone else's, drop the row and stay.
+                        let target = Target { host: host.clone(), remote_bin: None, install: InstallPolicy::UseExisting };
+                        match crate::request_reply(&target, Connect::Only, ClientMsg::KillSession { name: name.clone() }).await {
+                            Ok(ServerMsg::SessionKilled { .. }) => state.remove_row(&host, &name),
+                            Ok(ServerMsg::Error(e)) => {
+                                state.set_notice(ClientError::DaemonError(e).to_string());
+                            }
+                            Ok(_) => {}
+                            Err(e) => state.set_notice(e.to_string()),
+                        }
+                    }
+                    None => {}
+                }
+            }
+            status = next_status(picker_rx) => {
+                match status {
+                    Some((host, hs)) => {
+                        let (row_status, rows) = resolve_status(&host, hs);
+                        state.resolve_host(&host, row_status, rows);
+                    }
+                    // Channel closed: every queried daemon resolved. Stop polling
+                    // (else `recv` returns `None` in a hot loop). `next_status`
+                    // pends forever once this is `None`, so the arm goes inert.
+                    None => *picker_rx = None,
+                }
+            }
+        }
+        stdout
+            .write_all(&state.render())
+            .await
+            .map_err(ClientError::Io)?;
+        stdout.flush().await.map_err(ClientError::Io)?;
+    }
+}
+
 /// The rows + query inputs assembled for one `OpenSessionPicker`.
 struct PickerAssembly {
     rows: Vec<PickerRow>,
@@ -611,7 +785,7 @@ fn build_picker_rows(sessions: Vec<SessionEntry>, current_host: &Host) -> Picker
         rows.push(session_row(e, current_host.clone()));
     }
 
-    let mut roster_rows = build_roster_rows(current_host);
+    let mut roster_rows = build_roster_rows(Some(current_host));
     rows.append(&mut roster_rows.rows);
 
     PickerAssembly {
@@ -673,11 +847,13 @@ struct RosterRows {
     query_local: bool,
 }
 
-fn build_roster_rows(current_host: &Host) -> RosterRows {
+/// `attached` is the daemon we are attached to, or `None` when we are attached to
+/// NONE — the standalone picker. Both fall out of the same rule: a daemon is an
+/// OTHER daemon unless it is the one we are attached to, so with `None` every
+/// daemon (local included) is queried and nothing is excluded.
+fn build_roster_rows(attached: Option<&Host>) -> RosterRows {
     let roster = roster::assemble(&roster::config_remotes(), &roster::load_adhoc());
-    // The local daemon is an OTHER daemon only when we're attached to a remote;
-    // attached-local, it IS the current daemon and is excluded.
-    let query_local = current_host.is_remote();
+    let query_local = attached != Some(&Host::Local);
     let mut rows = Vec::new();
     if query_local {
         rows.push(PickerRow {
@@ -691,7 +867,7 @@ fn build_roster_rows(current_host: &Host) -> RosterRows {
     let mut remote_hosts = Vec::new();
     let mut adhoc = Vec::new();
     for h in roster {
-        if current_host.remote() == Some(&h.host) {
+        if attached.and_then(Host::remote) == Some(&h.host) {
             continue; // this IS the current daemon
         }
         if h.source == RosterSource::AdHoc {

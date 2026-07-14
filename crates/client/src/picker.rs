@@ -254,6 +254,11 @@ pub struct PickerState {
     /// Resolved palette colors for the box (Task 1). Defaults to the fixed
     /// fallback theme; the pump seeds the real one via `set_theme`.
     theme: PickerTheme,
+    /// A one-line message pinned above the list, in the alert color. Carries the
+    /// reason a picker was opened FOR you rather than BY you — the connection
+    /// error that has nowhere else to go, since a failed attach has no session
+    /// to flash a status line in.
+    notice: Option<String>,
 }
 
 impl PickerState {
@@ -273,6 +278,7 @@ impl PickerState {
                 pixel_height: 0,
             },
             theme: PickerTheme::default(),
+            notice: None,
         }
     }
 
@@ -309,6 +315,7 @@ impl PickerState {
                 pixel_height: 0,
             },
             theme: PickerTheme::default(),
+            notice: None,
         }
     }
 
@@ -358,6 +365,11 @@ impl PickerState {
     }
 
     /// Seed the resolved palette theme (pump, at build).
+    /// Pin `text` above the list in the alert color. See `notice`.
+    pub fn set_notice(&mut self, text: String) {
+        self.notice = Some(text);
+    }
+
     pub const fn set_theme(&mut self, theme: PickerTheme) {
         self.theme = theme;
     }
@@ -840,8 +852,20 @@ impl PickerState {
             }
         };
 
-        // Interior rows = content lines + a blank + the prompt line.
-        let mut interior: Vec<Line> = lines;
+        // Interior rows = an optional notice + content lines + a blank + the
+        // prompt line. The notice leads: it is the reason the box is open.
+        let mut interior: Vec<Line> = Vec::new();
+        if let Some(notice) = &self.notice {
+            interior.push(Line {
+                glyph: "\u{26a0}".to_string(),
+                glyph_color: Some(self.theme.unreachable),
+                text: notice.clone(),
+                dim: false,
+                selected: false,
+                divider: false,
+            });
+        }
+        interior.extend(lines);
         interior.push(Line {
             glyph: String::new(),
             glyph_color: None,

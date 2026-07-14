@@ -25,7 +25,7 @@ pub use kill::{KillOutcome, kill, kill_all};
 use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
     ClientHello, ClientMsg, Codec, CreatePolicy, ExitStatus, GraphicsCaps, NegotiatedKbd,
-    PROTOCOL_VERSION, ServerMsg, SessionEntry, SessionName, SpawnSpec, client_handshake,
+    PROTOCOL_VERSION, PtySize, ServerMsg, SessionEntry, SessionName, SpawnSpec, client_handshake,
     client_handshake_with,
 };
 pub use pump::{PumpExit, handshake_spawn, pump};
@@ -195,102 +195,47 @@ pub async fn run(
         // raw window, drops back to cooked before the `ssh` child spawns (so auth
         // prompts land normally), then opens the transport and re-enters raw for
         // the handshake + session.
-        let (mut t, guard, probe) = if target.host.is_local() {
-            let t = open_transport(target, Connect::Spawn).await?;
-            let guard = HostTty::enter_raw(stdin_fd)?;
-            let probe = run_probe(stdin_fd);
-            (t, guard, probe)
-        } else {
-            let probe = {
-                let _raw = HostTty::enter_raw(stdin_fd)?;
-                run_probe(stdin_fd)
-            }; // _raw drops here, restoring cooked mode for SSH auth
-            let t = open_transport(target, Connect::Spawn).await?;
-            let guard = HostTty::enter_raw(stdin_fd)?;
-            (t, guard, probe)
-        };
-
-        // --- Enable escapes + emergency restore. Host-terminal-local (never goes
-        // over the wire), so this runs once here for both paths, inside the raw
-        // guard that now covers the rest of the session. ---
-        let mut out = io::stdout();
-        // Enable SGR-encoded mouse coords (?1006h), button-event tracking (?1002h,
-        // motion only while a button is held; ?1003h would flood with hover), and
-        // bracketed paste (?2004h). These are kept OUT of `EnabledCaps` (and so out of
-        // its teardown inverse) because HostTty disables ?1006/?1002/?2004
-        // unconditionally on restore, and order relative to the kbd enables doesn't
-        // matter since DEC private modes are independent.
-        let _ = out.write_all(b"\x1b[?1006h\x1b[?1002h\x1b[?2004h");
-        // Enable exactly the keyboard/focus/theme caps we classified.
-        let _ = out.write_all(&probe.caps.enable_bytes());
-        let _ = out.flush();
-
-        // Record the enabled set for both the normal and emergency teardown paths,
-        // then install the emergency restore (which reads the recorded caps). The
-        // `guard` local lives to the end of this iteration, so its `Drop` restores
-        // the tty on `break` (session end) and on any early `?` return before
-        // `pump` — exactly as the old per-attach guard did.
-        tty::set_enabled_caps(probe.caps);
-        tty::install_emergency_restore(stdin_fd, guard.original_termios());
-
-        let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
-        let hello = ClientHello {
-            version: PROTOCOL_VERSION,
-            term,
-            kbd: probe.kbd,
-            graphics: probe.graphics,
-            remote: target.host.is_remote(),
-        };
-        let server_hello = match client_handshake_with(&mut t.reader, &mut t.writer, hello).await {
-            Ok(h) => h,
-            Err(e) => {
-                // On SSH, a remote-binary-not-found (exit 127) shows up as a bare
-                // EOF; surface the actionable hint instead (mirrors `request_reply`).
-                return Err(t.ssh_not_found().await.unwrap_or_else(|| e.into()));
-            }
-        };
-        info!(
-            daemon_pid = server_hello.daemon_pid,
-            kbd = ?probe.kbd,
-            "connected to daemon"
-        );
-
-        let initial_size = current_size(stdin_fd)?;
-
-        let cmd = resolve_attach_spec(target.host.is_remote(), spawn_cmd.clone());
-        // The daemon picks the real session name when `name` was `None`, so
-        // the ONLY reliable source for "what am I attached to" is its
-        // `Attached` reply, not the request we sent.
-        let attached_name = handshake_spawn(
-            &mut t.reader,
-            &mut t.writer,
-            name,
-            create_if_missing,
-            cmd,
+        let attached =
+            match try_attach(target, name, spawn_cmd.clone(), create_if_missing, stdin_fd).await {
+                Ok(a) => a,
+                Err(e) => {
+                    // A connection error is not a reason to die. Offer the picker
+                    // instead: it is client-side and needs no session of its own, so
+                    // it works even when we are attached to nothing. Esc, or nothing
+                    // anywhere to offer, falls back to the command line.
+                    //
+                    // Raw mode for the picker's key reads: `try_attach`'s own guard
+                    // dropped on the way out, restoring the tty.
+                    let guard = HostTty::enter_raw(stdin_fd)?;
+                    let size = current_size(stdin_fd).unwrap_or(PtySize {
+                        rows: 24,
+                        cols: 80,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    });
+                    let picked =
+                        pump::run_standalone_picker(&mut stdin, &mut stdout, size, &e.to_string())
+                            .await;
+                    drop(guard);
+                    match picked {
+                        // Try again against whatever they chose.
+                        Ok(Some((t, n))) => {
+                            next = (t, Some(n));
+                            continue;
+                        }
+                        // Nowhere to go: report what actually went wrong, not
+                        // whatever the picker made of it.
+                        Ok(None) => break Err(e),
+                        Err(pe) => break Err(pe),
+                    }
+                }
+            };
+        let Attached {
+            transport: mut t,
+            guard: _guard,
             initial_size,
-        )
-        .await?;
-
-        // Remember this host in the ad-hoc roster so the session picker can
-        // list it next time, whether this is the initial `-H` attach or a
-        // picker-driven reconnect (`ReconnectTo` loops back through here). Only
-        // fires for a remote; best-effort (`add_adhoc` already swallows its own
-        // write errors). No double-listing: this host becomes `current_target`
-        // for the NEXT picker open, which excludes it from the query set.
-        if let Host::Remote(name) = &target.host {
-            roster::add_adhoc(name);
-        }
-
-        // Replay probe-window type-ahead now that a pane exists to receive it. These
-        // are plain keystrokes: focus/theme/mouse/paste modes are enabled only after
-        // the probe, so the post-DA1 tail can't carry those events. Send it as Input.
-        if !probe.type_ahead.is_empty() {
-            pump::send_client_msg(
-                &mut t.writer,
-                &ClientMsg::Input(bytes::Bytes::from(probe.type_ahead)),
-            )
-            .await?;
-        }
+            session: attached_name,
+        } = attached;
 
         // SIGWINCH plumbing.
         let (resize_tx, mut resize_rx) = mpsc::channel(4);
@@ -388,6 +333,147 @@ pub async fn run(
             process::exit(1);
         }
     }
+}
+
+/// One live attach: the daemon connection plus everything set up around it.
+///
+/// `guard` and `transport` are handed back rather than kept inside `try_attach`
+/// because they must outlive it — the raw-mode guard for the whole session, the
+/// transport for the pump. Dropping this drops both, restoring the tty and
+/// reaping the ssh child.
+struct Attached {
+    transport: Transport,
+    /// Raw mode for the session. Nothing reads it — binding it is the point: its
+    /// `Drop` restores the tty when the loop body ends, on every path.
+    guard: HostTty,
+    initial_size: PtySize,
+    /// The session we actually landed on. The daemon picks the name when we
+    /// asked for `None`, so its `Attached` reply is the ONLY reliable source.
+    session: String,
+}
+
+/// Connect, negotiate, and attach — every failure as a `Result`, never an escape.
+///
+/// This used to be inline in `run`'s loop, where ten separate `?`/`return Err`
+/// sites left the function entirely: past the loop, past the tail `match outcome`
+/// that owns the exit message, and out through `main`'s anyhow printer, which
+/// knows nothing about the terminal we left behind. Picking a version-skewed
+/// remote out of the picker therefore killed a client that was perfectly happily
+/// attached to a local session. Making the whole sequence one fallible value is
+/// what lets the caller treat "that daemon didn't work" as a thing to recover
+/// from rather than a reason to die.
+async fn try_attach(
+    target: &Target,
+    name: Option<String>,
+    spawn_cmd: Option<SpawnSpec>,
+    create_if_missing: CreatePolicy,
+    stdin_fd: BorrowedFd<'_>,
+) -> Result<Attached, ClientError> {
+    // The local terminal probe needs raw mode; SSH interactive auth
+    // (password/passphrase/host-key, read from /dev/tty by ssh) needs cooked
+    // mode; the pump needs raw mode again. LOCAL keeps the pre-SSH ordering
+    // exactly (connect, THEN one raw guard spanning probe/enable/handshake/
+    // pump) so local attach is behaviorally unchanged. SSH probes in a brief
+    // raw window, drops back to cooked before the `ssh` child spawns (so auth
+    // prompts land normally), then opens the transport and re-enters raw for
+    // the handshake + session.
+    let (mut t, guard, probe) = if target.host.is_local() {
+        let t = open_transport(target, Connect::Spawn).await?;
+        let guard = HostTty::enter_raw(stdin_fd)?;
+        let probe = run_probe(stdin_fd);
+        (t, guard, probe)
+    } else {
+        let probe = {
+            let _raw = HostTty::enter_raw(stdin_fd)?;
+            run_probe(stdin_fd)
+        }; // _raw drops here, restoring cooked mode for SSH auth
+        let t = open_transport(target, Connect::Spawn).await?;
+        let guard = HostTty::enter_raw(stdin_fd)?;
+        (t, guard, probe)
+    };
+
+    // --- Enable escapes + emergency restore. Host-terminal-local (never goes
+    // over the wire), so this runs once here for both paths, inside the raw
+    // guard that now covers the rest of the session. ---
+    let mut out = io::stdout();
+    // Enable SGR-encoded mouse coords (?1006h), button-event tracking (?1002h,
+    // motion only while a button is held; ?1003h would flood with hover), and
+    // bracketed paste (?2004h). These are kept OUT of `EnabledCaps` (and so out of
+    // its teardown inverse) because HostTty disables ?1006/?1002/?2004
+    // unconditionally on restore, and order relative to the kbd enables doesn't
+    // matter since DEC private modes are independent.
+    let _ = out.write_all(b"\x1b[?1006h\x1b[?1002h\x1b[?2004h");
+    // Enable exactly the keyboard/focus/theme caps we classified.
+    let _ = out.write_all(&probe.caps.enable_bytes());
+    let _ = out.flush();
+
+    // Record the enabled set for both the normal and emergency teardown paths,
+    // then install the emergency restore (which reads the recorded caps).
+    tty::set_enabled_caps(probe.caps);
+    tty::install_emergency_restore(stdin_fd, guard.original_termios());
+
+    let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
+    let hello = ClientHello {
+        version: PROTOCOL_VERSION,
+        term,
+        kbd: probe.kbd,
+        graphics: probe.graphics,
+        remote: target.host.is_remote(),
+    };
+    let server_hello = match client_handshake_with(&mut t.reader, &mut t.writer, hello).await {
+        Ok(h) => h,
+        Err(e) => {
+            // On SSH, a remote-binary-not-found (exit 127) shows up as a bare
+            // EOF; surface the actionable hint instead (mirrors `request_reply`).
+            return Err(t.ssh_not_found().await.unwrap_or_else(|| e.into()));
+        }
+    };
+    info!(
+        daemon_pid = server_hello.daemon_pid,
+        kbd = ?probe.kbd,
+        "connected to daemon"
+    );
+
+    let initial_size = current_size(stdin_fd)?;
+
+    let cmd = resolve_attach_spec(target.host.is_remote(), spawn_cmd);
+    let attached_name = handshake_spawn(
+        &mut t.reader,
+        &mut t.writer,
+        name,
+        create_if_missing,
+        cmd,
+        initial_size,
+    )
+    .await?;
+
+    // Remember this host in the ad-hoc roster so the session picker can
+    // list it next time, whether this is the initial `-H` attach or a
+    // picker-driven reconnect (`ReconnectTo` loops back through here). Only
+    // fires for a remote; best-effort (`add_adhoc` already swallows its own
+    // write errors). Only after a SUCCESSFUL attach: a host we could not reach
+    // has not earned a permanent row in everyone's picker.
+    if let Host::Remote(host) = &target.host {
+        roster::add_adhoc(host);
+    }
+
+    // Replay probe-window type-ahead now that a pane exists to receive it. These
+    // are plain keystrokes: focus/theme/mouse/paste modes are enabled only after
+    // the probe, so the post-DA1 tail can't carry those events. Send it as Input.
+    if !probe.type_ahead.is_empty() {
+        pump::send_client_msg(
+            &mut t.writer,
+            &ClientMsg::Input(bytes::Bytes::from(probe.type_ahead.clone())),
+        )
+        .await?;
+    }
+
+    Ok(Attached {
+        transport: t,
+        guard,
+        initial_size,
+        session: attached_name,
+    })
 }
 
 /// Shared request/reply scaffold: open one connection to `target` (spawning

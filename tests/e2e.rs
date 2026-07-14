@@ -5917,6 +5917,116 @@ fn follow_after_kill_switches_silently_to_the_only_other_session() {
     );
 }
 
+/// A connection error opens the picker instead of killing the client.
+///
+/// This is the whole point of the recovery work. Picking a version-skewed or
+/// unreachable remote used to take the client down: every failure in the attach
+/// sequence escaped `run` entirely, past the tail that owns the exit message, and
+/// out through main's anyhow printer — which knows nothing about the terminal it
+/// was leaving behind, so it painted the error over a still-drawn picker box.
+///
+/// The failure is forced with a stub `ssh` that exits nonzero, so this is
+/// deterministic and needs no network, no real remote, and no version skew. Same
+/// trick the OSC-8 and clipboard tests use. A real `-H badhost` would depend on
+/// DNS and on ssh's own timeouts, which is exactly the kind of
+/// environment-dependent assertion that has already reddened CI here once.
+///
+/// The local daemon is live with a session, so there IS somewhere to go — which
+/// is what makes the picker the right answer rather than exiting.
+#[test]
+fn a_failed_remote_attach_opens_the_picker_instead_of_exiting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // A local session to fall back to, so the picker has something to offer.
+    {
+        let mut local = TestSession::builder(&env)
+            .args(&["attach", "-n", "homebase"])
+            .start();
+        assert!(
+            local.wait_ready("homebase", Duration::from_secs(20)),
+            "local session never rendered: {}",
+            local.snapshot_str()
+        );
+        local.send_prefix(b'd');
+        assert!(
+            local.wait_exit(Duration::from_secs(10)),
+            "local client did not detach"
+        );
+    }
+
+    // Stub `ssh`: fail immediately, the way an unreachable host would.
+    let stub_dir = tmp.path().join("stubs");
+    fs::create_dir_all(&stub_dir).unwrap();
+    let stub_path = stub_dir.join("ssh");
+    fs::write(&stub_path, "#!/bin/sh\nexit 255\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&stub_path, Permissions::from_mode(0o755)).unwrap();
+
+    let mut sess = TestSession::builder(&env)
+        .args(&["-H", "unreachable-host", "attach"])
+        .path_prepend(&stub_dir)
+        .start();
+
+    // The client must still be alive, showing the picker, with the reason.
+    assert!(
+        sess.wait_for(b"homebase", Duration::from_secs(20)),
+        "a failed remote attach must land in the picker listing the local \
+         daemon's sessions, not kill the client: {}",
+        sess.snapshot_str()
+    );
+    let out = sess.snapshot_str();
+    assert!(
+        out.contains("local"),
+        "the picker must offer the local daemon: {out}"
+    );
+
+    // Esc from here is a deliberate choice to leave, so it exits.
+    sess.send(b"\x1b");
+    assert!(
+        sess.wait_exit(Duration::from_secs(10)),
+        "esc in the standalone picker must fall back to the command line"
+    );
+}
+
+/// With nowhere to go, a failed attach exits to the command line rather than
+/// opening an empty box: no roster hosts and no local daemon means the picker has
+/// literally nothing to offer. The user's rule — "no local and no remote for a
+/// cold start, fall back to the command line".
+///
+/// Note this is keyed on REACHABILITY, not on session count: a reachable daemon
+/// with zero sessions still has plenty to offer, since `n` makes one.
+#[test]
+fn a_failed_attach_with_nowhere_to_go_exits_to_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    // No local daemon is started, and the isolated runtime dir has no roster.
+    let stub_dir = tmp.path().join("stubs");
+    fs::create_dir_all(&stub_dir).unwrap();
+    let stub_path = stub_dir.join("ssh");
+    fs::write(&stub_path, "#!/bin/sh\nexit 255\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&stub_path, Permissions::from_mode(0o755)).unwrap();
+
+    let mut sess = TestSession::builder(&env)
+        .args(&["-H", "unreachable-host", "attach"])
+        .path_prepend(&stub_dir)
+        .start();
+
+    assert!(
+        sess.wait_exit(Duration::from_secs(20)),
+        "with no local daemon and no roster there is nothing to pick, so the \
+         client must exit rather than open an empty picker: {}",
+        sess.snapshot_str()
+    );
+    let out = sess.snapshot_str();
+    assert!(
+        !out.contains("plexy-glass \u{2500}") && !out.contains("\u{250c}"),
+        "no picker box should have been drawn: {out}"
+    );
+}
+
 /// A session that never opens the picker must never pop the alternate screen.
 ///
 /// The client only ever pushes `?1049h` for the picker, but `tty::restore` used
