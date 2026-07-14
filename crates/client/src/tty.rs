@@ -77,8 +77,9 @@ impl HostTty {
         // ?1004l, ?2031l) is whatever negotiation actually enabled, see
         // `negotiated_teardown_bytes`.
         let mut out = io::stdout();
-        let _ = out
-            .write_all(b"\x1b[?2004l\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l\x1b[0 q");
+        let _ = out.write_all(b"\x1b[?2004l\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?25h");
+        let _ = out.write_all(alt_pop_bytes());
+        let _ = out.write_all(b"\x1b[0 q");
         let _ = out.write_all(&negotiated_teardown_bytes());
         let _ = out.flush();
         self.restored = true;
@@ -130,20 +131,60 @@ static EMERGENCY_FD: OnceLock<RawFd> = OnceLock::new();
 // Wrap it in a `Mutex` so the `OnceLock` is safe to share between threads.
 static EMERGENCY_TERMIOS: OnceLock<Mutex<Termios>> = OnceLock::new();
 static ARMED: AtomicBool = AtomicBool::new(false);
-static ENABLED_CAPS: OnceLock<EnabledCaps> = OnceLock::new();
+/// Replaceable, NOT a `OnceLock`: `run`'s attach loop re-probes the terminal and
+/// calls `set_enabled_caps` on **every** iteration, so a set-once cell would pin
+/// the first attach's caps forever and a reconnect to a differently-capable
+/// terminal would tear down the wrong inverse.
+static ENABLED_CAPS: Mutex<Option<EnabledCaps>> = Mutex::new(None);
+/// Whether we have pushed the alternate screen and owe a pop. See
+/// [`set_alt_active`].
+static ALT_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Record what the client enabled outward so both teardown paths emit the exact
-/// inverse. Call once, right after the negotiation phase.
+/// inverse. Called once per attach, and **overwrites**: see `ENABLED_CAPS`.
 pub fn set_enabled_caps(caps: EnabledCaps) {
-    let _ = ENABLED_CAPS.set(caps);
+    if let Ok(mut slot) = ENABLED_CAPS.lock() {
+        *slot = Some(caps);
+    }
+}
+
+/// Record that the alternate screen has been entered (`true`) or left (`false`).
+///
+/// The picker owns the alt screen and writes the `?1049h`/`?1049l` itself, on the
+/// same writer it renders with; this is only the bookkeeping that lets the
+/// teardown paths below know whether a pop is owed. Without it they emit
+/// `?1049l` unconditionally, which is wrong in both directions: on a failure
+/// that never opened a picker (a cold `-H badhost`, say) it pops a buffer we
+/// never pushed, and `?1049l` is defined to restore the cursor as DECRC — from a
+/// slot we never saved — so the cursor jumps somewhere arbitrary and whatever
+/// prints next lands there. That was the garbled error-over-the-picker-box.
+pub fn set_alt_active(active: bool) {
+    ALT_ACTIVE.store(active, Ordering::SeqCst);
+}
+
+/// The alt-screen pop, but only when we actually pushed. Consumes the flag so a
+/// double teardown (guard `Drop` then the emergency path) pops exactly once.
+fn alt_pop_bytes() -> &'static [u8] {
+    if ALT_ACTIVE.swap(false, Ordering::SeqCst) {
+        b"\x1b[?1049l"
+    } else {
+        b""
+    }
 }
 
 /// The kbd/focus/theme teardown bytes (precise inverse of the enable set), or
 /// empty if negotiation never recorded caps.
+///
+/// `try_lock`, not `lock`: this runs from the panic hook and the signal handler,
+/// where blocking on a mutex a panicking thread might still hold would wedge the
+/// one path whose entire job is to work when everything else is broken. Losing
+/// the kbd teardown in that (vanishingly unlikely) race is a far better outcome
+/// than hanging, and the termios restore below does not depend on it.
 fn negotiated_teardown_bytes() -> Vec<u8> {
     ENABLED_CAPS
-        .get()
-        .map(super::negotiate::EnabledCaps::teardown_bytes)
+        .try_lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(EnabledCaps::teardown_bytes))
         .unwrap_or_default()
 }
 
@@ -154,6 +195,17 @@ fn negotiated_teardown_bytes() -> Vec<u8> {
 /// The signal handlers re-raise the signal with the default disposition so
 /// the parent shell observes the canonical exit status.
 pub fn install_emergency_restore(fd: BorrowedFd<'_>, snapshot: &Termios) {
+    // invariant: process-scoped, install exactly once. `run`'s loop calls this
+    // every attach, and the set-once guard is load-bearing rather than an
+    // oversight: re-running would `take_hook` the hook WE installed last time and
+    // wrap it again (one more nested `restore_from_static` per reconnect), and
+    // leak another signal task per reconnect, all racing to restore and re-raise.
+    // Nothing it captures is per-attach anyway — the fd is always stdin, and the
+    // termios snapshot is identical every time because each iteration's guard
+    // restores the original before the next `enter_raw` re-reads it. The one
+    // genuinely per-attach thing, the enabled caps, is read dynamically by
+    // `restore_from_static` via `negotiated_teardown_bytes`, so it stays fresh
+    // without reinstalling anything here.
     if EMERGENCY_INSTALLED.set(()).is_err() {
         return;
     }
@@ -213,8 +265,9 @@ fn restore_from_static() {
     let fd = unsafe { BorrowedFd::borrow_raw(fd) };
     let _ = termios::tcsetattr(fd, SetArg::TCSANOW, &snap);
     let mut out = io::stdout();
-    let _ =
-        out.write_all(b"\x1b[?2004l\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l\x1b[0 q");
+    let _ = out.write_all(b"\x1b[?2004l\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?25h");
+    let _ = out.write_all(alt_pop_bytes());
+    let _ = out.write_all(b"\x1b[0 q");
     let _ = out.write_all(&negotiated_teardown_bytes());
     let _ = out.flush();
 }

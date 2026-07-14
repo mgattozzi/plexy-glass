@@ -16,6 +16,7 @@ use crate::picker::{PickerOutcome, PickerRow, PickerState, PickerTheme, RowKind,
 use crate::query::{self, HostStatus};
 use crate::roster::{self, RosterSource};
 use crate::transport::{Connect, Host, InstallPolicy, RemoteName, Target};
+use crate::tty;
 
 const STDIN_CHUNK: usize = 4096;
 
@@ -186,6 +187,11 @@ where
         let entries = fresh_session_list(current_target).await?;
         let (state, rx) = build_picker_state(entries, current_target, attached_name, size);
         stdout
+            .write_all(PICKER_ENTER)
+            .await
+            .map_err(ClientError::Io)?;
+        tty::set_alt_active(true);
+        stdout
             .write_all(&state.render())
             .await
             .map_err(ClientError::Io)?;
@@ -258,6 +264,8 @@ where
                         // resolves.
                         let (state, rx) =
                             build_picker_state(sessions, current_target, &current, size);
+                        stdout.write_all(PICKER_ENTER).await.map_err(ClientError::Io)?;
+                        tty::set_alt_active(true);
                         stdout.write_all(&state.render()).await.map_err(ClientError::Io)?;
                         stdout.flush().await.map_err(ClientError::Io)?;
                         picker_rx = Some(rx);
@@ -291,8 +299,9 @@ where
                     let (mut state, current) = picker.take().expect("picker.is_some() checked above");
                     match feed_picker_bytes(&mut state, &chunk) {
                         Some(PickerOutcome::Switch(name)) => {
-                            // Leaving the picker: unhide the cursor it hid each frame.
-                            stdout.write_all(b"\x1b[?25h").await.map_err(ClientError::Io)?;
+                            // Leaving the picker: pop back to the main screen.
+                            stdout.write_all(PICKER_LEAVE).await.map_err(ClientError::Io)?;
+                            tty::set_alt_active(false);
                             stdout.flush().await.map_err(ClientError::Io)?;
                             if name == current {
                                 // Reselecting the already-attached session: no
@@ -316,8 +325,9 @@ where
                             picker_rx = None;
                         }
                         Some(PickerOutcome::Cancel) => {
-                            // Leaving the picker: unhide the cursor it hid each frame.
-                            stdout.write_all(b"\x1b[?25h").await.map_err(ClientError::Io)?;
+                            // Leaving the picker: pop back to the main screen.
+                            stdout.write_all(PICKER_LEAVE).await.map_err(ClientError::Io)?;
+                            tty::set_alt_active(false);
                             stdout.flush().await.map_err(ClientError::Io)?;
                             send_client_msg(&mut *daemon_write, &ClientMsg::Redraw).await?;
                             picker_rx = None;
@@ -346,12 +356,15 @@ where
                             } else {
                                 name
                             };
-                            // Leaving the picker to re-attach: unhide the cursor.
-                            // Load-bearing on the reconnect path — the re-attach
-                            // runs SSH auth in cooked mode reading /dev/tty before
-                            // any daemon frame, so a still-hidden cursor means
-                            // typing an SSH password blind.
-                            stdout.write_all(b"\x1b[?25h").await.map_err(ClientError::Io)?;
+                            // Leaving the picker to re-attach: pop back to the
+                            // main screen. Load-bearing on the reconnect path —
+                            // the re-attach runs SSH auth in cooked mode reading
+                            // /dev/tty before any daemon frame, so a still-hidden
+                            // cursor means typing an SSH password blind, and a
+                            // still-pushed alt buffer means the prompt (and any
+                            // error) lands on a screen that is about to vanish.
+                            stdout.write_all(PICKER_LEAVE).await.map_err(ClientError::Io)?;
+                            tty::set_alt_active(false);
                             stdout.flush().await.map_err(ClientError::Io)?;
                             return Ok(PumpExit::ReconnectTo {
                                 target: Target {
@@ -519,6 +532,30 @@ where
         }
     }
 }
+
+/// Enter the picker's screen: push the alternate screen buffer.
+///
+/// The picker is a full-screen modal, and until now it painted straight onto the
+/// MAIN screen — its `render` opens with `\x1b[2J\x1b[H`, wiping whatever the
+/// daemon had composed there. That is why `Switch`/`Cancel` have to ask the
+/// daemon to `Redraw`, and why anything that went wrong between closing the
+/// picker and the next frame (a failed reconnect, say) printed its error on top
+/// of a still-resident box. On the alt buffer the main screen is left exactly as
+/// the daemon last painted it, and popping restores it for free.
+///
+/// The `2J` in `render` is still right — it clears the ALT buffer on entry, which
+/// may hold stale content from a previous push.
+const PICKER_ENTER: &[u8] = b"\x1b[?1049h";
+
+/// Leave the picker's screen: pop back to the main buffer, then unhide the cursor
+/// `render` hid. Pop first, so the cursor we unhide is the main screen's.
+///
+/// Note this does NOT remove the need for the `Redraw` on the `Switch`/`Cancel`
+/// paths: `ServerMsg::Output` frames are dropped while the picker is open (see
+/// the drain arm's `picker.is_none()` guard), so the main screen the terminal
+/// restores is intact but STALE. Popping fixes the paint; only the daemon can fix
+/// the content.
+const PICKER_LEAVE: &[u8] = b"\x1b[?1049l\x1b[?25h";
 
 /// The rows + query inputs assembled for one `OpenSessionPicker`.
 struct PickerAssembly {

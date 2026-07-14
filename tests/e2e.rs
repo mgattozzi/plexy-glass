@@ -5917,6 +5917,50 @@ fn follow_after_kill_switches_silently_to_the_only_other_session() {
     );
 }
 
+/// A session that never opens the picker must never pop the alternate screen.
+///
+/// The client only ever pushes `?1049h` for the picker, but `tty::restore` used
+/// to emit `?1049l` unconditionally on every teardown. That is not a harmless
+/// extra byte: `?1049l` restores the cursor as DECRC, from a save slot we never
+/// wrote, so it parks the cursor somewhere arbitrary and whatever prints next
+/// (an error, the shell prompt) lands there. It is what painted a handshake
+/// error across a half-drawn picker box, and it fires on the plainest possible
+/// path — attach, detach, no picker in sight.
+///
+/// Asserted on the CUMULATIVE buffer rather than a snapshot: the bug is a stray
+/// byte at teardown, so the whole stream is the subject.
+#[test]
+fn attach_and_detach_never_pop_an_alt_screen_we_did_not_push() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = isolate_dirs(&tmp);
+
+    let mut sess = TestSession::builder(&env)
+        .args(&["attach", "-n", "solo"])
+        .start();
+    assert!(
+        sess.wait_ready("solo", Duration::from_secs(20)),
+        "session never rendered: {}",
+        sess.snapshot_str()
+    );
+    sess.send_prefix(b'd');
+    assert!(
+        sess.wait_exit(Duration::from_secs(10)),
+        "client did not exit on detach"
+    );
+
+    let out = sess.snapshot();
+    let find = |needle: &[u8]| out.windows(needle.len()).any(|w| w == needle);
+    assert!(
+        !find(b"\x1b[?1049h"),
+        "no picker was opened, so the alt screen must never be pushed"
+    );
+    assert!(
+        !find(b"\x1b[?1049l"),
+        "popped an alt screen we never pushed; that DECRC cursor restore is the \
+         stray jump that misplaces whatever prints next"
+    );
+}
+
 /// The invariant the follow feature must never violate: a plain DETACH
 /// (`Ctrl+a d`) still exits the client to the shell, even though another live
 /// session exists to follow to. Only a session END (kill, or the last shell
