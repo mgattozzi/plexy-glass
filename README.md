@@ -69,9 +69,16 @@ integration.
 - A visual session picker (`Ctrl+a w`) that spans multiple daemons at once (the
   local daemon plus every host in your [`remotes`](docs/configuration.md#remotes)
   roster, and every host you've `-H` attached to before), with `Enter` to
-  reconnect across hosts, and a choose-tree
+  reconnect across hosts, `k` to kill the session under the cursor (`y`/`n`
+  confirm), and a choose-tree
   (session → window → pane drill-down with incremental filter `/`, collapse/expand `h`/`l`,
   and session rename `r`, `Ctrl+a W`)
+- [Follow to another session](docs/configuration.md#following-when-your-session-ends)
+  when yours ends (killed, or its last shell exits): no other sessions and you
+  drop to the shell same as always, exactly one and you're moved there
+  silently, two or more and you land on the most-recently-used one with the
+  picker open so you can go elsewhere; a plain detach (`Ctrl+a d`) always
+  still exits to the shell
 - Pane mobility: break a pane to its own window, join it elsewhere, swap
   panes (including cross-window swap with the marked pane), and a marked pane
   for cross-window moves; focus and zoom follow the slot, mark is preserved

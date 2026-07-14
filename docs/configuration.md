@@ -1166,6 +1166,7 @@ typing narrows the list.
 | `n` | New session on the host under the cursor (prompts for a name); no-op off a host row |
 | `i` | Toggle connect-with-install for the next host connect (always, regardless of the cursor row or the filter) |
 | `x` | Forget the ad-hoc host under the cursor; no-op elsewhere |
+| `k` | Kill the session under the cursor (prompts `y`/`n` to confirm); no-op off a session row |
 | `Esc` | Cancel and return to the current session |
 | Any other key | No-op — letters don't filter here; press `/` first |
 
@@ -1204,6 +1205,14 @@ you type persists after you leave filter mode (the list stays narrowed), so you
 can `/` to narrow, `Enter` to stop typing, then arrow through the matches; `Esc`
 while filtering clears it.
 
+`k` opens a kill confirmation for the session row under the cursor (`y`
+commits, `n` or `Esc` aborts back to Navigate with nothing killed); it's a
+no-op on a host anchor or the `＋` slot, mirroring choose-tree's `x`. Killing
+a session that **isn't** the one you're attached to just drops its row from
+the picker and leaves you where you are. Killing **the session you're
+currently attached to** ends your own connection too, see [Following when
+your session ends](#following-when-your-session-ends) for what happens next.
+
 The last row is always `＋ Connect to a host…`, pinned past every section and
 exempt from the filter, so it's reachable even when a search matches nothing
 else. `Enter` on it opens a one-line prompt; type any ssh target (the same
@@ -1222,6 +1231,32 @@ provisions or updates the remote `plexy-glass` binary over SSH before attaching,
 the same effect as `plexy-glass -H host --install` on the CLI (see
 [docs/ssh.md](ssh.md)). The footer shows its current state (`i install: on`/`off`)
 so it's never silently on for a host you didn't mean to install to.
+
+## Following when your session ends
+
+When the session you're attached to **ends**, whether you killed it (`k`/`y`
+in the picker above) or its last shell just exited on its own, plexy-glass
+doesn't drop you to your outer shell if there's somewhere else on the same
+daemon to go:
+
+- **No other sessions.** Exit to the shell, same as if the feature didn't
+  exist.
+- **Exactly one other session.** Reattach to it silently: no picker, no
+  prompt, you just land there.
+- **Two or more other sessions.** Reattach to the most-recently-used one (the
+  one you were attached to most recently before this one), then open the
+  session picker on top of it, so a wrong guess is one keystroke away from
+  being corrected.
+
+"Most recently used" comes from a `last_active` timestamp the daemon stamps on
+every session at creation and at every attach (`SessionEntry.last_active`,
+protocol v13); the client asks for the current session list and picks the
+newest among whatever's left.
+
+A plain **detach** (`Ctrl+a d`) is unaffected by any of this: it always drops
+you to the shell, even when other sessions are alive. Only the session itself
+ending, killed or its last shell exiting, triggers a follow; detaching is you
+choosing to leave, not the session going away.
 
 ## Choose-tree (`Ctrl+a W`)
 
