@@ -24,9 +24,9 @@ pub use error::ClientError;
 pub use kill::{KillOutcome, kill, kill_all};
 use plexy_glass_protocol::errors::CodecError;
 use plexy_glass_protocol::{
-    ClientHello, ClientMsg, Codec, CreatePolicy, ExitStatus, GraphicsCaps, NegotiatedKbd,
-    PROTOCOL_VERSION, PtySize, ServerMsg, SessionEntry, SessionName, SpawnSpec, client_handshake,
-    client_handshake_with,
+    ClientHello, ClientMsg, Codec, CreatePolicy, ExitStatus, GraphicsCaps, HandshakeError,
+    NegotiatedKbd, PROTOCOL_VERSION, PtySize, ServerMsg, SessionEntry, SessionName, SpawnSpec,
+    client_handshake, client_handshake_with,
 };
 pub use pump::{PumpExit, handshake_spawn, pump};
 pub use shell_integration::shell_integration_snippet;
@@ -422,9 +422,21 @@ async fn try_attach(
     };
     let server_hello = match client_handshake_with(&mut t.reader, &mut t.writer, hello).await {
         Ok(h) => h,
+        Err(HandshakeError::VersionMismatch { ours, peer }) if target.host.is_remote() => {
+            // Answer a version-skewed remote directly, and deliberately WITHOUT
+            // asking `ssh_not_found`: this is not a missing-binary case, and that
+            // check `wait()`s on the ssh child — which a mismatch does not
+            // guarantee has exited, since it is OUR check on the peer's
+            // ServerHello that fired, not the peer hanging up.
+            return Err(ClientError::RemoteVersionSkew {
+                peer,
+                ours,
+                provisioned: target.install.provisions(),
+            });
+        }
         Err(e) => {
-            // On SSH, a remote-binary-not-found (exit 127) shows up as a bare
-            // EOF; surface the actionable hint instead (mirrors `request_reply`).
+            // On SSH, no working remote binary shows up as a bare EOF; surface
+            // the actionable hint instead (mirrors `request_reply`).
             return Err(t.ssh_not_found().await.unwrap_or_else(|| e.into()));
         }
     };

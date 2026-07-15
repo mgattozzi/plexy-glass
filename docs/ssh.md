@@ -46,8 +46,24 @@ widget (see [docs/configuration.md](configuration.md)).
 
 Note that the marker rides protocol v11: after you upgrade past it, re-run
 `--install` once per remote host so the remote daemon matches (a v11 client
-against a v10 daemon prints `handshake: peer speaks protocol version 10, we
-speak 11` until you do).
+against a v10 daemon reports the skew until you do).
+
+That advice has one important limit. `--install` fetches the rolling `nightly`
+release, so it can only move a remote to **whatever last passed CI**. If you are
+running a locally-built client that is ahead of the nightly — or CI is red, which
+freezes the nightly where it stands — then re-running `--install` provisions the
+same too-old binary and reports success, and the mismatch stays exactly where it
+was. plexy-glass says which case you are in rather than repeating the advice:
+
+```
+the remote daemon speaks protocol v12, this client speaks v13. --install already
+ran, so the nightly release is BEHIND this client and cannot fix it: either point
+--remote-bin at a matching binary, or use a client built from the same nightly
+```
+
+There is no `--install-version` or local-binary push yet (the latter needs
+cross-compiling to the remote's triple), so for a dev client ahead of the
+nightly, `--remote-bin` pointing at a binary you built for that host is the way.
 
 `--install` stops the remote daemon whenever it actually pushes a new binary,
 because writing the binary is not an upgrade on its own: the daemon already
