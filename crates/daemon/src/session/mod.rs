@@ -1578,6 +1578,24 @@ mod tests {
         }
     }
 
+    /// A child that writes NOTHING, for tests that paint the grid themselves.
+    ///
+    /// `spec()` spawns `/bin/sh` with no args, which on a PTY is an INTERACTIVE
+    /// shell: it prints a prompt, asynchronously, and that prompt lands at row 0
+    /// col 0 — exactly where grid-painting fixtures go. A test that paints a cell
+    /// and then asserts on it is racing the prompt, and loses whenever the child
+    /// gets scheduled first (which a loaded CI box makes much likelier; this is
+    /// the same shape as the historical `..._from_a_real_bel` flake). `cat` just
+    /// blocks on stdin forever and never touches the grid.
+    fn silent_spec() -> SpawnSpec {
+        SpawnSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+        }
+    }
+
     fn size() -> PtySize {
         PtySize {
             rows: 24,
@@ -2660,7 +2678,10 @@ mod tests {
     async fn osc8_click_reports_open_error_off_lock() {
         use plexy_glass_mux::{MouseButton, MouseEvent, MouseKind, MouseModifiers};
         let _g = test_env::isolate();
-        let s = Session::new("main".into(), spec(), size(), cfg()).unwrap();
+        // `silent_spec`, not `spec`: this paints a hyperlink at row 0 col 0 and
+        // then clicks it, so an interactive shell's prompt landing there first
+        // would silently erase the fixture and the click would find nothing.
+        let s = Session::new("main".into(), silent_spec(), size(), cfg()).unwrap();
         let pane = {
             let m = s.window_manager.lock().await;
             m.active_window().pane(PaneId(0)).cloned().unwrap()
