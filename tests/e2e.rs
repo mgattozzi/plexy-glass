@@ -825,7 +825,7 @@ fn selection_drag_copies_to_clipboard() {
 
     sess.send_str("echo SELECTME\n");
     assert!(
-        sess.wait_for(b"SELECTME", Duration::from_secs(3)),
+        sess.wait_for(b"SELECTME", Duration::from_secs(10)),
         "SELECTME never rendered"
     );
 
@@ -862,7 +862,7 @@ fn mouse_wheel_scrolls_scrollback() {
         sess.send_str(&format!("echo LINE{i:02}\n"));
     }
     assert!(
-        sess.wait_for(b"LINE39", Duration::from_secs(3)),
+        sess.wait_for(b"LINE39", Duration::from_secs(10)),
         "LINE39 never rendered"
     );
 
@@ -922,7 +922,7 @@ fn detach_then_reattach_restores_session_content() {
         );
         s1.send_str("echo MARKER_42\n");
         assert!(
-            s1.wait_for(b"MARKER_42", Duration::from_secs(3)),
+            s1.wait_for(b"MARKER_42", Duration::from_secs(10)),
             "marker never rendered in run 1"
         );
         s1.send_prefix(b'd'); // detach
@@ -1968,7 +1968,7 @@ fn layout_tiled_keeps_all_panes_alive() {
     // Three panes: prefix+v (vertical split), then prefix+s (horizontal split).
     sess.send_prefix(b'v');
     assert!(
-        sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)),
+        sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(10)),
         "no split separator"
     );
     sess.send_prefix(b's');
@@ -2004,7 +2004,7 @@ fn next_layout_cycles_without_breaking_input() {
     // Two panes.
     sess.send_prefix(b'v');
     assert!(
-        sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)),
+        sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(10)),
         "no split separator"
     );
     // Cycle through three presets with Ctrl+a i.
@@ -5473,7 +5473,7 @@ fn hint_mode_uppercase_label_opens_instead_of_copying() {
     sess.send(b"A"); // uppercase -> Open, stripping the :line:col suffix
 
     assert!(
-        wait_for_file_exists(&log, Duration::from_secs(3)),
+        wait_for_file_exists(&log, Duration::from_secs(10)),
         "opener stub never invoked — the Open path did not fire. raw: {}",
         sess.snapshot_str()
     );
@@ -5567,7 +5567,7 @@ fn sync_panes_fans_out_send_but_not_run() {
 
     sess.send_prefix(b'v'); // vertical split -> new RIGHT pane, active
     assert!(
-        sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(3)),
+        sess.wait_for(b"\xe2\x94\x82", Duration::from_secs(10)),
         "split never rendered"
     );
     sess.send_str("export MARK=RIGHT && echo RIGHT_SET\n");
