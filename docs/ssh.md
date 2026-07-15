@@ -25,7 +25,7 @@ it — they aren't client→daemon connections.
 daemon request and rides the bridge like everything else. But `kill` with no
 `-n` stops the daemon *process* by signalling it, which the client can only do
 locally — so for `-H` it runs `<remote-bin> kill` **on the remote host** over
-SSH (same PATH-then-cache binary resolution as the bridge) and prints the
+SSH (same binary search as the bridge, see `--remote-bin`) and prints the
 remote's outcome. `plexy-glass -H host kill` therefore stops the *remote*
 daemon, never your local one.
 
@@ -76,30 +76,41 @@ invokes it for you as the SSH command.
 
 ## `--remote-bin`
 
-Without `--remote-bin`, plexy-glass tries `plexy-glass` on the remote's PATH
-first and falls back to the `--install` cache path, so both a system install
-and an `--install`-provisioned binary work with no extra flag:
+Without `--remote-bin`, plexy-glass searches the remote for a working binary, in
+this order:
 
-1. `--remote-bin <path>` — explicit, always wins. Invoked directly, no fallback.
-2. bare `plexy-glass` — used if it's on the remote's **non-interactive** PATH.
-   `ssh host cmd` runs a non-login shell, so `~/.cargo/bin` and similar
-   user-local install locations often aren't there even if they'd be on PATH
-   in an interactive session; put `plexy-glass` on the remote's system PATH
-   (e.g. `/usr/local/bin`) for this to hit.
-3. the `--install` cache path (`~/.cache/plexy-glass/bin/plexy-glass`) — where
-   `--install` provisions the binary. This is the fallback when it isn't on
-   PATH, so `--install` once and then plain `-H <host> <verb>` both find it.
+1. `--remote-bin <path>` — explicit, always wins. Invoked directly, no search.
+2. bare `plexy-glass`, on the remote's **non-interactive** PATH.
+3. `~/.cargo/bin/plexy-glass`
+4. `~/.local/bin/plexy-glass`
+5. `~/.cache/plexy-glass/bin/plexy-glass` — where `--install` provisions it.
 
-The fallback (steps 2 and 3) runs as a single `sh -c` conditional on the
-remote, so it's correct whatever the remote **login** shell is — `ssh host cmd`
-re-parses the command through the login shell, which may be nushell or fish,
-not POSIX `sh`.
+Steps 3 and 4 exist because of a genuinely confusing failure: `ssh host cmd`
+runs your login shell **non-interactively**, so none of the rc files that build
+your interactive PATH are read. A `plexy-glass` you installed with `cargo
+install`, that you can run, that `which` finds — is simply not on the PATH we
+get. If your remote login shell is **nushell** it's worse still: nushell never
+reads the POSIX profile chain in any mode, so the `~/.cargo/env` line rustup
+writes into `~/.profile` is dead code there.
 
-If neither PATH nor the cache path has a binary, SSH exits 127 and plexy-glass
-reports it directly instead of hanging or printing a bare connection error:
+One command tells you what we actually see:
 
 ```
-remote `plexy-glass` not found on the host (neither on PATH nor at ~/.cache/plexy-glass/bin); either run with --install, or install it on the remote and add it to your PATH (or pass --remote-bin <path>)
+ssh <host> "sh -c 'command -v plexy-glass; echo \$PATH'"
+```
+
+Each candidate is checked by **running** it (`plexy-glass --version`), not by
+testing that the file is there. A wrong-architecture binary exists and is
+executable, so a file test says yes and only running it says no. Steps 2–5 run
+as a single `sh -c` loop on the remote, so it's correct whatever the remote
+**login** shell is — `ssh host cmd` re-parses the command through that shell,
+which may be nushell or fish, not POSIX `sh`.
+
+If nothing works, the script says so itself and plexy-glass reports it directly
+rather than printing a bare connection error:
+
+```
+no working remote `plexy-glass` on the host: tried PATH, ~/.cargo/bin, ~/.local/bin and ~/.cache/plexy-glass/bin. Note ssh runs your login shell NON-interactively, so a PATH set in an interactive rc (or in ~/.profile, which nushell never reads) is not visible here — pass --remote-bin <path>, or run with --install
 ```
 
 ## `--install` (provisioning a remote binary)

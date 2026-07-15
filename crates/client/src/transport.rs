@@ -168,18 +168,46 @@ pub struct Target {
     pub install: InstallPolicy,
 }
 
+/// The exit status our own remote script uses to say "I tried every candidate
+/// and none of them is a working `plexy-glass`".
+///
+/// A sentinel, because the shell's own codes cannot carry this. The obvious read
+/// is "missing → 127, present-but-broken → 126", and it is simply not portable:
+/// a missing `exec` target is **126** under bash (which is `/bin/sh` on macOS, a
+/// first-class remote target here) and **127** under dash. So `== 127` both
+/// misses a genuinely absent binary on a Darwin remote and claims "plexy-glass
+/// not found" for unrelated 127s — a missing `sh`, an unset `$HOME` making `~`
+/// expand to nothing, a binary whose `#!` interpreter is gone. Only the script
+/// knows what it actually looked for, so let it say so.
+pub const REMOTE_NOT_FOUND_EXIT: i32 = 3;
+
 /// Build the argv for `ssh` (after the program name) to run `<remote-bin> cmd…`
 /// on the host. `-T` disables remote PTY allocation so a framed byte stream
 /// (the `bridge`) stays 8-bit clean.
 ///
-/// With `--remote-bin`, we invoke that exact path directly. Otherwise we try
-/// `plexy-glass` on the remote's non-interactive PATH first, then fall back to
-/// the `--install` cache path, so a manual PATH install and an
-/// `--install`-provisioned binary both work with no extra flag. That fallback is
-/// a shell conditional, so it runs under `sh -c` (via [`remote_sh`], correct
-/// whatever the remote login shell is) and `exec` hands the raw stdio to the
-/// chosen binary. If neither exists the final `exec` fails 127, which the client
-/// surfaces as [`ClientError::RemoteNotFound`]. `cmd` is the subcommand + flags,
+/// With `--remote-bin`, we invoke that exact path directly: an explicit path is
+/// an instruction, not a hint, so it wins outright and a failure there should be
+/// loud rather than quietly fall through to something else.
+///
+/// Otherwise we search, and the search is why this is more than a one-liner.
+/// `ssh host cmd` runs the remote user's LOGIN shell **non-interactively**, so
+/// none of the rc files that build an interactive PATH are read — and if that
+/// login shell is nushell it never reads the POSIX profile chain in any mode, so
+/// the `~/.cargo/env` line rustup writes into `~/.profile` is dead code there.
+/// The upshot is that a `plexy-glass` the user installed, and can run, and can
+/// see on their PATH, is invisible to us. So look in the places those installs
+/// actually land, not just on PATH.
+///
+/// Each candidate is probed by **running** it (`--version`), not by testing that
+/// the file exists. `command -v` answers the wrong question: a wrong-architecture
+/// binary is present and executable, so `command -v` says yes, `exec` then fails,
+/// and POSIX says a failed `exec` **terminates a non-interactive shell** — so the
+/// old `||` fallback never ran for the one case a fallback is for. Running it is
+/// the only probe that distinguishes present-and-working from present-and-broken,
+/// and a failed probe is survivable where a failed `exec` is not.
+///
+/// Runs under `sh -c` via [`remote_sh`] (correct whatever the login shell is), so
+/// the script must contain **no single quote**. `cmd` is the subcommand + flags,
 /// e.g. `["bridge"]`, `["bridge", "--no-spawn"]`, or `["kill", "--all"]`.
 pub fn ssh_remote_args(host: &RemoteName, target: &Target, cmd: &[&str]) -> Vec<String> {
     let mut args = vec!["-T".to_string(), host.to_string()];
@@ -189,8 +217,12 @@ pub fn ssh_remote_args(host: &RemoteName, target: &Target, cmd: &[&str]) -> Vec<
     } else {
         let cache = install::REMOTE_CACHE_BIN;
         let tail = cmd.join(" ");
+        // PATH first (a deliberate install wins), then where cargo and pip-style
+        // installs land, then the `--install` cache.
         let script = format!(
-            "command -v plexy-glass >/dev/null 2>&1 && exec plexy-glass {tail} || exec {cache} {tail}"
+            "for c in plexy-glass $HOME/.cargo/bin/plexy-glass $HOME/.local/bin/plexy-glass {cache}; \
+             do \"$c\" --version >/dev/null 2>&1 && exec \"$c\" {tail}; done; \
+             echo plexy-glass: no working binary found on this host >&2; exit {REMOTE_NOT_FOUND_EXIT}"
         );
         args.push(remote_sh(&script));
     }
@@ -211,6 +243,10 @@ pub fn ssh_args(host: &RemoteName, target: &Target, connect: Connect) -> Vec<Str
 
 #[cfg(test)]
 mod ssh_tests {
+    use std::fs::{self, Permissions};
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command as StdCommand;
+
     use super::*;
 
     fn target(remote_bin: Option<&str>) -> Target {
@@ -241,27 +277,141 @@ mod ssh_tests {
         );
     }
 
+    /// Pull the script back out of `sh -c '<script>'` so a test can run it.
+    fn script_of(args: &[String]) -> String {
+        let arg = &args[2];
+        let inner = arg
+            .strip_prefix("sh -c '")
+            .and_then(|r| r.strip_suffix('\''))
+            .expect("remote_sh wraps the script in sh -c '...'");
+        assert!(
+            !inner.contains('\''),
+            "the remote script must contain no single quote: {inner}"
+        );
+        inner.to_string()
+    }
+
+    /// A stub `plexy-glass` that answers `--version` and otherwise announces
+    /// itself, so a test can see WHICH candidate got exec'd.
+    fn working_stub(dir: &Path, says: &str) {
+        stub(
+            dir,
+            &format!("#!/bin/sh\ncase \"$1\" in --version) exit 0;; esac\necho {says}\n"),
+        );
+    }
+
+    /// A stub that is present and executable but CANNOT EXEC — a wrong-arch
+    /// binary, in effect. A bogus interpreter is the portable way to get the real
+    /// failure mode: the file exists and has its executable bit, so `command -v`
+    /// reports it happily, and only actually trying to run it fails.
+    fn broken_stub(dir: &Path) {
+        stub(dir, "#!/nonexistent/interpreter\n");
+    }
+
+    fn stub(dir: &Path, body: &str) {
+        fs::create_dir_all(dir).unwrap();
+        let p = dir.join("plexy-glass");
+        fs::write(&p, body).unwrap();
+        fs::set_permissions(&p, Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Run the default remote script under a real `sh`, with `HOME`/`PATH`
+    /// pointed at fixtures. Returns (exit code, stdout).
+    fn run_script(home: &Path, path: &str) -> (i32, String) {
+        let script = script_of(&ssh_args(
+            &RemoteName::from("h"),
+            &target(None),
+            Connect::Spawn,
+        ));
+        let out = StdCommand::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .env("HOME", home)
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        )
+    }
+
     #[test]
-    fn ssh_args_default_falls_back_path_then_cache() {
-        let cache = install::REMOTE_CACHE_BIN;
-        // Spawn: try PATH, then the cache path.
+    fn ssh_args_default_is_one_quote_free_sh_script() {
         let a = ssh_args(&RemoteName::from("prod"), &target(None), Connect::Spawn);
         assert_eq!(a[0], "-T");
         assert_eq!(a[1], "prod");
-        assert_eq!(a.len(), 3);
-        assert_eq!(
-            a[2],
-            format!(
-                "sh -c 'command -v plexy-glass >/dev/null 2>&1 && exec plexy-glass bridge || exec {cache} bridge'"
-            )
+        assert_eq!(a.len(), 3, "the script is ONE ssh argument");
+        let s = script_of(&a);
+        assert!(
+            s.contains("exec \"$c\" bridge"),
+            "execs the chosen candidate: {s}"
         );
-        // Only: --no-spawn rides both branches.
-        let b = ssh_args(&RemoteName::from("prod"), &target(None), Connect::Only);
+        assert!(
+            s.contains(install::REMOTE_CACHE_BIN),
+            "searches the --install cache: {s}"
+        );
+        // `--no-spawn` must ride the exec, not just one branch of it.
+        let b = script_of(&ssh_args(
+            &RemoteName::from("prod"),
+            &target(None),
+            Connect::Only,
+        ));
+        assert!(b.contains("exec \"$c\" bridge --no-spawn"), "got: {b}");
+    }
+
+    /// The bug this whole search exists for: `ssh host cmd` runs the login shell
+    /// NON-interactively, so a cargo-installed `plexy-glass` the user can run
+    /// interactively is not on the PATH we get. Find it anyway.
+    #[test]
+    fn remote_script_finds_a_binary_that_is_not_on_path() {
+        let home = tempfile::tempdir().unwrap();
+        working_stub(&home.path().join(".cargo/bin"), "from-cargo-bin");
+        let empty = tempfile::tempdir().unwrap();
+        let (code, out) = run_script(home.path(), &empty.path().display().to_string());
+        assert_eq!(code, 0, "should have exec'd the cargo-bin candidate");
+        assert_eq!(out, "from-cargo-bin");
+    }
+
+    /// PATH wins when it works: a deliberate install beats the fallbacks.
+    #[test]
+    fn remote_script_prefers_path() {
+        let home = tempfile::tempdir().unwrap();
+        working_stub(&home.path().join(".cargo/bin"), "from-cargo-bin");
+        let path_dir = tempfile::tempdir().unwrap();
+        working_stub(path_dir.path(), "from-path");
+        let (code, out) = run_script(home.path(), &path_dir.path().display().to_string());
+        assert_eq!(code, 0);
+        assert_eq!(out, "from-path");
+    }
+
+    /// The case the old `||` fallback could NOT handle, and the reason the probe
+    /// runs the binary instead of testing that the file exists. A wrong-arch
+    /// binary is present and executable, so `command -v` reported it, `exec` then
+    /// failed, and POSIX terminates a non-interactive shell on a failed `exec` —
+    /// so the fallback never ran. Probing by running makes the failure survivable.
+    #[test]
+    fn remote_script_skips_a_present_but_broken_binary_and_keeps_looking() {
+        let home = tempfile::tempdir().unwrap();
+        working_stub(&home.path().join(".cargo/bin"), "from-cargo-bin");
+        let path_dir = tempfile::tempdir().unwrap();
+        broken_stub(path_dir.path());
+        let (code, out) = run_script(home.path(), &path_dir.path().display().to_string());
+        assert_eq!(code, 0, "a broken PATH binary must not abort the search");
+        assert_eq!(out, "from-cargo-bin");
+    }
+
+    /// Nothing anywhere: the script raises OUR sentinel, so the client can say
+    /// so instead of guessing from the shell's 126-vs-127 (which is not portable
+    /// — bash says 126 for a missing exec target, dash says 127).
+    #[test]
+    fn remote_script_raises_our_sentinel_when_nothing_works() {
+        let home = tempfile::tempdir().unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        let (code, _) = run_script(home.path(), &empty.path().display().to_string());
         assert_eq!(
-            b[2],
-            format!(
-                "sh -c 'command -v plexy-glass >/dev/null 2>&1 && exec plexy-glass bridge --no-spawn || exec {cache} bridge --no-spawn'"
-            )
+            code, REMOTE_NOT_FOUND_EXIT,
+            "no candidate worked, so the script must report it itself"
         );
     }
 
@@ -277,14 +427,11 @@ mod ssh_tests {
             ),
             vec!["-T", "prod", "/opt/pg", "kill", "--all"]
         );
-        // Default: the same PATH-then-cache fallback, running `kill` remotely.
+        // Default: the same search the bridge uses, running `kill` remotely.
         let k = ssh_remote_args(&RemoteName::from("prod"), &target(None), &["kill"]);
-        assert_eq!(
-            k[2],
-            format!(
-                "sh -c 'command -v plexy-glass >/dev/null 2>&1 && exec plexy-glass kill || exec {cache} kill'"
-            )
-        );
+        let script = script_of(&k);
+        assert!(script.contains("exec \"$c\" kill"), "execs kill: {script}");
+        assert!(script.contains(cache), "searches the cache: {script}");
     }
 }
 
@@ -299,14 +446,20 @@ pub struct Transport {
 }
 
 impl Transport {
-    /// After a failed handshake/read on an SSH transport, check whether the ssh
-    /// child exited 127 (remote command not found) and, if so, return the
-    /// clearer error to surface instead of a bare EOF. `None` for local, or when
-    /// the child exited for another reason.
+    /// After a failed handshake/read on an SSH transport, check whether our own
+    /// remote script reported that it found no working `plexy-glass`, and if so
+    /// return that instead of a bare EOF. `None` for local, or when the child
+    /// exited for any other reason.
+    ///
+    /// Matches [`REMOTE_NOT_FOUND_EXIT`], which the script raises itself, rather
+    /// than reading the shell's 126/127 — see that constant for why those cannot
+    /// carry this. `ssh` propagates the remote command's status as its own, and
+    /// its own failures (auth, unreachable, bad `ProxyJump`) are 255, so they
+    /// correctly fall through to the real error.
     pub async fn ssh_not_found(&mut self) -> Option<ClientError> {
         let child = self.child.as_mut()?;
         let status = child.wait().await.ok()?;
-        (status.code() == Some(127)).then_some(ClientError::RemoteNotFound)
+        (status.code() == Some(REMOTE_NOT_FOUND_EXIT)).then_some(ClientError::RemoteNotFound)
     }
 }
 

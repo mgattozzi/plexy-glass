@@ -28,7 +28,11 @@ pub enum ClientError {
     #[error("config reload error: {0}")]
     Reload(String),
     #[error(
-        "remote `plexy-glass` not found on the host (neither on PATH nor at ~/.cache/plexy-glass/bin); either run with --install, or install it on the remote and add it to your PATH (or pass --remote-bin <path>)"
+        "no working remote `plexy-glass` on the host: tried PATH, ~/.cargo/bin, \
+         ~/.local/bin and ~/.cache/plexy-glass/bin. Note ssh runs your login shell \
+         NON-interactively, so a PATH set in an interactive rc (or in ~/.profile, \
+         which nushell never reads) is not visible here — pass --remote-bin <path>, \
+         or run with --install"
     )]
     RemoteNotFound,
     #[error("install: {0}")]
