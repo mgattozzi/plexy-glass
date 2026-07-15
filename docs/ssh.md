@@ -106,6 +106,13 @@ as a single `sh -c` loop on the remote, so it's correct whatever the remote
 **login** shell is — `ssh host cmd` re-parses the command through that shell,
 which may be nushell or fish, not POSIX `sh`.
 
+`--remote-bin` follows you through the session picker, but only back to the
+**same** host: it names a path on one machine, so reconnecting to `wsl2` keeps
+it, and jumping to `prod` or to the local daemon drops it rather than pointing
+them at a path that means nothing there. For a path that should apply to a host
+you reach *from* the picker, there is nowhere to put one yet — that wants a
+per-host config entry, which doesn't exist today.
+
 If nothing works, the script says so itself and plexy-glass reports it directly
 rather than printing a bare connection error:
 

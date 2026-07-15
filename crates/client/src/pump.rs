@@ -367,11 +367,7 @@ where
                             tty::set_alt_active(false);
                             stdout.flush().await.map_err(ClientError::Io)?;
                             return Ok(PumpExit::ReconnectTo {
-                                target: Target {
-                                    host,
-                                    remote_bin: None,
-                                    install,
-                                },
+                                target: resolve_target(&host, current_target, install),
                                 name,
                             });
                         }
@@ -411,15 +407,8 @@ where
                             // connection (`Connect::Only`) — `KillSession` is
                             // only accepted as a connection's first message —
                             // mirroring `client_kill_session` (`lib.rs:407`).
-                            let target = if host == current_target.host {
-                                current_target.clone()
-                            } else {
-                                Target {
-                                    host: host.clone(),
-                                    remote_bin: None,
-                                    install: InstallPolicy::UseExisting,
-                                }
-                            };
+                            let target =
+                                resolve_target(&host, current_target, InstallPolicy::UseExisting);
                             let is_current_session =
                                 host == current_target.host && name == current;
                             let reply = crate::request_reply(
@@ -529,6 +518,36 @@ where
                     None => picker_rx = None,
                 }
             }
+        }
+    }
+}
+
+/// The `Target` for a picker row's daemon, given the one we're attached to.
+///
+/// Same daemon: reuse `current` wholesale, keeping its `--remote-bin` and
+/// `--install`. A different daemon: a fresh `Target`, because those two are
+/// per-host and nothing we know about ours transfers — `--remote-bin` is a path
+/// on THIS host, and pointing host B at host A's binary is worse than not
+/// knowing. (Which is also why the roster fan-out in `query.rs` builds bare
+/// Targets and must keep doing so: it queries every host at once, and there is
+/// no one path that could be right for all of them. A per-host config `bin=` is
+/// the only honest source for that.)
+///
+/// The Kill arm worked this out first and got it right; the Reconnect/New arm
+/// hardcoded `remote_bin: None`, so `--remote-bin` silently stopped applying the
+/// moment you went through the picker — even reconnecting to the SAME host you
+/// had just passed it for. One rule, one place, both arms call it.
+fn resolve_target(host: &Host, current: &Target, install: InstallPolicy) -> Target {
+    if *host == current.host {
+        Target {
+            install,
+            ..current.clone()
+        }
+    } else {
+        Target {
+            host: host.clone(),
+            remote_bin: None,
+            install,
         }
     }
 }
@@ -1219,6 +1238,42 @@ mod tests {
         let _ = feeder.await;
         let _ = server.await;
         let _ = drain.await;
+    }
+
+    /// `--remote-bin` is a path on ONE host, so it must follow you back to that
+    /// same host through the picker — and must never be handed to a different
+    /// one. The Reconnect arm used to hardcode `remote_bin: None`, so the flag
+    /// silently stopped applying the moment you went through the picker at all.
+    #[test]
+    fn resolve_target_keeps_remote_bin_for_the_same_host_and_drops_it_for_others() {
+        let current = Target {
+            host: Host::Remote(RemoteName::from("wsl2")),
+            remote_bin: Some("/opt/pg".to_string()),
+            install: InstallPolicy::UseExisting,
+        };
+
+        // Same host: the path still applies, and the picker's `i` toggle wins.
+        let same = resolve_target(
+            &Host::Remote(RemoteName::from("wsl2")),
+            &current,
+            InstallPolicy::Provision,
+        );
+        assert_eq!(same.remote_bin.as_deref(), Some("/opt/pg"));
+        assert_eq!(same.install, InstallPolicy::Provision);
+
+        // A different remote: `/opt/pg` is a path on wsl2 and means nothing here.
+        let other = resolve_target(
+            &Host::Remote(RemoteName::from("prod")),
+            &current,
+            InstallPolicy::UseExisting,
+        );
+        assert_eq!(other.host, Host::Remote(RemoteName::from("prod")));
+        assert_eq!(other.remote_bin, None);
+
+        // The local daemon runs no remote binary at all.
+        let local = resolve_target(&Host::Local, &current, InstallPolicy::UseExisting);
+        assert_eq!(local.host, Host::Local);
+        assert_eq!(local.remote_bin, None);
     }
 
     #[test]
