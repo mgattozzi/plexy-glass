@@ -17,7 +17,6 @@
     reason = "integration-test file; allow-unwrap-in-tests misses free helper fns"
 )]
 
-#[cfg(target_os = "macos")]
 use std::fs::Permissions;
 use std::io::Write;
 use std::ops::Deref;
