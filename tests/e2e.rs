@@ -2127,10 +2127,22 @@ fn write_multi_daemon_ssh_stub(dir: &Path, second_root: &Path) {
     let ssh = dir.join("ssh");
     fs::write(
         &ssh,
+        // Skip ssh OPTIONS the way real ssh does before the host+command: `-T`
+        // (attach/reconnect) and `-o KEY=VAL` (the picker's `Connect::Probe`
+        // passes `-o BatchMode=yes -o ConnectTimeout=N`). A naive `-T`-only skip
+        // left the `-o` pair in `$*` and ran it as a command, so the fake remote
+        // never answered and the roster row went ⚠. Stop at the first
+        // non-option arg (the host), then shift it off.
         format!(
             "#!/bin/sh\n\
              export PLEXY_GLASS_DIR=\"{root}\"\n\
-             while [ \"$1\" = \"-T\" ]; do shift; done\n\
+             while [ $# -gt 0 ]; do\n\
+             case \"$1\" in\n\
+             -o) shift 2 ;;\n\
+             -*) shift ;;\n\
+             *) break ;;\n\
+             esac\n\
+             done\n\
              shift\n\
              [ -n \"$PLEXY_SSH_STUB_MARKER\" ] && : > \"$PLEXY_SSH_STUB_MARKER\"\n\
              exec sh -c \"$*\"\n",

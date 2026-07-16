@@ -1138,12 +1138,21 @@ A host anchor carries a status glyph, filled in as its query resolves:
 | `…` | Pending, the query is still in flight |
 | `●` | Live: the daemon answered, and its sessions are listed under the anchor |
 | `○` | Empty: the daemon answered but has no sessions |
-| `⚠` | Unreachable: connect failed or timed out |
+| `⚠` | Unreachable: connect failed or timed out — the host is down, has no route, or runs no daemon |
+| `⚠ auth` | Needs auth: the host is reachable, but the background probe couldn't authenticate non-interactively (a passphrase-only key, or a server-side check like Tailscale SSH's web auth). Press Enter on the host to connect the normal interactive way and complete it |
 | `⚠ vN` | Version mismatch: the remote runs protocol `vN`. Reattach with `--install` to upgrade it (this restarts the remote daemon, ending its sessions). If it *stays* mismatched, the nightly release is behind your client — see [docs/ssh.md](ssh.md) |
 
 Remote queries stream in independently, so a slow or unreachable host never
 blocks the rest of the list. There's no animated connect spinner yet; a
 pending host just shows `…` until it resolves, and that polish is deferred.
+
+The probe is **non-interactive by design**: it runs ssh with `BatchMode=yes` and
+a short `ConnectTimeout`, so opening the picker never prompts for a password or
+passphrase and never blocks the terminal the picker is drawn on — a host that
+needs interactive auth (a Tailscale check, say) fails the probe fast and shows
+as `⚠ auth` rather than dumping an auth banner over the picker. Pressing Enter on
+that host then connects the ordinary interactive way, in cooked mode, so the
+prompt (or a fresh Tailscale URL) lands normally.
 
 ### Keys
 

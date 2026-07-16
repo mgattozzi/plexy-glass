@@ -131,6 +131,10 @@ pub enum RowStatus {
     Live,
     Empty,
     Unreachable,
+    /// Reachable, but the probe couldn't authenticate non-interactively (a
+    /// passphrase-only key, or a server-side check like Tailscale SSH). Press
+    /// Enter to connect interactively and complete the auth.
+    NeedsAuth,
     Pending,
     VersionMismatch(u16),
 }
@@ -1074,7 +1078,7 @@ const fn status_color(status: &RowStatus, t: &PickerTheme) -> Rgb {
         RowStatus::Empty => t.empty,
         RowStatus::Unreachable => t.unreachable,
         RowStatus::Pending => t.pending,
-        RowStatus::VersionMismatch(_) => t.warn,
+        RowStatus::NeedsAuth | RowStatus::VersionMismatch(_) => t.warn,
     }
 }
 
@@ -1083,7 +1087,11 @@ fn status_glyph(status: &RowStatus) -> String {
         RowStatus::Live => "\u{25cf}".to_string(),        // ●
         RowStatus::Empty => "\u{25cb}".to_string(),       // ○
         RowStatus::Unreachable => "\u{26a0}".to_string(), // ⚠
-        RowStatus::Pending => "\u{2026}".to_string(),     // …
+        // `⚠ auth` — the "auth" tag (and the warn color) distinguish it from a
+        // plain-⚠ unreachable host; matches the `⚠ v{n}` skew tag. ASCII suffix,
+        // so it's alignment-safe (no ambiguous-width glyph).
+        RowStatus::NeedsAuth => "\u{26a0} auth".to_string(),
+        RowStatus::Pending => "\u{2026}".to_string(), // …
         RowStatus::VersionMismatch(v) => format!("\u{26a0} v{v}"),
     }
 }
@@ -1699,6 +1707,24 @@ mod tests {
             Some(RowStatus::Unreachable)
         );
         assert_eq!(s.visible().len(), 1, "no session rows added");
+    }
+
+    #[test]
+    fn resolve_host_needs_auth_shows_the_auth_tag_not_unreachable() {
+        // A reachable-but-locked host must render distinctly from a dead one:
+        // the `⚠ auth` tag, so the picker doesn't lie that the host is down.
+        let mut s = PickerState::new(vec![host_row("wsl2", RowStatus::Pending)]);
+        s.resolve_host(&remote("wsl2"), RowStatus::NeedsAuth, vec![]);
+        assert_eq!(
+            s.selected().map(|r| r.status.clone()),
+            Some(RowStatus::NeedsAuth)
+        );
+        assert_eq!(s.visible().len(), 1, "no session rows added");
+        let text = visible_text(&s.render());
+        assert!(
+            text.contains("\u{26a0} auth"),
+            "needs-auth host renders the ⚠ auth tag, got: {text:?}"
+        );
     }
 
     #[test]

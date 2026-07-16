@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use std::{env, fmt, io};
 
 use nix::libc;
-use tokio::io::{AsyncRead, AsyncWrite, split};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, split};
 use tokio::net::UnixStream;
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStderr, Command};
 use tokio::time;
 use tracing::{debug, info};
 
@@ -122,12 +122,20 @@ impl From<RemoteName> for Host {
     }
 }
 
-/// How a connection opens: auto-spawn the daemon (interactive/list) or fail if
-/// none is running (scripting verbs).
+/// How a connection opens: auto-spawn the daemon (interactive/list), connect to
+/// an existing one (scripting verbs), or a background roster probe that must
+/// never touch the terminal or block on interactive auth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Connect {
     Spawn,
     Only,
+    /// A picker fan-out probe: like [`Connect::Only`] (`--no-spawn`), but the
+    /// ssh child runs with `BatchMode=yes` + a short `ConnectTimeout` and its
+    /// stderr is CAPTURED, not inherited — so an auth-required host (a Tailscale
+    /// check, a passphrase-only key) fails fast and gets classified, instead of
+    /// hijacking the terminal the picker is drawn on. Remote-only in effect: a
+    /// local `Probe` is just a connect-only unix-socket open.
+    Probe,
 }
 
 /// Whether `--install` should provision the remote binary before connecting.
@@ -230,13 +238,13 @@ pub fn ssh_remote_args(host: &RemoteName, target: &Target, cmd: &[&str]) -> Vec<
 }
 
 /// The `ssh` argv to run the `bridge` for a connection verb (attach + every
-/// request/reply). `Connect::Only` appends `--no-spawn` so a scripting verb
-/// never starts a remote daemon.
+/// request/reply). Anything but `Connect::Spawn` appends `--no-spawn` so a
+/// scripting verb or a roster probe never starts a remote daemon.
 pub fn ssh_args(host: &RemoteName, target: &Target, connect: Connect) -> Vec<String> {
-    let cmd: &[&str] = if connect == Connect::Only {
-        &["bridge", "--no-spawn"]
-    } else {
+    let cmd: &[&str] = if connect == Connect::Spawn {
         &["bridge"]
+    } else {
+        &["bridge", "--no-spawn"]
     };
     ssh_remote_args(host, target, cmd)
 }
@@ -358,6 +366,14 @@ mod ssh_tests {
             Connect::Only,
         ));
         assert!(b.contains("exec \"$c\" bridge --no-spawn"), "got: {b}");
+        // A `Probe` is `--no-spawn` too (BatchMode/ConnectTimeout are added at
+        // spawn time in `open_transport`, not in the argv `ssh_args` builds).
+        let p = script_of(&ssh_args(
+            &RemoteName::from("prod"),
+            &target(None),
+            Connect::Probe,
+        ));
+        assert!(p.contains("exec \"$c\" bridge --no-spawn"), "got: {p}");
     }
 
     /// The bug this whole search exists for: `ssh host cmd` runs the login shell
@@ -435,6 +451,11 @@ mod ssh_tests {
     }
 }
 
+/// The `ConnectTimeout` (seconds) a `Connect::Probe` ssh runs with, so a dead
+/// host fails at the TCP-connect phase inside the picker's per-host budget
+/// rather than hanging until the OS default (~75s) and relying on our own kill.
+const PROBE_CONNECT_TIMEOUT_SECS: u32 = 2;
+
 /// A daemon connection as a split reader/writer, from the local socket or an
 /// SSH `bridge` child. `child` keeps the SSH process (and thus the pipes)
 /// alive for the transport's lifetime, and lets `ssh_not_found` inspect its
@@ -443,9 +464,35 @@ pub struct Transport {
     pub reader: Box<dyn AsyncRead + Send + Unpin>,
     pub writer: Box<dyn AsyncWrite + Send + Unpin>,
     child: Option<Child>,
+    /// ssh's captured stderr, `Some` only for a `Connect::Probe` transport
+    /// (every other path inherits stderr so ssh's prompts reach the user). Read
+    /// by [`probe_diagnose`](Self::probe_diagnose) when a probe fails, to tell
+    /// "needs auth" from "unreachable".
+    stderr: Option<ChildStderr>,
 }
 
 impl Transport {
+    /// Kill the ssh child and return whatever it wrote to stderr — for a
+    /// `Connect::Probe` that failed or timed out. Killing FIRST closes ssh's
+    /// stderr so the read reaches EOF instead of blocking on a still-running
+    /// session (a Tailscale check holds the connection open); the banner ssh
+    /// already wrote sits in the kernel pipe buffer and survives the kill.
+    /// Empty for a local transport or any non-probe one (stderr was inherited,
+    /// so there's nothing captured to read).
+    pub async fn probe_diagnose(&mut self) -> String {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+        }
+        let Some(mut err) = self.stderr.take() else {
+            return String::new();
+        };
+        let mut buf = Vec::new();
+        // Bounded read: the banner is small and already buffered post-kill, but
+        // never wait unboundedly on a pipe that a wedged ssh might hold open.
+        let _ = time::timeout(Duration::from_millis(500), err.read_to_end(&mut buf)).await;
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
     /// After a failed handshake/read on an SSH transport, check whether our own
     /// remote script reported that it found no working `plexy-glass`, and if so
     /// return that instead of a bare EOF. `None` for local, or when the child
@@ -470,24 +517,47 @@ pub async fn open_transport(target: &Target, connect: Connect) -> Result<Transpo
             let socket = default_socket_path()?;
             let stream = match connect {
                 Connect::Spawn => connect_or_spawn(&socket).await?,
-                Connect::Only => connect_only(&socket).await?,
+                // A `Probe` never spawns, same as `Only`: the local daemon rides
+                // the unix socket, so BatchMode/captured-stderr don't apply here.
+                Connect::Only | Connect::Probe => connect_only(&socket).await?,
             };
             let (r, w) = split(stream);
             Ok(Transport {
                 reader: Box::new(r),
                 writer: Box::new(w),
                 child: None,
+                stderr: None,
             })
         }
         Host::Remote(host) => {
             if target.install.provisions() {
                 install::install_remote(host).await?;
             }
-            let mut child = Command::new("ssh")
+            let probe = connect == Connect::Probe;
+            let mut cmd = Command::new("ssh");
+            if probe {
+                // Background roster probe: never prompt, never touch the
+                // terminal. BatchMode makes ssh fail fast instead of blocking on
+                // password/passphrase/keyboard-interactive auth; ConnectTimeout
+                // bounds a dead host; stderr is captured below so an auth banner
+                // is classified, not painted over the picker.
+                cmd.arg("-o")
+                    .arg("BatchMode=yes")
+                    .arg("-o")
+                    .arg(format!("ConnectTimeout={PROBE_CONNECT_TIMEOUT_SECS}"));
+            }
+            let mut child = cmd
                 .args(ssh_args(host, target, connect))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::inherit()) // SSH's prompts/errors reach the user
+                // Foreground connections inherit stderr so SSH's prompts/errors
+                // reach the user; a probe captures it instead (read by
+                // `probe_diagnose` to distinguish needs-auth from unreachable).
+                .stderr(if probe {
+                    Stdio::piped()
+                } else {
+                    Stdio::inherit()
+                })
                 // A timed-out query (query.rs) drops the Transport without ever
                 // reading ssh's exit status; without this the ssh child (and the
                 // remote session it holds open) would orphan instead of getting
@@ -498,10 +568,13 @@ pub async fn open_transport(target: &Target, connect: Connect) -> Result<Transpo
             // invariant: stdin/stdout are piped above, so take() is Some.
             let writer = child.stdin.take().expect("ssh stdin piped");
             let reader = child.stdout.take().expect("ssh stdout piped");
+            // invariant: stderr is piped above iff `probe`, so take() is Some there.
+            let stderr = probe.then(|| child.stderr.take().expect("ssh stderr piped"));
             Ok(Transport {
                 reader: Box::new(reader),
                 writer: Box::new(writer),
                 child: Some(child),
+                stderr,
             })
         }
     }

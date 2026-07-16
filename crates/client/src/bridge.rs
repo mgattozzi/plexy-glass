@@ -39,7 +39,10 @@ where
 pub async fn run_bridge(connect: Connect) -> Result<(), ClientError> {
     let socket = default_socket_path()?;
     let stream = match connect {
-        Connect::Only => connect_only(&socket).await?,
+        // `Probe` never reaches here in practice (it's a client-side ssh mode
+        // that passes `--no-spawn`, which parses back to `Only`); treat it as
+        // connect-only for exhaustiveness anyway.
+        Connect::Only | Connect::Probe => connect_only(&socket).await?,
         Connect::Spawn => connect_or_spawn(&socket).await?,
     };
     let (daemon_read, daemon_write) = split(stream);

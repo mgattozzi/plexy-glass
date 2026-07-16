@@ -932,6 +932,7 @@ fn resolve_status(host: &Host, hs: HostStatus) -> (RowStatus, Vec<PickerRow>) {
         ),
         HostStatus::Empty => (RowStatus::Empty, Vec::new()),
         HostStatus::Unreachable => (RowStatus::Unreachable, Vec::new()),
+        HostStatus::NeedsAuth => (RowStatus::NeedsAuth, Vec::new()),
         HostStatus::VersionMismatch(v) => (RowStatus::VersionMismatch(v), Vec::new()),
     }
 }
