@@ -2,10 +2,11 @@
 //! local-download-then-push. Pure decision helpers here are unit-tested; the
 //! effectful flow shells `ssh`/`curl`/`sha256sum`|`shasum` (no crate deps).
 
+use std::io;
 use std::process::{Command as StdCommand, Stdio};
 
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 
 use crate::error::ClientError;
 use crate::transport::RemoteName;
@@ -255,19 +256,47 @@ async fn ssh_push(host: &str, bytes: &[u8]) -> Result<(), ClientError> {
     let script = format!(
         "mkdir -p ~/.cache/plexy-glass/bin && cat > {REMOTE_CACHE_BIN} && chmod +x {REMOTE_CACHE_BIN}"
     );
-    let mut child = Command::new("ssh")
+    let child = Command::new("ssh")
         .arg(host)
         .arg(remote_sh(&script))
         .stdin(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(ClientError::Io)?;
-    // invariant: stdin piped above.
-    let mut stdin = child.stdin.take().expect("ssh push stdin piped");
-    stdin.write_all(bytes).await.map_err(ClientError::Io)?;
+    stream_stdin_then_wait(child, bytes, || {
+        ClientError::Install(format!(
+            "push to {host} failed: ssh closed the connection before the binary \
+             finished transferring (often an interactive auth step the \
+             non-interactive push can't complete — connect once with \
+             `plexy-glass -H {host}` to clear it)"
+        ))
+    })
+    .await
+}
+
+/// Stream `bytes` into a spawned child's stdin, then wait and map a non-zero
+/// exit to `on_fail`. A **broken pipe on the write is tolerated**: it means the
+/// child already exited (ssh's auth refused, the remote `cat` never ran, a
+/// Tailscale check dropped the connection), so falling through to `wait()`
+/// reports that child's real failure via `on_fail` instead of an opaque "broken
+/// pipe" io error. Any OTHER write error is a genuine local IO failure and
+/// still propagates. Split out so this EPIPE handling is testable without a
+/// real ssh (feed it a child that exits without reading stdin).
+async fn stream_stdin_then_wait(
+    mut child: Child,
+    bytes: &[u8],
+    on_fail: impl FnOnce() -> ClientError,
+) -> Result<(), ClientError> {
+    // invariant: callers spawn with stdin piped.
+    let mut stdin = child.stdin.take().expect("child stdin piped");
+    match stdin.write_all(bytes).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+        Err(e) => return Err(ClientError::Io(e)),
+    }
     drop(stdin);
     if !child.wait().await.map_err(ClientError::Io)?.success() {
-        return Err(ClientError::Install(format!("push to {host} failed")));
+        return Err(on_fail());
     }
     Ok(())
 }
@@ -275,6 +304,43 @@ async fn ssh_push(host: &str, bytes: &[u8]) -> Result<(), ClientError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stream_stdin_tolerates_broken_pipe_and_reports_child_failure() {
+        // A child that exits nonzero WITHOUT reading stdin: a >pipe-buffer write
+        // EPIPEs. That must NOT surface as a raw broken-pipe io error — the
+        // child's real failure (via `on_fail`) is what the caller sees.
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 7")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let big = vec![0u8; 1 << 20]; // 1 MiB, well past any pipe buffer
+        let err = stream_stdin_then_wait(child, &big, || ClientError::Install("boom".into()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ClientError::Install(m) if m == "boom"),
+            "EPIPE must fall through to the child's failure, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_stdin_succeeds_when_child_consumes_it() {
+        // `cat` drains stdin and exits 0 → Ok, `on_fail` never called.
+        let child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        stream_stdin_then_wait(child, b"hello", || ClientError::Install("nope".into()))
+            .await
+            .expect("a stdin-draining child that exits 0 is Ok");
+    }
 
     #[test]
     fn remote_sh_single_quote_wraps_for_sh_c() {
