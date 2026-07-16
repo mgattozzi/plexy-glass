@@ -545,8 +545,13 @@ fn resolve_target(host: &Host, current: &Target, install: InstallPolicy) -> Targ
         }
     } else {
         Target {
+            // A different daemon: its bin comes from config, if it declares one
+            // (`remotes { host bin= }`). `--remote-bin` on the CURRENT host is a
+            // path on the current host and does not transfer; the per-host config
+            // entry is the only thing that travels with a host you reach from the
+            // picker. Ad-hoc hosts have no config entry, so `None`.
+            remote_bin: host.remote().and_then(roster::config_bin_for),
             host: host.clone(),
-            remote_bin: None,
             install,
         }
     }
@@ -759,7 +764,7 @@ struct PickerAssembly {
     /// The OTHER daemons' remote hosts to stream-query (roster minus current).
     /// Remotes only — the local daemon rides `query_local`, not this list, since
     /// it is queried on the socket rather than over ssh.
-    remote_hosts: Vec<RemoteName>,
+    remote_hosts: Vec<(RemoteName, Option<String>)>,
     /// Whether the local daemon is in the OTHER set (true only when we're
     /// attached to a REMOTE), so it gets queried on the local socket.
     query_local: bool,
@@ -862,7 +867,7 @@ async fn fresh_session_list(target: &Target) -> Result<Vec<SessionEntry>, Client
 struct RosterRows {
     rows: Vec<PickerRow>,
     adhoc: Vec<String>,
-    remote_hosts: Vec<RemoteName>,
+    remote_hosts: Vec<(RemoteName, Option<String>)>,
     query_local: bool,
 }
 
@@ -899,7 +904,7 @@ fn build_roster_rows(attached: Option<&Host>) -> RosterRows {
             kind: RowKind::Host,
             status: RowStatus::Pending,
         });
-        remote_hosts.push(h.host);
+        remote_hosts.push((h.host, h.bin));
     }
 
     // The `＋ Connect to a host…` affordance is NOT a row: the picker synthesizes
@@ -940,7 +945,7 @@ fn resolve_status(host: &Host, hs: HostStatus) -> (RowStatus, Vec<PickerRow>) {
 /// so the drain updates rows uniformly. The original sender is dropped here so
 /// the channel closes once every producer finishes.
 fn spawn_picker_query(
-    remote_hosts: Vec<RemoteName>,
+    remote_hosts: Vec<(RemoteName, Option<String>)>,
     query_local: bool,
 ) -> mpsc::UnboundedReceiver<(Host, HostStatus)> {
     const PER_HOST: Duration = Duration::from_millis(2500);
@@ -1492,7 +1497,10 @@ mod tests {
         assert!(!a.query_local, "attached-local does not query local again");
         assert_eq!(
             a.remote_hosts,
-            vec![RemoteName::from("prod"), RemoteName::from("scratch")]
+            vec![
+                (RemoteName::from("prod"), None),
+                (RemoteName::from("scratch"), None),
+            ]
         );
         assert_eq!(a.adhoc, vec!["scratch".to_string()]);
         let prod = a
@@ -1524,13 +1532,42 @@ mod tests {
         assert!(a.query_local, "attached-remote queries the local daemon");
         assert_eq!(
             a.remote_hosts,
-            vec![RemoteName::from("dev")],
+            vec![(RemoteName::from("dev"), None)],
             "prod (current) excluded"
         );
         let locals: Vec<_> = a.rows.iter().filter(|r| r.host.is_local()).collect();
         assert_eq!(locals.len(), 1, "one local-other anchor");
         assert_eq!(locals[0].kind, RowKind::Host);
         assert_eq!(locals[0].status, RowStatus::Pending);
+    }
+
+    /// A configured host's `bin` must ride into the query set, or the picker's
+    /// roster query hits the same "no working binary" a manual attach would —
+    /// exactly the not-on-PATH case `bin=` exists to fix.
+    #[test]
+    fn build_picker_rows_carries_configured_bin_into_the_query() {
+        roster::set_test_roster_configured(
+            vec![
+                roster::ConfigRemote {
+                    host: RemoteName::from("wsl2"),
+                    bin: Some("/opt/pg".to_string()),
+                },
+                roster::ConfigRemote {
+                    host: RemoteName::from("prod"),
+                    bin: None,
+                },
+            ],
+            vec![],
+        );
+        let a = build_picker_rows(vec![], &Host::Local);
+        assert_eq!(
+            a.remote_hosts,
+            vec![
+                (RemoteName::from("prod"), None),
+                (RemoteName::from("wsl2"), Some("/opt/pg".to_string())),
+            ],
+            "the wsl2 bin must reach the query; prod (no bin) stays None"
+        );
     }
 
     #[test]

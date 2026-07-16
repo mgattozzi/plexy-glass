@@ -49,17 +49,19 @@ pub fn classify(result: Result<ServerMsg, ClientError>) -> HostStatus {
 /// Returns immediately; the query runs on a detached task that owns `tx` and
 /// exits early if the receiver is dropped (the picker closed).
 pub fn spawn_query(
-    hosts: Vec<RemoteName>,
+    hosts: Vec<(RemoteName, Option<String>)>,
     per_host: Duration,
     tx: mpsc::UnboundedSender<(RemoteName, HostStatus)>,
 ) {
     tokio::spawn(async move {
         let mut set = JoinSet::new();
-        for host in hosts {
+        for (host, bin) in hosts {
             set.spawn(async move {
                 let target = Target {
                     host: Host::Remote(host.clone()),
-                    remote_bin: None,
+                    // A configured host with a `bin` must be queried with it, or
+                    // the query hits the same not-found the reconnect would.
+                    remote_bin: bin,
                     install: InstallPolicy::UseExisting,
                 };
                 let res = match timeout(

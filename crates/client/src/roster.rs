@@ -25,20 +25,35 @@ pub enum RosterSource {
     AdHoc,
 }
 
+/// A configured remote from `config.kdl`: an ssh target and its optional
+/// per-host `plexy-glass` path. The client-side mirror of `config::RemoteHost`
+/// (which uses a plain `String` host at the config boundary), carrying a
+/// `RemoteName` so the roster deals in the typed host throughout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigRemote {
+    pub host: RemoteName,
+    pub bin: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RosterHost {
     pub host: RemoteName,
+    /// The configured `bin` path, if this host came from `config.kdl` with one.
+    /// Always `None` for an ad-hoc host — those are just names the user `-H`'d
+    /// into, with no config entry to carry a path.
+    pub bin: Option<String>,
     pub source: RosterSource,
 }
 
 /// Assemble the roster: every distinct `configured` host (sorted, source
 /// `Configured`) followed by every distinct `adhoc` host that isn't already
-/// configured (sorted, source `AdHoc`).
-pub fn assemble(configured: &[RemoteName], adhoc: &[RemoteName]) -> Vec<RosterHost> {
-    let mut cfg: Vec<RemoteName> = configured.to_vec();
-    cfg.sort();
-    cfg.dedup();
-    let cfgset: HashSet<&RemoteName> = cfg.iter().collect();
+/// configured (sorted, source `AdHoc`). A configured host keeps its `bin`; an
+/// ad-hoc host has none.
+pub fn assemble(configured: &[ConfigRemote], adhoc: &[RemoteName]) -> Vec<RosterHost> {
+    let mut cfg: Vec<ConfigRemote> = configured.to_vec();
+    cfg.sort_by(|a, b| a.host.cmp(&b.host));
+    cfg.dedup_by(|a, b| a.host == b.host);
+    let cfgset: HashSet<&RemoteName> = cfg.iter().map(|r| &r.host).collect();
     let mut ad: Vec<RemoteName> = adhoc
         .iter()
         .filter(|h| !cfgset.contains(*h))
@@ -47,29 +62,44 @@ pub fn assemble(configured: &[RemoteName], adhoc: &[RemoteName]) -> Vec<RosterHo
     ad.sort();
     ad.dedup();
     cfg.into_iter()
-        .map(|host| RosterHost {
-            host,
+        .map(|r| RosterHost {
+            host: r.host,
+            bin: r.bin,
             source: RosterSource::Configured,
         })
         .chain(ad.into_iter().map(|host| RosterHost {
             host,
+            bin: None,
             source: RosterSource::AdHoc,
         }))
         .collect()
+}
+
+/// The configured `bin` for `name`, if `config.kdl` declares one — for the
+/// reconnect path, which starts from a bare `Host` and re-derives the bin here
+/// rather than threading it through the picker. Reads the same
+/// `config_remotes()` the roster query does, so the two never disagree.
+pub fn config_bin_for(name: &RemoteName) -> Option<String> {
+    config_remotes()
+        .into_iter()
+        .find(|r| &r.host == name)
+        .and_then(|r| r.bin)
 }
 
 /// The operator's LOCAL config remotes. Client-side config parse errors are
 /// swallowed here (the picker still works from the ad-hoc file + this session's
 /// hosts); the daemon logs its own config error separately.
 #[cfg(not(test))]
-pub fn config_remotes() -> Vec<RemoteName> {
+pub fn config_remotes() -> Vec<ConfigRemote> {
     let (cfg, _err) = plexy_glass_config::load_or_default();
     // The config/roster boundary: convert the host name into `RemoteName` here so
-    // the rest of the roster deals in `RemoteName`. The per-host `bin` is dropped
-    // for now — threaded through in the next step.
+    // the rest of the roster deals in the typed host, carrying the per-host `bin`.
     cfg.remotes
         .into_iter()
-        .map(|r| RemoteName::from(r.host))
+        .map(|r| ConfigRemote {
+            host: RemoteName::from(r.host),
+            bin: r.bin,
+        })
         .collect()
 }
 
@@ -97,18 +127,31 @@ pub fn config_palette() -> plexy_glass_config::PaletteConfig {
 // real query.
 #[cfg(test)]
 thread_local! {
-    static TEST_ROSTER: RefCell<(Vec<RemoteName>, Vec<RemoteName>)> =
+    static TEST_ROSTER: RefCell<(Vec<ConfigRemote>, Vec<RemoteName>)> =
         const { RefCell::new((Vec::new(), Vec::new())) };
 }
 
-/// Seed the per-thread roster override (configured, ad-hoc) for a test.
+/// Seed the per-thread roster override (configured, ad-hoc) for a test. The
+/// configured hosts get no `bin`; use [`set_test_roster_configured`] for a test
+/// that needs per-host bins.
 #[cfg(test)]
 pub(crate) fn set_test_roster(configured: Vec<RemoteName>, adhoc: Vec<RemoteName>) {
+    let configured = configured
+        .into_iter()
+        .map(|host| ConfigRemote { host, bin: None })
+        .collect();
+    TEST_ROSTER.with(|c| *c.borrow_mut() = (configured, adhoc));
+}
+
+/// Seed the roster override with full `ConfigRemote`s, so a test can give a
+/// configured host a `bin`.
+#[cfg(test)]
+pub(crate) fn set_test_roster_configured(configured: Vec<ConfigRemote>, adhoc: Vec<RemoteName>) {
     TEST_ROSTER.with(|c| *c.borrow_mut() = (configured, adhoc));
 }
 
 #[cfg(test)]
-pub fn config_remotes() -> Vec<RemoteName> {
+pub fn config_remotes() -> Vec<ConfigRemote> {
     TEST_ROSTER.with(|c| c.borrow().0.clone())
 }
 
@@ -146,7 +189,7 @@ pub fn add_adhoc(host: &RemoteName) {
     // file — `assemble` filters it out at read time anyway, but skipping the
     // append keeps the file from accumulating configured hosts (and lets one
     // drop out on the next write once it's promoted to `config.kdl`).
-    if config_remotes().iter().any(|h| h == host) {
+    if config_remotes().iter().any(|r| &r.host == host) {
         return;
     }
     let mut cur = load_adhoc();
@@ -245,8 +288,12 @@ mod tests {
 
     #[test]
     fn assemble_dedups_adhoc_against_configured_and_orders() {
+        let cfg = |h: &str| ConfigRemote {
+            host: RemoteName::from(h),
+            bin: None,
+        };
         let hosts = assemble(
-            &[RemoteName::from("prod"), RemoteName::from("wsl2")],
+            &[cfg("prod"), cfg("wsl2")],
             &[RemoteName::from("scratch"), RemoteName::from("wsl2")],
         );
         let got: Vec<_> = hosts.iter().map(|h| (&*h.host, h.source)).collect();
