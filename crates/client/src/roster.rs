@@ -64,9 +64,13 @@ pub fn assemble(configured: &[RemoteName], adhoc: &[RemoteName]) -> Vec<RosterHo
 #[cfg(not(test))]
 pub fn config_remotes() -> Vec<RemoteName> {
     let (cfg, _err) = plexy_glass_config::load_or_default();
-    // The config/roster boundary: `Config.remotes` is a plain `Vec<String>`;
-    // convert into `RemoteName` here so the rest of the roster deals in `RemoteName`.
-    cfg.remotes.into_iter().map(RemoteName::from).collect()
+    // The config/roster boundary: convert the host name into `RemoteName` here so
+    // the rest of the roster deals in `RemoteName`. The per-host `bin` is dropped
+    // for now — threaded through in the next step.
+    cfg.remotes
+        .into_iter()
+        .map(|r| RemoteName::from(r.host))
+        .collect()
 }
 
 /// The operator's LOCAL config palette, read from the same `load_or_default()`

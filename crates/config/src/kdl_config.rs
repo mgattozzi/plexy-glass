@@ -10,7 +10,7 @@ use kdl::{KdlDocument, KdlNode, KdlValue};
 use crate::{
     BlocksConfig, ColorSource, Config, ConfigError, DragModifier, GlyphTier, HintsConfig,
     KeymapBinding, KeymapConfig, MouseConfig, NotificationsConfig, Padding, PaletteConfig,
-    PaneNode, PaneTemplate, Position, Rgb, SessionTemplate, SplitChild, SplitDirection,
+    PaneNode, PaneTemplate, Position, RemoteHost, Rgb, SessionTemplate, SplitChild, SplitDirection,
     StatusConfig, StyleConfig, WidgetSpec, WindowTemplate,
 };
 
@@ -731,12 +731,20 @@ fn decode_env_child(node: &KdlNode, src: &str) -> Result<Vec<(String, String)>, 
 
 /// Decode the `remotes { host "x"; … }` node: a roster of remote host names
 /// the session picker spans alongside the local daemon (Milestone B).
-fn decode_remotes(node: &KdlNode, src: &str) -> Result<Vec<String>, ConfigError> {
+fn decode_remotes(node: &KdlNode, src: &str) -> Result<Vec<RemoteHost>, ConfigError> {
     ensure_only_children(node, &["host"], src)?;
     ensure_only_props(node, &[], src)?;
     let mut out = Vec::new();
     for child in node.iter_children().filter(|c| c.name().value() == "host") {
-        out.push(string_arg(child, 0, src, "remotes host")?.to_string());
+        // Validate the host CHILD's props, not just the `remotes` node's — the
+        // old decoder checked only the parent, so `host "wsl2" bin="…"` (or any
+        // typo'd prop) parsed clean and was silently dropped. `bin` is the one
+        // allowed prop; anything else is a loud error, per the config contract.
+        ensure_only_props(child, &["bin"], src)?;
+        out.push(RemoteHost {
+            host: string_arg(child, 0, src, "remotes host")?.to_string(),
+            bin: opt_prop_str(child, "bin", src)?.map(str::to_string),
+        });
     }
     Ok(out)
 }
@@ -2439,9 +2447,53 @@ hints {
     #[test]
     fn remotes_decodes_host_children() {
         let cfg = parse_config("remotes { host \"wsl2\"; host \"prod\" }").unwrap();
-        assert_eq!(cfg.remotes, vec!["wsl2".to_string(), "prod".to_string()]);
+        assert_eq!(
+            cfg.remotes,
+            vec![
+                RemoteHost {
+                    host: "wsl2".to_string(),
+                    bin: None
+                },
+                RemoteHost {
+                    host: "prod".to_string(),
+                    bin: None
+                },
+            ]
+        );
         assert!(parse_config("").unwrap().remotes.is_empty());
         assert!(parse_config("remotes { host \"a\" }\nremotes { host \"b\" }").is_err()); // dup section
+    }
+
+    #[test]
+    fn remotes_host_carries_an_optional_bin() {
+        let cfg = parse_config("remotes { host \"wsl2\" bin=\"/opt/pg\"; host \"prod\" }").unwrap();
+        assert_eq!(
+            cfg.remotes,
+            vec![
+                RemoteHost {
+                    host: "wsl2".to_string(),
+                    bin: Some("/opt/pg".to_string()),
+                },
+                RemoteHost {
+                    host: "prod".to_string(),
+                    bin: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn remotes_rejects_an_unknown_prop_on_a_host_child() {
+        // The old decoder validated props on the `remotes` node but never on its
+        // `host` children, so a typo like `binn=` was silently dropped. It must
+        // now be a loud error, like every other unknown prop.
+        let err = parse_config("remotes { host \"wsl2\" binn=\"/opt/pg\" }").unwrap_err();
+        assert!(
+            err.to_string().contains("binn"),
+            "expected an error naming the bad prop, got: {err}"
+        );
+        // A non-string bin is also a decode error, not a silent skip.
+        assert!(parse_config("remotes { host \"wsl2\" bin=5 }").is_err());
     }
 
     #[test]

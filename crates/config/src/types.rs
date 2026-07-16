@@ -36,7 +36,24 @@ pub struct Config {
     pub welcome: bool,
     /// Roster of remote hosts (`remotes { host "x" }`) the session picker spans
     /// alongside the local daemon. Empty by default (local-only).
-    pub remotes: Vec<String>,
+    pub remotes: Vec<RemoteHost>,
+}
+
+/// One `remotes { host "x" bin="…" }` entry: an SSH target the picker spans, and
+/// optionally the `plexy-glass` path to run on it.
+///
+/// `bin` is the per-host answer to `--remote-bin`. The CLI flag is a path on one
+/// machine, so it can't ride the picker's roster query (which fans out to every
+/// host at once) or a reconnect to a host you reach *from* the picker — nothing
+/// we know about the current host's binary transfers to another. A configured
+/// `bin` travels *with* the host, so it applies wherever that host is used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteHost {
+    /// The SSH target — an `ssh_config` alias or `user@host`.
+    pub host: String,
+    /// The remote `plexy-glass` path (`bin="…"`), or `None` to search the
+    /// remote's PATH and the usual install locations.
+    pub bin: Option<String>,
 }
 
 /// Configuration for the block exit-status border feature.

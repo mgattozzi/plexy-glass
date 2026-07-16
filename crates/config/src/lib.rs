@@ -13,7 +13,7 @@ pub use load::{ConfigError, load_from_path, load_or_default};
 pub use types::{
     BlocksConfig, Config, DragModifier, GlyphTier, HintsConfig, KeymapBinding, KeymapConfig,
     MouseConfig, NotificationsConfig, Padding, PaletteConfig, PaneNode, PaneTemplate, Position,
-    SessionTemplate, SplitChild, SplitDirection, StatusConfig, StyleConfig, WidgetSpec,
+    RemoteHost, SessionTemplate, SplitChild, SplitDirection, StatusConfig, StyleConfig, WidgetSpec,
     WindowTemplate,
 };
 
