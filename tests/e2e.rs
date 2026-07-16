@@ -857,13 +857,21 @@ fn mouse_wheel_scrolls_scrollback() {
         "daemon never rendered"
     );
 
-    // Print 40 distinct lines so the first few scroll into scrollback.
-    for i in 0..40 {
-        sess.send_str(&format!("echo LINE{i:02}\n"));
-    }
+    // Print 40 distinct lines so the first few scroll into scrollback. ONE
+    // command, not 40 separate `echo`s: each `echo` is a full readline cycle,
+    // and 40 of them serialized through a shell that's fighting seven sibling
+    // e2e tests for CPU took longer than any sane timeout (`echo` never even
+    // reached LINE39 within 40s under saturation). A single `printf` is one
+    // readline cycle that bursts all 40 output lines, so this test now waits on
+    // the shell running one line rather than forty — far less load-sensitive,
+    // and it fills the scrollback exactly the same. `printf`+`seq` over `echo
+    // LINE%02g` avoids any BSD-vs-GNU `seq -f` difference (bash 3.2 on the macOS
+    // runner, coreutils on Linux).
+    sess.send_str("printf 'LINE%02d\\n' $(seq 0 39)\n");
     assert!(
         sess.wait_for(b"LINE39", Duration::from_secs(10)),
-        "LINE39 never rendered"
+        "LINE39 never rendered: {}",
+        sess.snapshot_str()
     );
 
     // Wheel-up several lines; an early line should re-render in the viewport.
